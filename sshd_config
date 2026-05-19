@@ -12,6 +12,12 @@ AddressFamily any
 PubkeyAuthentication yes
 PasswordAuthentication no
 PermitEmptyPasswords no
+# Required: the `claude` user inherits a locked password from the base image
+# (normal for a key-only service account). With `UsePAM no`, sshd rejects
+# locked-password accounts as "invalid user" even for pubkey auth. PAM account
+# management permits key login for a passwordless account; password auth stays
+# disabled above.
+UsePAM yes
 ChallengeResponseAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin no
