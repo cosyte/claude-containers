@@ -95,6 +95,7 @@ small descriptive commits as you change things.
 | `.env.example` | Every tunable, documented. Copy to `.env`. |
 | `test/smoke.sh` | Automated acceptance for everything that doesn't need real OAuth/phone. |
 | `docs/` | `architecture.md` (decisions + acceptance map), `customizing-bakeins.md`, `troubleshooting.md`. |
+| Governance / CI | `LICENSE` (MIT, Cosyte LLC), `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md` (Keep a Changelog — add behaviour changes under `## [Unreleased]`), `.hadolint.yaml` (deliberate Dockerfile-lint opt-outs), `.github/workflows/ci.yml` (runs `make lint` + image build). |
 
 ## Operational playbook
 
@@ -160,8 +161,9 @@ generator warns about: `make build`, `make login`, `~/.ssh/authorized_keys`,
 **Multi-arch / publish:** `make build-all` (no local load) or
 `make push` (set `CLAUDE_IMAGE` to a registry ref first).
 
-**Validate changes:** `make lint` (shell syntax) and
-`IMAGE=claude-code-box:test test/smoke.sh` after a build. The smoke test
+**Validate changes:** `make lint` (bash -n + shellcheck + hadolint;
+auto-skips a tool that isn't installed — CI installs both and blocks on
+them) and `IMAGE=claude-code-box:test test/smoke.sh` after a build. The smoke test
 covers API-key hard-fail, both fail-fast paths, bake-in merge, trust
 pre-accept, tmux, sshd, and SSH-into-session. Real OAuth + the phone-app
 green-dot remain manual.
@@ -199,6 +201,10 @@ green-dot remain manual.
   relaunch with `claude-session`.
 - **Git push fails** → `GIT_SSH_KEY` missing/not authorized on the remote;
   public/https still clone. Wrong author → set `GIT_AUTHOR_*` in `.env`.
+  No SSH key by design? Set `GH_TOKEN` (PAT, host env or `.env`) — the
+  entrypoint runs `gh auth setup-git` so `gh` + HTTPS git authenticate;
+  SSH remotes still need `GIT_SSH_KEY`. Forwarded by `claude-launch`,
+  `docker-compose.yml`, and `claude-compose-gen` alike.
 - **Auth went stale across containers** → reconcile loop converges every ~30s;
   restart the container to re-seed immediately; full reset
   `docker volume rm claude-auth && make login`.

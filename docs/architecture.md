@@ -81,6 +81,18 @@ Baked `mcp/*.json` use `${VAR}` placeholders, expanded by `envsubst` from the
 container environment at registration time. Secrets come from `.env`
 (`--env-file`), never the image. Confirms the spec's stated preference.
 
+## Decision: optional GitHub PAT, never baked
+
+SSH (`GIT_SSH_KEY`) is the primary git path. As an opt-in alternative,
+`GH_TOKEN`/`GITHUB_TOKEN` (host env or `.env`) authenticates the `gh` CLI and,
+via `gh auth setup-git`, git over HTTPS — so private HTTPS clone/push and
+`gh pr create` work with no SSH key. Consistent with the MCP-secret rule, the
+token is read from the environment at use time and is **never** written to an
+image layer; `bin/claude-launch` only forwards it when set on the host (so a
+`.env`-supplied token is never blanked), and it is passed through identically
+by `docker-compose.yml` and the generated `bin/claude-compose-gen` services.
+SSH remotes are unaffected — they keep using the mounted key regardless.
+
 ## Decision: one substantive build stage
 
 A heavy builder stage was considered and rejected: the image weight is the

@@ -246,3 +246,12 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
 
 See [docs/architecture.md](docs/architecture.md#acceptance) for how each spec
 acceptance criterion maps to this implementation and how to verify it.
+
+## Contributing & license
+
+- Setup, the pre-PR lint/smoke gate, and commit conventions:
+  [CONTRIBUTING.md](CONTRIBUTING.md).
+- Notable changes per release: [CHANGELOG.md](CHANGELOG.md).
+- Reporting a vulnerability: [SECURITY.md](SECURITY.md) (do **not** open a
+  public issue).
+- Licensed under the MIT [LICENSE](LICENSE).
