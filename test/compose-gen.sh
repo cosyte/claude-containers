@@ -37,25 +37,28 @@ else
 fi
 
 # 2. Regeneration: surviving repos keep their exact port; new repo is distinct.
+# port_of <svc> <ports-dump> — empty (not a set -e abort) if the svc is absent.
+port_of() { grep -oP "(?<=^$1=)\\d+" <<<"$2" || true; }
 before="$(ports)"
-a_port="$(grep -oP '(?<=^alpha=)\d+' <<<"$before")"
-c_port="$(grep -oP '(?<=^charlie=)\d+' <<<"$before")"
+a_port="$(port_of alpha "$before")"
+c_port="$(port_of charlie "$before")"
 gen alpha charlie delta            # drop bravo, add delta
 after="$(ports)"
-[[ "$(grep -oP '(?<=^alpha=)\d+'   <<<"$after")" == "$a_port" ]] \
+a_now="$(port_of alpha "$after")"; c_now="$(port_of charlie "$after")"
+d_port="$(port_of delta "$after")"
+[[ -n "$a_port" && "$a_now" == "$a_port" ]] \
     && ok "regen: alpha keeps port $a_port" \
-    || bad "regen: alpha port moved ($a_port -> $(grep -oP '(?<=^alpha=)\d+' <<<"$after"))"
-[[ "$(grep -oP '(?<=^charlie=)\d+' <<<"$after")" == "$c_port" ]] \
+    || bad "regen: alpha port moved ($a_port -> $a_now)"
+[[ -n "$c_port" && "$c_now" == "$c_port" ]] \
     && ok "regen: charlie keeps port $c_port" \
-    || bad "regen: charlie port moved"
-d_port="$(grep -oP '(?<=^delta=)\d+' <<<"$after")"
+    || bad "regen: charlie port moved ($c_port -> $c_now)"
 [[ -n "$d_port" && "$d_port" != "$a_port" && "$d_port" != "$c_port" ]] \
     && ok "regen: new repo delta gets a distinct port ($d_port)" \
     || bad "regen: delta port missing or colliding ($d_port)"
 
 # 3. Every service forwards GH_TOKEN from the deploy environment, verbatim.
-n_svc="$(grep -cE '^    container_name: claude-' "$OUT")"
-n_tok="$(grep -cF 'GH_TOKEN: "${GH_TOKEN:-}"' "$OUT")"
+n_svc="$(grep -cE '^    container_name: claude-' "$OUT" || true)"
+n_tok="$(grep -cF 'GH_TOKEN: "${GH_TOKEN:-}"' "$OUT" || true)"
 [[ "$n_svc" -gt 0 && "$n_tok" -eq "$n_svc" ]] \
     && ok "GH_TOKEN passthrough present in all $n_svc services" \
     || bad "GH_TOKEN passthrough: $n_tok of $n_svc services"
