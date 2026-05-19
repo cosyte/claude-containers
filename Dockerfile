@@ -59,6 +59,23 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
     && npm cache clean --force \
     && claude --version
 
+# Bake pnpm + yarn at build time (registry reachable here) so JS dev servers
+# never need a runtime corepack/registry fetch for the package-manager binary
+# itself — that download is a 10s-timeout failure point in locked-down/flaky
+# container networks. `manage-package-manager-versions=false` stops pnpm from
+# trying to self-switch to a repo's pinned `packageManager` version at runtime
+# (which would re-introduce the same fetch); the baked pnpm is used instead.
+# yarn 1.x already ships in the base image; only pnpm needs baking.
+RUN npm install -g pnpm@latest \
+    && npm cache clean --force \
+    && printf 'manage-package-manager-versions=false\n' > /usr/local/etc/npmrc \
+    && pnpm --version && yarn --version
+# `manage-package-manager-versions=false` (pnpm setting; also via env so it
+# holds for any user) stops pnpm self-switching to a repo's pinned
+# `packageManager` version at runtime, which would re-trigger a registry fetch.
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    npm_config_manage_package_manager_versions=false
+
 # --- Non-root user ------------------------------------------------------------
 # The entrypoint starts as root (sshd, volume chown) then drops to this user
 # for the Claude Code process via gosu.
