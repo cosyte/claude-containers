@@ -120,10 +120,10 @@ reconcile_creds() {
     while sleep 30; do
         [[ -s "$a" || -s "$b" ]] || continue
         if [[ -s "$b" && ( ! -s "$a" || "$b" -nt "$a" ) ]] && ! cmp -s "$b" "$a"; then
-            install -m 600 "$b" "$a.tmp" && mv -f "$a.tmp" "$a"
+            { install -m 600 "$b" "$a.tmp" && mv -f "$a.tmp" "$a"; } || true
         elif [[ -s "$a" && "$a" -nt "$b" ]] && ! cmp -s "$a" "$b"; then
-            install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 "$a" "$b.tmp" \
-                && mv -f "$b.tmp" "$b"
+            { install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 "$a" "$b.tmp" \
+                && mv -f "$b.tmp" "$b"; } || true
         fi
     done
 }
