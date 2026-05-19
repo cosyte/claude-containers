@@ -126,6 +126,47 @@ the dialog, the per-container config volume didn't mount (check
 isn't the path Claude opened. As a one-off, accept it once — it persists in the
 config volume.
 
+## Frontend debugging (`--browser` / `CLAUDE_BROWSER=1`)
+
+The `--browser` flag registers the official
+[`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)
+server inside the container, so Claude can navigate, evaluate, screenshot,
+inspect console/network, run Lighthouse, and capture perf/heap traces against
+any frontend the agent runs.
+
+- **`--browser` warns "image not built with WITH_BROWSER=1".** The default
+  image is lean — Chromium and the MCP are only baked when you opt in. Build
+  the variant:
+  ```
+  make build-browser            # tags claude-code-box:browser
+  CLAUDE_IMAGE=claude-code-box:browser ./bin/claude-launch myproj --browser …
+  ```
+  Or `make build WITH_BROWSER=1 CLAUDE_IMAGE=mytag` for a custom tag. Set
+  `CLAUDE_IMAGE` in `.env` so every launch uses the browser variant by default.
+- **The MCP is registered but Chrome won't start in Claude.** Verify the
+  binary chain inside the container:
+  ```
+  ssh -p <port> claude@host 'chromium --version && chrome-devtools-mcp --help | head -5'
+  ```
+  Both must succeed. If `chromium` is missing, the image was built without
+  `WITH_BROWSER=1`.
+- **"Failed to launch the browser process".** Almost always sandbox/seccomp.
+  The entrypoint already passes `--chromeArg=--no-sandbox
+  --chromeArg=--disable-dev-shm-usage --chromeArg=--disable-gpu` to
+  `chrome-devtools-mcp`, which is what containers need. If you're on a host
+  with extremely restrictive seccomp (e.g. some hardened Kubernetes), relax
+  the seccomp profile for the container or expose `--cap-add=SYS_ADMIN`.
+- **Run it manually as `claude` to see real errors:**
+  ```
+  ssh -p <port> claude@host '
+    chrome-devtools-mcp --executablePath /usr/bin/chromium \
+      --headless --isolated --chromeArg=--no-sandbox \
+      <<<"{}"; echo exit=$?'
+  ```
+- **The flag is per-session.** SSH remotes / on-disk state aren't affected; if
+  you stop and `claude-launch <name>` resumes, the MCP registration is in the
+  per-container config volume and persists across restarts.
+
 ## Container restart-loops
 
 `claude-launch` surfaces the last 30 log lines if startup fails. Common causes:
