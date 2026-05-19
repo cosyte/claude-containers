@@ -76,6 +76,37 @@ RUN npm install -g pnpm@latest \
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     npm_config_manage_package_manager_versions=false
 
+# --- Optional: headless Chromium + chrome-devtools-mcp (frontend debugging) --
+# Build with `--build-arg WITH_BROWSER=1` (or `make build-browser`) to bake a
+# headless Chromium and the official Chrome DevTools MCP server, so a session
+# launched with `--browser` / `CLAUDE_BROWSER=1` can drive, inspect, and debug
+# any frontend (navigate, evaluate, console, network, Lighthouse, screenshots,
+# perf traces, heap snapshots — 55+ tools). Default is OFF: the lean image is
+# unchanged unless you opt in. ~200 MB delta when on.
+ARG WITH_BROWSER=0
+# Pin to the latest verified release. Bump via the build arg.
+ARG CHROME_DEVTOOLS_MCP_VERSION=0.7.0
+RUN set -eux; \
+    if [ "$WITH_BROWSER" = "1" ]; then \
+        apt-get update; \
+        # Debian's `chromium` package is multi-arch (amd64+arm64) and pulls in
+        # every headless lib (nss, fontconfig, dbus, etc.) we'd otherwise have
+        # to enumerate. The smaller `chromium-driver` (chromedriver) is not
+        # needed — chrome-devtools-mcp drives Chrome via CDP directly.
+        apt-get install -y --no-install-recommends chromium fonts-liberation; \
+        apt-get clean; \
+        rm -rf /var/lib/apt/lists/*; \
+        npm install -g "chrome-devtools-mcp@${CHROME_DEVTOOLS_MCP_VERSION}"; \
+        npm cache clean --force; \
+        chromium --version; \
+        chrome-devtools-mcp --help >/dev/null; \
+    else \
+        echo "WITH_BROWSER=0 — skipping Chromium + chrome-devtools-mcp"; \
+    fi
+# Image-capability label: bin/claude-launch checks this to warn early if
+# --browser is requested against a non-browser image.
+LABEL claude.browser="${WITH_BROWSER}"
+
 # --- Non-root user ------------------------------------------------------------
 # The entrypoint starts as root (sshd, volume chown) then drops to this user
 # for the Claude Code process via gosu.

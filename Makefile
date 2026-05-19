@@ -15,6 +15,9 @@ CLAUDE_USER         ?= claude
 AUTH_VOLUME         ?= claude-auth
 PLATFORMS           ?= linux/amd64,linux/arm64
 BUILDX_BUILDER      ?= claude-box
+# Frontend-debugging variant: 1 bakes headless Chromium + chrome-devtools-mcp.
+# Off by default (the lean image is unchanged). `make build-browser` flips it.
+WITH_BROWSER        ?= 0
 
 BUILD_ARGS = \
   --build-arg NODE_VERSION=$(NODE_VERSION) \
@@ -22,10 +25,11 @@ BUILD_ARGS = \
   --build-arg UV_VERSION=$(UV_VERSION) \
   --build-arg CLAUDE_UID=$(CLAUDE_UID) \
   --build-arg CLAUDE_GID=$(CLAUDE_GID) \
-  --build-arg CLAUDE_USER=$(CLAUDE_USER)
+  --build-arg CLAUDE_USER=$(CLAUDE_USER) \
+  --build-arg WITH_BROWSER=$(WITH_BROWSER)
 
 .DEFAULT_GOAL := help
-.PHONY: help build build-all push login launch list stop rm logs clean lint
+.PHONY: help build build-all build-browser push login launch list stop rm logs clean lint
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -42,6 +46,11 @@ build: builder ## Build the image for the host arch and load it locally
 
 build-all: builder ## Build both linux/amd64 and linux/arm64 (no local load)
 	docker buildx build $(BUILD_ARGS) --platform $(PLATFORMS) -t $(CLAUDE_IMAGE) .
+
+build-browser: ## Build the browser-enabled variant (Chromium + chrome-devtools-mcp), tag :browser
+	@$(MAKE) build WITH_BROWSER=1 CLAUDE_IMAGE=$(or $(CLAUDE_IMAGE_BROWSER),claude-code-box:browser)
+	@echo "Built browser variant. Launch with:  ./bin/claude-launch <name> --browser --workspace <path>"
+	@echo "Or set CLAUDE_IMAGE=claude-code-box:browser in your .env so every launch uses it."
 
 push: builder ## Build+push amd64+arm64 to the registry in CLAUDE_IMAGE
 	docker buildx build $(BUILD_ARGS) --platform $(PLATFORMS) \
