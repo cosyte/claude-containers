@@ -296,15 +296,27 @@ log "sshd listening on container port 22"
 
 # --- 12. Launch Claude Code in a persistent tmux session --------------------
 CLAUDE_PROJECT_NAME="${CLAUDE_PROJECT_NAME:-claude}"
-export CLAUDE_PROJECT_NAME CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}"
+export CLAUDE_PROJECT_NAME CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}" \
+       CLAUDE_DEV_CMD="${CLAUDE_DEV_CMD:-}"
 
 # tmux server runs as the claude user; claude-session is the pane command and
 # falls back to an interactive shell if Claude exits, so SSH stays usable.
 asclaude tmux new-session -d -s claude -x 220 -y 50 /usr/local/bin/claude-session
 log "Claude Code session 'claude' started in tmux"
+
+# Optional dev server: runs $CLAUDE_DEV_CMD in its own 'dev' tmux window so it
+# auto-starts on boot, is observable (tmux select-window -t claude:dev), and
+# survives independently of the Claude pane.
+if [[ -n "${CLAUDE_DEV_CMD:-}" ]]; then
+    asclaude tmux new-window -t claude -n dev /usr/local/bin/claude-dev
+    log "Dev server started in tmux window 'dev': $CLAUDE_DEV_CMD"
+fi
+
 echo
 log "Remote Control name : $CLAUDE_PROJECT_NAME  (look for it in the Claude app Code tab)"
 log "SSH                 : connect, you'll attach to the live tmux session"
+[[ -n "${CLAUDE_DEV_CMD:-}" ]] && \
+    log "Dev window          : tmux select-window -t claude:dev  (after SSH attach)"
 echo
 
 # --- 13. Stay alive + graceful shutdown --------------------------------------

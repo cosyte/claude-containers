@@ -89,8 +89,10 @@ COPY sshd_config /etc/ssh/sshd_config
 COPY claude-config/ /opt/claude-config/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY bin/claude-session /usr/local/bin/claude-session
+COPY bin/claude-dev /usr/local/bin/claude-dev
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
+        /usr/local/bin/claude-dev \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
 

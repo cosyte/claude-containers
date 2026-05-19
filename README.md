@@ -143,6 +143,7 @@ session container per repo in a GitHub org:
 ```
 claude-compose-gen --org ORG --out FILE [--active REPOS]... [--dormant-profile NAME]
                    [--expose REPO:HOSTPORT:CONTAINERPORT]...
+                   [--dev-cmd REPO=COMMAND]...
                    [--include GLOB] [--exclude GLOB] [--forks] [--archived]
 claude-compose-gen --out FILE repo-a repo-b:dev      # explicit list, no gh needed
 ```
@@ -151,9 +152,19 @@ claude-compose-gen --out FILE repo-a repo-b:dev      # explicit list, no gh need
 generator refuses to write inside the repo. **SSH ports are stable**: when
 `--out` already exists each repo keeps its previously assigned port and only
 new repos take the next free one, so adding a repo never reshuffles running
-containers. Use `--expose` to also publish a dev-server port for a repo (e.g.
-an Astro/Vite site): `--expose my-site:4321:4321`, then run the dev server
-bound to `0.0.0.0` inside that session and browse `http://<host>:4321`.
+containers. `--expose` publishes a dev-server port for a repo; `--dev-cmd`
+auto-starts that dev server on container boot in its own tmux `dev` window
+(bind it to `0.0.0.0` so the published port reaches it). Example for an Astro
+site:
+
+```
+claude-compose-gen --org ORG --out FILE --active my-site \
+  --expose my-site:4321:4321 \
+  --dev-cmd my-site='npm install && npm run dev -- --host 0.0.0.0 --port 4321'
+```
+
+Then `http://<host>:4321` serves the live dev site; SSH in and
+`tmux select-window -t claude:dev` to watch its output.
 
 It enumerates via an authenticated `gh` (scopes `repo` + `read:org`) or takes
 explicit `repo[:branch]` args, assigns stable SSH ports from the configured

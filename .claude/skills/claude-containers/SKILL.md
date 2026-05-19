@@ -82,6 +82,7 @@ small descriptive commits as you change things.
 | `Dockerfile` | `node:24-bookworm-slim`; uv via a named throwaway stage (BuildKit forbids var-expansion in `COPY --from`); apt toolchain + `gh`; npm-pinned Claude Code; reuses base 1000:1000 user as `claude`; hardened sshd. |
 | `entrypoint.sh` | Root → refuse API key → (login mode) → fix volume perms → host keys → authorized_keys → git key/identity → credential reconcile loop → seed `.claude.json` trust → merge bake-ins (CLAUDE.md, settings, plugins, commands, skills) → workspace (use/clone/fail) → register MCP via CLI → `sshd` → `gosu claude tmux` running `claude-session` → stay PID 1 with signal traps. |
 | `bin/claude-session` | tmux pane cmd: `cd /workspace`, `exec claude --dangerously-skip-permissions --remote-control "<project>" $EXTRA`; falls back to a shell so SSH stays usable. |
+| `bin/claude-dev` | tmux `dev`-window cmd: runs `$CLAUDE_DEV_CMD` (a dev server) in `/workspace` on boot, shell fallback. Started by the entrypoint only when `CLAUDE_DEV_CMD` is set. |
 | `bin/_common.sh` | Shared lib: `.env` load, defaults, `sanitize`, volume names, `alloc_port` (2200–2299, skips used), state checks, `print_connect`. |
 | `bin/claude-launch` | Create/start a container; auto port; labels carry metadata; surfaces a fast-failing entrypoint. |
 | `bin/claude-list/stop/rm/logs` | Manage containers; `claude-rm --purge` also deletes the per-project volumes. |
@@ -139,6 +140,10 @@ free one — adding a repo never reshuffles running containers (regenerate, then
 `up -d <newrepo>`). `--expose REPO:HOST:CONTAINER` publishes an extra port
 (dev server); the dev server must bind `0.0.0.0` inside the container to be
 reachable. Default Astro/Vite/Next dev ports: 4321 / 5173 / 3000.
+`--dev-cmd REPO=COMMAND` sets `CLAUDE_DEV_CMD` for that service so the
+entrypoint auto-starts it on boot in a separate tmux `dev` window
+(`tmux select-window -t claude:dev` to watch it; `claude-dev` to rerun).
+Pair `--expose` + `--dev-cmd` for a browsable dev site.
 Needs `gh` authed with `repo`+`read:org` (a personal fine-grained PAT scoped
 to the user usually CANNOT see an org's private repos — use a classic token
 or an org-scoped one). Containers still clone over the mounted SSH git key at

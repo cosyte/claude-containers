@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# tmux 'dev' window command. Runs $CLAUDE_DEV_CMD (a dev server etc.) in
+# /workspace on container boot, and drops to a shell if it exits so the window
+# stays usable. Rerun with `claude-dev`. Bind dev servers to 0.0.0.0 so the
+# container's published port actually reaches them.
+set -uo pipefail
+
+cd /workspace 2>/dev/null || cd "$HOME"
+CMD="${CLAUDE_DEV_CMD:-}"
+
+if [[ -z "$CMD" ]]; then
+    echo "CLAUDE_DEV_CMD is not set — nothing to run."
+    exec bash -l
+fi
+
+echo "[claude-dev] cwd: $(pwd)"
+echo "[claude-dev] \$ ${CMD}"
+echo
+bash -lc "$CMD"
+code=$?
+echo
+echo "[claude-dev] dev command exited (status ${code}). Dropping to a shell."
+echo "Rerun with:  claude-dev"
+exec bash -l

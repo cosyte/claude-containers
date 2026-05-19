@@ -20,6 +20,10 @@
 #     --expose <map>    publish an extra container port for a repo, e.g. a dev
 #                       server. Format REPO:HOSTPORT:CONTAINERPORT (repeatable).
 #                       e.g. --expose bridgelink-website:4321:4321
+#     --dev-cmd <map>   auto-start a dev server on container boot, in its own
+#                       tmux 'dev' window. Format REPO=COMMAND (repeatable).
+#                       Bind to 0.0.0.0 so the published port reaches it, e.g.
+#                       --dev-cmd site='npm run dev -- --host 0.0.0.0 --port 4321'
 #     --forks           include forks (default: source repos only)
 #     --archived        include archived repos (default: skip)
 #     --limit <n>       gh repo list limit (default: 500)
@@ -33,7 +37,7 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG=""
 OUT=""
@@ -41,7 +45,7 @@ PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
 WANT_FORKS=0 WANT_ARCHIVED=0
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --org)             ORG="$2"; shift 2 ;;
@@ -51,6 +55,7 @@ while [[ $# -gt 0 ]]; do
         --exclude)         EXCLUDE+=("$2"); shift 2 ;;
         --active)          ACTIVE_RAW+=("$2"); shift 2 ;;
         --expose)          EXPOSE_RAW+=("$2"); shift 2 ;;
+        --dev-cmd)         DEVCMD_RAW+=("$2"); shift 2 ;;
         --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
         --forks)           WANT_FORKS=1; shift ;;
         --archived)        WANT_ARCHIVED=1; shift ;;
@@ -89,6 +94,14 @@ for tok in "${EXPOSE_RAW[@]:-}"; do
         || die "--expose must be REPO:HOSTPORT:CONTAINERPORT (got '$tok')"
     es="$(sanitize "$er")"
     EXPOSE[$es]="${EXPOSE[$es]:-}${EXPOSE[$es]:+$'\n'}${eh}:${ec}"
+done
+
+# Auto-start dev command per service: svc -> command string (boot tmux window).
+declare -A DEVCMD=()
+for tok in "${DEVCMD_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == *=* ]] || die "--dev-cmd must be REPO=COMMAND (got '$tok')"
+    DEVCMD["$(sanitize "${tok%%=*}")"]="${tok#*=}"
 done
 
 # The generated multi-repo compose is deployment config, not part of this
@@ -258,6 +271,11 @@ EOF
       GIT_REPO_URL: "${url}"
 EOF
     [[ -n "$branch" ]] && echo "      GIT_REPO_BRANCH: \"${branch}\""
+    if [[ -n "${DEVCMD[$svc]:-}" ]]; then
+        dc="${DEVCMD[$svc]}"
+        dc="${dc//\\/\\\\}"; dc="${dc//\"/\\\"}"; dc="${dc//\$/\$\$}"
+        echo "      CLAUDE_DEV_CMD: \"${dc}\""
+    fi
     cat <<EOF
       GIT_AUTHOR_NAME: "${GH_NAME}"
       GIT_AUTHOR_EMAIL: "${GH_MAIL}"
@@ -316,6 +334,7 @@ for r in "${FINAL[@]}"; do
     if [[ $HAVE_ACTIVE -eq 1 && -z "${ACTIVE[$s]:-}" ]]; then mark="dormant (${DORMANT_PROFILE})"; else mark="ACTIVE"; fi
     extra=""
     [[ -n "${EXPOSE[$s]:-}" ]] && extra=" +ports $(echo "${EXPOSE[$s]}" | tr '\n' ',' | sed 's/,$//')"
+    [[ -n "${DEVCMD[$s]:-}" ]] && extra="$extra +dev"
     printf '   %-22s -> claude-%-20s ssh :%-5s %s%s\n' "$nm" "$s" "${SVCPORT[$s]}" "$mark" "$extra"
 done
 
