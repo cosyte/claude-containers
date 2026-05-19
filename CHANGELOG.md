@@ -33,6 +33,14 @@ Behaviour changes should add an entry under `## [Unreleased]` (see
   `hadolint` on the `Dockerfile`, skipping any tool that is not installed.
   Previously it only ran `bash -n` on a partial file list.
 
+### Fixed
+
+- `bin/claude-compose-gen`: fresh generation assigned **every** new repo the
+  same SSH port (`PORT_BASE`), producing a guaranteed host-port collision on
+  `docker compose up`. Port allocation mutated `USEDPORT`/the cursor inside a
+  `$(...)` subshell, so it never persisted; assignment now happens in the
+  parent shell. Existing-file port stability is unaffected.
+
 ## [0.1.0] - 2026-05-19
 
 Initial release: a self-hosted Docker stack for running many isolated,

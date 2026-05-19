@@ -184,17 +184,17 @@ if [[ -f "$OUT" ]]; then
             p=$0; gsub(/[^0-9]/,"",p); if(s!=""){print s"\t"p; s=""} }
     ' "$OUT")
 fi
-next_port() {
-    local p
-    for ((p=PORT_BASE; p<=SSH_PORT_RANGE_END; p++)); do
-        [[ -n "${USEDPORT[$p]:-}" ]] && continue
-        USEDPORT[$p]=1; echo "$p"; return 0
-    done
-    die "no free SSH port in ${PORT_BASE}-${SSH_PORT_RANGE_END} for new repos"
-}
+# Assign in the parent shell (NOT a $(...) subshell): the USEDPORT map and
+# the cursor must persist across repos, or every new repo would collide on
+# PORT_BASE.
+next_free="$PORT_BASE"
 for row in "${FINAL[@]}"; do
     IFS=$'\t' read -r svc _ _ <<<"$row"
-    [[ -n "${SVCPORT[$svc]:-}" ]] || SVCPORT[$svc]="$(next_port)"
+    [[ -n "${SVCPORT[$svc]:-}" ]] && continue
+    while [[ -n "${USEDPORT[$next_free]:-}" ]]; do next_free=$((next_free+1)); done
+    (( next_free <= SSH_PORT_RANGE_END )) \
+        || die "no free SSH port in ${PORT_BASE}-${SSH_PORT_RANGE_END} for new repos"
+    SVCPORT[$svc]="$next_free"; USEDPORT[$next_free]=1
 done
 
 # --- Emit compose ------------------------------------------------------------
@@ -304,7 +304,6 @@ EOF
     if [[ $HAVE_ACTIVE -eq 1 && -z "${ACTIVE[$svc]:-}" ]]; then
         printf '    profiles:\n      - %s\n' "$DORMANT_PROFILE"
     fi
-    port=$((port+1))
 done
 
 # top-level volumes
