@@ -1,0 +1,28 @@
+# hadolint configuration (run via `make lint` and CI).
+#
+# Every opt-out here is deliberate and explained. Extend THIS file — with a
+# reason — rather than sprinkling inline `# hadolint ignore=` in the Dockerfile.
+
+# Warnings and errors fail the lint; info/style hints stay advisory. The
+# Dockerfile uses several intentional separate RUN layers (apt, uv, npm,
+# user) for cache clarity, which would otherwise trip style/info rules.
+failure-threshold: warning
+
+ignored:
+  # DL3008 "pin versions in apt-get install". We install Debian *stable*
+  # (bookworm) packages unpinned on purpose: apt has no lockfile, explicit
+  # versions break across point releases and mirrors, and build
+  # reproducibility comes from the pinned base image + pinned Claude Code,
+  # not from apt pins.
+  - DL3008
+  # DL3016 "pin versions in npm install". claude-code IS pinned, via the
+  # CLAUDE_CODE_VERSION build ARG (hadolint can't resolve the ARG, so it
+  # still flags the line); pnpm is intentionally @latest and baked so JS
+  # dev servers never do a runtime package-manager fetch (see the Dockerfile
+  # comment and docs/architecture.md).
+  - DL3016
+
+# Base images come only from these registries (silences DL3026).
+trustedRegistries:
+  - docker.io
+  - ghcr.io

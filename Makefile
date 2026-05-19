@@ -24,6 +24,8 @@ BUILD_ARGS = \
   --build-arg CLAUDE_GID=$(CLAUDE_GID) \
   --build-arg CLAUDE_USER=$(CLAUDE_USER)
 
+SHELL_FILES := entrypoint.sh bin/_common.sh $(wildcard bin/claude-*) test/smoke.sh
+
 .DEFAULT_GOAL := help
 .PHONY: help build build-all push login launch list stop rm logs clean lint
 
@@ -69,8 +71,17 @@ rm:    ## make rm ARGS="myproj --purge"
 logs:  ## make logs ARGS="myproj"
 	@./bin/claude-logs $(ARGS)
 
-lint: ## Shell-syntax check the scripts
-	@for f in entrypoint.sh bin/_common.sh bin/claude-*; do bash -n $$f && echo "ok $$f"; done
+lint: ## Lint: bash -n + shellcheck (shell) + hadolint (Dockerfile); skips a missing tool
+	@echo "==> bash -n"; \
+	  for f in $(SHELL_FILES); do bash -n "$$f" && echo "  ok   $$f" || exit 1; done
+	@if command -v shellcheck >/dev/null 2>&1; then \
+	    echo "==> shellcheck --severity=warning"; \
+	    shellcheck --severity=warning $(SHELL_FILES) && echo "  ok   shellcheck clean"; \
+	  else echo "==> shellcheck: SKIP (not installed)"; fi
+	@if command -v hadolint >/dev/null 2>&1; then \
+	    echo "==> hadolint"; \
+	    hadolint Dockerfile && echo "  ok   hadolint clean"; \
+	  else echo "==> hadolint: SKIP (not installed)"; fi
 
 clean: ## Remove the image and the buildx builder (volumes are kept)
 	-docker image rm $(CLAUDE_IMAGE) 2>/dev/null
