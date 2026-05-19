@@ -15,6 +15,9 @@
 - **bash_profile** — interactive SSH logins `exec tmux attach` to the live
   `claude` session; non-interactive SSH (scp/rsync) is untouched.
 - **bin/** — `claude-launch/list/stop/rm/logs` over a shared `_common.sh`.
+- **.claude/skills/claude-containers/** — project skill: when this repo is
+  opened in Claude Code, it teaches the model the architecture, invariants,
+  and operational playbook so it can drive build/login/launch/customize/debug.
 
 ## Verified facts (Claude Code 2.1.144)
 
