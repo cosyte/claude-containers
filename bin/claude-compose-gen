@@ -225,6 +225,9 @@ cat <<EOF
 #   docker compose -f ${OUT} stop <repo>            # free its resources
 #   docker compose -f ${OUT} down                   # stop all (add -v for volumes)
 #
+# Optional: export GH_TOKEN (or put it in a .env beside this file) for gh CLI
+# + private HTTPS git without an SSH key. SSH remotes still use the deploy key.
+#
 # Never set ANTHROPIC_API_KEY (the entrypoint hard-fails: OAuth only).
 
 services:
@@ -281,6 +284,9 @@ EOF
       GIT_AUTHOR_EMAIL: "${GH_MAIL}"
       GIT_COMMITTER_NAME: "${GH_NAME}"
       GIT_COMMITTER_EMAIL: "${GH_MAIL}"
+      # Optional GitHub PAT (gh CLI + HTTPS git, no SSH key needed). Read from
+      # the deploy host's environment / .env at \`compose up\`; unset = SSH only.
+      GH_TOKEN: "\${GH_TOKEN:-}"
     volumes:
       - claude-auth:/auth
       - claude-sshkeys:/etc/ssh/host-keys

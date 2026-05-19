@@ -90,6 +90,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` | — | Clone source (or use `--repo`/`--branch`/`--depth`) |
 | `GIT_AUTHOR_NAME`/`_EMAIL` (+`COMMITTER`) | host git config | Commit identity |
 | `GIT_SSH_KEY` | `~/.ssh/claude-git-key` | Host SSH key for git, mounted read-only |
+| `GH_TOKEN` | unset | Optional GitHub PAT — authenticates `gh` CLI + HTTPS git (private clone/push & PRs without an SSH key) |
 | `SSH_AUTHORIZED_KEYS` | `~/.ssh/authorized_keys` | Host pubkeys allowed to SSH in (read-only) |
 | `SSH_PORT_RANGE_START`/`_END` | `2200`/`2299` | Auto-assigned host SSH port range |
 | `CLAUDE_SSH_HOST` | this host's name | Hostname shown in the connect line |

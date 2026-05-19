@@ -97,6 +97,17 @@ fi
 GH_NAME="$(git config --global user.name  2>/dev/null || true)"
 GH_MAIL="$(git config --global user.email 2>/dev/null || true)"
 
+# Optional GitHub PAT: a host-env GH_TOKEN/GITHUB_TOKEN authenticates the gh
+# CLI and HTTPS git inside the container. Only forwarded when set on the host,
+# so it never blanks out a token supplied via --env-file (.env). Normalized to
+# GH_TOKEN (gh's preferred variable).
+GH_TOKEN_ENV=()
+if [[ -n "${GH_TOKEN:-}" ]]; then
+    GH_TOKEN_ENV=(-e GH_TOKEN="$GH_TOKEN")
+elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    GH_TOKEN_ENV=(-e GH_TOKEN="$GITHUB_TOKEN")
+fi
+
 ENV_FILE_ARG=()
 [[ -f "$CLAUDE_DOCKER_ROOT/.env" ]] && ENV_FILE_ARG=(--env-file "$CLAUDE_DOCKER_ROOT/.env")
 
@@ -123,6 +134,7 @@ docker run -d \
     -e GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-$GH_MAIL}" \
     -e GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-$GH_NAME}" \
     -e GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$GH_MAIL}" \
+    "${GH_TOKEN_ENV[@]}" \
     -v "$AUTH_VOLUME:/auth" \
     -v "$SSHKEYS_VOLUME:/etc/ssh/host-keys" \
     -v "$CFG_VOL:/home/claude/.claude" \

@@ -96,6 +96,26 @@ git_id user.email "${GIT_AUTHOR_EMAIL:-}"
 asclaude git config --global --add safe.directory "$WORKSPACE" || true
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 
+# --- 5b. GitHub CLI / PAT auth (optional) ------------------------------------
+# A personal access token in GH_TOKEN (or GITHUB_TOKEN) authenticates the `gh`
+# CLI and, via `gh auth setup-git`, git over HTTPS too — so private HTTPS
+# clones and `git push` work without an SSH key. SSH remotes (git@github.com:…)
+# are unaffected; they keep using the mounted key. The token is read from the
+# environment at use time and is never written to an image layer. gh prefers
+# GH_TOKEN, so fold GITHUB_TOKEN onto it. This runs before the workspace clone
+# (section 9) so a private HTTPS GIT_REPO_URL can authenticate.
+GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+if [[ -n "$GH_TOKEN" ]]; then
+    export GH_TOKEN
+    if asclaude gh auth setup-git >/dev/null 2>&1; then
+        log "GitHub PAT detected: gh CLI authenticated; git HTTPS uses the token"
+    else
+        log "WARNING: GH_TOKEN set but 'gh auth setup-git' failed (gh CLI still works)"
+    fi
+else
+    log "No GH_TOKEN/GITHUB_TOKEN set (gh CLI unauthenticated; SSH git unaffected)"
+fi
+
 # --- 6. Credentials reconcile (shared auth volume) ---------------------------
 # Credentials are shared across all containers via the claude-auth volume; the
 # rest of the config dir is per-container so sessions never collide. Claude

@@ -104,6 +104,14 @@ prompt. If a future Claude Code version prompts anyway:
 - Public/https repos clone fine with no key.
 - Wrong commit author: set `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` in `.env`
   (otherwise the host's `git config --global` is used).
+- `gh` reports *"To get started with GitHub CLI, please run: gh auth login"*,
+  or `gh pr create` / private **HTTPS** clone fails with auth: no token. Set a
+  PAT in `.env` (`GH_TOKEN=…`, fine-grained: Contents + Pull requests
+  read/write) and relaunch. The entrypoint runs `gh auth setup-git`, so both
+  the `gh` CLI and plain `git` over HTTPS use it. Verify:
+  `ssh -p <port> claude@host 'gh auth status'`. The boot log prints
+  `GitHub PAT detected …` (or that none is set). SSH remotes are independent —
+  they keep using `GIT_SSH_KEY` whether or not a PAT is set.
 
 ## SSH connection refused / closed
 

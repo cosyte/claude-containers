@@ -49,6 +49,10 @@ services:
       GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-}
       GIT_COMMITTER_NAME: ${GIT_COMMITTER_NAME:-}
       GIT_COMMITTER_EMAIL: ${GIT_COMMITTER_EMAIL:-}
+      # Optional GitHub PAT: authenticates the gh CLI + HTTPS git in-container
+      # (private HTTPS clone/push without an SSH key). Set GH_TOKEN in .env;
+      # leave unset to use SSH only.
+      GH_TOKEN: ${GH_TOKEN:-}
       # Pass MCP secrets through from the host .env as needed:
       ROVO_MCP_TOKEN: ${ROVO_MCP_TOKEN:-}
     volumes:
