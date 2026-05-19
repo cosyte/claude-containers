@@ -41,6 +41,23 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# The generated multi-repo compose is deployment config, not part of this
+# project — refuse to write it anywhere inside the repo so it can't be
+# committed here by accident. Resolve paths without requiring them to exist.
+abspath() {
+    if command -v realpath >/dev/null 2>&1; then realpath -m -- "$1"
+    else case "$1" in /*) printf '%s\n' "$1";; *) printf '%s\n' "$PWD/$1";; esac
+    fi
+}
+OUT_ABS="$(abspath "$OUT")"
+REPO_ABS="$(abspath "$CLAUDE_DOCKER_ROOT")"
+case "$OUT_ABS/" in
+    "$REPO_ABS"/*)
+        die "refusing to write inside the repo ($REPO_ABS).
+       This is deployment config — point --out elsewhere, e.g.
+       --out /opt/homelab/docker-compose.yml" ;;
+esac
+
 ABS_CONTEXT="$CLAUDE_DOCKER_ROOT"
 # Compose has no ~ expansion — resolve host SSH paths to absolute now.
 AK="${SSH_AUTHORIZED_KEYS/#\~/$HOME}"
