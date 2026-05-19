@@ -24,6 +24,9 @@
 #                       tmux 'dev' window. Format REPO=COMMAND (repeatable).
 #                       Bind to 0.0.0.0 so the published port reaches it, e.g.
 #                       --dev-cmd site='npm run dev -- --host 0.0.0.0 --port 4321'
+#     --browser <repos> enable the chrome-devtools MCP (frontend debugging) for
+#                       these repos (repeatable; comma/space lists ok). Image
+#                       must be built with WITH_BROWSER=1 (`make build-browser`).
 #     --forks           include forks (default: source repos only)
 #     --archived        include archived repos (default: skip)
 #     --limit <n>       gh repo list limit (default: 500)
@@ -37,7 +40,7 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG=""
 OUT=""
@@ -45,7 +48,7 @@ PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
 WANT_FORKS=0 WANT_ARCHIVED=0
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() BROWSER_RAW=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --org)             ORG="$2"; shift 2 ;;
@@ -56,6 +59,7 @@ while [[ $# -gt 0 ]]; do
         --active)          ACTIVE_RAW+=("$2"); shift 2 ;;
         --expose)          EXPOSE_RAW+=("$2"); shift 2 ;;
         --dev-cmd)         DEVCMD_RAW+=("$2"); shift 2 ;;
+        --browser)         BROWSER_RAW+=("$2"); shift 2 ;;
         --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
         --forks)           WANT_FORKS=1; shift ;;
         --archived)        WANT_ARCHIVED=1; shift ;;
@@ -102,6 +106,16 @@ for tok in "${DEVCMD_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
     [[ "$tok" == *=* ]] || die "--dev-cmd must be REPO=COMMAND (got '$tok')"
     DEVCMD["$(sanitize "${tok%%=*}")"]="${tok#*=}"
+done
+
+# Frontend debugging: services with chrome-devtools MCP enabled (CLAUDE_BROWSER=1).
+# Image must be built with WITH_BROWSER=1 (`make build-browser`).
+declare -A BROWSER=()
+for tok in "${BROWSER_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    for one in $(echo "$tok" | tr ',' ' '); do
+        BROWSER["$(sanitize "$one")"]=1
+    done
 done
 
 # The generated multi-repo compose is deployment config, not part of this
@@ -276,6 +290,7 @@ EOF
         dc="${dc//\\/\\\\}"; dc="${dc//\"/\\\"}"; dc="${dc//\$/\$\$}"
         echo "      CLAUDE_DEV_CMD: \"${dc}\""
     fi
+    [[ -n "${BROWSER[$svc]:-}" ]] && echo '      CLAUDE_BROWSER: "1"'
     cat <<EOF
       GIT_AUTHOR_NAME: "${GH_NAME}"
       GIT_AUTHOR_EMAIL: "${GH_MAIL}"
@@ -335,6 +350,7 @@ for r in "${FINAL[@]}"; do
     extra=""
     [[ -n "${EXPOSE[$s]:-}" ]] && extra=" +ports $(echo "${EXPOSE[$s]}" | tr '\n' ',' | sed 's/,$//')"
     [[ -n "${DEVCMD[$s]:-}" ]] && extra="$extra +dev"
+    [[ -n "${BROWSER[$s]:-}" ]] && extra="$extra +browser"
     printf '   %-22s -> claude-%-20s ssh :%-5s %s%s\n' "$nm" "$s" "${SVCPORT[$s]}" "$mark" "$extra"
 done
 
@@ -342,5 +358,10 @@ echo
 [[ -f "$AK" ]] || warn "authorized_keys not found at $AK — create it (your SSH pubkey) before 'up'"
 [[ -f "$GK" ]] || warn "git deploy key not found at $GK — create it and add the .pub to ${ORG} before 'up'"
 docker image inspect "$CLAUDE_IMAGE" >/dev/null 2>&1 || warn "image $CLAUDE_IMAGE not built yet — run 'make build'"
+# Warn if --browser was used but the configured image isn't the browser variant.
+if (( ${#BROWSER[@]} > 0 )); then
+    img_browser="$(docker image inspect -f '{{ index .Config.Labels "claude.browser" }}' "$CLAUDE_IMAGE" 2>/dev/null || true)"
+    [[ "$img_browser" == "1" ]] || warn "image $CLAUDE_IMAGE was not built with WITH_BROWSER=1 — rebuild with 'make build-browser' before 'up' (--browser services won't get the chrome-devtools MCP otherwise)"
+fi
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing — run 'make login'"
 info "Validate:  docker compose -f $OUT config >/dev/null && echo OK"

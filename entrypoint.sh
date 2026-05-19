@@ -290,6 +290,47 @@ if [[ -d "$BAKE_DIR/mcp" ]]; then
     done
 fi
 
+# --- 10b. Optional: register chrome-devtools-mcp (frontend debugging) --------
+# When CLAUDE_BROWSER=1 (set by `claude-launch --browser` or the env), register
+# the Chrome DevTools MCP server so Claude can navigate, evaluate, inspect
+# console/network, take screenshots, run Lighthouse, etc. against any frontend
+# the agent spins up in /workspace. The image must be built with
+# WITH_BROWSER=1 — we check by probing the baked binaries and warn-skip if
+# absent (rather than silently failing inside Claude). Headless, isolated
+# profile (clean per session), --no-sandbox is required in unprivileged Docker.
+case "${CLAUDE_BROWSER:-0}" in
+    1|true|yes|on)
+        if command -v chrome-devtools-mcp >/dev/null 2>&1 \
+           && command -v chromium >/dev/null 2>&1; then
+            if asclaude claude mcp get chrome-devtools >/dev/null 2>&1; then
+                log "MCP 'chrome-devtools' already configured, skipping"
+            else
+                cdt_json="$(jq -n '{
+                    type: "stdio",
+                    command: "chrome-devtools-mcp",
+                    args: [
+                        "--executablePath", "/usr/bin/chromium",
+                        "--headless",
+                        "--isolated",
+                        "--chromeArg=--no-sandbox",
+                        "--chromeArg=--disable-dev-shm-usage",
+                        "--chromeArg=--disable-gpu"
+                    ],
+                    env: { CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "1" }
+                }')"
+                if asclaude claude mcp add-json --scope user chrome-devtools "$cdt_json" >/dev/null 2>&1; then
+                    log "Registered MCP server 'chrome-devtools' (headless Chromium)"
+                else
+                    log "WARNING: failed to register chrome-devtools MCP"
+                fi
+            fi
+        else
+            log "WARNING: CLAUDE_BROWSER=1 but chrome-devtools-mcp / chromium not in image."
+            log "         Rebuild with: make build-browser   (or --build-arg WITH_BROWSER=1)"
+        fi
+        ;;
+esac
+
 # --- 11. Start sshd ----------------------------------------------------------
 /usr/sbin/sshd -e
 log "sshd listening on container port 22"
