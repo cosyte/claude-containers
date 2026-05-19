@@ -17,16 +17,23 @@
 #                       start them (zero resources until asked). Default: all.
 #     --dormant-profile <name>  profile name for non-active repos (default:
 #                       dormant)
+#     --expose <map>    publish an extra container port for a repo, e.g. a dev
+#                       server. Format REPO:HOSTPORT:CONTAINERPORT (repeatable).
+#                       e.g. --expose bridgelink-website:4321:4321
 #     --forks           include forks (default: source repos only)
 #     --archived        include archived repos (default: skip)
 #     --limit <n>       gh repo list limit (default: 500)
+#
+# SSH host ports are STABLE: if --out already exists, each repo keeps its
+# previously assigned port; only new repos get the next free port in range.
+# So adding a repo never reshuffles running containers.
 #
 # With explicit repo args, gh is not called (use NAME or NAME:BRANCH).
 # Otherwise `gh repo list <org>` is used and must be authenticated.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG=""
 OUT=""
@@ -34,7 +41,7 @@ PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
 WANT_FORKS=0 WANT_ARCHIVED=0
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --org)             ORG="$2"; shift 2 ;;
@@ -43,6 +50,7 @@ while [[ $# -gt 0 ]]; do
         --include)         INCLUDE+=("$2"); shift 2 ;;
         --exclude)         EXCLUDE+=("$2"); shift 2 ;;
         --active)          ACTIVE_RAW+=("$2"); shift 2 ;;
+        --expose)          EXPOSE_RAW+=("$2"); shift 2 ;;
         --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
         --forks)           WANT_FORKS=1; shift ;;
         --archived)        WANT_ARCHIVED=1; shift ;;
@@ -70,6 +78,17 @@ for tok in "${ACTIVE_RAW[@]:-}"; do
     for one in $(echo "$tok" | tr ',' ' '); do
         ACTIVE["$(sanitize "$one")"]=1; HAVE_ACTIVE=1
     done
+done
+
+# Extra published ports per service: svc -> newline-separated "HOST:CONTAINER".
+declare -A EXPOSE=()
+for tok in "${EXPOSE_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    IFS=: read -r er eh ec <<<"$tok"
+    [[ -n "$er" && "$eh" =~ ^[0-9]+$ && "$ec" =~ ^[0-9]+$ ]] \
+        || die "--expose must be REPO:HOSTPORT:CONTAINERPORT (got '$tok')"
+    es="$(sanitize "$er")"
+    EXPOSE[$es]="${EXPOSE[$es]:-}${EXPOSE[$es]:+$'\n'}${eh}:${ec}"
 done
 
 # The generated multi-repo compose is deployment config, not part of this
@@ -135,6 +154,36 @@ done < <(printf '%s\n' "${REPOS[@]}" | sort -f)
 
 [[ ${#FINAL[@]} -gt 0 ]] || die "no repos selected (after filters)"
 
+# --- Stable SSH port assignment ----------------------------------------------
+# Reuse each repo's previously assigned port from an existing OUT file; only
+# brand-new repos take the next free port. Adding a repo never reshuffles
+# running containers.
+declare -A SVCPORT=() USEDPORT=()
+if [[ -f "$OUT" ]]; then
+    while IFS=$'\t' read -r psvc pport; do
+        [[ -n "$psvc" && -n "$pport" ]] || continue
+        SVCPORT[$psvc]="$pport"; USEDPORT[$pport]=1
+    done < <(awk '
+        /^[[:space:]]*container_name:[[:space:]]*claude-/ {
+            s=$0; sub(/^[[:space:]]*container_name:[[:space:]]*claude-/,"",s);
+            sub(/[[:space:]]+$/,"",s) }
+        /^[[:space:]]*claude\.ssh_port:/ {
+            p=$0; gsub(/[^0-9]/,"",p); if(s!=""){print s"\t"p; s=""} }
+    ' "$OUT")
+fi
+next_port() {
+    local p
+    for ((p=PORT_BASE; p<=SSH_PORT_RANGE_END; p++)); do
+        [[ -n "${USEDPORT[$p]:-}" ]] && continue
+        USEDPORT[$p]=1; echo "$p"; return 0
+    done
+    die "no free SSH port in ${PORT_BASE}-${SSH_PORT_RANGE_END} for new repos"
+}
+for row in "${FINAL[@]}"; do
+    IFS=$'\t' read -r svc _ _ <<<"$row"
+    [[ -n "${SVCPORT[$svc]:-}" ]] || SVCPORT[$svc]="$(next_port)"
+done
+
 # --- Emit compose ------------------------------------------------------------
 mkdir -p "$(dirname "$OUT")"
 TMP="$(mktemp)"
@@ -168,10 +217,10 @@ cat <<EOF
 services:
 EOF
 
-port=$PORT_BASE
 for row in "${FINAL[@]}"; do
     IFS=$'\t' read -r svc name branch <<<"$row"
     url="git@github.com:${ORG}/${name}.git"
+    port="${SVCPORT[$svc]}"
     cat <<EOF
   ${svc}:
     image: ${CLAUDE_IMAGE}
@@ -196,6 +245,13 @@ for row in "${FINAL[@]}"; do
       - /tmp:rw,nosuid,nodev,exec,size=1g
     ports:
       - "${port}:22"
+EOF
+    if [[ -n "${EXPOSE[$svc]:-}" ]]; then
+        while IFS= read -r m; do
+            [[ -n "$m" ]] && echo "      - \"${m}\""
+        done <<<"${EXPOSE[$svc]}"
+    fi
+    cat <<EOF
     environment:
       CLAUDE_PROJECT_NAME: "${svc}"
       CLAUDE_PERMISSION_MODE: "\${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
@@ -254,13 +310,13 @@ if [[ $HAVE_ACTIVE -eq 1 ]]; then
 else
     n_active=${#FINAL[@]}
 fi
-ok "Wrote $OUT  (${#FINAL[@]} services, ${n_active} start by default, SSH ports ${PORT_BASE}-$((PORT_BASE+${#FINAL[@]}-1)))"
-p=$PORT_BASE
+ok "Wrote $OUT  (${#FINAL[@]} services, ${n_active} start by default)"
 for r in "${FINAL[@]}"; do
     IFS=$'\t' read -r s nm _ <<<"$r"
     if [[ $HAVE_ACTIVE -eq 1 && -z "${ACTIVE[$s]:-}" ]]; then mark="dormant (${DORMANT_PROFILE})"; else mark="ACTIVE"; fi
-    printf '   %-24s -> claude-%-20s ssh :%-5d %s\n' "$nm" "$s" "$p" "$mark"
-    p=$((p+1))
+    extra=""
+    [[ -n "${EXPOSE[$s]:-}" ]] && extra=" +ports $(echo "${EXPOSE[$s]}" | tr '\n' ',' | sed 's/,$//')"
+    printf '   %-22s -> claude-%-20s ssh :%-5s %s%s\n' "$nm" "$s" "${SVCPORT[$s]}" "$mark" "$extra"
 done
 
 echo

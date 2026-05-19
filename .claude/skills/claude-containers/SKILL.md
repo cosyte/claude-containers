@@ -125,16 +125,20 @@ name (= project name; green dot when online). `bin/` on `PATH` drops `./bin/`.
 ```
 ./bin/claude-compose-gen --org ORG --out FILE --active repo-a --active repo-b,repo-c
 ./bin/claude-compose-gen --out FILE repo-a repo-b:branch    # explicit, no gh
+./bin/claude-compose-gen --org ORG --out FILE --active site --expose site:4321:4321
 docker compose -f FILE up -d                       # active only
 docker compose -f FILE --profile dormant up -d     # all
-docker compose -f FILE up -d <repo>                # one on demand
+docker compose -f FILE up -d <repo>                # one on demand / add a new repo
 ```
 `--org` and `--out` are required (no host/org defaults — shared tool); `--out`
 must be outside the repo (the generator refuses in-repo paths). `--active`
-repos start by default; the rest are defined but behind the `dormant` Compose
-profile (zero resources until requested). Ports are stable (sorted by repo
-name) regardless of active/dormant, so toggling the active set never
-reshuffles ports.
+repos start by default; the rest are behind the `dormant` Compose profile
+(zero resources until requested). **SSH ports are preserved**: if `--out`
+already exists each repo keeps its prior port and only new repos get the next
+free one — adding a repo never reshuffles running containers (regenerate, then
+`up -d <newrepo>`). `--expose REPO:HOST:CONTAINER` publishes an extra port
+(dev server); the dev server must bind `0.0.0.0` inside the container to be
+reachable. Default Astro/Vite/Next dev ports: 4321 / 5173 / 3000.
 Needs `gh` authed with `repo`+`read:org` (a personal fine-grained PAT scoped
 to the user usually CANNOT see an org's private repos — use a classic token
 or an org-scoped one). Containers still clone over the mounted SSH git key at
