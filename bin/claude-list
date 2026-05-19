@@ -12,7 +12,14 @@ if [[ -z "$rows" ]]; then
     exit 0
 fi
 
-{
-    printf 'NAME\tSTATE\tSSH PORT\tREPO\tUPTIME\n'
-    echo "$rows"
-} | column -t -s $'\t'
+table="$(printf 'NAME\tSTATE\tSSH PORT\tREPO\tUPTIME\n%s\n' "$rows")"
+# `column` is in util-linux/bsdmainutils and not always present; fall back to
+# awk-aligned columns so the listing always renders.
+if command -v column >/dev/null 2>&1; then
+    echo "$table" | column -t -s $'\t'
+else
+    echo "$table" | awk -F'\t' '{
+        for (i=1;i<=NF;i++){ printf "%-*s", (i<NF?26:0), $i }
+        print ""
+    }'
+fi
