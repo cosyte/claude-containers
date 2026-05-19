@@ -53,6 +53,15 @@ small descriptive commits as you change things.
   commented; the launcher refuses early if it's set.
 - **Never use `claude --bare`.** It forces API-key-only auth and disables
   plugins/CLAUDE.md — incompatible with this stack's OAuth + bake-ins.
+- **Never set `DISABLE_TELEMETRY`, `DO_NOT_TRACK`, or
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`** (env or settings.json `env`).
+  Each short-circuits the GrowthBook fetch, so the `tengu_ccr_bridge` gate
+  defaults false and Remote Control fails with "not yet enabled for your
+  account" — even on an eligible account. RC is the point of this image.
+  Only `DISABLE_AUTOUPDATER=1` is safe (unrelated to flags). The entrypoint
+  self-heals older config volumes (strips these keys + clears the stale flag
+  cache). This was a real, shipped-then-fixed defect — see
+  docs/troubleshooting.md "Remote Control".
 - **Install Claude Code via npm, pinned** (`@anthropic-ai/claude-code@<ver>`),
   never the native installer (auto-update + historical FS-scan OOM).
 - **MCP secrets are runtime-only.** Baked `mcp/*.json` use `${VAR}`

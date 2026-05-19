@@ -95,11 +95,15 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
                                             /home/${CLAUDE_USER}/.bash_profile
 
 # --- Environment --------------------------------------------------------------
+# Do NOT set DISABLE_TELEMETRY / DO_NOT_TRACK / CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:
+# they short-circuit Claude Code's GrowthBook feature-flag fetch, so the
+# `tengu_ccr_bridge` gate falls back to its `false` default and Remote Control
+# reports "not yet enabled for your account" — even on an eligible account.
+# Remote Control is the whole point of this image, so telemetry stays on.
+# DISABLE_AUTOUPDATER is unrelated to the flag fetch and is kept (pinned version).
 ENV CLAUDE_USER=${CLAUDE_USER} \
     CLAUDE_CONFIG_DIR=/home/${CLAUDE_USER}/.claude \
     DISABLE_AUTOUPDATER=1 \
-    DISABLE_TELEMETRY=1 \
-    DO_NOT_TRACK=1 \
     NODE_NO_WARNINGS=1
 
 EXPOSE 22

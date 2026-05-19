@@ -166,21 +166,37 @@ fi
 
 # 8b. settings.json — baked file is the base, existing user settings win on
 #     conflict (recursive merge). Also injects unattended-operation defaults.
+#     NOTE: env intentionally does NOT include DISABLE_TELEMETRY/DO_NOT_TRACK.
+#     Those (and CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) make Claude Code skip
+#     the GrowthBook fetch, so the `tengu_ccr_bridge` gate defaults false and
+#     Remote Control reports "not yet enabled for your account". RC is the point
+#     of this image, so they must never be set. See docs/troubleshooting.md.
 PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 BASE_SETTINGS="$(jq -n --arg pm "$PERM_MODE" '{
     permissions: { defaultMode: $pm },
     skipDangerousModePermissionPrompt: true,
     includeCoAuthoredBy: true,
-    env: { DISABLE_AUTOUPDATER: "1", DISABLE_TELEMETRY: "1", DO_NOT_TRACK: "1" }
+    env: { DISABLE_AUTOUPDATER: "1" }
 }')"
 [[ -f "$BAKE_DIR/settings.json" ]] && \
     BASE_SETTINGS="$(jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") "$BAKE_DIR/settings.json")"
 EXISTING_SETTINGS='{}'
 [[ -s "$CLAUDE_CONFIG_DIR/settings.json" ]] && \
     EXISTING_SETTINGS="$(cat "$CLAUDE_CONFIG_DIR/settings.json")"
+# Self-heal: strip the Remote-Control-breaking telemetry kills from the final
+# settings (covers per-container volumes created by an older image). If any
+# were present, drop the cached GrowthBook flags + statsig cache so the next
+# Claude run re-fetches them and RC eligibility resolves correctly.
 jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") <(echo "$EXISTING_SETTINGS") \
+    | jq 'if .env then .env |= (del(.DISABLE_TELEMETRY,.DO_NOT_TRACK,.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)) else . end' \
     > "$CLAUDE_CONFIG_DIR/settings.json"
 chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
+if echo "$EXISTING_SETTINGS" | jq -e '.env // {} | (.DISABLE_TELEMETRY // .DO_NOT_TRACK // .CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) != null' >/dev/null 2>&1; then
+    log "Migrated settings.json: removed telemetry kills that block Remote Control; clearing stale feature-flag cache"
+    [[ -s "$CJSON" ]] && jq 'del(.cachedGrowthBookFeatures,.cachedExperimentFeatures)' "$CJSON" > "$CJSON.tmp" \
+        && mv -f "$CJSON.tmp" "$CJSON" && chown "$CLAUDE_UID:$CLAUDE_GID" "$CJSON"
+    rm -rf "$CLAUDE_CONFIG_DIR/statsig" 2>/dev/null || true
+fi
 
 # 8c. Plugins — declarative. Claude Code installs/syncs the marketplaces and
 #     enabled plugins from settings.json on startup (idempotent). We union the

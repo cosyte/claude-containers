@@ -26,6 +26,43 @@ scratch: `docker volume rm claude-auth && make login`.
 
 ## Remote Control session not in the mobile app
 
+### "Remote Control is not yet enabled for your account" (most common)
+
+This message is almost always **misleading** — it usually does NOT mean your
+account lacks Remote Control. Remote Control eligibility is the GrowthBook
+feature flag `tengu_ccr_bridge`, fetched at startup. If Claude Code's telemetry
+fetch is suppressed, that flag is never retrieved and falls back to its `false`
+default, producing this exact error even on a fully eligible Max/Pro account.
+This is documented by Anthropic and reported in 50+ upstream issues.
+
+The killers, in order of likelihood:
+
+1. **`DISABLE_TELEMETRY`, `DO_NOT_TRACK`, or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`**
+   set anywhere — env, or `~/.claude/settings.json` `env` block. Any truthy
+   value makes Claude Code skip GrowthBook entirely. **This image deliberately
+   does not set them**; the entrypoint also self-heals older per-container
+   volumes (strips them from settings.json and clears the stale flag cache).
+   Verify inside a container:
+   `jq .env /home/claude/.claude/settings.json` and `env | grep -E 'TELEMETRY|DO_NOT_TRACK|NONESSENTIAL'` — all should be absent.
+2. **Stale flag cache.** Removing the var isn't enough on its own — the old
+   evaluation is frozen. Clear it and re-fetch:
+   `jq 'del(.cachedGrowthBookFeatures,.cachedExperimentFeatures)' ~/.claude/.claude.json` (write back), `rm -rf ~/.claude/statsig`, then run any prompt (`claude -p ping`) to repopulate. Confirm `jq -r '.cachedGrowthBookFeatures.tengu_ccr_bridge' ~/.claude/.claude.json` is `true`.
+3. **Wrong auth type.** RC needs a full-scope `claude auth login` session token.
+   An inference-only `CLAUDE_CODE_OAUTH_TOKEN` / `claude setup-token`, or
+   `ANTHROPIC_API_KEY` / `CLAUDE_CODE_USE_BEDROCK|VERTEX|FOUNDRY`, disqualifies
+   it. This image uses subscription OAuth and refuses API keys, so this only
+   bites if you override auth.
+4. Diagnose precisely with `claude remote-control --verbose` inside the
+   container — it prints which condition failed.
+
+After a rebuild + container recreate (below), all four are handled
+automatically. If `tengu_ccr_bridge` is *still* `false` with a clean env,
+cleared cache, and full-scope login, you're in the genuine minority server-side
+rollout/entitlement-sync case (upstream issues #34528/#37003) — no client fix;
+contact Anthropic.
+
+### Session present but not showing
+
 1. Needs Claude Code ≥ 2.1.52 (this image pins 2.1.144). Confirm in
    `claude-logs <name>` ("Claude Code session 'claude' started in tmux").
 2. Remote Control is **outbound HTTPS only** — no inbound port. If egress is
@@ -34,7 +71,7 @@ scratch: `docker volume rm claude-auth && make login`.
 3. The app session name is the (sanitized) project name. Look in the **Code**
    tab; green dot = the `claude` process is running. No dot → SSH in, check the
    tmux pane; relaunch with `claude-session` if it dropped to a shell.
-4. The account in the app must be the same Max account used for `make login`.
+4. The app must be signed into the **same account** used for `make login`.
 
 ## `--dangerously-skip-permissions` with Remote Control
 
@@ -102,14 +139,18 @@ Egress is open by default — Claude Code, npm, pip, git and MCP servers all nee
 outbound. To lock down a paranoid setup, attach the container to an `internal`
 Docker network plus a proxy/firewall that allows only:
 
-- `api.anthropic.com`, `claude.ai`, `*.anthropic.com` (API + Remote Control)
+- `api.anthropic.com`, `claude.ai`, `*.anthropic.com`, `cdn.growthbook.io`
+  (API + Remote Control + the feature-flag fetch RC eligibility depends on)
 - `registry.npmjs.org`, your git host, any MCP server hosts you enable
 
 Easiest is a host firewall (nftables) or an egress proxy with
 `HTTPS_PROXY`/`HTTP_PROXY` set in `.env`. Blocking everything else still leaves
-SSH (inbound) and Remote Control (outbound 443) working. Don't set
-`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` — it can disable the Remote Control
-eligibility check.
+SSH (inbound) and Remote Control (outbound 443) working. **Never set
+`DISABLE_TELEMETRY`, `DO_NOT_TRACK`, or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`**
+— each disables the GrowthBook fetch that resolves the `tengu_ccr_bridge`
+Remote Control gate, breaking RC with a misleading "not yet enabled for your
+account" (see the Remote Control section above). The image and entrypoint
+deliberately avoid them.
 
 ## Performance / OOM
 

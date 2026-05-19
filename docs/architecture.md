@@ -112,6 +112,24 @@ sets `permissions.defaultMode = bypassPermissions` and
 Claude Code regresses the interaction, set `CLAUDE_PERMISSION_MODE=acceptEdits`
 — see troubleshooting for the end-to-end verification.
 
+## Decision: telemetry stays ON (Remote Control depends on it)
+
+Remote Control eligibility is the GrowthBook feature flag `tengu_ccr_bridge`,
+fetched at startup. `DISABLE_TELEMETRY`, `DO_NOT_TRACK`, and
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` each make Claude Code skip the
+GrowthBook fetch, so the flag falls back to its `false` default and RC reports
+"not yet enabled for your account" — even on a fully eligible account
+(confirmed against Anthropic's docs and 50+ upstream issues; reproduced and
+fixed here). An earlier revision of this image set `DISABLE_TELEMETRY=1` /
+`DO_NOT_TRACK=1` (Dockerfile ENV **and** the entrypoint's settings.json `env`)
+and that was the sole reason Remote Control never appeared. They are now never
+set; only `DISABLE_AUTOUPDATER=1` (unrelated to flags) remains. The entrypoint
+also self-heals pre-existing per-container config volumes: it strips these keys
+from `settings.json` and, if any were present, clears
+`cachedGrowthBookFeatures`/`statsig` so the next run re-resolves the gate.
+Trade-off accepted: this image cannot be fully telemetry-silent and also
+provide Remote Control; RC is the product, so telemetry stays on.
+
 ## Acceptance
 
 | # | Criterion | How it's met / verify |
