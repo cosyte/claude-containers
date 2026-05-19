@@ -143,7 +143,13 @@ reachable. Default Astro/Vite/Next dev ports: 4321 / 5173 / 3000.
 `--dev-cmd REPO=COMMAND` sets `CLAUDE_DEV_CMD` for that service so the
 entrypoint auto-starts it on boot in a separate tmux `dev` window
 (`tmux select-window -t claude:dev` to watch it; `claude-dev` to rerun).
-Pair `--expose` + `--dev-cmd` for a browsable dev site.
+Pair `--expose` + `--dev-cmd` for a browsable dev site. Two real gotchas:
+the dev server **must bind 0.0.0.0** (localhost = published port reaches
+nothing); and `npm run` needs `-- ` before forwarded flags while
+`pnpm`/`yarn` must NOT get a literal `--` (it makes Astro/Vite ignore
+`--host`). pnpm/yarn/npm are baked into the image (no runtime PM download —
+a corepack fetch timed out in practice). Verified dev-cmd pattern:
+`if [ -f pnpm-lock.yaml ]; then PM=pnpm;SEP=; elif [ -f yarn.lock ]; then PM=yarn;SEP=; else PM=npm;SEP=--; fi; [ -d node_modules ] || $PM install; exec $PM run dev $SEP --host 0.0.0.0 --port 4321`
 Needs `gh` authed with `repo`+`read:org` (a personal fine-grained PAT scoped
 to the user usually CANNOT see an org's private repos — use a classic token
 or an org-scoped one). Containers still clone over the mounted SSH git key at

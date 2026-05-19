@@ -153,18 +153,29 @@ generator refuses to write inside the repo. **SSH ports are stable**: when
 `--out` already exists each repo keeps its previously assigned port and only
 new repos take the next free one, so adding a repo never reshuffles running
 containers. `--expose` publishes a dev-server port for a repo; `--dev-cmd`
-auto-starts that dev server on container boot in its own tmux `dev` window
-(bind it to `0.0.0.0` so the published port reaches it). Example for an Astro
-site:
+auto-starts that dev server on container boot in its own tmux `dev` window.
+
+Two gotchas the example below handles (both bit us in practice):
+
+- The dev server must bind **`0.0.0.0`**, not localhost, or the published
+  port reaches nothing inside the container.
+- `npm run <script>` needs `-- ` before forwarded flags; `pnpm`/`yarn`
+  forward them **without** `--` (passing a literal `--` makes Astro/Vite
+  ignore `--host` and silently bind localhost). So detect the package
+  manager. `pnpm`/`yarn`/`npm` are baked into the image — no runtime
+  package-manager download.
+
+Verified working example (Astro/Vite/Next dev server, any package manager):
 
 ```
 claude-compose-gen --org ORG --out FILE --active my-site \
   --expose my-site:4321:4321 \
-  --dev-cmd my-site='npm install && npm run dev -- --host 0.0.0.0 --port 4321'
+  --dev-cmd 'my-site=if [ -f pnpm-lock.yaml ]; then PM=pnpm; SEP=; elif [ -f yarn.lock ]; then PM=yarn; SEP=; else PM=npm; SEP=--; fi; [ -d node_modules ] || $PM install; exec $PM run dev $SEP --host 0.0.0.0 --port 4321'
 ```
 
 Then `http://<host>:4321` serves the live dev site; SSH in and
-`tmux select-window -t claude:dev` to watch its output.
+`tmux select-window -t claude:dev` to watch its output (`claude-dev` reruns
+it).
 
 It enumerates via an authenticated `gh` (scopes `repo` + `read:org`) or takes
 explicit `repo[:branch]` args, assigns stable SSH ports from the configured
