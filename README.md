@@ -141,11 +141,13 @@ claude-logs  <name> [-n LINES]    tail the entrypoint/sshd log
 session container per repo in a GitHub org:
 
 ```
-claude-compose-gen [--org cosyte] [--out /opt/homelab/docker-compose.yml]
-                   [--active REPOS]... [--dormant-profile NAME]
+claude-compose-gen --org ORG --out FILE [--active REPOS]... [--dormant-profile NAME]
                    [--include GLOB] [--exclude GLOB] [--forks] [--archived]
-claude-compose-gen myrepo otherrepo:dev      # explicit list, no gh needed
+claude-compose-gen --out FILE repo-a repo-b:dev      # explicit list, no gh needed
 ```
+
+`--out` must be a path **outside this repo** (a deploy location); the
+generator refuses to write inside the repo.
 
 It enumerates via an authenticated `gh` (scopes `repo` + `read:org`) or takes
 explicit `repo[:branch]` args, assigns stable SSH ports from the configured
@@ -158,11 +160,11 @@ but placed behind a Compose profile (`dormant`), so it consumes zero
 resources until you ask for it:
 
 ```
-claude-compose-gen --active claude-containers --active fhir,website,pims
-docker compose -f <out> up -d                       # just the active ones
-docker compose -f <out> up -d ncpdp                 # one dormant repo, on demand
-docker compose -f <out> --profile dormant up -d     # everything
-docker compose -f <out> stop website                # free its resources
+claude-compose-gen --org ORG --out FILE --active repo-a --active repo-b,repo-c
+docker compose -f FILE up -d                       # just the active ones
+docker compose -f FILE up -d repo-x                # one dormant repo, on demand
+docker compose -f FILE --profile dormant up -d     # everything
+docker compose -f FILE stop repo-a                 # free its resources
 ```
 
 With no `--active`, all repos start (backward compatible). Regenerate any time

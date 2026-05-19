@@ -38,6 +38,17 @@ git init -q "$TMP/repo"
   git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init )
 echo "smoke-marker" > "$TMP/repo/marker.txt"
 
+# A throwaway plugins bake-in to prove the merge mechanism generically
+# (the shipped claude-config/plugins/plugins.json is intentionally empty).
+cat > "$TMP/plugins.json" <<'JSON'
+{
+  "extraKnownMarketplaces": {
+    "smoke-mkt": { "source": { "source": "git", "url": "https://example.invalid/x.git" }, "autoUpdate": false }
+  },
+  "enabledPlugins": { "smoke-plugin@smoke-mkt": true }
+}
+JSON
+
 echo
 echo "== 1. ANTHROPIC_API_KEY hard-fail =="
 if docker run --rm -e ANTHROPIC_API_KEY=sk-test "$IMAGE" >/dev/null 2>&1; then
@@ -68,6 +79,7 @@ docker run -d --name "$CN" \
     -p 127.0.0.1::22 \
     -v "$TMP/repo:/workspace" \
     -v "$TMP/key.pub:/etc/claude/authorized_keys:ro" \
+    -v "$TMP/plugins.json:/opt/claude-config/plugins/plugins.json:ro" \
     "$IMAGE" >/dev/null
 
 # wait for the entrypoint to reach the tmux launch (or die)
@@ -97,10 +109,10 @@ check "settings.json defaultMode=bypassPermissions" \
     'cexec "jq -e \".permissions.defaultMode==\\\"bypassPermissions\\\"\" /home/claude/.claude/settings.json" >/dev/null 2>&1'
 check "settings.json has skipDangerousModePermissionPrompt" \
     'cexec "jq -e \".skipDangerousModePermissionPrompt==true\" /home/claude/.claude/settings.json" >/dev/null 2>&1'
-check "plugin marketplace baked into settings.json" \
-    'cexec "jq -e \".extraKnownMarketplaces[\\\"claude-skills\\\"]\" /home/claude/.claude/settings.json" >/dev/null 2>&1'
-check "plugin enabled in settings.json" \
-    'cexec "jq -e \".enabledPlugins[\\\"fullstack-standard@claude-skills\\\"]\" /home/claude/.claude/settings.json" >/dev/null 2>&1'
+check "plugin marketplace merged into settings.json (mechanism)" \
+    'cexec "jq -e \".extraKnownMarketplaces[\\\"smoke-mkt\\\"]\" /home/claude/.claude/settings.json" >/dev/null 2>&1'
+check "plugin enabled in settings.json (mechanism)" \
+    'cexec "jq -e \".enabledPlugins[\\\"smoke-plugin@smoke-mkt\\\"]\" /home/claude/.claude/settings.json" >/dev/null 2>&1'
 check "global CLAUDE.md installed" \
     'cexec "test -s /home/claude/.claude/CLAUDE.md"'
 check "baked slash command installed" \

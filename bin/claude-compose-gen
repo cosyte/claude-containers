@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# claude-compose-gen — generate a multi-service docker-compose.yml that runs one
-# Claude Code session container per repo in a GitHub org (default: cosyte).
+# claude-compose-gen — generate a multi-service docker-compose.yml that runs
+# one Claude Code session container per repo in a GitHub org.
 #
-#   claude-compose-gen [options] [repo[:branch] ...]
-#     --org <name>      GitHub org/owner to enumerate (default: cosyte)
-#     --out <file>      output path (default: /opt/homelab/docker-compose.yml)
+#   claude-compose-gen --org <name> --out <file> [options]
+#   claude-compose-gen --out <file> [options] repo[:branch] ...
+#     --org <name>      GitHub org/owner to enumerate (required unless repos
+#                       are passed as arguments)
+#     --out <file>      output compose path (required; must be OUTSIDE this
+#                       repo — e.g. a deploy dir like /srv/claude/compose.yml)
 #     --port-base <n>   first SSH host port (default: SSH_PORT_RANGE_START)
 #     --include <glob>  only repos whose name matches (repeatable)
 #     --exclude <glob>  skip repos whose name matches (repeatable)
@@ -23,10 +26,10 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
-ORG="cosyte"
-OUT="/opt/homelab/docker-compose.yml"
+ORG=""
+OUT=""
 PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
 WANT_FORKS=0 WANT_ARCHIVED=0
@@ -49,6 +52,14 @@ while [[ $# -gt 0 ]]; do
         *)                 REPO_ARGS+=("$1"); shift ;;
     esac
 done
+
+# No host- or org-specific defaults: this is a shared tool. Caller must say
+# where to write and (for gh enumeration) which org.
+[[ -n "$OUT" ]] || die "--out <file> is required, and must be OUTSIDE this repo
+       (a deploy location), e.g. --out /srv/claude/docker-compose.yml"
+if [[ ${#REPO_ARGS[@]} -eq 0 && -z "$ORG" ]]; then
+    die "give --org <name> to enumerate via gh, or pass repo names as args"
+fi
 
 # Active set: sanitized service names that start by default. Empty = all
 # active (no profiles emitted — backward compatible).
@@ -74,8 +85,8 @@ REPO_ABS="$(abspath "$CLAUDE_DOCKER_ROOT")"
 case "$OUT_ABS/" in
     "$REPO_ABS"/*)
         die "refusing to write inside the repo ($REPO_ABS).
-       This is deployment config — point --out elsewhere, e.g.
-       --out /opt/homelab/docker-compose.yml" ;;
+       This is deployment config — point --out at a path outside the repo,
+       e.g. --out /srv/claude/docker-compose.yml" ;;
 esac
 
 ABS_CONTEXT="$CLAUDE_DOCKER_ROOT"

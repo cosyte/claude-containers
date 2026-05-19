@@ -114,17 +114,18 @@ name (= project name; green dot when online). `bin/` on `PATH` drops `./bin/`.
 
 **Many repos at once**
 ```
-./bin/claude-compose-gen --org cosyte --out /opt/homelab/docker-compose.yml \
-    --active claude-containers --active fhir,website,pims
-./bin/claude-compose-gen repoA repoB:branch        # explicit, no gh
-docker compose -f /opt/homelab/docker-compose.yml up -d                 # active only
-docker compose -f /opt/homelab/docker-compose.yml --profile dormant up -d   # all
-docker compose -f /opt/homelab/docker-compose.yml up -d <repo>          # one on demand
+./bin/claude-compose-gen --org ORG --out FILE --active repo-a --active repo-b,repo-c
+./bin/claude-compose-gen --out FILE repo-a repo-b:branch    # explicit, no gh
+docker compose -f FILE up -d                       # active only
+docker compose -f FILE --profile dormant up -d     # all
+docker compose -f FILE up -d <repo>                # one on demand
 ```
-`--active` repos start by default; the rest are defined but behind the
-`dormant` Compose profile (zero resources until requested). Ports are stable
-(sorted by repo name) regardless of active/dormant, so toggling the active
-set never reshuffles ports. The generator refuses `--out` inside the repo.
+`--org` and `--out` are required (no host/org defaults — shared tool); `--out`
+must be outside the repo (the generator refuses in-repo paths). `--active`
+repos start by default; the rest are defined but behind the `dormant` Compose
+profile (zero resources until requested). Ports are stable (sorted by repo
+name) regardless of active/dormant, so toggling the active set never
+reshuffles ports.
 Needs `gh` authed with `repo`+`read:org` (a personal fine-grained PAT scoped
 to the user usually CANNOT see an org's private repos — use a classic token
 or an org-scoped one). Containers still clone over the mounted SSH git key at

@@ -1,17 +1,18 @@
 {
-  "_comment": "Declarative plugin bake-in. The entrypoint unions these keys into ~/.claude/settings.json; Claude Code installs/syncs marketplaces and enabled plugins on startup (idempotent). Replace the example marketplace below with your own. Format verified against Claude Code 2.1.x settings.json.",
+  "_comment": "Declarative plugin bake-in. The entrypoint unions extraKnownMarketplaces and enabledPlugins into ~/.claude/settings.json; Claude Code installs/syncs them on startup (idempotent). Ships empty so the image is generic. Add your own marketplaces/plugins and rebuild, or mount your own plugins.json / settings.json at runtime.",
 
-  "extraKnownMarketplaces": {
-    "claude-skills": {
-      "source": {
-        "source": "git",
-        "url": "https://github.com/NSchatz/claude-skills.git"
-      },
-      "autoUpdate": true
+  "_example": {
+    "extraKnownMarketplaces": {
+      "my-marketplace": {
+        "source": { "source": "git", "url": "https://github.com/me/my-marketplace.git" },
+        "autoUpdate": true
+      }
+    },
+    "enabledPlugins": {
+      "my-plugin@my-marketplace": true
     }
   },
 
-  "enabledPlugins": {
-    "fullstack-standard@claude-skills": true
-  }
+  "extraKnownMarketplaces": {},
+  "enabledPlugins": {}
 }
