@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# claude-rm <name> [--yes] [--purge]
+#   --yes    skip the confirmation prompt
+#   --purge  also delete the per-container workspace + config volumes
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+need_docker
+
+YES=0 PURGE=0 PROJECT=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --yes|-y) YES=1; shift ;;
+        --purge)  PURGE=1; shift ;;
+        -*)       die "unknown option: $1" ;;
+        *)        PROJECT="$1"; shift ;;
+    esac
+done
+[[ -n "$PROJECT" ]] || die "usage: claude-rm <name> [--yes] [--purge]"
+
+PROJECT="$(sanitize "$PROJECT")"
+CN="$(cname "$PROJECT")"
+WS_VOL="$(ws_volume "$PROJECT")"
+CFG_VOL="$(cfg_volume "$PROJECT")"
+[[ "$(container_state "$CN")" == "absent" ]] && die "no such container: $CN"
+
+echo "About to remove container: $CN"
+if [[ "$PURGE" == "1" ]]; then
+    echo "  --purge: also DELETING volumes '$WS_VOL' and '$CFG_VOL'"
+    echo "  (workspace contents and conversation history will be lost)"
+fi
+if [[ "$YES" != "1" ]]; then
+    read -rp "Proceed? [y/N] " ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { info "aborted"; exit 0; }
+fi
+
+docker rm -f "$CN" >/dev/null
+ok "Removed container $CN"
+
+if [[ "$PURGE" == "1" ]]; then
+    for v in "$WS_VOL" "$CFG_VOL"; do
+        if docker volume inspect "$v" >/dev/null 2>&1; then
+            docker volume rm "$v" >/dev/null && ok "Removed volume $v"
+        fi
+    done
+    info "Shared volumes '$AUTH_VOLUME' and '$SSHKEYS_VOLUME' were left intact."
+fi

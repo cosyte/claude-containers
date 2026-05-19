@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# claude-logs <name> [-n <lines>] — tail container (entrypoint) logs.
+# Note: this shows the entrypoint/sshd log, not the Claude session itself.
+# For the live Claude session, SSH in and attach to tmux.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+need_docker
+
+TAIL=200 PROJECT=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n|--tail) TAIL="$2"; shift 2 ;;
+        -*)        die "unknown option: $1" ;;
+        *)         PROJECT="$1"; shift ;;
+    esac
+done
+[[ -n "$PROJECT" ]] || die "usage: claude-logs <name> [-n <lines>]"
+
+CN="$(cname "$(sanitize "$PROJECT")")"
+[[ "$(container_state "$CN")" == "absent" ]] && die "no such container: $CN"
+exec docker logs -f --tail "$TAIL" "$CN"

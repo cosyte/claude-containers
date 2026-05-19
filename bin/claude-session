@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# The command tmux runs in the 'claude' session pane.
+# Launches Claude Code with Remote Control + skip-permissions, then drops to an
+# interactive shell if Claude exits so the SSH/tmux session stays usable. Run
+# `claude-session` (this script) again from that shell to relaunch.
+set -uo pipefail
+
+cd /workspace || cd "$HOME"
+
+NAME="${CLAUDE_PROJECT_NAME:-claude}"
+EXTRA="${CLAUDE_EXTRA_ARGS:-}"
+
+echo "Starting Claude Code  (Remote Control name: ${NAME})"
+echo "  workspace: $(pwd)"
+echo "  flags    : --dangerously-skip-permissions --remote-control \"${NAME}\" ${EXTRA}"
+echo
+
+# shellcheck disable=SC2086  # EXTRA is intentionally word-split
+claude --dangerously-skip-permissions --remote-control "$NAME" $EXTRA
+
+code=$?
+echo
+echo "Claude Code exited (status ${code}). Dropping to a shell."
+echo "Relaunch with:  claude-session"
+exec bash -l

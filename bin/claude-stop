@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# claude-stop <name> — graceful stop. Workspace + .claude volumes preserved.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+need_docker
+
+[[ $# -ge 1 ]] || die "usage: claude-stop <name>"
+PROJECT="$(sanitize "$1")"
+CN="$(cname "$PROJECT")"
+
+case "$(container_state "$CN")" in
+    absent)  die "no such container: $CN" ;;
+    stopped) info "'$CN' is already stopped." ; exit 0 ;;
+esac
+
+info "Stopping '$CN' (timeout ${CLAUDE_STOP_TIMEOUT}s)…"
+docker stop -t "$CLAUDE_STOP_TIMEOUT" "$CN" >/dev/null
+ok "Stopped. Resume with: claude-launch $PROJECT"

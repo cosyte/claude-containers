@@ -1,0 +1,29 @@
+# Hardened sshd for the Claude Code container.
+# Host keys live on a persisted named volume so the fingerprint is stable
+# across image rebuilds (the entrypoint generates them there on first boot).
+HostKey /etc/ssh/host-keys/ssh_host_ed25519_key
+HostKey /etc/ssh/host-keys/ssh_host_rsa_key
+
+Port 22
+AddressFamily any
+
+# Key-based auth only. Authorized keys are mounted read-only from the host
+# and installed by the entrypoint.
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AllowUsers claude
+
+X11Forwarding no
+AllowTcpForwarding yes
+PrintMotd no
+AcceptEnv LANG LC_*
+ClientAliveInterval 30
+ClientAliveCountMax 1000000
+LoginGraceTime 30
+MaxAuthTries 4
+
+Subsystem sftp internal-sftp

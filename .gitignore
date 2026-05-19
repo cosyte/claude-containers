@@ -1,0 +1,6 @@
+# Local config / secrets — never commit
+.env
+
+# Build / runtime artifacts
+*.log
+workspace/

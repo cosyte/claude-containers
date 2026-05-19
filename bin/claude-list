@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# claude-list — table of all claude-* containers.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+need_docker
+
+fmt='{{.Names}}\t{{.State}}\t{{.Label "claude.ssh_port"}}\t{{.Label "claude.repo"}}\t{{.RunningFor}}'
+rows="$(docker ps -a --filter 'label=claude.managed=1' --format "$fmt" 2>/dev/null || true)"
+
+if [[ -z "$rows" ]]; then
+    info "No claude-* containers. Create one with: claude-launch <name> --repo <url>"
+    exit 0
+fi
+
+{
+    printf 'NAME\tSTATE\tSSH PORT\tREPO\tUPTIME\n'
+    echo "$rows"
+} | column -t -s $'\t'

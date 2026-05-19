@@ -1,0 +1,7 @@
+{
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-everything"],
+  "env": {
+    "EXAMPLE_API_KEY": "${EXAMPLE_API_KEY}"
+  }
+}

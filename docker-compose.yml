@@ -1,0 +1,79 @@
+# Single-container template. The bin/claude-* scripts are the primary way to
+# run many sessions; this file is the equivalent for one container managed with
+# `docker compose`, and doubles as living documentation of the run config.
+#
+# Usage:
+#   cp .env.example .env        # then edit
+#   make login                  # one-time OAuth (writes the claude-auth volume)
+#   CLAUDE_PROJECT_NAME=myproj SSH_PORT=2200 GIT_REPO_URL=git@github.com:me/x.git \
+#     docker compose up -d
+#
+# `docker compose` can't auto-assign a port from a range — set SSH_PORT
+# explicitly here (the claude-launch script does auto-assign).
+
+services:
+  claude:
+    image: ${CLAUDE_IMAGE:-claude-code-box:latest}
+    build:
+      context: .
+      args:
+        NODE_VERSION: ${NODE_VERSION:-24}
+        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-2.1.144}
+        UV_VERSION: ${UV_VERSION:-latest}
+        CLAUDE_UID: ${CLAUDE_UID:-1000}
+        CLAUDE_GID: ${CLAUDE_GID:-1000}
+        CLAUDE_USER: ${CLAUDE_USER:-claude}
+    container_name: claude-${CLAUDE_PROJECT_NAME:?set CLAUDE_PROJECT_NAME}
+    hostname: ${CLAUDE_PROJECT_NAME}
+    restart: unless-stopped
+    init: true
+    shm_size: ${CLAUDE_SHM_SIZE:-2g}
+    cpus: ${CLAUDE_CPU_LIMIT:-2}
+    mem_limit: ${CLAUDE_MEM_LIMIT:-4g}
+    stop_grace_period: ${CLAUDE_STOP_TIMEOUT:-20}s
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,exec,size=1g
+    ports:
+      - "${SSH_PORT:?set SSH_PORT}:22"
+    environment:
+      # Never add ANTHROPIC_API_KEY here. This stack is subscription-OAuth only;
+      # the entrypoint hard-fails if it sees a non-empty ANTHROPIC_API_KEY.
+      CLAUDE_PROJECT_NAME: ${CLAUDE_PROJECT_NAME}
+      CLAUDE_EXTRA_ARGS: ${CLAUDE_EXTRA_ARGS:-}
+      CLAUDE_MCP_ENABLED: ${CLAUDE_MCP_ENABLED:-}
+      CLAUDE_PERMISSION_MODE: ${CLAUDE_PERMISSION_MODE:-bypassPermissions}
+      GIT_REPO_URL: ${GIT_REPO_URL:-}
+      GIT_REPO_BRANCH: ${GIT_REPO_BRANCH:-}
+      GIT_REPO_DEPTH: ${GIT_REPO_DEPTH:-}
+      GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME:-}
+      GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-}
+      GIT_COMMITTER_NAME: ${GIT_COMMITTER_NAME:-}
+      GIT_COMMITTER_EMAIL: ${GIT_COMMITTER_EMAIL:-}
+      # Pass MCP secrets through from the host .env as needed:
+      ROVO_MCP_TOKEN: ${ROVO_MCP_TOKEN:-}
+    volumes:
+      - claude-auth:/auth
+      - claude-sshkeys:/etc/ssh/host-keys
+      - claude-config:/home/claude/.claude
+      # Default: per-container named workspace volume (entrypoint clones into it
+      # when GIT_REPO_URL is set). To bind-mount a local checkout instead,
+      # comment the next line and uncomment the bind line.
+      - claude-ws:/workspace
+      # - ${CLAUDE_WORKSPACE_HOST_DIR:-./workspace}:/workspace
+      - ${SSH_AUTHORIZED_KEYS:-~/.ssh/authorized_keys}:/etc/claude/authorized_keys:ro
+      - ${GIT_SSH_KEY:-~/.ssh/claude-git-key}:/etc/claude/git-key:ro
+
+volumes:
+  # Shared across every container. Created by `make login`.
+  claude-auth:
+    name: ${AUTH_VOLUME:-claude-auth}
+    external: true
+  # Shared host keys (stable SSH fingerprint).
+  claude-sshkeys:
+    name: ${SSHKEYS_VOLUME:-claude-sshkeys}
+  # Per-project. The real Docker volume names carry the project suffix so
+  # multiple compose projects don't collide.
+  claude-config:
+    name: claude-config-${CLAUDE_PROJECT_NAME}
+  claude-ws:
+    name: claude-ws-${CLAUDE_PROJECT_NAME}

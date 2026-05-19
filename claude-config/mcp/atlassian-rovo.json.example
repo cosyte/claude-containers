@@ -1,0 +1,7 @@
+{
+  "type": "sse",
+  "url": "https://mcp.atlassian.com/v1/sse",
+  "headers": {
+    "Authorization": "Bearer ${ROVO_MCP_TOKEN}"
+  }
+}

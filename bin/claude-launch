@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# claude-launch <project-name> [options]
+#   --repo <url>          git URL to clone into a fresh workspace volume
+#   --branch <branch>     branch to check out
+#   --depth <n>           shallow-clone depth
+#   --workspace <path>    bind-mount a local checkout instead of cloning
+#   --port <ssh-port>     explicit host SSH port (default: auto 2200-2299)
+#   --mcp <name>          enable only these baked-in MCP servers (repeatable)
+#   --extra-args "<args>" extra args passed to claude via CLAUDE_EXTRA_ARGS
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT="" EXTRA="" MCP_LIST=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo)       REPO="$2"; shift 2 ;;
+        --branch)     BRANCH="$2"; shift 2 ;;
+        --depth)      DEPTH="$2"; shift 2 ;;
+        --workspace)  WS_PATH="$2"; shift 2 ;;
+        --port)       PORT="$2"; shift 2 ;;
+        --mcp)        MCP_LIST="${MCP_LIST:+$MCP_LIST,}$2"; shift 2 ;;
+        --extra-args) EXTRA="$2"; shift 2 ;;
+        -h|--help)    usage 0 ;;
+        -*)           die "unknown option: $1 (try --help)" ;;
+        *)            [[ -z "$PROJECT" ]] && PROJECT="$1" || die "unexpected arg: $1"; shift ;;
+    esac
+done
+[[ -n "$PROJECT" ]] || usage 1
+[[ -n "$REPO" && -n "$WS_PATH" ]] && die "--repo and --workspace are mutually exclusive"
+
+need_docker
+[[ -z "${ANTHROPIC_API_KEY:-}" ]] || die "ANTHROPIC_API_KEY is set (env or .env).
+       This stack is OAuth-subscription only — unset it. It would otherwise be
+       passed in and the container would refuse to start anyway."
+PROJECT="$(sanitize "$PROJECT")"
+CN="$(cname "$PROJECT")"
+state="$(container_state "$CN")"
+
+# Already running -> just print how to connect.
+if [[ "$state" == "running" ]]; then
+    info "Container '$CN' is already running."
+    print_connect "$PROJECT" "$(container_ssh_port "$CN")"
+    exit 0
+fi
+
+# Stopped -> start it back up (workspace + history preserved).
+if [[ "$state" == "stopped" ]]; then
+    info "Starting existing container '$CN'…"
+    docker start "$CN" >/dev/null
+    print_connect "$PROJECT" "$(container_ssh_port "$CN")"
+    exit 0
+fi
+
+# Absent -> create it.
+ensure_image
+[[ -n "$PORT" ]] || PORT="$(alloc_port)"
+host_port_free "$PORT" || warn "host port $PORT looks busy; Docker may refuse it"
+
+WS_VOL="$(ws_volume "$PROJECT")"
+CFG_VOL="$(cfg_volume "$PROJECT")"
+
+# Workspace source: bind mount, or named volume (cloned or resumed).
+WS_MOUNT=()
+if [[ -n "$WS_PATH" ]]; then
+    WS_PATH="$(cd "$WS_PATH" 2>/dev/null && pwd)" || die "--workspace path not found"
+    WS_MOUNT=(-v "$WS_PATH:/workspace")
+    REPO_LABEL="bind:$WS_PATH"
+else
+    WS_MOUNT=(-v "$WS_VOL:/workspace")
+    REPO_LABEL="${REPO:-$WS_VOL}"
+    if [[ -z "$REPO" ]] && ! docker volume inspect "$WS_VOL" >/dev/null 2>&1; then
+        die "no --repo, no --workspace, and no existing workspace volume '$WS_VOL'.
+       First launch of a project needs --repo <url> or --workspace <path>."
+    fi
+fi
+
+# Auth volume must exist (created by 'make login').
+docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 \
+    || die "auth volume '$AUTH_VOLUME' missing. Run 'make login' once first."
+
+# Read-only host mounts (skip with a warning if absent).
+RO_MOUNTS=()
+if [[ -f "$SSH_AUTHORIZED_KEYS" ]]; then
+    RO_MOUNTS+=(-v "$SSH_AUTHORIZED_KEYS:/etc/claude/authorized_keys:ro")
+else
+    warn "no authorized_keys at $SSH_AUTHORIZED_KEYS — SSH will be disabled"
+fi
+if [[ -f "$GIT_SSH_KEY" ]]; then
+    RO_MOUNTS+=(-v "$GIT_SSH_KEY:/etc/claude/git-key:ro")
+else
+    warn "no git SSH key at $GIT_SSH_KEY — only public/https repos will clone"
+fi
+
+# Git identity defaults from the host's git config.
+GH_NAME="$(git config --global user.name  2>/dev/null || true)"
+GH_MAIL="$(git config --global user.email 2>/dev/null || true)"
+
+ENV_FILE_ARG=()
+[[ -f "$CLAUDE_DOCKER_ROOT/.env" ]] && ENV_FILE_ARG=(--env-file "$CLAUDE_DOCKER_ROOT/.env")
+
+info "Creating container '$CN' (SSH host port $PORT)…"
+docker run -d \
+    --name "$CN" \
+    --hostname "$PROJECT" \
+    --restart unless-stopped \
+    --init \
+    --shm-size "$CLAUDE_SHM_SIZE" \
+    --cpus "$CLAUDE_CPU_LIMIT" \
+    --memory "$CLAUDE_MEM_LIMIT" \
+    --tmpfs /tmp:rw,nosuid,nodev,exec,size=1g \
+    -p "$PORT:22" \
+    "${ENV_FILE_ARG[@]}" \
+    -e CLAUDE_PROJECT_NAME="$PROJECT" \
+    -e CLAUDE_EXTRA_ARGS="$EXTRA" \
+    -e CLAUDE_MCP_ENABLED="$MCP_LIST" \
+    -e CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}" \
+    -e GIT_REPO_URL="$REPO" \
+    -e GIT_REPO_BRANCH="$BRANCH" \
+    -e GIT_REPO_DEPTH="$DEPTH" \
+    -e GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-$GH_NAME}" \
+    -e GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-$GH_MAIL}" \
+    -e GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-$GH_NAME}" \
+    -e GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$GH_MAIL}" \
+    -v "$AUTH_VOLUME:/auth" \
+    -v "$SSHKEYS_VOLUME:/etc/ssh/host-keys" \
+    -v "$CFG_VOL:/home/claude/.claude" \
+    "${WS_MOUNT[@]}" \
+    "${RO_MOUNTS[@]}" \
+    --label claude.managed=1 \
+    --label claude.project="$PROJECT" \
+    --label claude.ssh_port="$PORT" \
+    --label claude.repo="$REPO_LABEL" \
+    "$CLAUDE_IMAGE" >/dev/null
+
+# Surface a fast-failing entrypoint (bad repo, missing auth) instead of a
+# silent restart loop.
+sleep 2
+if [[ "$(container_state "$CN")" != "running" ]]; then
+    err "container exited during startup. Last log lines:"
+    docker logs --tail 30 "$CN" 2>&1 | sed 's/^/    /'
+    exit 1
+fi
+
+print_connect "$PROJECT" "$PORT"
