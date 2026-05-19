@@ -23,8 +23,11 @@ Behaviour changes should add an entry under `## [Unreleased]` (see
   stack's security guarantees), and `CONTRIBUTING.md`.
 - `.hadolint.yaml` with the deliberate, documented Dockerfile lint opt-outs.
 - `CHANGELOG.md` (this file).
-- Continuous integration: lint (bash -n + shellcheck + hadolint) and an
-  image build on every push and pull request.
+- `test/compose-gen.sh`: a fast, dependency-free self-test for the compose
+  generator (SSH-port distinctness/stability + `GH_TOKEN` passthrough); no
+  Docker/gh/OAuth required.
+- Continuous integration: lint (bash -n + shellcheck + hadolint), the
+  compose-gen self-test, and an image build on every push and pull request.
 
 ### Changed
 

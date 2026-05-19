@@ -24,7 +24,7 @@ BUILD_ARGS = \
   --build-arg CLAUDE_GID=$(CLAUDE_GID) \
   --build-arg CLAUDE_USER=$(CLAUDE_USER)
 
-SHELL_FILES := entrypoint.sh bin/_common.sh $(wildcard bin/claude-*) test/smoke.sh
+SHELL_FILES := entrypoint.sh bin/_common.sh $(wildcard bin/claude-*) $(wildcard test/*.sh)
 
 .DEFAULT_GOAL := help
 .PHONY: help build build-all push login launch list stop rm logs clean lint

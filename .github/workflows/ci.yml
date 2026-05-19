@@ -19,8 +19,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: Lint (bash -n + shellcheck + hadolint)
+  checks:
+    name: Lint + generator self-test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +37,10 @@ jobs:
 
       - name: make lint
         run: make lint
+
+      # No Docker / gh / OAuth needed — pure generation-logic guard.
+      - name: compose-gen self-test
+        run: bash test/compose-gen.sh
 
   build:
     name: Build image

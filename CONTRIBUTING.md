@@ -26,7 +26,10 @@ Run the linters — CI runs the same checks and will block on them:
 
 ```bash
 make lint                # bash -n + shellcheck + hadolint (auto-skips a missing tool)
+bash test/compose-gen.sh # fast generator self-test (no Docker/gh needed)
 ```
+
+CI runs both on every push and pull request.
 
 If you changed runtime behavior (entrypoint, config merge, workspace clone,
 auth), run the smoke test against a freshly built image:
