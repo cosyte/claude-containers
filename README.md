@@ -142,6 +142,7 @@ session container per repo in a GitHub org:
 
 ```
 claude-compose-gen [--org cosyte] [--out /opt/homelab/docker-compose.yml]
+                   [--active REPOS]... [--dormant-profile NAME]
                    [--include GLOB] [--exclude GLOB] [--forks] [--archived]
 claude-compose-gen myrepo otherrepo:dev      # explicit list, no gh needed
 ```
@@ -149,9 +150,24 @@ claude-compose-gen myrepo otherrepo:dev      # explicit list, no gh needed
 It enumerates via an authenticated `gh` (scopes `repo` + `read:org`) or takes
 explicit `repo[:branch]` args, assigns stable SSH ports from the configured
 range, shares `claude-auth`/`claude-sshkeys` with per-repo config/workspace
-volumes, and labels services so they still show up in `claude-list`. Then:
-`docker compose -f <out> up -d`. Regenerate any time the repo set changes
-(ports stay stable — services are sorted by name).
+volumes, and labels services so they still show up in `claude-list`.
+
+**Resource-conscious by default.** `--active` marks the repos that should
+start with a plain `docker compose up -d`; every other repo is still defined
+but placed behind a Compose profile (`dormant`), so it consumes zero
+resources until you ask for it:
+
+```
+claude-compose-gen --active claude-containers --active fhir,website,pims
+docker compose -f <out> up -d                       # just the active ones
+docker compose -f <out> up -d ncpdp                 # one dormant repo, on demand
+docker compose -f <out> --profile dormant up -d     # everything
+docker compose -f <out> stop website                # free its resources
+```
+
+With no `--active`, all repos start (backward compatible). Regenerate any time
+the repo or active set changes — ports stay stable (services sorted by name),
+so a repo keeps its port whether active or dormant.
 
 ## Troubleshooting (summary)
 

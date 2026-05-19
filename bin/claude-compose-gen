@@ -8,6 +8,12 @@
 #     --port-base <n>   first SSH host port (default: SSH_PORT_RANGE_START)
 #     --include <glob>  only repos whose name matches (repeatable)
 #     --exclude <glob>  skip repos whose name matches (repeatable)
+#     --active <repos>  repos to start by default (repeatable; comma/space
+#                       lists ok). All OTHER repos are still defined but put
+#                       behind a Compose profile so a plain `up -d` does not
+#                       start them (zero resources until asked). Default: all.
+#     --dormant-profile <name>  profile name for non-active repos (default:
+#                       dormant)
 #     --forks           include forks (default: source repos only)
 #     --archived        include archived repos (default: skip)
 #     --limit <n>       gh repo list limit (default: 500)
@@ -17,28 +23,42 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG="cosyte"
 OUT="/opt/homelab/docker-compose.yml"
 PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
 WANT_FORKS=0 WANT_ARCHIVED=0
-INCLUDE=() EXCLUDE=() REPO_ARGS=()
+DORMANT_PROFILE="dormant"
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --org)       ORG="$2"; shift 2 ;;
-        --out)       OUT="$2"; shift 2 ;;
-        --port-base) PORT_BASE="$2"; shift 2 ;;
-        --include)   INCLUDE+=("$2"); shift 2 ;;
-        --exclude)   EXCLUDE+=("$2"); shift 2 ;;
-        --forks)     WANT_FORKS=1; shift ;;
-        --archived)  WANT_ARCHIVED=1; shift ;;
-        --limit)     LIMIT="$2"; shift 2 ;;
-        -h|--help)   usage 0 ;;
-        -*)          die "unknown option: $1 (try --help)" ;;
-        *)           REPO_ARGS+=("$1"); shift ;;
+        --org)             ORG="$2"; shift 2 ;;
+        --out)             OUT="$2"; shift 2 ;;
+        --port-base)       PORT_BASE="$2"; shift 2 ;;
+        --include)         INCLUDE+=("$2"); shift 2 ;;
+        --exclude)         EXCLUDE+=("$2"); shift 2 ;;
+        --active)          ACTIVE_RAW+=("$2"); shift 2 ;;
+        --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
+        --forks)           WANT_FORKS=1; shift ;;
+        --archived)        WANT_ARCHIVED=1; shift ;;
+        --limit)           LIMIT="$2"; shift 2 ;;
+        -h|--help)         usage 0 ;;
+        -*)                die "unknown option: $1 (try --help)" ;;
+        *)                 REPO_ARGS+=("$1"); shift ;;
     esac
+done
+
+# Active set: sanitized service names that start by default. Empty = all
+# active (no profiles emitted — backward compatible).
+declare -A ACTIVE=()
+HAVE_ACTIVE=0
+for tok in "${ACTIVE_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    for one in $(echo "$tok" | tr ',' ' '); do
+        ACTIVE["$(sanitize "$one")"]=1; HAVE_ACTIVE=1
+    done
 done
 
 # The generated multi-repo compose is deployment config, not part of this
@@ -121,10 +141,16 @@ cat <<EOF
 #   4. Git deploy key w/ ${ORG} read:  ${GK}
 #      (its .pub added to the ${ORG} org / each repo as a read/write deploy key)
 #
+# Resource model: only "active" repos start by default. Every other repo is
+# still defined but behind the "${DORMANT_PROFILE}" Compose profile, so it
+# consumes ZERO resources until you explicitly ask for it.
+#
 # Bring up / down:
-#   docker compose -f ${OUT} up -d
-#   docker compose -f ${OUT} down            # add -v to also drop volumes
-#   docker compose -f ${OUT} up -d <repo>    # just one
+#   docker compose -f ${OUT} up -d                  # active repos only
+#   docker compose -f ${OUT} up -d <repo>           # one dormant repo, on demand
+#   docker compose -f ${OUT} --profile ${DORMANT_PROFILE} up -d   # ALL repos
+#   docker compose -f ${OUT} stop <repo>            # free its resources
+#   docker compose -f ${OUT} down                   # stop all (add -v for volumes)
 #
 # Never set ANTHROPIC_API_KEY (the entrypoint hard-fails: OAuth only).
 
@@ -183,6 +209,10 @@ EOF
       claude.ssh_port: "${port}"
       claude.repo: "${url}"
 EOF
+    # Non-active repos: defined but behind a profile, so `up -d` skips them.
+    if [[ $HAVE_ACTIVE -eq 1 && -z "${ACTIVE[$svc]:-}" ]]; then
+        printf '    profiles:\n      - %s\n' "$DORMANT_PROFILE"
+    fi
     port=$((port+1))
 done
 
@@ -204,9 +234,23 @@ done
 } > "$TMP"
 
 mv -f "$TMP" "$OUT"
-ok "Wrote $OUT  (${#FINAL[@]} services, SSH ports ${PORT_BASE}-$((PORT_BASE+${#FINAL[@]}-1)))"
-printf '%s\n' "${FINAL[@]}" | awk -F'\t' -v p="$PORT_BASE" \
-    '{printf "   %-26s -> container claude-%-20s ssh :%d\n",$2,$1,p++}'
+if [[ $HAVE_ACTIVE -eq 1 ]]; then
+    n_active=0
+    for r in "${FINAL[@]}"; do
+        IFS=$'\t' read -r s _ _ <<<"$r"
+        [[ -n "${ACTIVE[$s]:-}" ]] && n_active=$((n_active+1))
+    done
+else
+    n_active=${#FINAL[@]}
+fi
+ok "Wrote $OUT  (${#FINAL[@]} services, ${n_active} start by default, SSH ports ${PORT_BASE}-$((PORT_BASE+${#FINAL[@]}-1)))"
+p=$PORT_BASE
+for r in "${FINAL[@]}"; do
+    IFS=$'\t' read -r s nm _ <<<"$r"
+    if [[ $HAVE_ACTIVE -eq 1 && -z "${ACTIVE[$s]:-}" ]]; then mark="dormant (${DORMANT_PROFILE})"; else mark="ACTIVE"; fi
+    printf '   %-24s -> claude-%-20s ssh :%-5d %s\n' "$nm" "$s" "$p" "$mark"
+    p=$((p+1))
+done
 
 echo
 [[ -f "$AK" ]] || warn "authorized_keys not found at $AK — create it (your SSH pubkey) before 'up'"
