@@ -76,6 +76,7 @@ small descriptive commits as you change things.
 | `bin/_common.sh` | Shared lib: `.env` load, defaults, `sanitize`, volume names, `alloc_port` (2200–2299, skips used), state checks, `print_connect`. |
 | `bin/claude-launch` | Create/start a container; auto port; labels carry metadata; surfaces a fast-failing entrypoint. |
 | `bin/claude-list/stop/rm/logs` | Manage containers; `claude-rm --purge` also deletes the per-project volumes. |
+| `bin/claude-compose-gen` | Generate a multi-service `docker-compose.yml` (one session per repo in a GitHub org via `gh`, or explicit `repo[:branch]` args). Stable ports, shared+per-repo volumes, `claude.managed` labels so `claude-list` sees them. |
 | `bash_profile` | Interactive SSH → `exec tmux attach -t claude`; non-interactive SSH untouched. |
 | `sshd_config` | Pubkey-only, no root, `AllowUsers claude`, persistent host keys. |
 | `claude-config/` | Bake-in template: `CLAUDE.md`, `mcp/` (`.json.example` = inactive), `plugins/plugins.json`, `commands/*.md`, `skills/<name>/SKILL.md`. |
@@ -110,6 +111,19 @@ make login                    # one-time OAuth; opens a URL, paste the code
 Connect: the launcher prints `ssh -p <port> claude@<host>` and the app session
 name (= project name; green dot when online). `bin/` on `PATH` drops `./bin/`.
 `make <verb> ARGS="…"` wraps the scripts.
+
+**Many repos at once**
+```
+./bin/claude-compose-gen --org cosyte --out /opt/homelab/docker-compose.yml
+./bin/claude-compose-gen repoA repoB:branch        # explicit, no gh
+docker compose -f /opt/homelab/docker-compose.yml up -d
+```
+Needs `gh` authed with `repo`+`read:org` (a personal fine-grained PAT scoped
+to the user usually CANNOT see an org's private repos — use a classic token
+or an org-scoped one). Containers still clone over the mounted SSH git key at
+runtime, so API access is only needed for *enumeration*. Prerequisites the
+generator warns about: `make build`, `make login`, `~/.ssh/authorized_keys`,
+`~/.ssh/claude-git-key` (deploy key with org access).
 
 **Multi-arch / publish:** `make build-all` (no local load) or
 `make push` (set `CLAUDE_IMAGE` to a registry ref first).

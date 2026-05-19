@@ -135,6 +135,24 @@ claude-logs  <name> [-n LINES]    tail the entrypoint/sshd log
 
 `make launch ARGS="…"`, `make stop ARGS="…"` etc. wrap these if you prefer Make.
 
+### Many repos at once
+
+`claude-compose-gen` writes a multi-service `docker-compose.yml` with one
+session container per repo in a GitHub org:
+
+```
+claude-compose-gen [--org cosyte] [--out /opt/homelab/docker-compose.yml]
+                   [--include GLOB] [--exclude GLOB] [--forks] [--archived]
+claude-compose-gen myrepo otherrepo:dev      # explicit list, no gh needed
+```
+
+It enumerates via an authenticated `gh` (scopes `repo` + `read:org`) or takes
+explicit `repo[:branch]` args, assigns stable SSH ports from the configured
+range, shares `claude-auth`/`claude-sshkeys` with per-repo config/workspace
+volumes, and labels services so they still show up in `claude-list`. Then:
+`docker compose -f <out> up -d`. Regenerate any time the repo set changes
+(ports stay stable — services are sorted by name).
+
 ## Troubleshooting (summary)
 
 Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
