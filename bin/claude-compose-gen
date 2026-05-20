@@ -29,8 +29,9 @@
 #     --mem <map>       per-repo memory limit override. Format REPO=SIZE, e.g.
 #                       bridgelink-website=4g (repeatable). Default: CLAUDE_MEM_LIMIT.
 #     --browser <repos> enable the chrome-devtools MCP (frontend debugging) for
-#                       these repos (repeatable; comma/space lists ok). Image
-#                       must be built with WITH_BROWSER=1 (`make build-browser`).
+#                       these repos (repeatable; comma/space lists ok). Their
+#                       service uses CLAUDE_IMAGE_BROWSER (default
+#                       claude-code-box:browser; `make build-browser`).
 #     --forks           include forks (default: source repos only)
 #     --archived        include archived repos (default: skip)
 #     --limit <n>       gh repo list limit (default: 500)
@@ -166,6 +167,10 @@ GK="${GIT_SSH_KEY/#\~/$HOME}"
 BIND_PREFIX="${CLAUDE_SSH_BIND:+${CLAUDE_SSH_BIND}:}"
 GH_NAME="$(git config --global user.name  2>/dev/null || true)"
 GH_MAIL="$(git config --global user.email 2>/dev/null || true)"
+# --browser services need an image with Chromium + chrome-devtools-mcp baked
+# in; non-browser services keep the lean CLAUDE_IMAGE. Default to the standard
+# `make build-browser` tag; override with CLAUDE_IMAGE_BROWSER.
+BROWSER_IMAGE="${CLAUDE_IMAGE_BROWSER:-claude-code-box:browser}"
 
 # --- Collect repos as "name<TAB>branch" --------------------------------------
 declare -a REPOS=()
@@ -281,9 +286,11 @@ for row in "${FINAL[@]}"; do
     port="${SVCPORT[$svc]}"
     svc_cpu="${CPU[$svc]:-$CLAUDE_CPU_LIMIT}"
     svc_mem="${MEM[$svc]:-$CLAUDE_MEM_LIMIT}"
+    svc_image="${CLAUDE_IMAGE}"
+    [[ -n "${BROWSER[$svc]:-}" ]] && svc_image="$BROWSER_IMAGE"
     cat <<EOF
   ${svc}:
-    image: ${CLAUDE_IMAGE}
+    image: ${svc_image}
     build:
       context: ${ABS_CONTEXT}
       args:
@@ -393,10 +400,10 @@ echo
 [[ -f "$AK" ]] || warn "authorized_keys not found at $AK — create it (your SSH pubkey) before 'up'"
 [[ -f "$GK" ]] || warn "git deploy key not found at $GK — create it and add the .pub to ${ORG} before 'up'"
 docker image inspect "$CLAUDE_IMAGE" >/dev/null 2>&1 || warn "image $CLAUDE_IMAGE not built yet — run 'make build'"
-# Warn if --browser was used but the configured image isn't the browser variant.
+# Warn if --browser was used but the browser image isn't built/labeled.
 if (( ${#BROWSER[@]} > 0 )); then
-    img_browser="$(docker image inspect -f '{{ index .Config.Labels "claude.browser" }}' "$CLAUDE_IMAGE" 2>/dev/null || true)"
-    [[ "$img_browser" == "1" ]] || warn "image $CLAUDE_IMAGE was not built with WITH_BROWSER=1 — rebuild with 'make build-browser' before 'up' (--browser services won't get the chrome-devtools MCP otherwise)"
+    img_browser="$(docker image inspect -f '{{ index .Config.Labels "claude.browser" }}' "$BROWSER_IMAGE" 2>/dev/null || true)"
+    [[ "$img_browser" == "1" ]] || warn "image $BROWSER_IMAGE was not built with WITH_BROWSER=1 — run 'make build-browser' before 'up' (--browser services won't get the chrome-devtools MCP otherwise)"
 fi
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing — run 'make login'"
 info "Validate:  docker compose -f $OUT config >/dev/null && echo OK"

@@ -175,6 +175,8 @@ if "$REPO_ROOT/bin/claude-compose-gen" --out "$GENOUT" \
         '! grep -A20 "^  beta:" "$GENOUT" | grep -qE "cpus: 7|mem_limit: 777m"'
     check "--browser sets CLAUDE_BROWSER on the target repo" \
         'grep -A32 "^  beta:" "$GENOUT" | grep -q "CLAUDE_BROWSER"'
+    check "--browser repo uses the browser image" \
+        'grep -A2 "^  beta:" "$GENOUT" | grep -qE "image: .*:browser"'
     check "--browser does not leak to non-browser repos" \
         '! grep -A32 "^  alpha:" "$GENOUT" | grep -q "CLAUDE_BROWSER"'
 else
