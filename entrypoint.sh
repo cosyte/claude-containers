@@ -100,6 +100,21 @@ asclaude git config --global --get-all safe.directory 2>/dev/null \
     || asclaude git config --global --add safe.directory "$WORKSPACE" || true
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 
+# GitHub HTTPS auth (dynamic, additive): when GH_TOKEN is supplied, wire the
+# `gh` CLI in as git's credential helper for github.com so HTTPS clone/push
+# also work with the token. SSH remotes keep using the mounted deploy key, so
+# a session can use either transport. `gh auth setup-git` resets the helper
+# before re-adding its own, so running it on every boot stays idempotent.
+if [[ -n "${GH_TOKEN:-}" ]]; then
+    if asclaude gh auth setup-git --hostname github.com >/dev/null 2>&1; then
+        log "GH_TOKEN set: gh wired in as git credential helper (HTTPS + SSH both usable)"
+    else
+        log "WARNING: 'gh auth setup-git' failed; HTTPS git auth via GH_TOKEN unavailable"
+    fi
+else
+    log "No GH_TOKEN: git uses the SSH deploy key only; gh CLI is unauthenticated"
+fi
+
 # --- 6. Credentials reconcile (shared auth volume) ---------------------------
 # Credentials are shared across all containers via the claude-auth volume; the
 # rest of the config dir is per-container so sessions never collide. Claude
