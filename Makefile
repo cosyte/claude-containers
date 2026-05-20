@@ -9,6 +9,7 @@ CLAUDE_IMAGE        ?= claude-code-box:latest
 CLAUDE_CODE_VERSION ?= 2.1.144
 NODE_VERSION        ?= 24
 UV_VERSION          ?= latest
+PNPM_VERSION        ?= latest
 CLAUDE_UID          ?= 1000
 CLAUDE_GID          ?= 1000
 CLAUDE_USER         ?= claude
@@ -20,16 +21,19 @@ BUILD_ARGS = \
   --build-arg NODE_VERSION=$(NODE_VERSION) \
   --build-arg CLAUDE_CODE_VERSION=$(CLAUDE_CODE_VERSION) \
   --build-arg UV_VERSION=$(UV_VERSION) \
+  --build-arg PNPM_VERSION=$(PNPM_VERSION) \
   --build-arg CLAUDE_UID=$(CLAUDE_UID) \
   --build-arg CLAUDE_GID=$(CLAUDE_GID) \
   --build-arg CLAUDE_USER=$(CLAUDE_USER)
 
 .DEFAULT_GOAL := help
-.PHONY: help build build-all push login launch list stop rm logs clean lint
+.PHONY: help builder build build-all push login launch list attach stop rm logs clean lint smoke
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
-	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[1m%-12s\033[0m %s\n",$$1,$$2}'
+	@# Grep only this Makefile, not all of MAKEFILE_LIST: `-include .env` adds
+	@# .env there, and grep over >1 file prefixes "Makefile:" onto every match.
+	@grep -E '^[a-zA-Z_-]+:.*## ' $(firstword $(MAKEFILE_LIST)) \
+	  | awk 'BEGIN{FS=":.*## "}{printf "  \033[1m%-12s\033[0m %s\n",$$1,$$2}'
 
 builder: ## Ensure a buildx builder exists
 	@docker buildx inspect $(BUILDX_BUILDER) >/dev/null 2>&1 \
@@ -62,6 +66,8 @@ launch: ## make launch ARGS="myproj --repo git@github.com:me/x.git"
 
 list:  ## List all claude-* containers
 	@./bin/claude-list
+attach: ## make attach ARGS="myproj" — attach to a container's tmux session
+	@./bin/claude-attach $(ARGS)
 stop:  ## make stop ARGS="myproj"
 	@./bin/claude-stop $(ARGS)
 rm:    ## make rm ARGS="myproj --purge"
@@ -71,6 +77,9 @@ logs:  ## make logs ARGS="myproj"
 
 lint: ## Shell-syntax check the scripts
 	@for f in entrypoint.sh bin/_common.sh bin/claude-*; do bash -n $$f && echo "ok $$f"; done
+
+smoke: build ## Build the image, then run the automated smoke test against it
+	IMAGE=$(CLAUDE_IMAGE) test/smoke.sh
 
 clean: ## Remove the image and the buildx builder (volumes are kept)
 	-docker image rm $(CLAUDE_IMAGE) 2>/dev/null

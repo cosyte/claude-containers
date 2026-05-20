@@ -125,6 +125,8 @@ ABS_CONTEXT="$CLAUDE_DOCKER_ROOT"
 # Compose has no ~ expansion — resolve host SSH paths to absolute now.
 AK="${SSH_AUTHORIZED_KEYS/#\~/$HOME}"
 GK="${GIT_SSH_KEY/#\~/$HOME}"
+# Optional: bind every SSH port to one host interface (CLAUDE_SSH_BIND).
+BIND_PREFIX="${CLAUDE_SSH_BIND:+${CLAUDE_SSH_BIND}:}"
 GH_NAME="$(git config --global user.name  2>/dev/null || true)"
 GH_MAIL="$(git config --global user.email 2>/dev/null || true)"
 
@@ -141,7 +143,7 @@ else
         || die "gh is not authenticated. Run 'gh auth login' first."
     info "Enumerating ${ORG}/* via gh…"
     json="$(gh repo list "$ORG" --limit "$LIMIT" \
-        --json name,defaultBranchRef,isFork,isArchived 2>/dev/null)" \
+        --json name,isFork,isArchived 2>/dev/null)" \
         || die "gh repo list $ORG failed"
     while IFS=$'\t' read -r name branch; do
         [[ -n "$name" ]] && REPOS+=("$name	$branch")
@@ -184,17 +186,23 @@ if [[ -f "$OUT" ]]; then
             p=$0; gsub(/[^0-9]/,"",p); if(s!=""){print s"\t"p; s=""} }
     ' "$OUT")
 fi
+# next_port marks USEDPORT and reports the chosen port in the global NEXT_PORT.
+# It must NOT be called via $(...) — a command-substitution subshell would
+# discard the USEDPORT updates, so every new repo would get the same port.
+NEXT_PORT=""
 next_port() {
     local p
     for ((p=PORT_BASE; p<=SSH_PORT_RANGE_END; p++)); do
         [[ -n "${USEDPORT[$p]:-}" ]] && continue
-        USEDPORT[$p]=1; echo "$p"; return 0
+        USEDPORT[$p]=1; NEXT_PORT="$p"; return 0
     done
     die "no free SSH port in ${PORT_BASE}-${SSH_PORT_RANGE_END} for new repos"
 }
 for row in "${FINAL[@]}"; do
     IFS=$'\t' read -r svc _ _ <<<"$row"
-    [[ -n "${SVCPORT[$svc]:-}" ]] || SVCPORT[$svc]="$(next_port)"
+    [[ -n "${SVCPORT[$svc]:-}" ]] && continue
+    next_port
+    SVCPORT[$svc]="$NEXT_PORT"
 done
 
 # --- Emit compose ------------------------------------------------------------
@@ -243,6 +251,7 @@ for row in "${FINAL[@]}"; do
         NODE_VERSION: "\${NODE_VERSION:-24}"
         CLAUDE_CODE_VERSION: "\${CLAUDE_CODE_VERSION:-2.1.144}"
         UV_VERSION: "\${UV_VERSION:-latest}"
+        PNPM_VERSION: "\${PNPM_VERSION:-latest}"
         CLAUDE_UID: "\${CLAUDE_UID:-1000}"
         CLAUDE_GID: "\${CLAUDE_GID:-1000}"
         CLAUDE_USER: "\${CLAUDE_USER:-claude}"
@@ -257,7 +266,7 @@ for row in "${FINAL[@]}"; do
     tmpfs:
       - /tmp:rw,nosuid,nodev,exec,size=1g
     ports:
-      - "${port}:22"
+      - "${BIND_PREFIX}${port}:22"
 EOF
     if [[ -n "${EXPOSE[$svc]:-}" ]]; then
         while IFS= read -r m; do
@@ -298,7 +307,6 @@ EOF
     if [[ $HAVE_ACTIVE -eq 1 && -z "${ACTIVE[$svc]:-}" ]]; then
         printf '    profiles:\n      - %s\n' "$DORMANT_PROFILE"
     fi
-    port=$((port+1))
 done
 
 # top-level volumes

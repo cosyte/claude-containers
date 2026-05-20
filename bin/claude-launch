@@ -7,21 +7,30 @@
 #   --port <ssh-port>     explicit host SSH port (default: auto 2200-2299)
 #   --mcp <name>          enable only these baked-in MCP servers (repeatable)
 #   --extra-args "<args>" extra args passed to claude via CLAUDE_EXTRA_ARGS
+#   --expose <h:c>        publish an extra host:container port (repeatable)
+#   --dev-cmd <command>   auto-start a dev server on boot in a tmux 'dev' window
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
-PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT="" EXTRA="" MCP_LIST=""
+PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
+# EXTRA/MCP_LIST/DEVCMD default from .env (sourced by _common.sh); flags below
+# override. Without seeding them here, the explicit `-e` flags on `docker run`
+# would shadow any value set in .env with an empty string.
+EXTRA="${CLAUDE_EXTRA_ARGS:-}" MCP_LIST="${CLAUDE_MCP_ENABLED:-}" DEVCMD="${CLAUDE_DEV_CMD:-}"
+EXPOSE_RAW=() OPTS_GIVEN=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --repo)       REPO="$2"; shift 2 ;;
-        --branch)     BRANCH="$2"; shift 2 ;;
-        --depth)      DEPTH="$2"; shift 2 ;;
-        --workspace)  WS_PATH="$2"; shift 2 ;;
-        --port)       PORT="$2"; shift 2 ;;
-        --mcp)        MCP_LIST="${MCP_LIST:+$MCP_LIST,}$2"; shift 2 ;;
-        --extra-args) EXTRA="$2"; shift 2 ;;
+        --repo)       REPO="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --branch)     BRANCH="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --depth)      DEPTH="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --workspace)  WS_PATH="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --port)       PORT="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --mcp)        MCP_LIST="${MCP_LIST:+$MCP_LIST,}$2"; OPTS_GIVEN=1; shift 2 ;;
+        --extra-args) EXTRA="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --expose)     EXPOSE_RAW+=("$2"); OPTS_GIVEN=1; shift 2 ;;
+        --dev-cmd)    DEVCMD="$2"; OPTS_GIVEN=1; shift 2 ;;
         -h|--help)    usage 0 ;;
         -*)           die "unknown option: $1 (try --help)" ;;
         *)            [[ -z "$PROJECT" ]] && PROJECT="$1" || die "unexpected arg: $1"; shift ;;
@@ -29,6 +38,16 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$PROJECT" ]] || usage 1
 [[ -n "$REPO" && -n "$WS_PATH" ]] && die "--repo and --workspace are mutually exclusive"
+
+# Validate --expose maps (HOSTPORT:CONTAINERPORT) and build the docker -p args.
+EXPOSE_ARGS=()
+for e in "${EXPOSE_RAW[@]:-}"; do
+    [[ -n "$e" ]] || continue
+    IFS=: read -r eh ec <<<"$e"
+    [[ "$eh" =~ ^[0-9]+$ && "$ec" =~ ^[0-9]+$ ]] \
+        || die "--expose must be HOSTPORT:CONTAINERPORT (got '$e')"
+    EXPOSE_ARGS+=(-p "$eh:$ec")
+done
 
 need_docker
 [[ -z "${ANTHROPIC_API_KEY:-}" ]] || die "ANTHROPIC_API_KEY is set (env or .env).
@@ -41,13 +60,17 @@ state="$(container_state "$CN")"
 # Already running -> just print how to connect.
 if [[ "$state" == "running" ]]; then
     info "Container '$CN' is already running."
+    [[ "$OPTS_GIVEN" == "1" ]] && warn "launch options are ignored for an existing container — \`claude-rm $PROJECT\` then relaunch to apply them"
     print_connect "$PROJECT" "$(container_ssh_port "$CN")"
     exit 0
 fi
 
-# Stopped -> start it back up (workspace + history preserved).
+# Stopped -> start it back up (workspace + history preserved). `docker start`
+# reuses the container's creation-time env, ports, and mounts, so launch
+# options passed now do NOT take effect — recreate the container to apply them.
 if [[ "$state" == "stopped" ]]; then
     info "Starting existing container '$CN'…"
+    [[ "$OPTS_GIVEN" == "1" ]] && warn "launch options are ignored on resume — \`claude-rm $PROJECT\` then relaunch to apply them"
     docker start "$CN" >/dev/null
     print_connect "$PROJECT" "$(container_ssh_port "$CN")"
     exit 0
@@ -57,6 +80,10 @@ fi
 ensure_image
 [[ -n "$PORT" ]] || PORT="$(alloc_port)"
 host_port_free "$PORT" || warn "host port $PORT looks busy; Docker may refuse it"
+
+# Optionally bind the published SSH port to one host interface (CLAUDE_SSH_BIND,
+# e.g. 127.0.0.1). Empty = published on all interfaces (LAN-reachable).
+SSH_PUBLISH="${CLAUDE_SSH_BIND:+${CLAUDE_SSH_BIND}:}$PORT:22"
 
 WS_VOL="$(ws_volume "$PROJECT")"
 CFG_VOL="$(cfg_volume "$PROJECT")"
@@ -110,11 +137,13 @@ docker run -d \
     --cpus "$CLAUDE_CPU_LIMIT" \
     --memory "$CLAUDE_MEM_LIMIT" \
     --tmpfs /tmp:rw,nosuid,nodev,exec,size=1g \
-    -p "$PORT:22" \
+    -p "$SSH_PUBLISH" \
+    "${EXPOSE_ARGS[@]}" \
     "${ENV_FILE_ARG[@]}" \
     -e CLAUDE_PROJECT_NAME="$PROJECT" \
     -e CLAUDE_EXTRA_ARGS="$EXTRA" \
     -e CLAUDE_MCP_ENABLED="$MCP_LIST" \
+    -e CLAUDE_DEV_CMD="$DEVCMD" \
     -e CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}" \
     -e GIT_REPO_URL="$REPO" \
     -e GIT_REPO_BRANCH="$BRANCH" \
@@ -144,3 +173,13 @@ if [[ "$(container_state "$CN")" != "running" ]]; then
 fi
 
 print_connect "$PROJECT" "$PORT"
+
+if (( ${#EXPOSE_RAW[@]} )); then
+    echo "  Extra published ports:"
+    for e in "${EXPOSE_RAW[@]}"; do
+        echo "      host ${e%%:*}  ->  container ${e##*:}"
+    done
+    echo
+fi
+[[ -n "$DEVCMD" ]] && \
+    info "Dev server auto-starts on boot in tmux window 'dev' (claude-attach, then: tmux select-window -t claude:dev)"

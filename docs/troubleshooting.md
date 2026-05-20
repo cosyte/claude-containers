@@ -133,6 +133,16 @@ bad `GIT_REPO_URL`/branch, missing auth volume, unreadable mounted key. Fix the
 cause, then `claude-rm <name>` and relaunch (or `docker start` after fixing a
 mount).
 
+## Changed `.env` but a resumed container ignores it
+
+`claude-launch <name>` on a *stopped* container runs `docker start`, which
+reuses the container's creation-time environment, port mappings, and mounts.
+Editing `.env` (or passing new `--repo`/`--port`/`--expose`/`--dev-cmd`) has no
+effect on resume — `claude-launch` prints a warning when it sees options it
+must ignore. To apply the new values, recreate the container:
+`claude-rm <name>` (add `--purge` to also drop the workspace/config volumes),
+then `claude-launch <name> …` again.
+
 ## Restricting egress
 
 Egress is open by default — Claude Code, npm, pip, git and MCP servers all need

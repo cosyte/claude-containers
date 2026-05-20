@@ -24,6 +24,7 @@ SSH_PORT_RANGE_START="${SSH_PORT_RANGE_START:-2200}"
 SSH_PORT_RANGE_END="${SSH_PORT_RANGE_END:-2299}"
 GIT_SSH_KEY="${GIT_SSH_KEY:-$HOME/.ssh/claude-git-key}"
 SSH_AUTHORIZED_KEYS="${SSH_AUTHORIZED_KEYS:-$HOME/.ssh/authorized_keys}"
+CLAUDE_SSH_BIND="${CLAUDE_SSH_BIND:-}"   # empty = publish SSH on all interfaces
 CLAUDE_SHM_SIZE="${CLAUDE_SHM_SIZE:-2g}"
 CLAUDE_CPU_LIMIT="${CLAUDE_CPU_LIMIT:-2}"
 CLAUDE_MEM_LIMIT="${CLAUDE_MEM_LIMIT:-4g}"
@@ -113,6 +114,9 @@ print_connect() {
     echo
     echo "  SSH into the live tmux session:"
     echo -e "      ${C_B}ssh -p ${port} claude@${host}${C_0}"
+    echo
+    echo "  ...or attach locally on this host (no SSH key needed):"
+    echo -e "      ${C_B}claude-attach ${proj}${C_0}"
     echo
     echo "  Claude mobile app: open the Code tab and look for the session named"
     echo -e "      ${C_B}${proj}${C_0}   (green dot = online)"

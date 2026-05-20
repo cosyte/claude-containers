@@ -20,6 +20,7 @@ services:
         NODE_VERSION: ${NODE_VERSION:-24}
         CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-2.1.144}
         UV_VERSION: ${UV_VERSION:-latest}
+        PNPM_VERSION: ${PNPM_VERSION:-latest}
         CLAUDE_UID: ${CLAUDE_UID:-1000}
         CLAUDE_GID: ${CLAUDE_GID:-1000}
         CLAUDE_USER: ${CLAUDE_USER:-claude}
@@ -34,6 +35,8 @@ services:
     tmpfs:
       - /tmp:rw,nosuid,nodev,exec,size=1g
     ports:
+      # Published on all host interfaces. To restrict to one, prefix with an
+      # interface, e.g.  "127.0.0.1:${SSH_PORT}:22"  (host-only).
       - "${SSH_PORT:?set SSH_PORT}:22"
     environment:
       # Never add ANTHROPIC_API_KEY here. This stack is subscription-OAuth only;
@@ -62,6 +65,14 @@ services:
       # - ${CLAUDE_WORKSPACE_HOST_DIR:-./workspace}:/workspace
       - ${SSH_AUTHORIZED_KEYS:-~/.ssh/authorized_keys}:/etc/claude/authorized_keys:ro
       - ${GIT_SSH_KEY:-~/.ssh/claude-git-key}:/etc/claude/git-key:ro
+    # Same labels the bin/claude-* launchers set, so a container started via
+    # this compose file still shows up in `claude-list` and the connect line
+    # printed by `claude-launch <name>` resolves the SSH port correctly.
+    labels:
+      claude.managed: "1"
+      claude.project: "${CLAUDE_PROJECT_NAME}"
+      claude.ssh_port: "${SSH_PORT}"
+      claude.repo: "${GIT_REPO_URL:-}"
 
 volumes:
   # Shared across every container. Created by `make login`.

@@ -7,10 +7,12 @@
 # two fail-fast paths. The real `make login` + mobile-app checks (acceptance
 # criteria 2-auth and 5) remain manual and are listed at the end.
 #
-#   IMAGE=claude-code-box:test test/smoke.sh
+#   test/smoke.sh                       # tests claude-code-box:latest
+#   IMAGE=claude-code-box:test test/smoke.sh   # or any other tag
+#   make smoke                          # build + smoke-test in one step
 set -euo pipefail
 
-IMAGE="${IMAGE:-claude-code-box:test}"
+IMAGE="${IMAGE:-claude-code-box:latest}"
 TMP="$(mktemp -d)"
 CN="claude-smoke-$$"
 AUTHVOL="claude-smoke-auth-$$"

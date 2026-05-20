@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# claude-attach <name> — attach to the live tmux session inside a container.
+# Local convenience: runs `docker exec` (no SSH key needed). For remote access
+# use the `ssh -p <port>` line that claude-launch / claude-list print.
+# Detach with Ctrl-b d — the container and Claude session keep running.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+need_docker
+
+[[ $# -ge 1 ]] || die "usage: claude-attach <name>"
+PROJECT="$(sanitize "$1")"
+CN="$(cname "$PROJECT")"
+
+case "$(container_state "$CN")" in
+    absent)  die "no such container: $CN" ;;
+    stopped) die "'$CN' is stopped — start it first: claude-launch $PROJECT" ;;
+esac
+
+# The entrypoint runs tmux as the claude user; attach as that user so the
+# socket is reachable. TERM is forwarded so the TUI renders correctly.
+docker exec -it -u "${CLAUDE_USER:-claude}" -e TERM="${TERM:-xterm-256color}" \
+    "$CN" tmux attach-session -t claude \
+    || die "could not attach — the tmux session 'claude' may have died.
+       Check: claude-logs $PROJECT"

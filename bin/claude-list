@@ -14,12 +14,20 @@ fi
 
 table="$(printf 'NAME\tSTATE\tSSH PORT\tREPO\tUPTIME\n%s\n' "$rows")"
 # `column` is in util-linux/bsdmainutils and not always present; fall back to
-# awk-aligned columns so the listing always renders.
+# an awk pass that measures each column so it always renders aligned (kept
+# mawk-compatible: single-dim arrays + split, no gawk-only features).
 if command -v column >/dev/null 2>&1; then
     echo "$table" | column -t -s $'\t'
 else
-    echo "$table" | awk -F'\t' '{
-        for (i=1;i<=NF;i++){ printf "%-*s", (i<NF?26:0), $i }
-        print ""
-    }'
+    echo "$table" | awk -F'\t' '
+        { line[NR]=$0
+          for (i=1;i<=NF;i++) if (length($i)>w[i]) w[i]=length($i)
+          if (NF>nf) nf=NF }
+        END {
+          for (r=1;r<=NR;r++) {
+            split(line[r], c, "\t"); out=""
+            for (i=1;i<=nf;i++) out=out sprintf("%-*s", (i<nf?w[i]+2:0), c[i])
+            print out
+          }
+        }'
 fi

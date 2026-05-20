@@ -18,6 +18,9 @@ FROM node:${NODE_VERSION}-bookworm-slim
 # CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control;
 # 2.1.144 is verified to support `--remote-control` + bypassPermissions together.
 ARG CLAUDE_CODE_VERSION=2.1.144
+# PNPM_VERSION: pnpm baked into the image. "latest" works but isn't
+# reproducible — pin a real version (e.g. 10.4.1), same as UV_VERSION.
+ARG PNPM_VERSION=latest
 ARG CLAUDE_USER=claude
 ARG CLAUDE_UID=1000
 ARG CLAUDE_GID=1000
@@ -66,7 +69,7 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
 # trying to self-switch to a repo's pinned `packageManager` version at runtime
 # (which would re-introduce the same fetch); the baked pnpm is used instead.
 # yarn 1.x already ships in the base image; only pnpm needs baking.
-RUN npm install -g pnpm@latest \
+RUN npm install -g pnpm@${PNPM_VERSION} \
     && npm cache clean --force \
     && printf 'manage-package-manager-versions=false\n' > /usr/local/etc/npmrc \
     && pnpm --version && yarn --version

@@ -84,14 +84,14 @@ small descriptive commits as you change things.
 | `bin/claude-session` | tmux pane cmd: `cd /workspace`, `exec claude --dangerously-skip-permissions --remote-control "<project>" $EXTRA`; falls back to a shell so SSH stays usable. |
 | `bin/claude-dev` | tmux `dev`-window cmd: runs `$CLAUDE_DEV_CMD` (a dev server) in `/workspace` on boot, shell fallback. Started by the entrypoint only when `CLAUDE_DEV_CMD` is set. |
 | `bin/_common.sh` | Shared lib: `.env` load, defaults, `sanitize`, volume names, `alloc_port` (2200–2299, skips used), state checks, `print_connect`. |
-| `bin/claude-launch` | Create/start a container; auto port; labels carry metadata; surfaces a fast-failing entrypoint. |
-| `bin/claude-list/stop/rm/logs` | Manage containers; `claude-rm --purge` also deletes the per-project volumes. |
+| `bin/claude-launch` | Create/start a container; auto port; labels carry metadata; surfaces a fast-failing entrypoint. `--expose H:C` / `--dev-cmd` publish + auto-start a dev server for a single container. |
+| `bin/claude-list/attach/stop/rm/logs` | Manage containers. `claude-attach` opens the live tmux session via `docker exec` (local, no SSH key). `claude-rm --purge` also deletes the per-project volumes. |
 | `bin/claude-compose-gen` | Generate a multi-service `docker-compose.yml` (one session per repo in a GitHub org via `gh`, or explicit `repo[:branch]` args). Stable ports, shared+per-repo volumes, `claude.managed` labels so `claude-list` sees them. |
 | `bash_profile` | Interactive SSH → `exec tmux attach -t claude`; non-interactive SSH untouched. |
 | `sshd_config` | Pubkey-only, no root, `AllowUsers claude`, persistent host keys. |
 | `claude-config/` | Bake-in template: `CLAUDE.md`, `mcp/` (`.json.example` = inactive), `plugins/plugins.json`, `commands/*.md`, `skills/<name>/SKILL.md`. |
 | `docker-compose.yml` | One-container equivalent of the launcher (needs explicit `SSH_PORT`); assumes default shared-volume names. |
-| `Makefile` | `build` (host arch, loaded), `build-all`/`push` (amd64+arm64 via buildx), `login`, `launch/list/stop/rm/logs`, `lint`, `clean`. |
+| `Makefile` | `build` (host arch, loaded), `build-all`/`push` (amd64+arm64 via buildx), `login`, `launch/list/attach/stop/rm/logs`, `lint`, `smoke` (build + smoke test), `clean`. |
 | `.env.example` | Every tunable, documented. Copy to `.env`. |
 | `test/smoke.sh` | Automated acceptance for everything that doesn't need real OAuth/phone. |
 | `docs/` | `architecture.md` (decisions + acceptance map), `customizing-bakeins.md`, `troubleshooting.md`. |
@@ -111,10 +111,13 @@ make login                    # one-time OAuth; opens a URL, paste the code
 ```
 ./bin/claude-launch <name> --repo git@github.com:you/x.git [--branch B] [--depth N]
 ./bin/claude-launch <name> --workspace /abs/path/to/checkout
-./bin/claude-launch <name> [--port N] [--mcp foo --mcp bar] [--extra-args "…"]
+./bin/claude-launch <name> [--port N] [--mcp foo] [--extra-args "…"]
+./bin/claude-launch <name> [--expose 4321:4321] [--dev-cmd "npm run dev …"]
 ./bin/claude-list                       # name, state, ssh port, repo, uptime
+./bin/claude-attach <name>              # attach to its live tmux session (local)
 ./bin/claude-stop <name>                # graceful; state preserved
-./bin/claude-launch <name>              # resumes (docker start) — no --repo
+./bin/claude-launch <name>              # resumes (docker start) — no --repo;
+                                        #   launch options are ignored on resume
 ./bin/claude-rm <name> [--yes] [--purge]
 ./bin/claude-logs <name> [-n LINES]     # entrypoint/sshd log, not the session
 ```
@@ -160,11 +163,10 @@ generator warns about: `make build`, `make login`, `~/.ssh/authorized_keys`,
 **Multi-arch / publish:** `make build-all` (no local load) or
 `make push` (set `CLAUDE_IMAGE` to a registry ref first).
 
-**Validate changes:** `make lint` (shell syntax) and
-`IMAGE=claude-code-box:test test/smoke.sh` after a build. The smoke test
-covers API-key hard-fail, both fail-fast paths, bake-in merge, trust
-pre-accept, tmux, sshd, and SSH-into-session. Real OAuth + the phone-app
-green-dot remain manual.
+**Validate changes:** `make lint` (shell syntax) and `make smoke` (builds the
+image, then runs `test/smoke.sh` against it). The smoke test covers API-key
+hard-fail, both fail-fast paths, bake-in merge, trust pre-accept, tmux, sshd,
+and SSH-into-session. Real OAuth + the phone-app green-dot remain manual.
 
 ## Customizing bake-ins (rebuild after editing `claude-config/`)
 

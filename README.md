@@ -83,6 +83,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_CODE_VERSION` | `2.1.144` | Pinned Claude Code npm version (min 2.1.52) |
 | `NODE_VERSION` | `24` | Base Node LTS |
 | `UV_VERSION` | `latest` | `uv` version (pin for reproducibility) |
+| `PNPM_VERSION` | `latest` | `pnpm` version baked in (pin for reproducibility) |
 | `CLAUDE_UID`/`CLAUDE_GID`/`CLAUDE_USER` | `1000`/`1000`/`claude` | Container user |
 | `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `default`/`acceptEdits`/`bypassPermissions` |
 | `CLAUDE_EXTRA_ARGS` | — | Extra args to `claude` (or `--extra-args`) |
@@ -93,6 +94,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `SSH_AUTHORIZED_KEYS` | `~/.ssh/authorized_keys` | Host pubkeys allowed to SSH in (read-only) |
 | `SSH_PORT_RANGE_START`/`_END` | `2200`/`2299` | Auto-assigned host SSH port range |
 | `CLAUDE_SSH_HOST` | this host's name | Hostname shown in the connect line |
+| `CLAUDE_SSH_BIND` | — | Bind the SSH port to one host interface (e.g. `127.0.0.1`); empty = all |
 | `CLAUDE_CPU_LIMIT`/`CLAUDE_MEM_LIMIT` | `2`/`4g` | Per-container resource caps |
 | `CLAUDE_SHM_SIZE` | `2g` | `/dev/shm` size |
 | `CLAUDE_STOP_TIMEOUT` | `20` | Graceful stop timeout (s) |
@@ -127,11 +129,19 @@ holds `CLAUDE.md`, `mcp/`, `plugins/`, `commands/`, `skills/`. MCP secrets are
 ```
 claude-launch <name> [--repo URL | --workspace PATH] [--branch B] [--depth N]
                       [--port N] [--mcp NAME ...] [--extra-args "…"]
+                      [--expose H:C ...] [--dev-cmd "…"]
 claude-list                       table of all sessions
+claude-attach <name>              attach to its live tmux session (local host)
 claude-stop  <name>               graceful stop (state preserved)
 claude-rm    <name> [--yes] [--purge]   remove (+volumes with --purge)
 claude-logs  <name> [-n LINES]    tail the entrypoint/sshd log
 ```
+
+`--expose HOST:CONTAINER` publishes an extra port (e.g. a dev server) and
+`--dev-cmd` auto-starts a command on boot in a tmux `dev` window — the
+single-container equivalents of `claude-compose-gen`'s `--expose`/`--dev-cmd`.
+Resuming a stopped container reuses its creation-time env, ports, and mounts,
+so changed `.env` values or new launch options need a `claude-rm` + relaunch.
 
 `make launch ARGS="…"`, `make stop ARGS="…"` etc. wrap these if you prefer Make.
 
@@ -238,6 +248,10 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   keys persist in `claude-sshkeys` so the fingerprint is stable; all containers
   share it (acceptable for a single-owner homelab — note it and use distinct
   keys if that matters to you).
+- **The SSH port is published on all host interfaces** (`0.0.0.0`) by default,
+  so it is reachable from the whole LAN. Auth is pubkey-only, but to limit the
+  exposure set `CLAUDE_SSH_BIND=127.0.0.1` (host-only) or another interface —
+  honored by `claude-launch` and `claude-compose-gen`.
 - Egress is open by default (Claude, npm, git, MCP all need it). Locking it
   down: [docs/troubleshooting.md](docs/troubleshooting.md#restricting-egress).
 

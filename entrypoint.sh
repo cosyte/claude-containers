@@ -93,7 +93,11 @@ git_id() {
 }
 git_id user.name  "${GIT_AUTHOR_NAME:-}"
 git_id user.email "${GIT_AUTHOR_EMAIL:-}"
-asclaude git config --global --add safe.directory "$WORKSPACE" || true
+# safe.directory is multi-valued: `--add` every boot would append a duplicate
+# line per restart. Add it only if it isn't already present.
+asclaude git config --global --get-all safe.directory 2>/dev/null \
+    | grep -qxF "$WORKSPACE" \
+    || asclaude git config --global --add safe.directory "$WORKSPACE" || true
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 
 # --- 6. Credentials reconcile (shared auth volume) ---------------------------
@@ -117,13 +121,20 @@ fi
 reconcile_creds() {
     local a="$AUTH_DIR/.credentials.json"
     local b="$CLAUDE_CONFIG_DIR/.credentials.json"
+    local t
     while sleep 30; do
         [[ -s "$a" || -s "$b" ]] || continue
+        # Stage into a unique tmp file in the *target* dir, then atomic-rename.
+        # /auth is shared by every container, so a fixed tmp name would let one
+        # container's mv pick up another container's half-written file and
+        # publish a partial/corrupt .credentials.json fleet-wide.
         if [[ -s "$b" && ( ! -s "$a" || "$b" -nt "$a" ) ]] && ! cmp -s "$b" "$a"; then
-            { install -m 600 "$b" "$a.tmp" && mv -f "$a.tmp" "$a"; } || true
+            t="$(mktemp "$a.XXXXXX")" || continue
+            { install -m 600 "$b" "$t" && mv -f "$t" "$a"; } || rm -f "$t"
         elif [[ -s "$a" && "$a" -nt "$b" ]] && ! cmp -s "$a" "$b"; then
-            { install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 "$a" "$b.tmp" \
-                && mv -f "$b.tmp" "$b"; } || true
+            t="$(mktemp "$b.XXXXXX")" || continue
+            { install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 "$a" "$t" \
+                && mv -f "$t" "$b"; } || rm -f "$t"
         fi
     done
 }
