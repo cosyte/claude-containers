@@ -37,7 +37,11 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "image missing — build
 ssh-keygen -q -t ed25519 -f "$TMP/key" -N ''
 git init -q "$TMP/repo"
 ( cd "$TMP/repo"
-  git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init )
+  # Identity via env so the commit survives `make smoke`, which exports .env
+  # (empty GIT_AUTHOR_*/GIT_COMMITTER_* there would otherwise override -c).
+  GIT_AUTHOR_NAME=smoke GIT_AUTHOR_EMAIL=smoke@test \
+  GIT_COMMITTER_NAME=smoke GIT_COMMITTER_EMAIL=smoke@test \
+    git commit -q --allow-empty -m init )
 echo "smoke-marker" > "$TMP/repo/marker.txt"
 
 # A throwaway plugins bake-in to prove the merge mechanism generically
@@ -75,9 +79,13 @@ echo "$out" | grep -q "Empty workspace and no GIT_REPO_URL" \
 
 echo
 echo "== 4. boots with bind-mounted workspace =="
+# GH_TOKEN here also exercises the entrypoint's git credential-helper
+# wiring — a dummy value is fine, gh auth setup-git never validates it
+# (asserted in section 8).
 docker run -d --name "$CN" \
     -e CLAUDE_SKIP_AUTH_CHECK=1 \
     -e CLAUDE_PROJECT_NAME=smoke \
+    -e GH_TOKEN=ghp_smoketestdummy \
     -p 127.0.0.1::22 \
     -v "$TMP/repo:/workspace" \
     -v "$TMP/key.pub:/etc/claude/authorized_keys:ro" \
@@ -141,6 +149,13 @@ if ssh -i "$TMP/key" -p "$PORT" \
 else
     bad "ssh login / tmux reach failed (port $PORT)"
 fi
+
+echo
+echo "== 8. GH_TOKEN wires gh in as git credential helper =="
+check "entrypoint ran 'gh auth setup-git' for GH_TOKEN" \
+    'grep -q "gh wired in as git credential helper" <<<"$(docker logs "$CN" 2>&1)"'
+check "git credential helper for github.com HTTPS uses gh" \
+    'asclaude_x "git config --global --get-all credential.https://github.com.helper" 2>/dev/null | grep -q "gh auth git-credential"'
 
 echo
 echo "==============================================="
