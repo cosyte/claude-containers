@@ -338,6 +338,37 @@ if [[ -n "${CLAUDE_DEV_CMD:-}" ]]; then
     log "Dev server started in tmux window 'dev': $CLAUDE_DEV_CMD"
 fi
 
+# --- 12b. Remote Control watchdog -------------------------------------------
+# Claude Code auto-reconnects Remote Control across short network blips, but a
+# long outage (~10 min) makes the `claude` process exit — claude-session then
+# falls back to a shell and the phone session goes dark until it's relaunched
+# by hand. This background loop notices the Remote Control process is gone and
+# respawns the pane with `claude-session --continue`, so the same conversation
+# reappears in the app on its own. Disable with CLAUDE_WATCHDOG=0.
+WATCHDOG_INTERVAL="${CLAUDE_WATCHDOG_INTERVAL:-60}"
+WATCHDOG_SETTLE="${CLAUDE_WATCHDOG_SETTLE:-120}"
+claude_watchdog() {
+    sleep "$WATCHDOG_SETTLE"          # let the first launch settle before policing
+    while asclaude tmux has-session -t claude >/dev/null 2>&1; do
+        if pgrep -f 'remote-control' >/dev/null 2>&1; then
+            sleep "$WATCHDOG_INTERVAL"
+        else
+            log "watchdog: Remote Control process gone — relaunching session with --continue"
+            asclaude tmux respawn-pane -k -t claude:0.0 \
+                /usr/local/bin/claude-session --continue >/dev/null 2>&1 || true
+            sleep "$WATCHDOG_SETTLE"  # give the relaunched session time to reconnect
+        fi
+    done
+}
+WATCHDOG_PID=""
+if [[ "${CLAUDE_WATCHDOG:-1}" != "0" ]]; then
+    claude_watchdog &
+    WATCHDOG_PID=$!
+    log "Remote Control watchdog started (pid $WATCHDOG_PID; ${WATCHDOG_INTERVAL}s poll)"
+else
+    log "Remote Control watchdog disabled (CLAUDE_WATCHDOG=0)"
+fi
+
 echo
 log "Remote Control name : $CLAUDE_PROJECT_NAME  (look for it in the Claude app Code tab)"
 log "SSH                 : connect, you'll attach to the live tmux session"
@@ -351,6 +382,7 @@ shutdown() {
     asclaude tmux kill-server >/dev/null 2>&1 || true
     pkill -x sshd >/dev/null 2>&1 || true
     kill "$RECONCILE_PID" >/dev/null 2>&1 || true
+    [[ -n "${WATCHDOG_PID:-}" ]] && kill "$WATCHDOG_PID" >/dev/null 2>&1 || true
     exit 0
 }
 trap shutdown TERM INT

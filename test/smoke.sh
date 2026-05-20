@@ -82,11 +82,14 @@ echo
 echo "== 4. boots with bind-mounted workspace =="
 # GH_TOKEN here also exercises the entrypoint's git credential-helper
 # wiring — a dummy value is fine, gh auth setup-git never validates it
-# (asserted in section 8).
+# (asserted in section 8). The short CLAUDE_WATCHDOG_* timings make the
+# Remote Control watchdog act fast enough to observe (section 10).
 docker run -d --name "$CN" \
     -e CLAUDE_SKIP_AUTH_CHECK=1 \
     -e CLAUDE_PROJECT_NAME=smoke \
     -e GH_TOKEN=ghp_smoketestdummy \
+    -e CLAUDE_WATCHDOG_SETTLE=8 \
+    -e CLAUDE_WATCHDOG_INTERVAL=5 \
     -p 127.0.0.1::22 \
     -v "$TMP/repo:/workspace" \
     -v "$TMP/key.pub:/etc/claude/authorized_keys:ro" \
@@ -173,6 +176,22 @@ if "$REPO_ROOT/bin/claude-compose-gen" --out "$GENOUT" \
 else
     bad "claude-compose-gen failed to generate with --cpu/--mem"
 fi
+
+echo
+echo "== 10. Remote Control watchdog =="
+check "entrypoint starts the Remote Control watchdog" \
+    'grep -q "Remote Control watchdog started" <<<"$(docker logs "$CN" 2>&1)"'
+# Simulate a long-outage drop: kill the Remote Control process. The watchdog
+# should notice within a poll interval and relaunch the pane with --continue.
+docker exec "$CN" pkill -9 -f remote-control >/dev/null 2>&1 || true
+for _ in $(seq 1 30); do
+    grep -q "watchdog: Remote Control process gone" <<<"$(docker logs "$CN" 2>&1)" && break
+    sleep 1
+done
+check "watchdog detects the killed session and relaunches it" \
+    'grep -q "watchdog: Remote Control process gone" <<<"$(docker logs "$CN" 2>&1)"'
+check "tmux session survived the watchdog relaunch" \
+    'asclaude_x "tmux has-session -t claude" >/dev/null 2>&1'
 
 echo
 echo "==============================================="

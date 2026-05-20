@@ -10,16 +10,23 @@ cd /workspace || cd "$HOME"
 NAME="${CLAUDE_PROJECT_NAME:-claude}"
 EXTRA="${CLAUDE_EXTRA_ARGS:-}"
 
+# `claude-session --continue` resumes the most recent conversation for this
+# workspace instead of starting fresh — the Remote Control watchdog passes it
+# when it relaunches a session whose Claude process died.
+RESUME=""
+[[ "${1:-}" == "--continue" ]] && RESUME="--continue"
+
 echo "Starting Claude Code  (Remote Control name: ${NAME})"
 echo "  workspace: $(pwd)"
-echo "  flags    : --dangerously-skip-permissions --remote-control \"${NAME}\" ${EXTRA}"
+echo "  flags    : ${RESUME:+$RESUME }--dangerously-skip-permissions --remote-control \"${NAME}\" ${EXTRA}"
 echo
 
-# shellcheck disable=SC2086  # EXTRA is intentionally word-split
-claude --dangerously-skip-permissions --remote-control "$NAME" $EXTRA
+# shellcheck disable=SC2086  # RESUME and EXTRA are intentionally word-split
+claude $RESUME --dangerously-skip-permissions --remote-control "$NAME" $EXTRA
 
 code=$?
 echo
 echo "Claude Code exited (status ${code}). Dropping to a shell."
-echo "Relaunch with:  claude-session"
+echo "Relaunch with:  claude-session            (fresh conversation)"
+echo "            or: claude-session --continue  (resume this one)"
 exec bash -l
