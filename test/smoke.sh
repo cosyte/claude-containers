@@ -13,6 +13,7 @@
 set -euo pipefail
 
 IMAGE="${IMAGE:-claude-code-box:latest}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 CN="claude-smoke-$$"
 AUTHVOL="claude-smoke-auth-$$"
@@ -156,6 +157,22 @@ check "entrypoint ran 'gh auth setup-git' for GH_TOKEN" \
     'grep -q "gh wired in as git credential helper" <<<"$(docker logs "$CN" 2>&1)"'
 check "git credential helper for github.com HTTPS uses gh" \
     'asclaude_x "git config --global --get-all credential.https://github.com.helper" 2>/dev/null | grep -q "gh auth git-credential"'
+
+echo
+echo "== 9. claude-compose-gen per-repo resource overrides =="
+GENOUT="$TMP/gen-compose.yml"
+# Sentinel values 7 / 777m won't collide with any plausible global default.
+if "$REPO_ROOT/bin/claude-compose-gen" --out "$GENOUT" \
+       --cpu alpha=7 --mem alpha=777m alpha beta >/dev/null 2>&1; then
+    check "--cpu override applies cpus to the target repo" \
+        'grep -A20 "^  alpha:" "$GENOUT" | grep -q "cpus: 7"'
+    check "--mem override applies mem_limit to the target repo" \
+        'grep -A20 "^  alpha:" "$GENOUT" | grep -q "mem_limit: 777m"'
+    check "non-overridden repo keeps the global default (no override leak)" \
+        '! grep -A20 "^  beta:" "$GENOUT" | grep -qE "cpus: 7|mem_limit: 777m"'
+else
+    bad "claude-compose-gen failed to generate with --cpu/--mem"
+fi
 
 echo
 echo "==============================================="

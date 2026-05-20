@@ -24,6 +24,10 @@
 #                       tmux 'dev' window. Format REPO=COMMAND (repeatable).
 #                       Bind to 0.0.0.0 so the published port reaches it, e.g.
 #                       --dev-cmd site='npm run dev -- --host 0.0.0.0 --port 4321'
+#     --cpu <map>       per-repo CPU limit override. Format REPO=N (repeatable);
+#                       repos without one keep the global CLAUDE_CPU_LIMIT.
+#     --mem <map>       per-repo memory limit override. Format REPO=SIZE, e.g.
+#                       bridgelink-website=4g (repeatable). Default: CLAUDE_MEM_LIMIT.
 #     --forks           include forks (default: source repos only)
 #     --archived        include archived repos (default: skip)
 #     --limit <n>       gh repo list limit (default: 500)
@@ -37,7 +41,7 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG=""
 OUT=""
@@ -45,7 +49,7 @@ PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
 WANT_FORKS=0 WANT_ARCHIVED=0
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --org)             ORG="$2"; shift 2 ;;
@@ -56,6 +60,8 @@ while [[ $# -gt 0 ]]; do
         --active)          ACTIVE_RAW+=("$2"); shift 2 ;;
         --expose)          EXPOSE_RAW+=("$2"); shift 2 ;;
         --dev-cmd)         DEVCMD_RAW+=("$2"); shift 2 ;;
+        --cpu)             CPU_RAW+=("$2"); shift 2 ;;
+        --mem)             MEM_RAW+=("$2"); shift 2 ;;
         --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
         --forks)           WANT_FORKS=1; shift ;;
         --archived)        WANT_ARCHIVED=1; shift ;;
@@ -102,6 +108,24 @@ for tok in "${DEVCMD_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
     [[ "$tok" == *=* ]] || die "--dev-cmd must be REPO=COMMAND (got '$tok')"
     DEVCMD["$(sanitize "${tok%%=*}")"]="${tok#*=}"
+done
+
+# Per-repo resource overrides: svc -> value. Repos with no entry fall back to
+# the global CLAUDE_CPU_LIMIT / CLAUDE_MEM_LIMIT at emit time.
+declare -A CPU=() MEM=()
+for tok in "${CPU_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == *=* ]] || die "--cpu must be REPO=N (got '$tok')"
+    cpv="${tok#*=}"
+    [[ "$cpv" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "--cpu value must be a number (got '$cpv')"
+    CPU["$(sanitize "${tok%%=*}")"]="$cpv"
+done
+for tok in "${MEM_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == *=* ]] || die "--mem must be REPO=SIZE (got '$tok')"
+    mmv="${tok#*=}"
+    [[ "$mmv" =~ ^[0-9]+[bkmgBKMG]?$ ]] || die "--mem value must be a size like 4g (got '$mmv')"
+    MEM["$(sanitize "${tok%%=*}")"]="$mmv"
 done
 
 # The generated multi-repo compose is deployment config, not part of this
@@ -242,6 +266,8 @@ for row in "${FINAL[@]}"; do
     IFS=$'\t' read -r svc name branch <<<"$row"
     url="git@github.com:${ORG}/${name}.git"
     port="${SVCPORT[$svc]}"
+    svc_cpu="${CPU[$svc]:-$CLAUDE_CPU_LIMIT}"
+    svc_mem="${MEM[$svc]:-$CLAUDE_MEM_LIMIT}"
     cat <<EOF
   ${svc}:
     image: ${CLAUDE_IMAGE}
@@ -260,8 +286,8 @@ for row in "${FINAL[@]}"; do
     restart: unless-stopped
     init: true
     shm_size: ${CLAUDE_SHM_SIZE}
-    cpus: ${CLAUDE_CPU_LIMIT}
-    mem_limit: ${CLAUDE_MEM_LIMIT}
+    cpus: ${svc_cpu}
+    mem_limit: ${svc_mem}
     stop_grace_period: ${CLAUDE_STOP_TIMEOUT}s
     tmpfs:
       - /tmp:rw,nosuid,nodev,exec,size=1g
@@ -344,6 +370,7 @@ for r in "${FINAL[@]}"; do
     extra=""
     [[ -n "${EXPOSE[$s]:-}" ]] && extra=" +ports $(echo "${EXPOSE[$s]}" | tr '\n' ',' | sed 's/,$//')"
     [[ -n "${DEVCMD[$s]:-}" ]] && extra="$extra +dev"
+    [[ -n "${CPU[$s]:-}" || -n "${MEM[$s]:-}" ]] && extra="$extra +res(${CPU[$s]:-$CLAUDE_CPU_LIMIT}cpu/${MEM[$s]:-$CLAUDE_MEM_LIMIT})"
     printf '   %-22s -> claude-%-20s ssh :%-5s %s%s\n' "$nm" "$s" "${SVCPORT[$s]}" "$mark" "$extra"
 done
 
