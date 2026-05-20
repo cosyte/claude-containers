@@ -24,6 +24,10 @@ services:
         CLAUDE_UID: ${CLAUDE_UID:-1000}
         CLAUDE_GID: ${CLAUDE_GID:-1000}
         CLAUDE_USER: ${CLAUDE_USER:-claude}
+        # Set WITH_BROWSER=1 to bake headless Chromium + chrome-devtools-mcp
+        # for the --browser / CLAUDE_BROWSER=1 frontend-debugging path
+        # (adds ~200 MB to the image; default is off).
+        WITH_BROWSER: ${WITH_BROWSER:-0}
     container_name: claude-${CLAUDE_PROJECT_NAME:?set CLAUDE_PROJECT_NAME}
     hostname: ${CLAUDE_PROJECT_NAME}
     restart: unless-stopped
@@ -44,6 +48,9 @@ services:
       CLAUDE_PROJECT_NAME: ${CLAUDE_PROJECT_NAME}
       CLAUDE_EXTRA_ARGS: ${CLAUDE_EXTRA_ARGS:-}
       CLAUDE_MCP_ENABLED: ${CLAUDE_MCP_ENABLED:-}
+      # Frontend debugging: set to 1 to register the chrome-devtools MCP
+      # (requires WITH_BROWSER=1 at build time).
+      CLAUDE_BROWSER: ${CLAUDE_BROWSER:-0}
       CLAUDE_PERMISSION_MODE: ${CLAUDE_PERMISSION_MODE:-bypassPermissions}
       GIT_REPO_URL: ${GIT_REPO_URL:-}
       GIT_REPO_BRANCH: ${GIT_REPO_BRANCH:-}

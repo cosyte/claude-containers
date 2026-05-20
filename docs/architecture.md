@@ -81,6 +81,32 @@ Baked `mcp/*.json` use `${VAR}` placeholders, expanded by `envsubst` from the
 container environment at registration time. Secrets come from `.env`
 (`--env-file`), never the image. Confirms the spec's stated preference.
 
+## Decision: frontend debugging is an opt-in image variant
+
+The default image stays lean. A `WITH_BROWSER=1` build arg
+(`make build-browser`, tag `claude-code-box:browser`) bakes Debian's headless
+**Chromium** (multi-arch) and the official
+[`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)
+server — adding ~200 MB. At runtime, `claude-launch --browser` (or
+`CLAUDE_BROWSER=1`, or `claude-compose-gen --browser REPO`) registers the MCP
+in that session, so Claude gets the full Chrome DevTools Protocol surface
+(navigate / evaluate / console / network / Lighthouse / perf trace / heap
+snapshots / screenshots — 55+ tools) against any frontend the agent runs in
+`/workspace`. Headless-only inside the container; the agent reads pages back
+via screenshots and DOM queries.
+
+Why a build arg, not a runtime install: Chromium is ~200 MB and would cost
+every user, including those who never debug a frontend. Why MCP, not a CLI
+wrapper: it composes with the stack's existing MCP discipline — declarative,
+secret-free (the MCP needs none), removable per session. Why Chromium over
+`@puppeteer/browsers install chrome` at build time: Debian's package is
+multi-arch with one apt line, vs Puppeteer's per-arch binary download +
+runtime-managed cache. The launcher checks the image's `claude.browser`
+LABEL and warns early if `--browser` is requested against the lean image.
+Chrome is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
+(required in unprivileged Docker; Chrome's user-namespace sandbox conflicts
+with the default seccomp).
+
 ## Decision: one substantive build stage
 
 A heavy builder stage was considered and rejected: the image weight is the

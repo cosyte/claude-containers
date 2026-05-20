@@ -84,7 +84,7 @@ small descriptive commits as you change things.
 | `bin/claude-session` | tmux pane cmd: `cd /workspace`, `exec claude --dangerously-skip-permissions --remote-control "<project>" $EXTRA`; falls back to a shell so SSH stays usable. |
 | `bin/claude-dev` | tmux `dev`-window cmd: runs `$CLAUDE_DEV_CMD` (a dev server) in `/workspace` on boot, shell fallback. Started by the entrypoint only when `CLAUDE_DEV_CMD` is set. |
 | `bin/_common.sh` | Shared lib: `.env` load, defaults, `sanitize`, volume names, `alloc_port` (2200–2299, skips used), state checks, `print_connect`. |
-| `bin/claude-launch` | Create/start a container; auto port; labels carry metadata; surfaces a fast-failing entrypoint. `--expose H:C` / `--dev-cmd` publish + auto-start a dev server for a single container. |
+| `bin/claude-launch` | Create/start a container; auto port; labels carry metadata; surfaces a fast-failing entrypoint. `--expose H:C` / `--dev-cmd` publish + auto-start a dev server; `--browser` enables the chrome-devtools MCP for frontend debugging (needs a WITH_BROWSER=1 image). |
 | `bin/claude-list/attach/stop/rm/logs` | Manage containers. `claude-attach` opens the live tmux session via `docker exec` (local, no SSH key). `claude-rm --purge` also deletes the per-project volumes. |
 | `bin/claude-compose-gen` | Generate a multi-service `docker-compose.yml` (one session per repo in a GitHub org via `gh`, or explicit `repo[:branch]` args). Stable ports, shared+per-repo volumes, `claude.managed` labels so `claude-list` sees them. |
 | `bash_profile` | Interactive SSH → `exec tmux attach -t claude`; non-interactive SSH untouched. |
@@ -111,7 +111,7 @@ make login                    # one-time OAuth; opens a URL, paste the code
 ```
 ./bin/claude-launch <name> --repo git@github.com:you/x.git [--branch B] [--depth N]
 ./bin/claude-launch <name> --workspace /abs/path/to/checkout
-./bin/claude-launch <name> [--port N] [--mcp foo] [--extra-args "…"]
+./bin/claude-launch <name> [--port N] [--mcp foo] [--browser] [--extra-args "…"]
 ./bin/claude-launch <name> [--expose 4321:4321] [--dev-cmd "npm run dev …"]
 ./bin/claude-list                       # name, state, ssh port, repo, uptime
 ./bin/claude-attach <name>              # attach to its live tmux session (local)
@@ -162,6 +162,17 @@ generator warns about: `make build`, `make login`, `~/.ssh/authorized_keys`,
 
 **Multi-arch / publish:** `make build-all` (no local load) or
 `make push` (set `CLAUDE_IMAGE` to a registry ref first).
+
+**Frontend debugging:** `make build-browser` builds a `claude-code-box:browser`
+variant baking headless Chromium + chrome-devtools-mcp (+~200 MB). Launch with
+`--browser` (or `CLAUDE_BROWSER=1`, or `compose-gen --browser REPO`); the
+entrypoint registers the chrome-devtools MCP so Claude can navigate / evaluate
+/ screenshot / inspect console+network / run Lighthouse against a frontend.
+Chromium is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
+(required in unprivileged Docker). The launcher checks the image's
+`claude.browser` LABEL and warns early if `--browser` is used against the
+lean image. Pair `--browser` with `--dev-cmd`/`--expose` so the agent both
+runs and debugs the dev server.
 
 **Validate changes:** `make lint` (shell syntax) and `make smoke` (builds the
 image, then runs `test/smoke.sh` against it). The smoke test covers API-key
