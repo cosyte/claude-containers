@@ -16,8 +16,8 @@ FROM node:${NODE_VERSION}-bookworm-slim
 
 # --- Build-time configuration -------------------------------------------------
 # CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control;
-# 2.1.144 is verified to support `--remote-control` + bypassPermissions together.
-ARG CLAUDE_CODE_VERSION=2.1.144
+# 2.1.145 is verified to support `--remote-control` + bypassPermissions together.
+ARG CLAUDE_CODE_VERSION=2.1.145
 # PNPM_VERSION: pnpm baked into the image. "latest" works but isn't
 # reproducible — pin a real version (e.g. 10.4.1), same as UV_VERSION.
 ARG PNPM_VERSION=latest

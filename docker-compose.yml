@@ -18,7 +18,7 @@ services:
       context: .
       args:
         NODE_VERSION: ${NODE_VERSION:-24}
-        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-2.1.144}
+        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-2.1.145}
         UV_VERSION: ${UV_VERSION:-latest}
         PNPM_VERSION: ${PNPM_VERSION:-latest}
         CLAUDE_UID: ${CLAUDE_UID:-1000}
