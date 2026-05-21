@@ -2,10 +2,12 @@
 # claude-rc-watchdog — recover Remote Control after the bridge gives up.
 #
 # Claude Code's Remote Control bridge (v2 — an SSE transport, not a websocket)
-# auto-reconnects on a bounded retry budget. When that budget is exhausted the
-# link is permanently dead with no recovery: the mobile app shows the session
-# offline while the local `claude` process keeps running, healthy. Upstream
-# bug — anthropics/claude-code#34255, #29726.
+# retries reconnection on its own. A transient network drop self-heals — the
+# transport retries until connectivity returns — so an outage is not, by
+# itself, something to recover from. But the bridge can also fail *terminally*
+# (it logs a give-up and stops): then the link is dead with no recovery while
+# the local `claude` process keeps running, healthy, and the mobile app shows
+# the session offline. Upstream context — anthropics/claude-code#34255, #29726.
 #
 # Detection reads the RC debug log written by `claude-session`. The bridge logs
 # its terminal give-up as `[remote-bridge] … recovery exhausted after N

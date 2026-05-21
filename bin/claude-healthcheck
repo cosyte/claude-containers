@@ -4,8 +4,9 @@
 # Reports the container UNHEALTHY when either:
 #   * the Claude Code session is down — tmux gone, or the `claude` process
 #     exited (the pane fell back to a plain shell), or
-#   * the Remote Control bridge has permanently dropped — its reconnection
-#     budget is exhausted, so the mobile/web app sees the session offline.
+#   * the Remote Control bridge has failed terminally — it logged a give-up
+#     ("recovery exhausted after …" / notifyBridgeFailed) and stopped, so the
+#     mobile/web app sees the session offline though the process is alive.
 #
 # Liveness alone cannot see a Remote Control drop: the `claude` process stays
 # alive and healthy when only the bridge dies (upstream bug #34255). So this

@@ -76,11 +76,13 @@ contact Anthropic.
 ## Remote Control link drops mid-session (`(unhealthy)`, watchdog)
 
 A session that registered fine can still lose its Remote Control link later.
-Claude Code's RC bridge (a v2 SSE transport) reconnects on a **bounded retry
-budget**; once that budget is exhausted the link is permanently dead with no
-recovery — the mobile/web app shows the session offline while the local
-`claude` process keeps running, apparently healthy. Upstream bug —
-anthropics/claude-code#34255 (also \#29726).
+The RC bridge (a v2 SSE transport) retries reconnection on its own — a
+transient network drop self-heals, so a brief or even lengthy outage recovers
+with no intervention. But the bridge can also fail **terminally**: it logs a
+give-up (`recovery exhausted after …` / `notifyBridgeFailed`) and stops, and
+the link is then dead with no recovery while the local `claude` process keeps
+running, apparently healthy — the mobile/web app shows the session offline.
+Upstream context — anthropics/claude-code#34255 (also \#29726).
 
 The image handles this with two pieces:
 
