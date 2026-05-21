@@ -4,7 +4,10 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 need_docker
 
-fmt='{{.Names}}\t{{.State}}\t{{.Label "claude.ssh_port"}}\t{{.Label "claude.repo"}}\t{{.RunningFor}}'
+# `{{.Status}}` carries both uptime and the healthcheck verdict, e.g.
+# "Up 2 hours (healthy)" / "Up 5 minutes (unhealthy)" — (unhealthy) means the
+# Claude session or its Remote Control link is down (see docs/troubleshooting.md).
+fmt='{{.Names}}\t{{.State}}\t{{.Label "claude.ssh_port"}}\t{{.Label "claude.repo"}}\t{{.Status}}'
 rows="$(docker ps -a --filter 'label=claude.managed=1' --format "$fmt" 2>/dev/null || true)"
 
 if [[ -z "$rows" ]]; then
@@ -12,7 +15,7 @@ if [[ -z "$rows" ]]; then
     exit 0
 fi
 
-table="$(printf 'NAME\tSTATE\tSSH PORT\tREPO\tUPTIME\n%s\n' "$rows")"
+table="$(printf 'NAME\tSTATE\tSSH PORT\tREPO\tSTATUS\n%s\n' "$rows")"
 # `column` is in util-linux/bsdmainutils and not always present; fall back to
 # an awk pass that measures each column so it always renders aligned (kept
 # mawk-compatible: single-dim arrays + split, no gawk-only features).

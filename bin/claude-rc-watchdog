@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# claude-rc-watchdog — recover Remote Control after its websocket gives up.
+#
+# Claude Code's Remote Control link auto-reconnects on a bounded retry budget.
+# When that budget is exhausted (logged as "WS reconnection budget exhausted")
+# the link is permanently dead with no recovery: the mobile app shows the
+# session offline while the local `claude` process keeps running, healthy.
+# Upstream bug — anthropics/claude-code#34255, #29726.
+#
+# This watchdog tails the RC debug log written by `claude-session`. On a
+# confirmed budget-exhausted state it waits for the claude pane to go idle (so
+# an in-flight turn is never interrupted), then respawns the pane with
+# `claude-session --continue`. The Remote Control session name is unchanged, so
+# the mobile/web app reconnects on its own.
+#
+# Runs as the `claude` user, started by the entrypoint. Disable the whole
+# watchdog by launching the container with CLAUDE_RC_WATCHDOG=0.
+set -uo pipefail
+
+LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
+WINDOW="${CLAUDE_RC_TMUX_TARGET:-claude:main}"
+SESSION="${WINDOW%%:*}"
+CHECK_INTERVAL="${CLAUDE_RC_CHECK_INTERVAL:-30}"   # seconds between checks
+IDLE_SECONDS="${CLAUDE_RC_IDLE_SECONDS:-45}"       # pane must be quiet this long
+COOLDOWN="${CLAUDE_RC_COOLDOWN:-180}"              # min seconds between restarts
+MAX_RESTARTS="${CLAUDE_RC_MAX_RESTARTS:-10}"       # give up after this many in a row
+RESPAWN_CMD="${CLAUDE_RC_RESPAWN_CMD:-/usr/local/bin/claude-session --continue}"
+
+say() { echo "[rc-watchdog] $*"; }
+
+if [[ -z "$LOG" ]]; then
+    say "CLAUDE_RC_DEBUG_LOG is empty — nothing to watch. Exiting."
+    exit 0
+fi
+
+# Most recent decisive websocket event in the log. Prints: dead | alive | unknown
+#   dead    — the last WS event is "reconnection budget exhausted" (terminal)
+#   alive   — the last WS event is a successful "reconnected after" recovery
+#   unknown — no decisive event yet (fresh session, or never dropped)
+rc_state() {
+    [[ -s "$LOG" ]] || { echo unknown; return; }
+    local last
+    last="$(tail -n 800 "$LOG" 2>/dev/null \
+        | grep -aoE 'WS reconnected after|WS reconnection budget exhausted' \
+        | tail -n1)"
+    case "$last" in
+        'WS reconnection budget exhausted') echo dead ;;
+        'WS reconnected after')             echo alive ;;
+        *)                                  echo unknown ;;
+    esac
+}
+
+# True when the claude pane content is unchanged across IDLE_SECONDS — i.e. no
+# turn is streaming output. Uses capture-pane so it works on any tmux version
+# (no dependency on the pane_activity format variable).
+pane_idle() {
+    local a b
+    a="$(tmux capture-pane -p -t "$WINDOW" 2>/dev/null | cksum)" || return 1
+    sleep "$IDLE_SECONDS"
+    b="$(tmux capture-pane -p -t "$WINDOW" 2>/dev/null | cksum)" || return 1
+    [[ "$a" == "$b" ]]
+}
+
+# Kill the stale RC process, then respawn the pane fresh with --continue.
+restart_session() {
+    say "Restarting Claude session with --continue to restore Remote Control."
+    # The old `claude` process is alive but its websocket is dead — kill it
+    # explicitly so the respawn doesn't leave a second --remote-control process.
+    pkill -f 'remote-control' 2>/dev/null || true
+    local i
+    for ((i = 0; i < 10; i++)); do
+        pgrep -f 'remote-control' >/dev/null 2>&1 || break
+        sleep 0.5
+    done
+    pkill -9 -f 'remote-control' 2>/dev/null || true
+    if tmux respawn-pane -k -t "$WINDOW" "$RESPAWN_CMD"; then
+        say "Session respawned; Remote Control should re-register within ~30s."
+    else
+        say "WARNING: 'tmux respawn-pane' failed — could not restart the session."
+    fi
+}
+
+restarts=0
+last_restart=0
+
+say "started — watching ${LOG} (tmux target ${WINDOW}, check every ${CHECK_INTERVAL}s)"
+
+while sleep "$CHECK_INTERVAL"; do
+    # Container shutting down — the entrypoint killed tmux.
+    tmux has-session -t "$SESSION" >/dev/null 2>&1 || { say "tmux session gone — exiting."; break; }
+
+    now="$(date +%s)"
+    state="$(rc_state)"
+
+    # A previous restart that has held past the cooldown counts as a success:
+    # reset the counter so MAX_RESTARTS only ever trips on a run of failures.
+    if (( restarts > 0 )) && (( now - last_restart > COOLDOWN )) && [[ "$state" != dead ]]; then
+        say "Remote Control stable since the last restart — resetting restart counter."
+        restarts=0
+    fi
+
+    [[ "$state" == dead ]] || continue
+    (( now - last_restart < COOLDOWN )) && continue   # let the last restart settle
+
+    if (( restarts >= MAX_RESTARTS )); then
+        say "Remote Control still dead after ${restarts} restarts — giving up auto-restart."
+        say "Investigate: 'claude remote-control --verbose' and RC eligibility (see troubleshooting.md)."
+        break
+    fi
+
+    say "Remote Control link is dead (websocket reconnection budget exhausted)."
+    say "Waiting for the claude pane to go idle before restarting…"
+    while ! pane_idle; do
+        # A manual /remote-control reconnect (or any recovery) clears the state.
+        [[ "$(rc_state)" == dead ]] || break
+    done
+    [[ "$(rc_state)" == dead ]] || { say "Remote Control recovered on its own — standing down."; continue; }
+
+    restarts=$((restarts + 1))
+    last_restart="$(date +%s)"
+    say "Pane idle; restart attempt #${restarts}."
+    restart_session
+done

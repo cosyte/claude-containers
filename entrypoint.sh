@@ -363,12 +363,18 @@ log "sshd listening on container port 22"
 
 # --- 12. Launch Claude Code in a persistent tmux session --------------------
 CLAUDE_PROJECT_NAME="${CLAUDE_PROJECT_NAME:-claude}"
+# RC debug log path: claude-session writes Remote Control events here; the
+# watchdog and the Docker healthcheck read it. Exported so the tmux server (and
+# anything respawned in it) inherits it; CLAUDE_RC_DEBUG_LOG is also a baked ENV
+# so the healthcheck — a separate process spawned by dockerd — sees it too.
+export CLAUDE_RC_DEBUG_LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
 export CLAUDE_PROJECT_NAME CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}" \
        CLAUDE_DEV_CMD="${CLAUDE_DEV_CMD:-}"
 
 # tmux server runs as the claude user; claude-session is the pane command and
-# falls back to an interactive shell if Claude exits, so SSH stays usable.
-asclaude tmux new-session -d -s claude -x 220 -y 50 /usr/local/bin/claude-session
+# falls back to an interactive shell if Claude exits, so SSH stays usable. The
+# Claude pane lives in window 'main' (the RC watchdog respawns it by name).
+asclaude tmux new-session -d -s claude -n main -x 220 -y 50 /usr/local/bin/claude-session
 log "Claude Code session 'claude' started in tmux"
 
 # Optional dev server: runs $CLAUDE_DEV_CMD in its own 'dev' tmux window so it
@@ -380,34 +386,18 @@ if [[ -n "${CLAUDE_DEV_CMD:-}" ]]; then
 fi
 
 # --- 12b. Remote Control watchdog -------------------------------------------
-# Claude Code auto-reconnects Remote Control across short network blips, but a
-# long outage (~10 min) makes the `claude` process exit — claude-session then
-# falls back to a shell and the phone session goes dark until it's relaunched
-# by hand. This background loop notices the Remote Control process is gone and
-# respawns the pane with `claude-session --continue`, so the same conversation
-# reappears in the app on its own. Disable with CLAUDE_WATCHDOG=0.
-WATCHDOG_INTERVAL="${CLAUDE_WATCHDOG_INTERVAL:-60}"
-WATCHDOG_SETTLE="${CLAUDE_WATCHDOG_SETTLE:-120}"
-claude_watchdog() {
-    sleep "$WATCHDOG_SETTLE"          # let the first launch settle before policing
-    while asclaude tmux has-session -t claude >/dev/null 2>&1; do
-        if pgrep -f 'remote-control' >/dev/null 2>&1; then
-            sleep "$WATCHDOG_INTERVAL"
-        else
-            log "watchdog: Remote Control process gone — relaunching session with --continue"
-            asclaude tmux respawn-pane -k -t claude:0.0 \
-                /usr/local/bin/claude-session --continue >/dev/null 2>&1 || true
-            sleep "$WATCHDOG_SETTLE"  # give the relaunched session time to reconnect
-        fi
-    done
-}
-WATCHDOG_PID=""
-if [[ "${CLAUDE_WATCHDOG:-1}" != "0" ]]; then
-    claude_watchdog &
-    WATCHDOG_PID=$!
-    log "Remote Control watchdog started (pid $WATCHDOG_PID; ${WATCHDOG_INTERVAL}s poll)"
+# Claude Code's RC websocket auto-reconnects on a bounded retry budget; when
+# that budget is exhausted the link dies silently with no recovery — the
+# `claude` process stays alive but the phone session goes dark (upstream bug —
+# see docs/troubleshooting.md). The watchdog detects that from the RC debug log
+# and respawns the session with --continue once the pane is idle.
+RC_WATCHDOG_PID=""
+if [[ "${CLAUDE_RC_WATCHDOG:-1}" != "0" ]]; then
+    asclaude /usr/local/bin/claude-rc-watchdog &
+    RC_WATCHDOG_PID=$!
+    log "Remote Control watchdog started (disable with CLAUDE_RC_WATCHDOG=0)"
 else
-    log "Remote Control watchdog disabled (CLAUDE_WATCHDOG=0)"
+    log "Remote Control watchdog disabled (CLAUDE_RC_WATCHDOG=0)"
 fi
 
 echo
@@ -423,7 +413,7 @@ shutdown() {
     asclaude tmux kill-server >/dev/null 2>&1 || true
     pkill -x sshd >/dev/null 2>&1 || true
     kill "$RECONCILE_PID" >/dev/null 2>&1 || true
-    [[ -n "${WATCHDOG_PID:-}" ]] && kill "$WATCHDOG_PID" >/dev/null 2>&1 || true
+    [[ -n "${RC_WATCHDOG_PID:-}" ]] && kill "$RC_WATCHDOG_PID" >/dev/null 2>&1 || true
     exit 0
 }
 trap shutdown TERM INT

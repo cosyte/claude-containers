@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# claude-healthcheck — the container's Docker HEALTHCHECK probe.
+#
+# Reports the container UNHEALTHY when either:
+#   * the Claude Code session is down — tmux gone, or the `claude` process
+#     exited (the pane fell back to a plain shell), or
+#   * Remote Control's websocket has permanently dropped — its reconnection
+#     budget is exhausted, so the mobile/web app sees the session offline.
+#
+# Liveness alone cannot see a Remote Control drop: the `claude` process stays
+# alive and healthy when only the websocket dies (upstream bug #34255). So this
+# also reads the RC debug log written by claude-session.
+#
+# Runs as root (the container's default user). The RC watchdog handles
+# recovery; this probe is the sensor — its result shows in `docker ps` and
+# `claude-list`. Output is one line; exit 0 = healthy, 1 = unhealthy.
+set -uo pipefail
+
+CLAUDE_USER="${CLAUDE_USER:-claude}"
+LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
+SESSION=claude
+
+fail() { echo "unhealthy: $*"; exit 1; }
+
+# --- liveness --------------------------------------------------------------
+pgrep -x sshd >/dev/null 2>&1 \
+    || fail "sshd is not running"
+gosu "$CLAUDE_USER" tmux has-session -t "$SESSION" >/dev/null 2>&1 \
+    || fail "tmux session '$SESSION' is gone"
+pgrep -u "$CLAUDE_USER" -f 'remote-control' >/dev/null 2>&1 \
+    || fail "no 'claude --remote-control' process (Claude session exited)"
+
+# --- Remote Control link ---------------------------------------------------
+if [[ -n "$LOG" && -s "$LOG" ]]; then
+    last="$(tail -n 800 "$LOG" 2>/dev/null \
+        | grep -aoE 'WS reconnected after|WS reconnection budget exhausted' \
+        | tail -n1)"
+    [[ "$last" == 'WS reconnection budget exhausted' ]] \
+        && fail "Remote Control websocket dead (reconnection budget exhausted)"
+fi
+
+echo "healthy"
+exit 0
