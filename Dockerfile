@@ -141,9 +141,12 @@ COPY claude-config/ /opt/claude-config/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY bin/claude-session /usr/local/bin/claude-session
 COPY bin/claude-dev /usr/local/bin/claude-dev
+COPY bin/claude-rc-watchdog /usr/local/bin/claude-rc-watchdog
+COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
-        /usr/local/bin/claude-dev \
+        /usr/local/bin/claude-dev /usr/local/bin/claude-rc-watchdog \
+        /usr/local/bin/claude-healthcheck \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
 
@@ -156,9 +159,18 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
 # DISABLE_AUTOUPDATER is unrelated to the flag fetch and is kept (pinned version).
 ENV CLAUDE_USER=${CLAUDE_USER} \
     CLAUDE_CONFIG_DIR=/home/${CLAUDE_USER}/.claude \
+    CLAUDE_RC_DEBUG_LOG=/tmp/claude-rc-debug.log \
     DISABLE_AUTOUPDATER=1 \
     NODE_NO_WARNINGS=1
 
 EXPOSE 22
+
+# Healthcheck: liveness (sshd, tmux, the `claude --remote-control` process)
+# plus Remote Control link state read from the RC debug log — so a silently
+# dropped RC websocket shows as `unhealthy` in `docker ps` / `claude-list`,
+# not just an outright crash. The RC watchdog handles recovery; this is the
+# sensor. start-period covers the git clone + first Claude launch.
+HEALTHCHECK --interval=60s --timeout=15s --start-period=120s --retries=3 \
+    CMD ["/usr/local/bin/claude-healthcheck"]
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
