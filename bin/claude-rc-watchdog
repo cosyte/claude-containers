@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# claude-rc-watchdog — recover Remote Control after its websocket gives up.
+# claude-rc-watchdog — recover Remote Control after the bridge gives up.
 #
-# Claude Code's Remote Control link auto-reconnects on a bounded retry budget.
-# When that budget is exhausted (logged as "WS reconnection budget exhausted")
-# the link is permanently dead with no recovery: the mobile app shows the
-# session offline while the local `claude` process keeps running, healthy.
-# Upstream bug — anthropics/claude-code#34255, #29726.
+# Claude Code's Remote Control bridge (v2 — an SSE transport, not a websocket)
+# auto-reconnects on a bounded retry budget. When that budget is exhausted the
+# link is permanently dead with no recovery: the mobile app shows the session
+# offline while the local `claude` process keeps running, healthy. Upstream
+# bug — anthropics/claude-code#34255, #29726.
 #
-# This watchdog tails the RC debug log written by `claude-session`. On a
-# confirmed budget-exhausted state it waits for the claude pane to go idle (so
-# an in-flight turn is never interrupted), then respawns the pane with
-# `claude-session --continue`. The Remote Control session name is unchanged, so
-# the mobile/web app reconnects on its own.
+# Detection reads the RC debug log written by `claude-session`. The bridge logs
+# its terminal give-up as `[remote-bridge] … recovery exhausted after N
+# attempts` (or `[bridge:repl] notifyBridgeFailed`), and a (re)connect as
+# `[remote-bridge] v2 transport connected`. On a confirmed dead state the
+# watchdog waits for the claude pane to go idle (so an in-flight turn is never
+# interrupted), then respawns the pane with `claude-session --continue`. The
+# Remote Control session name is unchanged, so the app reconnects on its own.
 #
 # Runs as the `claude` user, started by the entrypoint. Disable the whole
 # watchdog by launching the container with CLAUDE_RC_WATCHDOG=0.
@@ -33,20 +35,21 @@ if [[ -z "$LOG" ]]; then
     exit 0
 fi
 
-# Most recent decisive websocket event in the log. Prints: dead | alive | unknown
-#   dead    — the last WS event is "reconnection budget exhausted" (terminal)
-#   alive   — the last WS event is a successful "reconnected after" recovery
+# Most recent decisive RC bridge event in the log. Prints: dead | alive | unknown
+#   dead    — the bridge gave up reconnecting ("recovery exhausted after …", or
+#             notifyBridgeFailed) — terminal, no recovery
+#   alive   — the bridge (re)connected ("v2 transport connected")
 #   unknown — no decisive event yet (fresh session, or never dropped)
 rc_state() {
     [[ -s "$LOG" ]] || { echo unknown; return; }
     local last
     last="$(tail -n 800 "$LOG" 2>/dev/null \
-        | grep -aoE 'WS reconnected after|WS reconnection budget exhausted' \
+        | grep -aoE 'v2 transport connected|recovery exhausted after|notifyBridgeFailed' \
         | tail -n1)"
     case "$last" in
-        'WS reconnection budget exhausted') echo dead ;;
-        'WS reconnected after')             echo alive ;;
-        *)                                  echo unknown ;;
+        'recovery exhausted after'|'notifyBridgeFailed') echo dead ;;
+        'v2 transport connected')                        echo alive ;;
+        *)                                               echo unknown ;;
     esac
 }
 
@@ -64,7 +67,7 @@ pane_idle() {
 # Kill the stale RC process, then respawn the pane fresh with --continue.
 restart_session() {
     say "Restarting Claude session with --continue to restore Remote Control."
-    # The old `claude` process is alive but its websocket is dead — kill it
+    # The old `claude` process is alive but its RC bridge is dead — kill it
     # explicitly so the respawn doesn't leave a second --remote-control process.
     pkill -f 'remote-control' 2>/dev/null || true
     local i
@@ -108,7 +111,7 @@ while sleep "$CHECK_INTERVAL"; do
         break
     fi
 
-    say "Remote Control link is dead (websocket reconnection budget exhausted)."
+    say "Remote Control link is dead (bridge recovery budget exhausted)."
     say "Waiting for the claude pane to go idle before restarting…"
     while ! pane_idle; do
         # A manual /remote-control reconnect (or any recovery) clears the state.

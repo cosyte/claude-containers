@@ -386,10 +386,10 @@ if [[ -n "${CLAUDE_DEV_CMD:-}" ]]; then
 fi
 
 # --- 12b. Remote Control watchdog -------------------------------------------
-# Claude Code's RC websocket auto-reconnects on a bounded retry budget; when
-# that budget is exhausted the link dies silently with no recovery — the
-# `claude` process stays alive but the phone session goes dark (upstream bug —
-# see docs/troubleshooting.md). The watchdog detects that from the RC debug log
+# Claude Code's RC bridge auto-reconnects on a bounded retry budget; when that
+# budget is exhausted the link dies silently with no recovery — the `claude`
+# process stays alive but the phone session goes dark (upstream bug — see
+# docs/troubleshooting.md). The watchdog detects that from the RC debug log
 # and respawns the session with --continue once the pane is idle.
 RC_WATCHDOG_PID=""
 if [[ "${CLAUDE_RC_WATCHDOG:-1}" != "0" ]]; then

@@ -76,20 +76,20 @@ contact Anthropic.
 ## Remote Control link drops mid-session (`(unhealthy)`, watchdog)
 
 A session that registered fine can still lose its Remote Control link later.
-Claude Code's RC websocket reconnects on a **bounded retry budget**; once that
-budget is exhausted the link is permanently dead with no recovery — the
-mobile/web app shows the session offline while the local `claude` process keeps
-running, apparently healthy. Upstream bug — anthropics/claude-code#34255 (also
-\#29726).
+Claude Code's RC bridge (a v2 SSE transport) reconnects on a **bounded retry
+budget**; once that budget is exhausted the link is permanently dead with no
+recovery — the mobile/web app shows the session offline while the local
+`claude` process keeps running, apparently healthy. Upstream bug —
+anthropics/claude-code#34255 (also \#29726).
 
 The image handles this with two pieces:
 
 - **Healthcheck (`claude-healthcheck`)** — the Docker `HEALTHCHECK` probe. It
   checks liveness (sshd, the tmux session, the `claude --remote-control`
-  process) *and* reads the RC debug log for the `WS reconnection budget
-  exhausted` event. A silently dropped link therefore shows as `(unhealthy)` in
-  `docker ps` and in the `claude-list` STATUS column — not only an outright
-  crash.
+  process) *and* reads the RC debug log for the bridge's terminal give-up
+  (`recovery exhausted after …` / `notifyBridgeFailed`). A silently dropped
+  link therefore shows as `(unhealthy)` in `docker ps` and in the `claude-list`
+  STATUS column — not only an outright crash.
 - **RC watchdog (`claude-rc-watchdog`)** — a background process started by the
   entrypoint. It tails the same log; on a confirmed dead link it waits for the
   claude pane to go idle (so an in-flight turn is never cut off), then respawns
@@ -114,7 +114,7 @@ watchdog restarts the session and it returns to `(healthy)`. `claude-logs
   disables drop detection — liveness checks still run.
 
 **Watchdog gave up (`MAX_RESTARTS` reached).** The link stayed dead across
-every restart, so this is no longer a transient websocket drop — treat it as a
+every restart, so this is no longer a transient bridge drop — treat it as a
 registration failure. Work through the "Remote Control session not in the
 mobile app" section above, and run `claude remote-control --verbose` in the
 container to see which condition fails.
