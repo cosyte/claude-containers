@@ -15,11 +15,11 @@ cd /workspace || cd "$HOME"
 NAME="${CLAUDE_PROJECT_NAME:-claude}"
 EXTRA="${CLAUDE_EXTRA_ARGS:-}"
 
-# Remote Control debug log. Claude writes bridge/websocket events here so the
+# Remote Control debug log. Claude writes RC bridge events here so the
 # healthcheck and the RC watchdog can tell when the Remote Control link drops
 # (and whether it recovered). Opt out by launching with CLAUDE_RC_DEBUG_LOG="".
 RC_DEBUG_LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
-RC_DEBUG_FILTER="${CLAUDE_RC_DEBUG_FILTER:-bridge,ws}"
+RC_DEBUG_FILTER="${CLAUDE_RC_DEBUG_FILTER:-bridge}"
 
 ARGS=(--dangerously-skip-permissions --remote-control "$NAME")
 

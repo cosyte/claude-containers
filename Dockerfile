@@ -167,8 +167,8 @@ EXPOSE 22
 
 # Healthcheck: liveness (sshd, tmux, the `claude --remote-control` process)
 # plus Remote Control link state read from the RC debug log — so a silently
-# dropped RC websocket shows as `unhealthy` in `docker ps` / `claude-list`,
-# not just an outright crash. The RC watchdog handles recovery; this is the
+# dropped RC link shows as `unhealthy` in `docker ps` / `claude-list`, not
+# just an outright crash. The RC watchdog handles recovery; this is the
 # sensor. start-period covers the git clone + first Claude launch.
 HEALTHCHECK --interval=60s --timeout=15s --start-period=120s --retries=3 \
     CMD ["/usr/local/bin/claude-healthcheck"]
