@@ -240,6 +240,40 @@ if [[ -f "$BAKE_DIR/plugins/plugins.json" ]]; then
     log "Merged baked-in plugin marketplaces/plugins into settings.json"
 fi
 
+# 8c-bis. Runtime plugin injection — no rebuild required.
+# CLAUDE_EXTRA_MARKETPLACES: "name=url[,name=url,...]"  (git source, autoUpdate=true)
+# CLAUDE_EXTRA_PLUGINS:      "plugin@marketplace[,...]"
+# Existing settings.json entries always win (same semantics as the baked merge above).
+if [[ -n "${CLAUDE_EXTRA_MARKETPLACES:-}" ]] || [[ -n "${CLAUDE_EXTRA_PLUGINS:-}" ]]; then
+    MKT_JSON="{}"
+    if [[ -n "${CLAUDE_EXTRA_MARKETPLACES:-}" ]]; then
+        IFS=',' read -ra _MKT_ENTRIES <<< "$CLAUDE_EXTRA_MARKETPLACES"
+        for _entry in "${_MKT_ENTRIES[@]}"; do
+            _name="${_entry%%=*}"; _url="${_entry#*=}"
+            [[ -n "$_name" && -n "$_url" && "$_name" != "$_url" ]] || continue
+            MKT_JSON="$(jq --arg n "$_name" --arg u "$_url" \
+                '. + {($n): {"source": {"source": "git", "url": $u}, "autoUpdate": true}}' \
+                <<< "$MKT_JSON")"
+        done
+    fi
+    PLG_JSON="{}"
+    if [[ -n "${CLAUDE_EXTRA_PLUGINS:-}" ]]; then
+        IFS=',' read -ra _PLG_ENTRIES <<< "$CLAUDE_EXTRA_PLUGINS"
+        for _entry in "${_PLG_ENTRIES[@]}"; do
+            [[ -n "$_entry" ]] || continue
+            PLG_JSON="$(jq --arg p "$_entry" '. + {($p): true}' <<< "$PLG_JSON")"
+        done
+    fi
+    jq --argjson mkt "$MKT_JSON" --argjson plg "$PLG_JSON" '
+        .extraKnownMarketplaces = ($mkt + (.extraKnownMarketplaces // {}))
+        | .enabledPlugins       = ($plg + (.enabledPlugins // {}))
+    ' "$CLAUDE_CONFIG_DIR/settings.json" \
+        > "$CLAUDE_CONFIG_DIR/settings.json.tmp" \
+        && mv -f "$CLAUDE_CONFIG_DIR/settings.json.tmp" "$CLAUDE_CONFIG_DIR/settings.json"
+    chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
+    log "Merged runtime plugin marketplaces/plugins into settings.json"
+fi
+
 # 8d. Custom slash commands
 if compgen -G "$BAKE_DIR/commands/*.md" > /dev/null; then
     install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/commands"

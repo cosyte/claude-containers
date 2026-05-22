@@ -1,43 +1,50 @@
 #!/usr/bin/env bash
 # claude-launch <project-name> [options]
-#   --repo <url>          git URL to clone into a fresh workspace volume
-#   --branch <branch>     branch to check out
-#   --depth <n>           shallow-clone depth
-#   --workspace <path>    bind-mount a local checkout instead of cloning
-#   --port <ssh-port>     explicit host SSH port (default: auto 2200-2299)
-#   --mcp <name>          enable only these baked-in MCP servers (repeatable)
-#   --browser             enable the chrome-devtools MCP for frontend debugging
-#                         (requires an image built with WITH_BROWSER=1, i.e.
-#                         `make build-browser`)
-#   --extra-args "<args>" extra args passed to claude via CLAUDE_EXTRA_ARGS
-#   --expose <h:c>        publish an extra host:container port (repeatable)
-#   --dev-cmd <command>   auto-start a dev server on boot in a tmux 'dev' window
+#   --repo <url>               git URL to clone into a fresh workspace volume
+#   --branch <branch>          branch to check out
+#   --depth <n>                shallow-clone depth
+#   --workspace <path>         bind-mount a local checkout instead of cloning
+#   --port <ssh-port>          explicit host SSH port (default: auto 2200-2299)
+#   --mcp <name>               enable only these baked-in MCP servers (repeatable)
+#   --browser                  enable the chrome-devtools MCP for frontend debugging
+#                              (requires an image built with WITH_BROWSER=1, i.e.
+#                              `make build-browser`)
+#   --extra-args "<args>"      extra args passed to claude via CLAUDE_EXTRA_ARGS
+#   --expose <h:c>             publish an extra host:container port (repeatable)
+#   --dev-cmd <command>        auto-start a dev server on boot in a tmux 'dev' window
+#   --marketplace <name=url>   add a git plugin marketplace at runtime (repeatable)
+#                              e.g. --marketplace claude-skills=git@github.com:org/repo.git
+#   --plugin <name@mkt>        enable a plugin at runtime (repeatable)
+#                              e.g. --plugin software-engineering@claude-skills
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
-# EXTRA/MCP_LIST/DEVCMD default from .env (sourced by _common.sh); flags below
-# override. Without seeding them here, the explicit `-e` flags on `docker run`
-# would shadow any value set in .env with an empty string.
+# EXTRA/MCP_LIST/DEVCMD/MKTS/PLUGINS default from .env (sourced by _common.sh);
+# flags below override. Without seeding them here, the explicit `-e` flags on
+# `docker run` would shadow any value set in .env with an empty string.
 EXTRA="${CLAUDE_EXTRA_ARGS:-}" MCP_LIST="${CLAUDE_MCP_ENABLED:-}" DEVCMD="${CLAUDE_DEV_CMD:-}"
+MKTS="${CLAUDE_EXTRA_MARKETPLACES:-}" PLUGINS="${CLAUDE_EXTRA_PLUGINS:-}"
 EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --repo)       REPO="$2"; OPTS_GIVEN=1; shift 2 ;;
-        --branch)     BRANCH="$2"; OPTS_GIVEN=1; shift 2 ;;
-        --depth)      DEPTH="$2"; OPTS_GIVEN=1; shift 2 ;;
-        --workspace)  WS_PATH="$2"; OPTS_GIVEN=1; shift 2 ;;
-        --port)       PORT="$2"; OPTS_GIVEN=1; shift 2 ;;
-        --mcp)        MCP_LIST="${MCP_LIST:+$MCP_LIST,}$2"; OPTS_GIVEN=1; shift 2 ;;
-        --browser)    BROWSER=1; OPTS_GIVEN=1; shift ;;
-        --extra-args) EXTRA="$2"; OPTS_GIVEN=1; shift 2 ;;
-        --expose)     EXPOSE_RAW+=("$2"); OPTS_GIVEN=1; shift 2 ;;
-        --dev-cmd)    DEVCMD="$2"; OPTS_GIVEN=1; shift 2 ;;
-        -h|--help)    usage 0 ;;
-        -*)           die "unknown option: $1 (try --help)" ;;
-        *)            [[ -z "$PROJECT" ]] && PROJECT="$1" || die "unexpected arg: $1"; shift ;;
+        --repo)        REPO="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --branch)      BRANCH="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --depth)       DEPTH="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --workspace)   WS_PATH="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --port)        PORT="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --mcp)         MCP_LIST="${MCP_LIST:+$MCP_LIST,}$2"; OPTS_GIVEN=1; shift 2 ;;
+        --browser)     BROWSER=1; OPTS_GIVEN=1; shift ;;
+        --extra-args)  EXTRA="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --expose)      EXPOSE_RAW+=("$2"); OPTS_GIVEN=1; shift 2 ;;
+        --dev-cmd)     DEVCMD="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --marketplace) MKTS="${MKTS:+$MKTS,}$2"; OPTS_GIVEN=1; shift 2 ;;
+        --plugin)      PLUGINS="${PLUGINS:+$PLUGINS,}$2"; OPTS_GIVEN=1; shift 2 ;;
+        -h|--help)     usage 0 ;;
+        -*)            die "unknown option: $1 (try --help)" ;;
+        *)             [[ -z "$PROJECT" ]] && PROJECT="$1" || die "unexpected arg: $1"; shift ;;
     esac
 done
 
@@ -163,6 +170,8 @@ docker run -d \
     -e CLAUDE_MCP_ENABLED="$MCP_LIST" \
     -e CLAUDE_DEV_CMD="$DEVCMD" \
     -e CLAUDE_BROWSER="$BROWSER" \
+    -e CLAUDE_EXTRA_MARKETPLACES="$MKTS" \
+    -e CLAUDE_EXTRA_PLUGINS="$PLUGINS" \
     -e CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}" \
     -e GIT_REPO_URL="$REPO" \
     -e GIT_REPO_BRANCH="$BRANCH" \
