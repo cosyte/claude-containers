@@ -146,7 +146,11 @@ reachable. Default Astro/Vite/Next dev ports: 4321 / 5173 / 3000.
 `--dev-cmd REPO=COMMAND` sets `CLAUDE_DEV_CMD` for that service so the
 entrypoint auto-starts it on boot in a separate tmux `dev` window
 (`tmux select-window -t claude:dev` to watch it; `claude-dev` to rerun).
-Pair `--expose` + `--dev-cmd` for a browsable dev site. Two real gotchas:
+Pair `--expose` + `--dev-cmd` for a browsable dev site.
+`--marketplace REPO=NAME=URL` and `--plugin REPO=PLUGIN[,…]` write
+`CLAUDE_EXTRA_MARKETPLACES` / `CLAUDE_EXTRA_PLUGINS` onto a service; the
+entrypoint merges them into `settings.json` on every boot (existing user
+entries win on conflict, so per-container edits stick). No rebuild needed. Two real gotchas:
 the dev server **must bind 0.0.0.0** (localhost = published port reaches
 nothing); and `npm run` needs `-- ` before forwarded flags while
 `pnpm`/`yarn` must NOT get a literal `--` (it makes Astro/Vite ignore

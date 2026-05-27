@@ -32,6 +32,15 @@
 #                       these repos (repeatable; comma/space lists ok). Their
 #                       service uses CLAUDE_IMAGE_BROWSER (default
 #                       claude-code-box:browser; `make build-browser`).
+#     --marketplace <map>  add a git plugin marketplace to a repo at runtime.
+#                       Format REPO=NAME=URL (repeatable). The repo's service
+#                       gets CLAUDE_EXTRA_MARKETPLACES with this entry appended,
+#                       e.g. --marketplace site=claude-skills=git@github.com:org/repo.git
+#     --plugin <map>    enable plugins on a repo at runtime. Format
+#                       REPO=PLUGIN[,PLUGIN...] (repeatable). Each PLUGIN is
+#                       NAME@MKT (the MKT must come from a --marketplace on the
+#                       same repo). Sets CLAUDE_EXTRA_PLUGINS on the service.
+#                       e.g. --plugin site=software-engineering@claude-skills,data@claude-skills
 #     --forks           include forks (default: source repos only)
 #     --archived        include archived repos (default: skip)
 #     --limit <n>       gh repo list limit (default: 500)
@@ -45,7 +54,7 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG=""
 OUT=""
@@ -53,7 +62,7 @@ PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
 WANT_FORKS=0 WANT_ARCHIVED=0
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() MKTS_RAW=() PLUGINS_RAW=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --org)             ORG="$2"; shift 2 ;;
@@ -67,6 +76,8 @@ while [[ $# -gt 0 ]]; do
         --cpu)             CPU_RAW+=("$2"); shift 2 ;;
         --mem)             MEM_RAW+=("$2"); shift 2 ;;
         --browser)         BROWSER_RAW+=("$2"); shift 2 ;;
+        --marketplace)     MKTS_RAW+=("$2"); shift 2 ;;
+        --plugin)          PLUGINS_RAW+=("$2"); shift 2 ;;
         --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
         --forks)           WANT_FORKS=1; shift ;;
         --archived)        WANT_ARCHIVED=1; shift ;;
@@ -140,6 +151,30 @@ for tok in "${BROWSER_RAW[@]:-}"; do
     for one in $(echo "$tok" | tr ',' ' '); do
         BROWSER["$(sanitize "$one")"]=1
     done
+done
+
+# Runtime plugin marketplaces per service: svc -> comma-separated "name=url" list.
+# Each --marketplace value is REPO=NAME=URL — split on the FIRST = to peel off
+# the repo, keep the rest verbatim (URLs commonly contain =, : and @).
+declare -A MKTS=()
+for tok in "${MKTS_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == *=*=* ]] || die "--marketplace must be REPO=NAME=URL (got '$tok')"
+    ms="$(sanitize "${tok%%=*}")"
+    mv="${tok#*=}"
+    MKTS[$ms]="${MKTS[$ms]:-}${MKTS[$ms]:+,}${mv}"
+done
+
+# Runtime plugins per service: svc -> comma-separated "name@mkt" list. Each
+# --plugin value is REPO=PLUGIN[,PLUGIN...]; split on first = then accumulate.
+declare -A PLUGINS=()
+for tok in "${PLUGINS_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == *=* ]] || die "--plugin must be REPO=PLUGIN[,PLUGIN...] (got '$tok')"
+    ps="$(sanitize "${tok%%=*}")"
+    pv="${tok#*=}"
+    [[ -n "$pv" ]] || die "--plugin '$tok' has no plugins after '='"
+    PLUGINS[$ps]="${PLUGINS[$ps]:-}${PLUGINS[$ps]:+,}${pv}"
 done
 
 # The generated multi-repo compose is deployment config, not part of this
@@ -332,6 +367,18 @@ EOF
         echo "      CLAUDE_DEV_CMD: \"${dc}\""
     fi
     [[ -n "${BROWSER[$svc]:-}" ]] && echo '      CLAUDE_BROWSER: "1"'
+    # Marketplace/plugin lists: quote and escape \, ", and $ the same way as
+    # CLAUDE_DEV_CMD so compose doesn't interpolate URL fragments like $foo.
+    if [[ -n "${MKTS[$svc]:-}" ]]; then
+        mv="${MKTS[$svc]}"
+        mv="${mv//\\/\\\\}"; mv="${mv//\"/\\\"}"; mv="${mv//\$/\$\$}"
+        echo "      CLAUDE_EXTRA_MARKETPLACES: \"${mv}\""
+    fi
+    if [[ -n "${PLUGINS[$svc]:-}" ]]; then
+        pv="${PLUGINS[$svc]}"
+        pv="${pv//\\/\\\\}"; pv="${pv//\"/\\\"}"; pv="${pv//\$/\$\$}"
+        echo "      CLAUDE_EXTRA_PLUGINS: \"${pv}\""
+    fi
     cat <<EOF
       GIT_AUTHOR_NAME: "${GH_NAME}"
       GIT_AUTHOR_EMAIL: "${GH_MAIL}"
@@ -393,6 +440,14 @@ for r in "${FINAL[@]}"; do
     [[ -n "${DEVCMD[$s]:-}" ]] && extra="$extra +dev"
     [[ -n "${CPU[$s]:-}" || -n "${MEM[$s]:-}" ]] && extra="$extra +res(${CPU[$s]:-$CLAUDE_CPU_LIMIT}cpu/${MEM[$s]:-$CLAUDE_MEM_LIMIT})"
     [[ -n "${BROWSER[$s]:-}" ]] && extra="$extra +browser"
+    if [[ -n "${MKTS[$s]:-}" ]]; then
+        n_mkts="$(awk -F, '{print NF}' <<<"${MKTS[$s]}")"
+        extra="$extra +mkts($n_mkts)"
+    fi
+    if [[ -n "${PLUGINS[$s]:-}" ]]; then
+        n_plugs="$(awk -F, '{print NF}' <<<"${PLUGINS[$s]}")"
+        extra="$extra +plugins($n_plugs)"
+    fi
     printf '   %-22s -> claude-%-20s ssh :%-5s %s%s\n' "$nm" "$s" "${SVCPORT[$s]}" "$mark" "$extra"
 done
 

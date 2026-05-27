@@ -156,6 +156,8 @@ session container per repo in a GitHub org:
 claude-compose-gen --org ORG --out FILE [--active REPOS]... [--dormant-profile NAME]
                    [--expose REPO:HOSTPORT:CONTAINERPORT]...
                    [--dev-cmd REPO=COMMAND]...
+                   [--browser REPOS]...
+                   [--marketplace REPO=NAME=URL]... [--plugin REPO=PLUGIN[,...]]...
                    [--include GLOB] [--exclude GLOB] [--forks] [--archived]
 claude-compose-gen --out FILE repo-a repo-b:dev      # explicit list, no gh needed
 ```
@@ -188,6 +190,20 @@ claude-compose-gen --org ORG --out FILE --active my-site \
 Then `http://<host>:4321` serves the live dev site; SSH in and
 `tmux select-window -t claude:dev` to watch its output (`claude-dev` reruns
 it).
+
+**Runtime plugin marketplaces.** `--marketplace REPO=NAME=URL` and
+`--plugin REPO=PLUGIN[,…]` write `CLAUDE_EXTRA_MARKETPLACES` /
+`CLAUDE_EXTRA_PLUGINS` onto a service. The entrypoint merges these into
+Claude Code's `settings.json` on every boot — no image rebuild, no manual
+edit. Existing `settings.json` entries win on conflict (so per-container user
+choices stick). Same syntax as the single-container `claude-launch
+--marketplace` / `--plugin`, with a `REPO=` prefix to say which service:
+
+```
+./bin/claude-compose-gen --org ORG --out FILE --active site \
+  --marketplace site=claude-skills=git@github.com:org/crew.git \
+  --plugin 'site=software-engineering@claude-skills,data@claude-skills'
+```
 
 It enumerates via an authenticated `gh` (scopes `repo` + `read:org`) or takes
 explicit `repo[:branch]` args, assigns stable SSH ports from the configured
