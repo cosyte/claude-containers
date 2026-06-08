@@ -207,15 +207,16 @@ GH_MAIL="$(git config --global user.email 2>/dev/null || true)"
 # `make build-browser` tag; override with CLAUDE_IMAGE_BROWSER.
 BROWSER_IMAGE="${CLAUDE_IMAGE_BROWSER:-claude-code-box:browser}"
 
-# --- Collect repos as "name<TAB>branch" --------------------------------------
+# --- Collect repos as "owner<TAB>name<TAB>branch" -----------------------------
+# Two independent sources, combined: (1) gh enumeration of --org (owner=ORG for
+# every repo), and (2) explicit repo args. An explicit arg may carry its own
+# owner as "owner/repo[:branch]" to pull a repo from outside --org; bare
+# "repo[:branch]" defaults its owner to ORG. This lets one compose mix a whole
+# org with a few one-off repos from elsewhere.
 declare -a REPOS=()
-if [[ ${#REPO_ARGS[@]} -gt 0 ]]; then
-    for r in "${REPO_ARGS[@]}"; do
-        REPOS+=("${r%%:*}	$( [[ "$r" == *:* ]] && echo "${r#*:}" || echo '' )")
-    done
-else
+if [[ -n "$ORG" ]]; then
     command -v gh >/dev/null 2>&1 \
-        || die "gh not found and no repo args given. Install/auth gh, or pass repo names."
+        || die "gh not found and --org given. Install/auth gh, or drop --org and pass owner/repo args."
     gh auth status >/dev/null 2>&1 \
         || die "gh is not authenticated. Run 'gh auth login' first."
     info "Enumerating ${ORG}/* via gh…"
@@ -223,25 +224,36 @@ else
         --json name,isFork,isArchived 2>/dev/null)" \
         || die "gh repo list $ORG failed"
     while IFS=$'\t' read -r name branch; do
-        [[ -n "$name" ]] && REPOS+=("$name	$branch")
+        [[ -n "$name" ]] && REPOS+=("$ORG	$name	$branch")
     done < <(echo "$json" | jq -r --argjson f "$WANT_FORKS" --argjson a "$WANT_ARCHIVED" '
         .[] | select(($f==1 or (.isFork|not)) and ($a==1 or (.isArchived|not)))
         | [.name, ""] | @tsv')
 fi
+for r in "${REPO_ARGS[@]:-}"; do
+    [[ -n "$r" ]] || continue
+    spec="${r%%:*}"
+    branch="$( [[ "$r" == *:* ]] && echo "${r#*:}" || echo '' )"
+    if [[ "$spec" == */* ]]; then owner="${spec%%/*}"; name="${spec##*/}"
+    else owner="$ORG"; name="$spec"; fi
+    [[ -n "$owner" ]] || die "repo '$r' has no owner: pass owner/repo or set --org"
+    [[ -n "$name"  ]] || die "repo '$r' has no name"
+    REPOS+=("$owner	$name	$branch")
+done
+[[ ${#REPOS[@]} -gt 0 ]] || die "no repos to emit (pass repo args or --org)"
 
 # --- Apply include/exclude, sanitize, sort, dedupe ---------------------------
 declare -A SEEN=()
 declare -a FINAL=()
 match_any() { local n="$1"; shift; for g in "$@"; do [[ "$n" == $g ]] && return 0; done; return 1; }
 # sort by repo name so port assignment is stable across regenerations
-while IFS=$'\t' read -r name branch; do
+while IFS=$'\t' read -r owner name branch; do
     [[ -n "$name" ]] || continue
     if [[ ${#INCLUDE[@]} -gt 0 ]]; then match_any "$name" "${INCLUDE[@]}" || continue; fi
     if [[ ${#EXCLUDE[@]} -gt 0 ]]; then match_any "$name" "${EXCLUDE[@]}" && continue; fi
     s="$(sanitize "$name")"
     [[ -n "${SEEN[$s]:-}" ]] && continue
     SEEN[$s]=1
-    FINAL+=("$s	$name	$branch")
+    FINAL+=("$s	$owner	$name	$branch")
 done < <(printf '%s\n' "${REPOS[@]}" | sort -f)
 
 [[ ${#FINAL[@]} -gt 0 ]] || die "no repos selected (after filters)"
@@ -316,8 +328,8 @@ services:
 EOF
 
 for row in "${FINAL[@]}"; do
-    IFS=$'\t' read -r svc name branch <<<"$row"
-    url="git@github.com:${ORG}/${name}.git"
+    IFS=$'\t' read -r svc owner name branch <<<"$row"
+    url="git@github.com:${owner}/${name}.git"
     port="${SVCPORT[$svc]}"
     svc_cpu="${CPU[$svc]:-$CLAUDE_CPU_LIMIT}"
     svc_mem="${MEM[$svc]:-$CLAUDE_MEM_LIMIT}"
