@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "cosyte-crew": {
+      "source": {
+        "source": "github",
+        "repo": "cosyte/crew"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "software-engineering@cosyte-crew": true,
+    "devops-platform@cosyte-crew": true
+  }
+}
