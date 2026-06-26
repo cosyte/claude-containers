@@ -405,11 +405,28 @@ export CLAUDE_RC_DEBUG_LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
 export CLAUDE_PROJECT_NAME CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}" \
        CLAUDE_DEV_CMD="${CLAUDE_DEV_CMD:-}"
 
-# tmux server runs as the claude user; claude-session is the pane command and
-# falls back to an interactive shell if Claude exits, so SSH stays usable. The
-# Claude pane lives in window 'main' (the RC watchdog respawns it by name).
-asclaude tmux new-session -d -s claude -n main -x 220 -y 50 /usr/local/bin/claude-session
-log "Claude Code session 'claude' started in tmux"
+# Two modes, selected by CLAUDE_AUTOPILOT:
+#   interactive (default) — main pane is claude-session (Remote Control + SSH).
+#   autopilot             — main pane is claude-autopilot, a headless Claude loop
+#                           (default `/next`) for unattended continuous build-out;
+#                           there is no Remote Control link, so the RC watchdog is
+#                           skipped. Either way SSH attaches to the live tmux pane.
+case "${CLAUDE_AUTOPILOT:-0}" in
+    1|true|yes|on) CLAUDE_MODE=autopilot;   MAIN_PANE_CMD=/usr/local/bin/claude-autopilot ;;
+    *)             CLAUDE_MODE=interactive; MAIN_PANE_CMD=/usr/local/bin/claude-session ;;
+esac
+export CLAUDE_MODE \
+       CLAUDE_AUTOPILOT_CMD="${CLAUDE_AUTOPILOT_CMD:-}" \
+       CLAUDE_AUTOPILOT_INTERVAL="${CLAUDE_AUTOPILOT_INTERVAL:-}" \
+       CLAUDE_AUTOPILOT_MAX_RUNS="${CLAUDE_AUTOPILOT_MAX_RUNS:-}" \
+       CLAUDE_AUTOPILOT_BACKOFF_MAX="${CLAUDE_AUTOPILOT_BACKOFF_MAX:-}" \
+       CLAUDE_AUTOPILOT_LOG_DIR="${CLAUDE_AUTOPILOT_LOG_DIR:-}"
+
+# tmux server runs as the claude user; the main pane command falls back to an
+# interactive shell if it exits, so SSH stays usable. The pane lives in window
+# 'main' (the RC watchdog respawns it by name in interactive mode).
+asclaude tmux new-session -d -s claude -n main -x 220 -y 50 "$MAIN_PANE_CMD"
+log "Claude Code session 'claude' started in tmux (mode: $CLAUDE_MODE)"
 
 # Optional dev server: runs $CLAUDE_DEV_CMD in its own 'dev' tmux window so it
 # auto-starts on boot, is observable (tmux select-window -t claude:dev), and
@@ -427,7 +444,9 @@ fi
 # watchdog detects that terminal state from the RC debug log and respawns the
 # session with --continue once the pane is idle.
 RC_WATCHDOG_PID=""
-if [[ "${CLAUDE_RC_WATCHDOG:-1}" != "0" ]]; then
+if [[ "$CLAUDE_MODE" == "autopilot" ]]; then
+    log "Remote Control watchdog skipped (autopilot mode — no Remote Control session)"
+elif [[ "${CLAUDE_RC_WATCHDOG:-1}" != "0" ]]; then
     asclaude /usr/local/bin/claude-rc-watchdog &
     RC_WATCHDOG_PID=$!
     log "Remote Control watchdog started (disable with CLAUDE_RC_WATCHDOG=0)"
@@ -436,7 +455,11 @@ else
 fi
 
 echo
-log "Remote Control name : $CLAUDE_PROJECT_NAME  (look for it in the Claude app Code tab)"
+if [[ "$CLAUDE_MODE" == "autopilot" ]]; then
+    log "Autopilot           : headless loop running '${CLAUDE_AUTOPILOT_CMD:-/next}' in tmux window 'main'"
+else
+    log "Remote Control name : $CLAUDE_PROJECT_NAME  (look for it in the Claude app Code tab)"
+fi
 log "SSH                 : connect, you'll attach to the live tmux session"
 [[ -n "${CLAUDE_DEV_CMD:-}" ]] && \
     log "Dev window          : tmux select-window -t claude:dev  (after SSH attach)"

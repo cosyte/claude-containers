@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# tmux 'main' window command for UNATTENDED operation.
+#
+# Instead of an interactive Remote Control session (claude-session), drive a
+# headless Claude loop on an interval — by default `/next`, the cosyte cockpit's
+# session-independent continuous-build-out command, which reads its work queue
+# from disk and does one unit per run. The container thus builds continuously
+# with no human in the seat. Mirrors claude-dev's "run, then drop to a shell so
+# the SSH/tmux window stays usable" contract.
+#
+# Selected by CLAUDE_AUTOPILOT=1 (the entrypoint runs this as the main pane
+# instead of claude-session, and skips the Remote Control watchdog).
+#
+# Tunables (env, all optional):
+#   CLAUDE_AUTOPILOT_CMD          prompt/command to run each cycle   (default: /next)
+#   CLAUDE_AUTOPILOT_INTERVAL     seconds between successful runs    (default: 3600)
+#   CLAUDE_AUTOPILOT_MAX_RUNS     stop after N runs, 0 = unlimited   (default: 0)
+#   CLAUDE_AUTOPILOT_BACKOFF_MAX  cap on failure backoff, seconds    (default: 21600)
+#   CLAUDE_AUTOPILOT_LOG_DIR      where per-run JSON logs go         (default: ~/.claude/autopilot-logs)
+#   CLAUDE_EXTRA_ARGS             extra args appended to `claude`
+set -uo pipefail
+
+cd /workspace 2>/dev/null || cd "$HOME"
+
+PROMPT="${CLAUDE_AUTOPILOT_CMD:-/next}"
+INTERVAL="${CLAUDE_AUTOPILOT_INTERVAL:-3600}"
+MAX_RUNS="${CLAUDE_AUTOPILOT_MAX_RUNS:-0}"
+BACKOFF_MAX="${CLAUDE_AUTOPILOT_BACKOFF_MAX:-21600}"
+EXTRA="${CLAUDE_EXTRA_ARGS:-}"
+LOG_DIR="${CLAUDE_AUTOPILOT_LOG_DIR:-$HOME/.claude/autopilot-logs}"
+mkdir -p "$LOG_DIR"
+
+echo "[autopilot] prompt   : $PROMPT"
+echo "[autopilot] interval : ${INTERVAL}s   max_runs: $([ "$MAX_RUNS" = 0 ] && echo ∞ || echo "$MAX_RUNS")"
+echo "[autopilot] workspace: $(pwd)"
+echo "[autopilot] logs     : $LOG_DIR"
+echo "[autopilot] auth     : Max subscription OAuth (entrypoint refuses ANTHROPIC_API_KEY)"
+echo
+
+run=0
+fails=0
+while :; do
+    run=$((run + 1))
+    ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    out="$LOG_DIR/run-$ts.json"
+    echo "[autopilot] === run #$run ($ts) ==="
+
+    # Headless and container-isolated, so --dangerously-skip-permissions is the
+    # accepted model here (identical to claude-session). NOT --remote-control:
+    # this is unattended. Each run is a fresh session by design — /next is
+    # session-independent and recovers its state from disk.
+    ok=1
+    # shellcheck disable=SC2086  # EXTRA is intentionally word-split
+    if claude -p "$PROMPT" --dangerously-skip-permissions --output-format json $EXTRA >"$out" 2>&1; then
+        if command -v jq >/dev/null 2>&1 \
+            && [ "$(jq -r '.is_error // false' "$out" 2>/dev/null)" = "true" ]; then
+            ok=0
+        fi
+    else
+        ok=0
+    fi
+
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.result // "(no result field)"' "$out" 2>/dev/null | head -n 40
+    else
+        tail -n 5 "$out"
+    fi
+
+    if [ "$ok" = 1 ]; then
+        fails=0
+        sleep_for="$INTERVAL"
+    else
+        fails=$((fails + 1))
+        # Exponential backoff on failure (rate-limit / error), capped. Protects
+        # the shared Max quota from a hot failure loop.
+        shift_by=$((fails > 4 ? 4 : fails))
+        sleep_for=$((INTERVAL * (1 << shift_by)))
+        [ "$sleep_for" -gt "$BACKOFF_MAX" ] && sleep_for="$BACKOFF_MAX"
+        echo "[autopilot] run FAILED (consecutive=$fails) — backing off. Log: $out"
+    fi
+
+    if [ "$MAX_RUNS" != 0 ] && [ "$run" -ge "$MAX_RUNS" ]; then
+        echo "[autopilot] reached max_runs=$MAX_RUNS — stopping."
+        break
+    fi
+
+    echo "[autopilot] next run in ${sleep_for}s"
+    sleep "$sleep_for"
+done
+
+echo
+echo "[autopilot] loop ended. Dropping to a shell."
+echo "Rerun with:  claude-autopilot"
+exec bash -l

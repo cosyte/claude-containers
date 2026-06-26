@@ -72,6 +72,38 @@ config keeps sessions independent and resumable. The entrypoint keeps the
 credentials file converged across containers. Details and the deviation
 rationale: [docs/architecture.md](docs/architecture.md).
 
+## Unattended autopilot
+
+A container has two modes, selected by `CLAUDE_AUTOPILOT`:
+
+- **interactive** (default) — the main tmux pane is a Remote Control + SSH
+  session (`claude-session`), as above.
+- **autopilot** (`CLAUDE_AUTOPILOT=1`) — the main pane instead runs a **headless
+  Claude loop** (`claude-autopilot`): every `CLAUDE_AUTOPILOT_INTERVAL` seconds
+  it fires `claude -p "$CLAUDE_AUTOPILOT_CMD"` (default `/next`) and prints the
+  result. No Remote Control link (the watchdog is skipped); SSH still attaches
+  to the live pane so you can watch it. Each run is a fresh session — perfect for
+  a session-independent command like `/next` that recovers its state from disk.
+
+Point one autopilot container at a repo whose continuous-build command you want
+run hands-off:
+
+```bash
+CLAUDE_AUTOPILOT=1 CLAUDE_AUTOPILOT_CMD=/next CLAUDE_AUTOPILOT_INTERVAL=3600 \
+  ./bin/claude-launch cockpit --repo git@github.com:cosyte/<umbrella>.git
+```
+
+Failures back off exponentially (up to `CLAUDE_AUTOPILOT_BACKOFF_MAX`, default
+6h) so a hot error/rate-limit loop can't burn your quota. Per-run JSON logs land
+in `CLAUDE_AUTOPILOT_LOG_DIR` (default `~/.claude/autopilot-logs`); `claude-logs`
+still shows the entrypoint/sshd log.
+
+**Auth + quota.** Autopilot uses the same Max-subscription OAuth as every other
+container (the entrypoint refuses `ANTHROPIC_API_KEY`). A single Max plan is
+shared across all running containers via the converged `claude-auth` volume, so
+mind the plan's 5-hour and weekly limits when choosing the interval and how many
+autopilot containers run at once — a too-tight cadence exhausts the subscription.
+
 ## Environment variables
 
 Set in `.env` (auto-loaded by the scripts and passed into containers). Real env
@@ -86,6 +118,10 @@ vars override `.env`. Full reference: `.env.example`.
 | `PNPM_VERSION` | `latest` | `pnpm` version baked in (pin for reproducibility) |
 | `CLAUDE_UID`/`CLAUDE_GID`/`CLAUDE_USER` | `1000`/`1000`/`claude` | Container user |
 | `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `default`/`acceptEdits`/`bypassPermissions` |
+| `CLAUDE_AUTOPILOT` | `0` | `1` = unattended mode: main pane runs a headless `claude -p` loop instead of Remote Control (see [Unattended autopilot](#unattended-autopilot)) |
+| `CLAUDE_AUTOPILOT_CMD` | `/next` | What the autopilot loop runs each cycle |
+| `CLAUDE_AUTOPILOT_INTERVAL` | `3600` | Seconds between successful autopilot runs |
+| `CLAUDE_AUTOPILOT_MAX_RUNS` | `0` | Stop after N autopilot runs (`0` = unlimited) |
 | `CLAUDE_EXTRA_ARGS` | — | Extra args to `claude` (or `--extra-args`) |
 | `CLAUDE_MCP_ENABLED` | — | CSV of baked MCP servers to load (empty = all) |
 | `WITH_BROWSER` | `0` | Build arg: 1 bakes Chromium + chrome-devtools-mcp (+~200 MB). `make build-browser` flips it. |
