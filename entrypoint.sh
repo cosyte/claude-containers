@@ -100,6 +100,23 @@ asclaude git config --global --get-all safe.directory 2>/dev/null \
     || asclaude git config --global --add safe.directory "$WORKSPACE" || true
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 
+# Secret guard: a fleet-wide pre-commit hook (global core.hooksPath) that blocks
+# committing obvious secrets/credentials — important because the agent commits
+# and pushes autonomously with a mounted key and one shared credential volume.
+# Disable with CLAUDE_SECRET_GUARD=0. The hook chains to a repo's own pre-commit.
+HOOKS_DIR="$CLAUDE_HOME/.claude-hooks"
+case "${CLAUDE_SECRET_GUARD:-1}" in
+    0|false|no|off)
+        asclaude git config --global --unset core.hooksPath 2>/dev/null || true
+        log "Secret guard         : disabled (CLAUDE_SECRET_GUARD=0)" ;;
+    *)
+        asclaude mkdir -p "$HOOKS_DIR"
+        ln -sf /usr/local/bin/claude-secret-guard "$HOOKS_DIR/pre-commit"
+        chown -h "$CLAUDE_UID:$CLAUDE_GID" "$HOOKS_DIR/pre-commit" 2>/dev/null || true
+        asclaude git config --global core.hooksPath "$HOOKS_DIR"
+        log "Secret guard         : on (blocks committing secrets; bypass with git commit --no-verify)" ;;
+esac
+
 # GitHub HTTPS auth (dynamic, additive): when GH_TOKEN is supplied, wire the
 # `gh` CLI in as git's credential helper for github.com so HTTPS clone/push
 # also work with the token. SSH remotes keep using the mounted deploy key, so
@@ -420,7 +437,9 @@ export CLAUDE_MODE \
        CLAUDE_AUTOPILOT_INTERVAL="${CLAUDE_AUTOPILOT_INTERVAL:-}" \
        CLAUDE_AUTOPILOT_MAX_RUNS="${CLAUDE_AUTOPILOT_MAX_RUNS:-}" \
        CLAUDE_AUTOPILOT_BACKOFF_MAX="${CLAUDE_AUTOPILOT_BACKOFF_MAX:-}" \
-       CLAUDE_AUTOPILOT_LOG_DIR="${CLAUDE_AUTOPILOT_LOG_DIR:-}"
+       CLAUDE_AUTOPILOT_LOG_DIR="${CLAUDE_AUTOPILOT_LOG_DIR:-}" \
+       CLAUDE_AUTOPILOT_RESUME="${CLAUDE_AUTOPILOT_RESUME:-}" \
+       CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 
 # tmux server runs as the claude user; the main pane command falls back to an
 # interactive shell if it exits, so SSH stays usable. The pane lives in window

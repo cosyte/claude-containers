@@ -93,10 +93,20 @@ CLAUDE_AUTOPILOT=1 CLAUDE_AUTOPILOT_CMD=/next CLAUDE_AUTOPILOT_INTERVAL=3600 \
   ./bin/claude-launch cockpit --repo git@github.com:cosyte/<umbrella>.git
 ```
 
-Failures back off exponentially (up to `CLAUDE_AUTOPILOT_BACKOFF_MAX`, default
-6h) so a hot error/rate-limit loop can't burn your quota. Per-run JSON logs land
-in `CLAUDE_AUTOPILOT_LOG_DIR` (default `~/.claude/autopilot-logs`); `claude-logs`
-still shows the entrypoint/sshd log.
+On a rate/usage-limit failure the loop parses the actual reset time (from the
+run output or a reset epoch in the JSON) and sleeps until then — better shared-
+quota throughput than blind waiting — and falls back to exponential backoff (up
+to `CLAUDE_AUTOPILOT_BACKOFF_MAX`, default 6h) when no reset time is found, so a
+hot error loop still can't burn your quota. Each run logs its `total_cost_usd`
+(plus turns and duration) so the shared subscription's spend is attributable per
+container. Per-run JSON logs land in `CLAUDE_AUTOPILOT_LOG_DIR` (default
+`~/.claude/autopilot-logs`); `claude-logs` still shows the entrypoint/sshd log.
+
+By default each cycle is a fresh session (suits session-independent commands
+like `/next` that recover state from disk). Set `CLAUDE_AUTOPILOT_RESUME=1` to
+instead carry the exact conversation forward via `--resume <session_id>` (the ID
+is captured from each run's JSON and persisted on the container's config volume)
+— use it for a single stateful long-running task rather than a queue-driven one.
 
 **Auth + quota.** Autopilot uses the same Max-subscription OAuth as every other
 container (the entrypoint refuses `ANTHROPIC_API_KEY`). A single Max plan is
@@ -117,11 +127,13 @@ vars override `.env`. Full reference: `.env.example`.
 | `UV_VERSION` | `latest` | `uv` version (pin for reproducibility) |
 | `PNPM_VERSION` | `latest` | `pnpm` version baked in (pin for reproducibility) |
 | `CLAUDE_UID`/`CLAUDE_GID`/`CLAUDE_USER` | `1000`/`1000`/`claude` | Container user |
-| `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `default`/`acceptEdits`/`bypassPermissions` |
+| `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `default`/`acceptEdits`/`plan`/`bypassPermissions`. Honored by both the interactive session and autopilot; `acceptEdits` is the safer fleet posture (gates shell/network) |
+| `CLAUDE_SECRET_GUARD` | `1` | `1` installs a fleet-wide git pre-commit hook that blocks committing secrets (`.env`, `*.pem`, `*.key`, `id_rsa`, PRIVATE KEY blocks). Bypass once with `git commit --no-verify`; extend via `CLAUDE_SECRET_GUARD_EXTRA` |
 | `CLAUDE_AUTOPILOT` | `0` | `1` = unattended mode: main pane runs a headless `claude -p` loop instead of Remote Control (see [Unattended autopilot](#unattended-autopilot)) |
 | `CLAUDE_AUTOPILOT_CMD` | `/next` | What the autopilot loop runs each cycle |
 | `CLAUDE_AUTOPILOT_INTERVAL` | `3600` | Seconds between successful autopilot runs |
 | `CLAUDE_AUTOPILOT_MAX_RUNS` | `0` | Stop after N autopilot runs (`0` = unlimited) |
+| `CLAUDE_AUTOPILOT_RESUME` | `0` | `1` = carry the conversation forward via `--resume <session_id>` each cycle instead of a fresh session |
 | `CLAUDE_EXTRA_ARGS` | — | Extra args to `claude` (or `--extra-args`) |
 | `CLAUDE_MCP_ENABLED` | — | CSV of baked MCP servers to load (empty = all) |
 | `WITH_BROWSER` | `0` | Build arg: 1 bakes Chromium + chrome-devtools-mcp (+~200 MB). `make build-browser` flips it. |
@@ -331,8 +343,17 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   isolated from the host (separate fs, non-root `claude` user, resource caps),
   but the agent has free rein *inside* it: it can run any command and push to
   any repo its mounted key can reach. Treat each container as a blast radius of
-  one repo. Use `CLAUDE_PERMISSION_MODE=acceptEdits` if you want shell commands
-  to still prompt in the app.
+  one repo. For a production fleet against real repos, set
+  `CLAUDE_PERMISSION_MODE=acceptEdits` (in-project edits auto-approved, shell/
+  network still gated) — now honored by **both** the interactive session and
+  autopilot, not just the app prompt.
+- **Secret guard (on by default).** A fleet-wide git pre-commit hook
+  (`CLAUDE_SECRET_GUARD=1`) blocks the autonomous agent from committing obvious
+  secrets — `.env`, `*.pem`, `*.key`, `id_rsa`, files containing a `PRIVATE KEY`
+  block — before they can be pushed with the mounted key. Bypass a deliberate
+  file once with `git commit --no-verify`; extend the deny-list via
+  `CLAUDE_SECRET_GUARD_EXTRA`; disable with `CLAUDE_SECRET_GUARD=0`. The hook
+  chains to a repo's own `pre-commit` so existing project hooks still run.
 - **`claude-auth` volume** holds your live OAuth credentials
   (`.credentials.json`) — effectively your Claude session. Anyone who can read
   this Docker volume can act as you. Rotate by `docker volume rm claude-auth`
