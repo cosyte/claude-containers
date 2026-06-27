@@ -442,6 +442,12 @@ export CLAUDE_MODE \
        CLAUDE_AUTOPILOT_QUEUE="${CLAUDE_AUTOPILOT_QUEUE:-}" \
        CLAUDE_AUTOPILOT_QUEUE_DIR="${CLAUDE_AUTOPILOT_QUEUE_DIR:-}" \
        CLAUDE_AUTOPILOT_QUEUE_DELAY="${CLAUDE_AUTOPILOT_QUEUE_DELAY:-}" \
+       CLAUDE_SCM_OBSERVER="${CLAUDE_SCM_OBSERVER:-}" \
+       CLAUDE_SCM_INTERVAL="${CLAUDE_SCM_INTERVAL:-}" \
+       CLAUDE_SCM_EVENTS="${CLAUDE_SCM_EVENTS:-}" \
+       CLAUDE_SCM_PR_FILTER="${CLAUDE_SCM_PR_FILTER:-}" \
+       CLAUDE_SCM_PR_LIMIT="${CLAUDE_SCM_PR_LIMIT:-}" \
+       CLAUDE_SCM_PRIORITY="${CLAUDE_SCM_PRIORITY:-}" \
        CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 
 # OpenTelemetry: opt-in fleet observability. Claude Code reads OTEL_* + the
@@ -486,6 +492,17 @@ log "Claude Code session 'claude' started in tmux (mode: $CLAUDE_MODE)"
 if [[ -n "${CLAUDE_DEV_CMD:-}" ]]; then
     asclaude tmux new-window -t claude -n dev /usr/local/bin/claude-dev
     log "Dev server started in tmux window 'dev': $CLAUDE_DEV_CMD"
+fi
+
+# Optional SCM observer: polls the workspace repo's PRs and routes CI failures /
+# change requests / merge conflicts into the autopilot task queue. Runs in its
+# own 'scm' tmux window. Pair with CLAUDE_AUTOPILOT=1 + CLAUDE_AUTOPILOT_QUEUE=1
+# so the same container consumes what it observes.
+if [[ "${CLAUDE_SCM_OBSERVER:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    asclaude tmux new-window -t claude -n scm /usr/local/bin/claude-scm-observer
+    log "SCM observer         : routing repo events into the queue (tmux window 'scm')"
+    [[ "${CLAUDE_AUTOPILOT_QUEUE:-0}" =~ ^(1|true|yes|on)$ ]] || \
+        log "SCM observer         : NOTE — enqueues tasks, but nothing consumes them without CLAUDE_AUTOPILOT=1 + CLAUDE_AUTOPILOT_QUEUE=1"
 fi
 
 # --- 12b. Remote Control watchdog -------------------------------------------

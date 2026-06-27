@@ -124,8 +124,20 @@ claude-enqueue --priority 0 "Urgent: patch the CVE in deps"   # lower = sooner
 
 The queue lives on the per-container config volume (`~/.claude/autopilot-queue/`)
 so it survives restarts; `CLAUDE_AUTOPILOT_QUEUE_DELAY` (default 10s) paces tasks
-while draining. This is the first step toward the event-driven model (next:
-routing CI/PR-review events straight into the queue).
+while draining.
+
+**Event-driven routing.** `CLAUDE_SCM_OBSERVER=1` runs a poller (tmux window
+`scm`) that turns the queue from pull to push: every `CLAUDE_SCM_INTERVAL`
+(default 300s) it lists the workspace repo's open PRs via `gh` and enqueues a
+task for each **new** actionable event — a failing CI check, a *changes
+requested* review, or a merge conflict — so the container reacts to repo events
+instead of only a clock. Events are keyed by PR + head commit, so a given
+failure is routed once and re-fires only when new commits land (never every
+poll). Polling (not webhooks) keeps the outbound-only posture — no inbound port.
+Choose signals with `CLAUDE_SCM_EVENTS=ci,review,conflict`, scope with
+`CLAUDE_SCM_PR_FILTER` (e.g. `--author @me`); it needs a GitHub remote and, for
+private repos, `GH_TOKEN`. Pair it with `CLAUDE_AUTOPILOT=1` +
+`CLAUDE_AUTOPILOT_QUEUE=1` so the same container consumes what it observes.
 
 **Fleet observability.** Set `CLAUDE_OTEL_ENABLED=1` (or just an
 `OTEL_EXPORTER_OTLP_ENDPOINT`) to export Claude Code's native per-call cost/token
@@ -162,6 +174,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_AUTOPILOT_MAX_RUNS` | `0` | Stop after N autopilot runs (`0` = unlimited) |
 | `CLAUDE_AUTOPILOT_RESUME` | `0` | `1` = carry the conversation forward via `--resume <session_id>` each cycle instead of a fresh session |
 | `CLAUDE_AUTOPILOT_QUEUE` | `0` | `1` = consume prompt files from a durable task queue (`claude-enqueue`), falling back to `/next` when empty (see [Unattended autopilot](#unattended-autopilot)) |
+| `CLAUDE_SCM_OBSERVER` | `0` | `1` = poll the repo's PRs via `gh` and route CI failures / change requests / merge conflicts into the queue (`CLAUDE_SCM_*` tune it; see `.env.example`) |
 | `CLAUDE_OTEL_ENABLED` | `0` | `1` (or setting `OTEL_EXPORTER_OTLP_ENDPOINT`) exports Claude Code's per-call cost/token telemetry to an OTLP backend, tagged per container. `CLAUDE_OTEL_TRACES=1` adds traces; see `.env.example` for the `OTEL_*` vars |
 | `CLAUDE_EXTRA_ARGS` | — | Extra args to `claude` (or `--extra-args`) |
 | `CLAUDE_MCP_ENABLED` | — | CSV of baked MCP servers to load (empty = all) |

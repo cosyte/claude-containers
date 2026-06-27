@@ -230,6 +230,19 @@ check "OpenTelemetry export composed + logged when enabled" \
 docker rm -f "$OTELCN" >/dev/null 2>&1 || true
 
 echo
+echo "== 12. SCM observer: baked + event extraction =="
+# Two PRs: #7 failing CI (→ event), #8 healthy (→ no event). The `events`
+# dry-run is a pure jq transform (no gh/workspace), so it runs in any container.
+cat > "$TMP/scm.json" <<'JSON'
+[ {"number":7,"title":"x","url":"u7","headRefOid":"h7","mergeable":"MERGEABLE","reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[{"conclusion":"FAILURE"}]},
+  {"number":8,"title":"y","url":"u8","headRefOid":"h8","mergeable":"MERGEABLE","reviewDecision":"APPROVED","statusCheckRollup":[{"conclusion":"SUCCESS"}]} ]
+JSON
+check "claude-scm-observer baked + executable" \
+    'cexec "test -x /usr/local/bin/claude-scm-observer"'
+check "observer routes a failing-CI PR and skips a healthy one" \
+    'out="$(docker exec -i "$CN" claude-scm-observer events < "$TMP/scm.json")"; grep -q "pr7-ci-h7" <<<"$out" && ! grep -q "pr8" <<<"$out"'
+
+echo
 echo "==============================================="
 echo "  PASS: $PASS   FAIL: $FAIL"
 echo "==============================================="

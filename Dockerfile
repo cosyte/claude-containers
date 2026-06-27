@@ -143,13 +143,14 @@ COPY bin/claude-session /usr/local/bin/claude-session
 COPY bin/claude-dev /usr/local/bin/claude-dev
 COPY bin/claude-autopilot /usr/local/bin/claude-autopilot
 COPY bin/claude-enqueue /usr/local/bin/claude-enqueue
+COPY bin/claude-scm-observer /usr/local/bin/claude-scm-observer
 COPY bin/claude-secret-guard /usr/local/bin/claude-secret-guard
 COPY bin/claude-rc-watchdog /usr/local/bin/claude-rc-watchdog
 COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-dev /usr/local/bin/claude-autopilot \
-        /usr/local/bin/claude-enqueue \
+        /usr/local/bin/claude-enqueue /usr/local/bin/claude-scm-observer \
         /usr/local/bin/claude-secret-guard \
         /usr/local/bin/claude-rc-watchdog \
         /usr/local/bin/claude-healthcheck \
