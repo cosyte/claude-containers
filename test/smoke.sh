@@ -17,12 +17,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 CN="claude-smoke-$$"
 OTELCN="claude-smoke-otel-$$"
+EGCN="claude-smoke-egress-$$"
 AUTHVOL="claude-smoke-auth-$$"
 WSVOL="claude-smoke-ws-$$"
 PASS=0 FAIL=0
 
 cleanup() {
-    docker rm -f "$CN" "$OTELCN" >/dev/null 2>&1 || true
+    docker rm -f "$CN" "$OTELCN" "$EGCN" >/dev/null 2>&1 || true
     docker volume rm "$AUTHVOL" "$WSVOL" >/dev/null 2>&1 || true
     rm -rf "$TMP"
 }
@@ -257,6 +258,37 @@ check "dangerous default caps are dropped (NET_RAW / MKNOD not present)" \
     'caps="$(docker inspect -f "{{.HostConfig.CapAdd}}" "$CN")"; echo "$caps" | grep -q "CHOWN" && ! echo "$caps" | grep -qiE "NET_RAW|MKNOD"'
 check "runC preflight flags this host as vulnerable or safe (runs without error)" \
     '(source "$REPO_ROOT/bin/_common.sh"; preflight_runc) >/dev/null 2>&1'
+
+echo
+echo "== 14. egress lockdown (opt-in) boots and enforces (or fails open) =="
+check "claude-egress-firewall baked + executable" \
+    'cexec "test -x /usr/local/bin/claude-egress-firewall"'
+# Boot a lockdown container (needs NET_ADMIN). The KEY safety property is that
+# lockdown never bricks boot: it either applies default-deny, or fails OPEN — the
+# container must come up either way. If the network is reachable and lockdown
+# engages, also assert a non-allowlisted IP is blocked.
+EGHARDEN="$(source "$REPO_ROOT/bin/_common.sh"; CLAUDE_EGRESS_LOCKDOWN=1 harden_run_args)"
+# shellcheck disable=SC2086
+docker run -d --name "$EGCN" $EGHARDEN \
+    -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=egress -e CLAUDE_EGRESS_LOCKDOWN=1 \
+    -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+for _ in $(seq 1 60); do
+    docker logs "$EGCN" 2>&1 | grep -qE "Egress lockdown" && break; sleep 1
+done
+check "lockdown container still boots (never bricks — default-deny or fail-open)" \
+    'docker exec "$EGCN" gosu claude tmux has-session -t claude >/dev/null 2>&1'
+check "lockdown either enforces default-deny or fails OPEN, never half-applied" \
+    'p="$(docker exec "$EGCN" iptables -S OUTPUT 2>/dev/null | head -1)"; [ "$p" = "-P OUTPUT DROP" ] || [ "$p" = "-P OUTPUT ACCEPT" ]'
+# Only meaningful when default-deny actually engaged (network was reachable):
+if docker exec "$EGCN" iptables -S OUTPUT 2>/dev/null | head -1 | grep -q "DROP"; then
+    check "default-deny blocks a non-allowlisted IP (1.1.1.1:443)" \
+        '! docker exec "$EGCN" gosu claude curl -sS -m8 -o /dev/null https://1.1.1.1 2>/dev/null'
+    check "default-deny still permits an allowlisted host (api.github.com)" \
+        'c=$(docker exec "$EGCN" gosu claude curl -sS -m12 -o /dev/null -w "%{http_code}" https://api.github.com 2>/dev/null); [ -n "$c" ] && [ "$c" != 000 ]'
+else
+    echo "  SKIP  default-deny allow/deny checks (lockdown failed open — no network in test env)"
+fi
+docker rm -f "$EGCN" >/dev/null 2>&1 || true
 
 echo
 echo "==============================================="

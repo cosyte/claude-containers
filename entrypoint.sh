@@ -480,6 +480,18 @@ if [[ "${CLAUDE_OTEL_ENABLED:-0}" =~ ^(1|true|yes|on)$ || -n "${OTEL_EXPORTER_OT
         log "OpenTelemetry        : WARNING — enabled but OTEL_EXPORTER_OTLP_ENDPOINT is empty; nothing will be exported"
 fi
 
+# Egress lockdown (opt-in): apply a default-deny firewall NOW — after the
+# entrypoint's own setup (clone, plugin install) has finished with open egress,
+# and as root (we still hold NET_ADMIN) before the unprivileged agent starts, so
+# the agent runs sealed and cannot alter its own rules. Fail-open by design.
+if [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    if /usr/local/bin/claude-egress-firewall; then
+        log "Egress lockdown      : default-deny active (allowlist + CLAUDE_EGRESS_EXTRA_HOSTS)"
+    else
+        log "Egress lockdown      : FAILED to apply — egress left OPEN (see [egress] lines above)"
+    fi
+fi
+
 # tmux server runs as the claude user; the main pane command falls back to an
 # interactive shell if it exits, so SSH stays usable. The pane lives in window
 # 'main' (the RC watchdog respawns it by name in interactive mode).
