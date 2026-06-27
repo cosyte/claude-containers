@@ -81,10 +81,14 @@ echo "$out" | grep -q "Empty workspace and no GIT_REPO_URL" \
 
 echo
 echo "== 4. boots with bind-mounted workspace =="
-# GH_TOKEN here also exercises the entrypoint's git credential-helper
-# wiring — a dummy value is fine, gh auth setup-git never validates it
-# (asserted in section 8).
+# Run under the SAME escape-hardening profile the launcher applies (cap-drop ALL
+# + minimal caps + no-new-privileges), so the whole suite proves boot, config
+# merge, SSH login, and git all work hardened. Sourced from _common.sh to avoid
+# drift. GH_TOKEN also exercises the git credential-helper wiring (asserted §8).
+HARDEN_FLAGS="$(source "$REPO_ROOT/bin/_common.sh"; harden_run_args)"
+# shellcheck disable=SC2086  # HARDEN_FLAGS is intentionally word-split
 docker run -d --name "$CN" \
+    $HARDEN_FLAGS \
     -e CLAUDE_SKIP_AUTH_CHECK=1 \
     -e CLAUDE_PROJECT_NAME=smoke \
     -e GH_TOKEN=ghp_smoketestdummy \
@@ -241,6 +245,18 @@ check "claude-scm-observer baked + executable" \
     'cexec "test -x /usr/local/bin/claude-scm-observer"'
 check "observer routes a failing-CI PR and skips a healthy one" \
     'out="$(docker exec -i "$CN" claude-scm-observer events < "$TMP/scm.json")"; grep -q "pr7-ci-h7" <<<"$out" && ! grep -q "pr8" <<<"$out"'
+
+echo
+echo "== 13. escape hardening applied (and still functional) =="
+# The container booted with HARDEN_FLAGS in §4; everything above (boot, SSH §7,
+# git §8) therefore already passed under the hardened profile. Assert the flags
+# actually took effect on the container.
+check "no-new-privileges is set on the container" \
+    'docker inspect -f "{{.HostConfig.SecurityOpt}}" "$CN" | grep -q "no-new-privileges"'
+check "dangerous default caps are dropped (NET_RAW / MKNOD not present)" \
+    'caps="$(docker inspect -f "{{.HostConfig.CapAdd}}" "$CN")"; echo "$caps" | grep -q "CHOWN" && ! echo "$caps" | grep -qiE "NET_RAW|MKNOD"'
+check "runC preflight flags this host as vulnerable or safe (runs without error)" \
+    '(source "$REPO_ROOT/bin/_common.sh"; preflight_runc) >/dev/null 2>&1'
 
 echo
 echo "==============================================="

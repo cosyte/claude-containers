@@ -189,6 +189,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_SSH_BIND` | — | Bind the SSH port to one host interface (e.g. `127.0.0.1`); empty = all |
 | `CLAUDE_CPU_LIMIT`/`CLAUDE_MEM_LIMIT` | `2`/`4g` | Per-container resource caps |
 | `CLAUDE_SHM_SIZE` | `2g` | `/dev/shm` size |
+| `CLAUDE_HARDEN_CAPS` | `1` | `1` = `--cap-drop ALL` + minimal `--cap-add` (drops NET_RAW/MKNOD/SETFCAP); `0` = Docker defaults. `no-new-privileges` is always set. Override the set with `CLAUDE_MIN_CAPS` |
 | `CLAUDE_STOP_TIMEOUT` | `20` | Graceful stop timeout (s) |
 | `AUTH_VOLUME`/`SSHKEYS_VOLUME` | `claude-auth`/`claude-sshkeys` | Shared volume names |
 | `ANTHROPIC_API_KEY` | unset | **Must stay unset** — entrypoint hard-fails otherwise |
@@ -400,6 +401,19 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   file once with `git commit --no-verify`; extend the deny-list via
   `CLAUDE_SECRET_GUARD_EXTRA`; disable with `CLAUDE_SECRET_GUARD=0`. The hook
   chains to a repo's own `pre-commit` so existing project hooks still run.
+- **Escape hardening + the honest blast radius.** Each container runs with
+  `--security-opt no-new-privileges` and, by default (`CLAUDE_HARDEN_CAPS=1`),
+  `--cap-drop ALL` plus a minimal re-add — removing the Docker-default `NET_RAW`,
+  `MKNOD`, and `SETFCAP` a compromised agent would reach for. The launcher also
+  **warns if the host runC is older than 1.2.8 / 1.3.3** (the Nov-2025 escape
+  CVEs CVE-2025-31133/52565/52881) — patching the host runtime is the single
+  highest-leverage control, because **a container is not a security boundary
+  against a fully weaponized agent** (AWS says as much of its own runtime). These
+  controls shrink blast radius but do **not** contain what matters most: the
+  agent still holds the mounted git deploy key and can read the shared
+  `claude-auth` credential volume. For an untrusted-input / multi-tenant threat
+  model, run a microVM runtime (gVisor/Kata) and broker those secrets out of the
+  agent's reach rather than relying on container isolation.
 - **`claude-auth` volume** holds your live OAuth credentials
   (`.credentials.json`) — effectively your Claude session. Anyone who can read
   this Docker volume can act as you. Rotate by `docker volume rm claude-auth`

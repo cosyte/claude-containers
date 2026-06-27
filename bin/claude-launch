@@ -152,12 +152,18 @@ GH_MAIL="$(git config --global user.email 2>/dev/null || true)"
 ENV_FILE_ARG=()
 [[ -f "$CLAUDE_DOCKER_ROOT/.env" ]] && ENV_FILE_ARG=(--env-file "$CLAUDE_DOCKER_ROOT/.env")
 
+# Warn if the host runtime is escape-vulnerable, and assemble the per-container
+# escape-hardening flags (no-new-privileges + minimal capabilities).
+preflight_runc
+read -r -a HARDEN_ARGS <<<"$(harden_run_args)"
+
 info "Creating container '$CN' (SSH host port $PORT)…"
 docker run -d \
     --name "$CN" \
     --hostname "$PROJECT" \
     --restart unless-stopped \
     --init \
+    "${HARDEN_ARGS[@]}" \
     --shm-size "$CLAUDE_SHM_SIZE" \
     --cpus "$CLAUDE_CPU_LIMIT" \
     --memory "$CLAUDE_MEM_LIMIT" \
