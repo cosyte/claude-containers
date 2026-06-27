@@ -34,8 +34,38 @@ EXTRA="${CLAUDE_EXTRA_ARGS:-}"
 LOG_DIR="${CLAUDE_AUTOPILOT_LOG_DIR:-$HOME/.claude/autopilot-logs}"
 RESUME="${CLAUDE_AUTOPILOT_RESUME:-0}"
 PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
+QUEUE="${CLAUDE_AUTOPILOT_QUEUE:-0}"
+QUEUE_DIR="${CLAUDE_AUTOPILOT_QUEUE_DIR:-$HOME/.claude/autopilot-queue}"
+QUEUE_DELAY="${CLAUDE_AUTOPILOT_QUEUE_DELAY:-10}"
 mkdir -p "$LOG_DIR"
 SESSION_FILE="$LOG_DIR/.session-id"   # persists on the per-container config volume
+
+# Durable task queue (opt-in). Queue beats a blind timer for fleet work: drop a
+# prompt file into pending/ (over SSH, a bind mount, or `claude-enqueue`) and the
+# loop claims the oldest one, runs it, and files it under done/ or failed/. When
+# pending/ is empty it falls back to CLAUDE_AUTOPILOT_CMD (/next) on the interval,
+# so a queued container is also a continuous-build container. Atomic mv-based
+# claiming keeps it safe and the dirs live on the per-container config volume so
+# the queue survives restarts. Each task is a fresh session (self-contained);
+# --resume applies only to the /next fallback.
+case "$QUEUE" in
+    1|true|yes|on) QUEUE=1; mkdir -p "$QUEUE_DIR"/{pending,running,done,failed} ;;
+    *)             QUEUE=0 ;;
+esac
+
+# Atomically claim the oldest pending task → echo its running/ path, or nothing.
+claim_task() {
+    local f base dest
+    for f in $(ls -1 "$QUEUE_DIR/pending" 2>/dev/null | sort); do
+        base="$f"; dest="$QUEUE_DIR/running/$base"
+        # mv on one filesystem is atomic: the winner gets the file, losers fail.
+        if mv -n "$QUEUE_DIR/pending/$base" "$dest" 2>/dev/null && [[ -e "$dest" ]]; then
+            echo "$dest"; return 0
+        fi
+    done
+    return 1
+}
+pending_count() { ls -1 "$QUEUE_DIR/pending" 2>/dev/null | wc -l | tr -d ' '; }
 
 # Map CLAUDE_PERMISSION_MODE to the right claude(1) flag. bypassPermissions keeps
 # the historical --dangerously-skip-permissions (full autonomy, accepted for a
@@ -84,6 +114,7 @@ echo "[autopilot] interval : ${INTERVAL}s   max_runs: $([ "$MAX_RUNS" = 0 ] && e
 echo "[autopilot] workspace: $(pwd)"
 echo "[autopilot] logs     : $LOG_DIR"
 echo "[autopilot] perm     : $PERM_MODE   resume: $([ "$RESUME" = 1 ] && echo on || echo off)"
+[ "$QUEUE" = 1 ] && echo "[autopilot] queue    : $QUEUE_DIR ($(pending_count) pending; /next fallback when empty)"
 echo "[autopilot] auth     : Max subscription OAuth (entrypoint refuses ANTHROPIC_API_KEY)"
 echo
 
@@ -96,20 +127,31 @@ while :; do
     out="$LOG_DIR/run-$ts.json"
     echo "[autopilot] === run #$run ($ts) ==="
 
+    # Pick this cycle's work: a queued task if one is waiting, else the timer
+    # command (/next). Queued tasks run as one-shot fresh sessions.
+    task_path=""; RUN_PROMPT="$PROMPT"; run_kind="cmd"
+    if [ "$QUEUE" = 1 ] && task_path="$(claim_task)" && [[ -n "$task_path" ]]; then
+        RUN_PROMPT="$(cat "$task_path")"
+        run_kind="task"
+        echo "[autopilot] task     : $(basename "$task_path")"
+    else
+        task_path=""
+    fi
+
     # Headless and container-isolated. Permission posture comes from
     # CLAUDE_PERMISSION_MODE (see perm_flags). NOT --remote-control: unattended.
-    # Each run is a fresh session by default — /next is session-independent and
-    # recovers its state from disk. Set CLAUDE_AUTOPILOT_RESUME=1 to instead
-    # carry the exact conversation forward with --resume.
+    # The /next fallback is a fresh session by default (it recovers state from
+    # disk); CLAUDE_AUTOPILOT_RESUME=1 carries the conversation forward instead.
+    # --resume never applies to a queued task (each is self-contained).
     resume_flags=""
-    if [[ "$RESUME" = 1 && -s "$SESSION_FILE" ]]; then
+    if [[ "$run_kind" = "cmd" && "$RESUME" = 1 && -s "$SESSION_FILE" ]]; then
         resume_flags="--resume $(cat "$SESSION_FILE")"
         echo "[autopilot] resuming session $(cat "$SESSION_FILE")"
     fi
 
     ok=1
     # shellcheck disable=SC2086  # flag vars are intentionally word-split
-    if claude -p "$PROMPT" $(perm_flags) --output-format json $resume_flags $EXTRA >"$out" 2>&1; then
+    if claude -p "$RUN_PROMPT" $(perm_flags) --output-format json $resume_flags $EXTRA >"$out" 2>&1; then
         if command -v jq >/dev/null 2>&1 \
             && [ "$(jq -r '.is_error // false' "$out" 2>/dev/null)" = "true" ]; then
             ok=0
@@ -136,9 +178,23 @@ while :; do
         tail -n 5 "$out"
     fi
 
+    # File a queued task by outcome; the run timestamp keeps the history greppable.
+    if [[ -n "$task_path" ]]; then
+        if [ "$ok" = 1 ]; then dest="$QUEUE_DIR/done/$ts-$(basename "$task_path")"
+        else                   dest="$QUEUE_DIR/failed/$ts-$(basename "$task_path")"; fi
+        mv -f "$task_path" "$dest" 2>/dev/null || true
+        echo "[autopilot] task     : $([ "$ok" = 1 ] && echo done || echo FAILED) → $(basename "$dest")"
+    fi
+
     if [ "$ok" = 1 ]; then
         fails=0
-        sleep_for="$INTERVAL"
+        # Drain the queue fast: if this was a task and more wait, take a short
+        # breather instead of the full interval.
+        if [[ "$run_kind" = "task" ]] && [ "$(pending_count)" -gt 0 ]; then
+            sleep_for="$QUEUE_DELAY"
+        else
+            sleep_for="$INTERVAL"
+        fi
     else
         fails=$((fails + 1))
         # Prefer the actual reset time when the failure is a rate/usage limit:

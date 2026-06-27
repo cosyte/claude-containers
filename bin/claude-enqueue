@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Enqueue a task for the autopilot queue (CLAUDE_AUTOPILOT_QUEUE=1).
+#
+# The prompt is the args, or stdin if no args are given. Writes one task file
+# into the queue's pending/ dir with a sortable, unique name so the autopilot
+# loop claims tasks oldest-first. Run inside the container (e.g. over SSH).
+#
+#   claude-enqueue "Upgrade the lockfile and run the tests"
+#   echo "Fix the failing CI job" | claude-enqueue
+#   claude-enqueue --priority 0 "Urgent: patch the CVE"   # lower = sooner
+#
+# Tunable: CLAUDE_AUTOPILOT_QUEUE_DIR (default ~/.claude/autopilot-queue).
+set -uo pipefail
+
+QUEUE_DIR="${CLAUDE_AUTOPILOT_QUEUE_DIR:-$HOME/.claude/autopilot-queue}"
+PRIO=50
+if [[ "${1:-}" == "--priority" || "${1:-}" == "-p" ]]; then
+    PRIO="$2"; shift 2
+fi
+
+if [[ $# -gt 0 ]]; then body="$*"; else body="$(cat)"; fi
+if [[ -z "${body// /}" ]]; then
+    echo "claude-enqueue: empty task (pass a prompt as args or on stdin)" >&2
+    exit 2
+fi
+
+mkdir -p "$QUEUE_DIR/pending"
+# Name: <priority>-<utc-timestamp>-<pid><nanos> → sorts by priority then arrival.
+prio="$(printf '%03d' "$PRIO" 2>/dev/null || echo 050)"
+name="${prio}-$(date -u +%Y%m%dT%H%M%SZ)-$$$(date +%N 2>/dev/null || echo 0).task"
+# Write atomically: stage in the queue root, then mv into pending/ so the loop
+# never claims a half-written file.
+tmp="$QUEUE_DIR/.in-$name"
+printf '%s\n' "$body" > "$tmp"
+mv -f "$tmp" "$QUEUE_DIR/pending/$name"
+echo "enqueued: $QUEUE_DIR/pending/$name"

@@ -16,12 +16,13 @@ IMAGE="${IMAGE:-claude-code-box:latest}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 CN="claude-smoke-$$"
+OTELCN="claude-smoke-otel-$$"
 AUTHVOL="claude-smoke-auth-$$"
 WSVOL="claude-smoke-ws-$$"
 PASS=0 FAIL=0
 
 cleanup() {
-    docker rm -f "$CN" >/dev/null 2>&1 || true
+    docker rm -f "$CN" "$OTELCN" >/dev/null 2>&1 || true
     docker volume rm "$AUTHVOL" "$WSVOL" >/dev/null 2>&1 || true
     rm -rf "$TMP"
 }
@@ -166,18 +167,26 @@ GENOUT="$TMP/gen-compose.yml"
 # service names (and override keys) are the bare repo names alpha / beta.
 if "$REPO_ROOT/bin/claude-compose-gen" --out "$GENOUT" \
        --cpu alpha=7 --mem alpha=777m --browser beta acme/alpha acme/beta >/dev/null 2>&1; then
+    # Extract exactly one service's block (its `^  name:` header to the next
+    # service or top-level key) so assertions don't depend on line offsets — the
+    # environment block grows over time and fixed -A windows silently rot.
+    svc_block(){ awk -v s="^  $1:\$" '
+        $0 ~ s {f=1; print; next}
+        f && /^  [A-Za-z0-9_-]+:$/ {exit}
+        f && /^[A-Za-z]/ {exit}
+        f {print}' "$GENOUT"; }
     check "--cpu override applies cpus to the target repo" \
-        'grep -A20 "^  alpha:" "$GENOUT" | grep -q "cpus: 7"'
+        'svc_block alpha | grep -q "cpus: 7"'
     check "--mem override applies mem_limit to the target repo" \
-        'grep -A20 "^  alpha:" "$GENOUT" | grep -q "mem_limit: 777m"'
+        'svc_block alpha | grep -q "mem_limit: 777m"'
     check "non-overridden repo keeps the global default (no override leak)" \
-        '! grep -A20 "^  beta:" "$GENOUT" | grep -qE "cpus: 7|mem_limit: 777m"'
+        '! svc_block beta | grep -qE "cpus: 7|mem_limit: 777m"'
     check "--browser sets CLAUDE_BROWSER on the target repo" \
-        'grep -A32 "^  beta:" "$GENOUT" | grep -q "CLAUDE_BROWSER"'
+        'svc_block beta | grep -q "CLAUDE_BROWSER"'
     check "--browser repo uses the browser image" \
-        'grep -A2 "^  beta:" "$GENOUT" | grep -qE "image: .*:browser"'
+        'svc_block beta | grep -qE "image: .*:browser"'
     check "--browser does not leak to non-browser repos" \
-        '! grep -A32 "^  alpha:" "$GENOUT" | grep -q "CLAUDE_BROWSER"'
+        '! svc_block alpha | grep -q "CLAUDE_BROWSER"'
 else
     bad "claude-compose-gen failed to generate with --cpu/--mem/--browser"
 fi
@@ -200,6 +209,25 @@ check "RC watchdog process is running" \
 # unhealthy — assert only that it executes cleanly and emits a verdict line.
 check "healthcheck runs and emits a verdict line" \
     'cexec "/usr/local/bin/claude-healthcheck" 2>&1 | grep -qE "^(healthy|unhealthy:)"'
+
+echo
+echo "== 11. fleet hardening: secret guard, queue helper, telemetry plumbing =="
+check "claude-secret-guard baked + executable" \
+    'cexec "test -x /usr/local/bin/claude-secret-guard"'
+check "claude-enqueue baked + executable" \
+    'cexec "test -x /usr/local/bin/claude-enqueue"'
+check "secret guard installed (global core.hooksPath → the guard)" \
+    'asclaude_x "test \"\$(readlink \$(git config --global core.hooksPath)/pre-commit)\" = /usr/local/bin/claude-secret-guard"'
+check "secret guard blocks a staged .env (filename deny-list)" \
+    'asclaude_x "cd /workspace && printf SECRET=x > .env && git add -f .env && git -c user.email=t@t -c user.name=t commit -m leak 2>&1 | grep -q claude-secret-guard; rc=\$?; git restore --staged .env 2>/dev/null; rm -f .env; exit \$rc"'
+# OTel is env-passthrough; assert the entrypoint composes + logs it when enabled.
+docker run -d --name "$OTELCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=otelsmoke \
+    -e CLAUDE_OTEL_ENABLED=1 -e OTEL_EXPORTER_OTLP_ENDPOINT=http://otel.invalid:4318 \
+    -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+for _ in $(seq 1 30); do docker logs "$OTELCN" 2>&1 | grep -q "started in tmux" && break; sleep 1; done
+check "OpenTelemetry export composed + logged when enabled" \
+    'docker logs "$OTELCN" 2>&1 | grep -q "OpenTelemetry .*: on"'
+docker rm -f "$OTELCN" >/dev/null 2>&1 || true
 
 echo
 echo "==============================================="
