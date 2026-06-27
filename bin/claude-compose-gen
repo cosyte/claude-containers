@@ -28,6 +28,12 @@
 #                       repos without one keep the global CLAUDE_CPU_LIMIT.
 #     --mem <map>       per-repo memory limit override. Format REPO=SIZE, e.g.
 #                       bridgelink-website=4g (repeatable). Default: CLAUDE_MEM_LIMIT.
+#     --model <map>     per-repo model override. Format REPO=MODEL (repeatable);
+#                       MODEL is any Claude Code alias (opus, sonnet, haiku,
+#                       opusplan, default) or a full id. Repos without one fall
+#                       back to the CLAUDE_MODEL env var, else opus (best
+#                       available). Set a fleet-wide default by exporting
+#                       CLAUDE_MODEL (or putting it in .env) before `up`.
 #     --browser <repos> enable the chrome-devtools MCP (frontend debugging) for
 #                       these repos (repeatable; comma/space lists ok). Their
 #                       service uses CLAUDE_IMAGE_BROWSER (default
@@ -54,7 +60,7 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG=""
 OUT=""
@@ -62,7 +68,7 @@ PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
 WANT_FORKS=0 WANT_ARCHIVED=0
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() MKTS_RAW=() PLUGINS_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --org)             ORG="$2"; shift 2 ;;
@@ -75,6 +81,7 @@ while [[ $# -gt 0 ]]; do
         --dev-cmd)         DEVCMD_RAW+=("$2"); shift 2 ;;
         --cpu)             CPU_RAW+=("$2"); shift 2 ;;
         --mem)             MEM_RAW+=("$2"); shift 2 ;;
+        --model)           MODEL_RAW+=("$2"); shift 2 ;;
         --browser)         BROWSER_RAW+=("$2"); shift 2 ;;
         --marketplace)     MKTS_RAW+=("$2"); shift 2 ;;
         --plugin)          PLUGINS_RAW+=("$2"); shift 2 ;;
@@ -142,6 +149,16 @@ for tok in "${MEM_RAW[@]:-}"; do
     mmv="${tok#*=}"
     [[ "$mmv" =~ ^[0-9]+[bkmgBKMG]?$ ]] || die "--mem value must be a size like 4g (got '$mmv')"
     MEM["$(sanitize "${tok%%=*}")"]="$mmv"
+done
+# Per-repo model override: svc -> model alias/id. Repos with no entry inherit the
+# CLAUDE_MODEL env var at run time, falling back to opus (the best available).
+declare -A MODEL=()
+for tok in "${MODEL_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == *=* ]] || die "--model must be REPO=MODEL (got '$tok')"
+    mdv="${tok#*=}"
+    [[ -n "$mdv" ]] || die "--model '$tok' has no model after '='"
+    MODEL["$(sanitize "${tok%%=*}")"]="$mdv"
 done
 # Frontend debugging: services with chrome-devtools MCP enabled (CLAUDE_BROWSER=1).
 # Image must be built with WITH_BROWSER=1 (`make build-browser`).
@@ -333,6 +350,11 @@ for row in "${FINAL[@]}"; do
     port="${SVCPORT[$svc]}"
     svc_cpu="${CPU[$svc]:-$CLAUDE_CPU_LIMIT}"
     svc_mem="${MEM[$svc]:-$CLAUDE_MEM_LIMIT}"
+    # Per-repo --model override emits a literal; otherwise emit a compose
+    # interpolation so a fleet-wide CLAUDE_MODEL (env/.env) wins, defaulting to
+    # opus — the best available model — when nothing is set.
+    if [[ -n "${MODEL[$svc]:-}" ]]; then svc_model="${MODEL[$svc]}"
+    else svc_model='${CLAUDE_MODEL:-opus}'; fi
     svc_image="${CLAUDE_IMAGE}"
     [[ -n "${BROWSER[$svc]:-}" ]] && svc_image="$BROWSER_IMAGE"
     cat <<EOF
@@ -385,6 +407,7 @@ EOF
     cat <<EOF
     environment:
       CLAUDE_PROJECT_NAME: "${svc}"
+      CLAUDE_MODEL: "${svc_model}"
       CLAUDE_PERMISSION_MODE: "\${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
       CLAUDE_SECRET_GUARD: "\${CLAUDE_SECRET_GUARD:-1}"
       CLAUDE_BROKER_GIT_KEY: "\${CLAUDE_BROKER_GIT_KEY:-0}"
@@ -478,6 +501,7 @@ for r in "${FINAL[@]}"; do
     [[ -n "${DEVCMD[$s]:-}" ]] && extra="$extra +dev"
     [[ -n "${CPU[$s]:-}" || -n "${MEM[$s]:-}" ]] && extra="$extra +res(${CPU[$s]:-$CLAUDE_CPU_LIMIT}cpu/${MEM[$s]:-$CLAUDE_MEM_LIMIT})"
     [[ -n "${BROWSER[$s]:-}" ]] && extra="$extra +browser"
+    [[ -n "${MODEL[$s]:-}" ]] && extra="$extra +model(${MODEL[$s]})"
     if [[ -n "${MKTS[$s]:-}" ]]; then
         n_mkts="$(awk -F, '{print NF}' <<<"${MKTS[$s]}")"
         extra="$extra +mkts($n_mkts)"

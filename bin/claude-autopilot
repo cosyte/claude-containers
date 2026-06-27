@@ -34,6 +34,9 @@ EXTRA="${CLAUDE_EXTRA_ARGS:-}"
 LOG_DIR="${CLAUDE_AUTOPILOT_LOG_DIR:-$HOME/.claude/autopilot-logs}"
 RESUME="${CLAUDE_AUTOPILOT_RESUME:-0}"
 PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
+# Model: the entrypoint defaults this to the best available model (opus); pin a
+# different one with CLAUDE_MODEL (alias or full id). Empty = Claude Code default.
+MODEL="${CLAUDE_MODEL:-}"
 QUEUE="${CLAUDE_AUTOPILOT_QUEUE:-0}"
 QUEUE_DIR="${CLAUDE_AUTOPILOT_QUEUE_DIR:-$HOME/.claude/autopilot-queue}"
 QUEUE_DELAY="${CLAUDE_AUTOPILOT_QUEUE_DELAY:-10}"
@@ -79,6 +82,11 @@ perm_flags() {
     esac
 }
 
+# `--model <m>` when CLAUDE_MODEL is set (the entrypoint defaults it to opus), else
+# nothing so Claude Code uses its own default. Aliases carry no spaces, so the
+# word-split at the call site is safe.
+model_flags() { [[ -n "$MODEL" ]] && printf '%s %s' '--model' "$MODEL"; }
+
 # Best-effort: turn a rate-limit reset hint in the run output into seconds-to-sleep.
 # Handles a unix-epoch reset field in the JSON and a human "reset at 3pm"/"resets
 # at 23:00" string in stdout/stderr. Echoes seconds (>0) or nothing.
@@ -114,6 +122,7 @@ echo "[autopilot] interval : ${INTERVAL}s   max_runs: $([ "$MAX_RUNS" = 0 ] && e
 echo "[autopilot] workspace: $(pwd)"
 echo "[autopilot] logs     : $LOG_DIR"
 echo "[autopilot] perm     : $PERM_MODE   resume: $([ "$RESUME" = 1 ] && echo on || echo off)"
+echo "[autopilot] model    : ${MODEL:-<claude code default>}"
 [ "$QUEUE" = 1 ] && echo "[autopilot] queue    : $QUEUE_DIR ($(pending_count) pending; /next fallback when empty)"
 echo "[autopilot] auth     : Max subscription OAuth (entrypoint refuses ANTHROPIC_API_KEY)"
 echo
@@ -151,7 +160,7 @@ while :; do
 
     ok=1
     # shellcheck disable=SC2086  # flag vars are intentionally word-split
-    if claude -p "$RUN_PROMPT" $(perm_flags) --output-format json $resume_flags $EXTRA >"$out" 2>&1; then
+    if claude -p "$RUN_PROMPT" $(perm_flags) $(model_flags) --output-format json $resume_flags $EXTRA >"$out" 2>&1; then
         if command -v jq >/dev/null 2>&1 \
             && [ "$(jq -r '.is_error // false' "$out" 2>/dev/null)" = "true" ]; then
             ok=0

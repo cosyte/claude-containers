@@ -166,6 +166,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `UV_VERSION` | `latest` | `uv` version (pin for reproducibility) |
 | `PNPM_VERSION` | `latest` | `pnpm` version baked in (pin for reproducibility) |
 | `CLAUDE_UID`/`CLAUDE_GID`/`CLAUDE_USER` | `1000`/`1000`/`claude` | Container user |
+| `CLAUDE_MODEL` | `opus` | Model the session runs. Defaults to the best available model (the `opus` alias always resolves to the latest Opus). Any Claude Code alias (`opus`/`sonnet`/`haiku`/`opusplan`/`default`) or a full id like `claude-opus-4-8`; `default` defers to Claude Code's pick. Per-container via `claude-launch --model`, per-repo via `claude-compose-gen --model REPO=MODEL`. Honored by both the interactive session and autopilot |
 | `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `default`/`acceptEdits`/`plan`/`bypassPermissions`. Honored by both the interactive session and autopilot; `acceptEdits` is the safer fleet posture (gates shell/network) |
 | `CLAUDE_SECRET_GUARD` | `1` | `1` installs a fleet-wide git pre-commit hook that blocks committing secrets (`.env`, `*.pem`, `*.key`, `id_rsa`, PRIVATE KEY blocks). Bypass once with `git commit --no-verify`; extend via `CLAUDE_SECRET_GUARD_EXTRA` |
 | `CLAUDE_AUTOPILOT` | `0` | `1` = unattended mode: main pane runs a headless `claude -p` loop instead of Remote Control (see [Unattended autopilot](#unattended-autopilot)) |
@@ -223,8 +224,8 @@ holds `CLAUDE.md`, `mcp/`, `plugins/`, `commands/`, `skills/`. MCP secrets are
 
 ```
 claude-launch <name> [--repo URL | --workspace PATH] [--branch B] [--depth N]
-                      [--port N] [--mcp NAME ...] [--browser] [--extra-args "…"]
-                      [--expose H:C ...] [--dev-cmd "…"]
+                      [--port N] [--model NAME] [--mcp NAME ...] [--browser]
+                      [--extra-args "…"] [--expose H:C ...] [--dev-cmd "…"]
 claude-list                       table of all sessions
 claude-attach <name>              attach to its live tmux session (local host)
 claude-stop  <name>               graceful stop (state preserved)
@@ -253,6 +254,7 @@ session container per repo in a GitHub org:
 claude-compose-gen --org ORG --out FILE [--active REPOS]... [--dormant-profile NAME]
                    [--expose REPO:HOSTPORT:CONTAINERPORT]...
                    [--dev-cmd REPO=COMMAND]...
+                   [--cpu REPO=N]... [--mem REPO=SIZE]... [--model REPO=MODEL]...
                    [--browser REPOS]...
                    [--marketplace REPO=NAME=URL]... [--plugin REPO=PLUGIN[,...]]...
                    [--include GLOB] [--exclude GLOB] [--forks] [--archived]

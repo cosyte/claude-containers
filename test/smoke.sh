@@ -120,6 +120,9 @@ check "sshd is running" \
     'cexec "pgrep -x sshd" >/dev/null 2>&1'
 check "workspace bind mount visible (skipped clone)" \
     'cexec "cat /workspace/marker.txt" 2>/dev/null | grep -q smoke-marker'
+# No CLAUDE_MODEL was passed, so the entrypoint must default to opus (best available).
+check "entrypoint defaults the model to opus (best available)" \
+    'grep -qE "Model[[:space:]]*: opus" <<<"$(docker logs "$CN" 2>&1)"'
 
 echo
 echo "== 5. baked-in config merged =="
@@ -172,7 +175,7 @@ GENOUT="$TMP/gen-compose.yml"
 # Repos given as owner/repo so no --org / gh enumeration is needed offline; the
 # service names (and override keys) are the bare repo names alpha / beta.
 if "$REPO_ROOT/bin/claude-compose-gen" --out "$GENOUT" \
-       --cpu alpha=7 --mem alpha=777m --browser beta acme/alpha acme/beta >/dev/null 2>&1; then
+       --cpu alpha=7 --mem alpha=777m --model alpha=sonnet --browser beta acme/alpha acme/beta >/dev/null 2>&1; then
     # Extract exactly one service's block (its `^  name:` header to the next
     # service or top-level key) so assertions don't depend on line offsets — the
     # environment block grows over time and fixed -A windows silently rot.
@@ -193,8 +196,14 @@ if "$REPO_ROOT/bin/claude-compose-gen" --out "$GENOUT" \
         'svc_block beta | grep -qE "image: .*:browser"'
     check "--browser does not leak to non-browser repos" \
         '! svc_block alpha | grep -q "CLAUDE_BROWSER"'
+    check "--model override sets the literal model on the target repo" \
+        'svc_block alpha | grep -q "CLAUDE_MODEL.*sonnet"'
+    check "non-overridden repo defaults CLAUDE_MODEL to opus (best available)" \
+        'svc_block beta | grep "CLAUDE_MODEL" | grep -q opus'
+    check "--model does not leak the override to other repos" \
+        '! svc_block beta | grep -q sonnet'
 else
-    bad "claude-compose-gen failed to generate with --cpu/--mem/--browser"
+    bad "claude-compose-gen failed to generate with --cpu/--mem/--model/--browser"
 fi
 
 echo
