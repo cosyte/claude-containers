@@ -5,6 +5,10 @@
 #   --depth <n>                shallow-clone depth
 #   --workspace <path>         bind-mount a local checkout instead of cloning
 #   --port <ssh-port>          explicit host SSH port (default: auto 2200-2299)
+#   --model <name>             model the session uses (default: opus = best
+#                              available). Any Claude Code alias (opus, sonnet,
+#                              haiku, opusplan, default) or a full id like
+#                              claude-opus-4-8. 'default' = Claude Code's own pick.
 #   --mcp <name>               enable only these baked-in MCP servers (repeatable)
 #   --browser                  enable the chrome-devtools MCP for frontend debugging
 #                              (requires an image built with WITH_BROWSER=1, i.e.
@@ -19,7 +23,7 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
 # EXTRA/MCP_LIST/DEVCMD/MKTS/PLUGINS default from .env (sourced by _common.sh);
@@ -27,6 +31,9 @@ PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
 # `docker run` would shadow any value set in .env with an empty string.
 EXTRA="${CLAUDE_EXTRA_ARGS:-}" MCP_LIST="${CLAUDE_MCP_ENABLED:-}" DEVCMD="${CLAUDE_DEV_CMD:-}"
 MKTS="${CLAUDE_EXTRA_MARKETPLACES:-}" PLUGINS="${CLAUDE_EXTRA_PLUGINS:-}"
+# Empty here means "unset" — the container's entrypoint then defaults it to opus
+# (best available). A value from .env/env seeds the default; --model overrides.
+MODEL="${CLAUDE_MODEL:-}"
 EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -35,6 +42,7 @@ while [[ $# -gt 0 ]]; do
         --depth)       DEPTH="$2"; OPTS_GIVEN=1; shift 2 ;;
         --workspace)   WS_PATH="$2"; OPTS_GIVEN=1; shift 2 ;;
         --port)        PORT="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --model)       MODEL="$2"; OPTS_GIVEN=1; shift 2 ;;
         --mcp)         MCP_LIST="${MCP_LIST:+$MCP_LIST,}$2"; OPTS_GIVEN=1; shift 2 ;;
         --browser)     BROWSER=1; OPTS_GIVEN=1; shift ;;
         --extra-args)  EXTRA="$2"; OPTS_GIVEN=1; shift 2 ;;
@@ -172,6 +180,7 @@ docker run -d \
     "${EXPOSE_ARGS[@]}" \
     "${ENV_FILE_ARG[@]}" \
     -e CLAUDE_PROJECT_NAME="$PROJECT" \
+    -e CLAUDE_MODEL="$MODEL" \
     -e CLAUDE_EXTRA_ARGS="$EXTRA" \
     -e CLAUDE_MCP_ENABLED="$MCP_LIST" \
     -e CLAUDE_DEV_CMD="$DEVCMD" \
@@ -219,6 +228,7 @@ if (( ${#EXPOSE_RAW[@]} )); then
     done
     echo
 fi
+info "Model: ${MODEL:-opus (best available — container default)}"
 [[ -n "$DEVCMD" ]] && \
     info "Dev server auto-starts on boot in tmux window 'dev' (claude-attach, then: tmux select-window -t claude:dev)"
 [[ "$BROWSER" == "1" ]] && \

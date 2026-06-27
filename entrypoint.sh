@@ -466,6 +466,16 @@ export CLAUDE_RC_DEBUG_LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
 export CLAUDE_PROJECT_NAME CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}" \
        CLAUDE_DEV_CMD="${CLAUDE_DEV_CMD:-}"
 
+# Model selection: default to the best available model. The `opus` alias always
+# resolves to the latest Opus, so the fleet tracks the strongest model without a
+# code change when a newer one ships. Override per-container with CLAUDE_MODEL —
+# any Claude Code alias (opus, sonnet, haiku, opusplan, default) or a full model
+# id (e.g. claude-opus-4-8). Both the interactive session and the autopilot loop
+# read it and pass `--model`. To defer to Claude Code's own default, set
+# CLAUDE_MODEL=default (empty/unset falls back to opus, the best available).
+export CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
+log "Model               : $CLAUDE_MODEL (override with CLAUDE_MODEL; 'default' = Claude Code's pick)"
+
 # Two modes, selected by CLAUDE_AUTOPILOT:
 #   interactive (default) — main pane is claude-session (Remote Control + SSH).
 #   autopilot             — main pane is claude-autopilot, a headless Claude loop

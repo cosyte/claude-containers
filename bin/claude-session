@@ -15,6 +15,10 @@ cd /workspace || cd "$HOME"
 NAME="${CLAUDE_PROJECT_NAME:-claude}"
 EXTRA="${CLAUDE_EXTRA_ARGS:-}"
 PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
+# Model: the entrypoint defaults this to the best available model (opus); pin a
+# different one with CLAUDE_MODEL. Empty (rare — only if run outside the
+# entrypoint) means no --model, i.e. Claude Code's own default.
+MODEL="${CLAUDE_MODEL:-}"
 
 # Remote Control debug log. Claude writes RC bridge events here so the
 # healthcheck and the RC watchdog can tell when the Remote Control link drops
@@ -31,6 +35,7 @@ case "$PERM_MODE" in
     *)                           ARGS=(--permission-mode "$PERM_MODE") ;;
 esac
 ARGS+=(--remote-control "$NAME")
+[[ -n "$MODEL" ]] && ARGS+=(--model "$MODEL")
 
 if [[ "${1:-}" == "--continue" || "${1:-}" == "-c" ]]; then
     ARGS+=(--continue)
