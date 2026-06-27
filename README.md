@@ -108,6 +108,33 @@ instead carry the exact conversation forward via `--resume <session_id>` (the ID
 is captured from each run's JSON and persisted on the container's config volume)
 — use it for a single stateful long-running task rather than a queue-driven one.
 
+**Durable task queue.** A blind timer is the wrong primitive for fleet work, so
+`CLAUDE_AUTOPILOT_QUEUE=1` turns the loop into a queue consumer: it claims the
+oldest pending prompt file (atomic `mv`, so it's restart- and race-safe), runs it
+as a one-shot task, and files it under `done/` or `failed/`. When the queue
+drains it falls back to `CLAUDE_AUTOPILOT_CMD` (`/next`) on the interval — so a
+queued container is *also* a continuous-build container. Enqueue from inside the
+container (SSH in, then):
+
+```bash
+claude-enqueue "Upgrade the lockfile and make the tests pass"
+echo "Triage the failing CI run and open a fix PR" | claude-enqueue
+claude-enqueue --priority 0 "Urgent: patch the CVE in deps"   # lower = sooner
+```
+
+The queue lives on the per-container config volume (`~/.claude/autopilot-queue/`)
+so it survives restarts; `CLAUDE_AUTOPILOT_QUEUE_DELAY` (default 10s) paces tasks
+while draining. This is the first step toward the event-driven model (next:
+routing CI/PR-review events straight into the queue).
+
+**Fleet observability.** Set `CLAUDE_OTEL_ENABLED=1` (or just an
+`OTEL_EXPORTER_OTLP_ENDPOINT`) to export Claude Code's native per-call cost/token
+telemetry to any OpenTelemetry backend — Langfuse, an OTel collector, Grafana.
+Each container is tagged `service.instance.id=<project>` so the fleet view
+separates agents, and the auth header stays in process env (never written to the
+config volume). `CLAUDE_OTEL_TRACES=1` adds the (beta) trace export that
+trace-first backends like Langfuse need. Full var list in `.env.example`.
+
 **Auth + quota.** Autopilot uses the same Max-subscription OAuth as every other
 container (the entrypoint refuses `ANTHROPIC_API_KEY`). A single Max plan is
 shared across all running containers via the converged `claude-auth` volume, so
@@ -134,6 +161,8 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_AUTOPILOT_INTERVAL` | `3600` | Seconds between successful autopilot runs |
 | `CLAUDE_AUTOPILOT_MAX_RUNS` | `0` | Stop after N autopilot runs (`0` = unlimited) |
 | `CLAUDE_AUTOPILOT_RESUME` | `0` | `1` = carry the conversation forward via `--resume <session_id>` each cycle instead of a fresh session |
+| `CLAUDE_AUTOPILOT_QUEUE` | `0` | `1` = consume prompt files from a durable task queue (`claude-enqueue`), falling back to `/next` when empty (see [Unattended autopilot](#unattended-autopilot)) |
+| `CLAUDE_OTEL_ENABLED` | `0` | `1` (or setting `OTEL_EXPORTER_OTLP_ENDPOINT`) exports Claude Code's per-call cost/token telemetry to an OTLP backend, tagged per container. `CLAUDE_OTEL_TRACES=1` adds traces; see `.env.example` for the `OTEL_*` vars |
 | `CLAUDE_EXTRA_ARGS` | — | Extra args to `claude` (or `--extra-args`) |
 | `CLAUDE_MCP_ENABLED` | — | CSV of baked MCP servers to load (empty = all) |
 | `WITH_BROWSER` | `0` | Build arg: 1 bakes Chromium + chrome-devtools-mcp (+~200 MB). `make build-browser` flips it. |
@@ -186,6 +215,10 @@ claude-stop  <name>               graceful stop (state preserved)
 claude-rm    <name> [--yes] [--purge]   remove (+volumes with --purge)
 claude-logs  <name> [-n LINES]    tail the entrypoint/sshd log
 ```
+
+Inside an autopilot container (over SSH), `claude-enqueue "<prompt>"` adds a task
+to the durable queue (`CLAUDE_AUTOPILOT_QUEUE=1`); `--priority N` orders it
+(lower runs sooner), and a prompt can also be piped on stdin.
 
 `--expose HOST:CONTAINER` publishes an extra port (e.g. a dev server) and
 `--dev-cmd` auto-starts a command on boot in a tmux `dev` window — the

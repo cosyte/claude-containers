@@ -439,7 +439,40 @@ export CLAUDE_MODE \
        CLAUDE_AUTOPILOT_BACKOFF_MAX="${CLAUDE_AUTOPILOT_BACKOFF_MAX:-}" \
        CLAUDE_AUTOPILOT_LOG_DIR="${CLAUDE_AUTOPILOT_LOG_DIR:-}" \
        CLAUDE_AUTOPILOT_RESUME="${CLAUDE_AUTOPILOT_RESUME:-}" \
+       CLAUDE_AUTOPILOT_QUEUE="${CLAUDE_AUTOPILOT_QUEUE:-}" \
+       CLAUDE_AUTOPILOT_QUEUE_DIR="${CLAUDE_AUTOPILOT_QUEUE_DIR:-}" \
+       CLAUDE_AUTOPILOT_QUEUE_DELAY="${CLAUDE_AUTOPILOT_QUEUE_DELAY:-}" \
        CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
+
+# OpenTelemetry: opt-in fleet observability. Claude Code reads OTEL_* + the
+# enable flag straight from the process environment (env > settings.json), and
+# the tmux panes inherit this exported env, so we just compose sane defaults and
+# a per-container resource tag — no settings.json surgery, and the auth header (a
+# secret) stays in process env, never persisted to the config volume. Enabled by
+# CLAUDE_OTEL_ENABLED=1 or simply by supplying an OTLP endpoint. Orthogonal to
+# the Remote-Control telemetry concern above (that's nonessential-traffic, not
+# this). Ref: code.claude.com/docs/en/monitoring-usage
+if [[ "${CLAUDE_OTEL_ENABLED:-0}" =~ ^(1|true|yes|on)$ || -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]]; then
+    export CLAUDE_CODE_ENABLE_TELEMETRY=1
+    export OTEL_METRICS_EXPORTER="${OTEL_METRICS_EXPORTER:-otlp}"
+    export OTEL_LOGS_EXPORTER="${OTEL_LOGS_EXPORTER:-otlp}"
+    export OTEL_EXPORTER_OTLP_PROTOCOL="${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}"
+    # Traces are a Claude Code beta (needed for trace backends like Langfuse).
+    if [[ "${CLAUDE_OTEL_TRACES:-0}" =~ ^(1|true|yes|on)$ ]]; then
+        export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1
+        export OTEL_TRACES_EXPORTER="${OTEL_TRACES_EXPORTER:-otlp}"
+    fi
+    # service.name is fixed to "claude-code" upstream, so distinguish containers
+    # with a custom tag (+ any operator-supplied attributes).
+    _ra="service.instance.id=${CLAUDE_PROJECT_NAME},claude.project=${CLAUDE_PROJECT_NAME}"
+    [[ -n "${OTEL_RESOURCE_ATTRIBUTES:-}" ]] && _ra="${_ra},${OTEL_RESOURCE_ATTRIBUTES}"
+    export OTEL_RESOURCE_ATTRIBUTES="$_ra"
+    # OTEL_EXPORTER_OTLP_ENDPOINT / _HEADERS arrive via env (-e/.env) and are
+    # already exported into this environment, so the panes inherit them as-is.
+    log "OpenTelemetry        : on → ${OTEL_EXPORTER_OTLP_ENDPOINT:-<no endpoint set!>} (${OTEL_EXPORTER_OTLP_PROTOCOL})$([[ -n "${OTEL_EXPORTER_OTLP_HEADERS:-}" ]] && echo ' +auth')"
+    [[ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]] && \
+        log "OpenTelemetry        : WARNING — enabled but OTEL_EXPORTER_OTLP_ENDPOINT is empty; nothing will be exported"
+fi
 
 # tmux server runs as the claude user; the main pane command falls back to an
 # interactive shell if it exits, so SSH stays usable. The pane lives in window
