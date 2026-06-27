@@ -29,6 +29,14 @@ CLAUDE_SHM_SIZE="${CLAUDE_SHM_SIZE:-2g}"
 CLAUDE_CPU_LIMIT="${CLAUDE_CPU_LIMIT:-2}"
 CLAUDE_MEM_LIMIT="${CLAUDE_MEM_LIMIT:-4g}"
 CLAUDE_STOP_TIMEOUT="${CLAUDE_STOP_TIMEOUT:-20}"
+# Escape hardening: drop ALL Linux capabilities and re-add only the minimal set
+# the container needs (sshd binding :22 + dropping privileges to the claude user,
+# plus the entrypoint's chown/setup). This removes the Docker defaults NET_RAW,
+# MKNOD, and SETFCAP — the ones a compromised/ injected agent would reach for.
+# CLAUDE_HARDEN_CAPS=0 falls back to Docker's default cap set if a workload needs
+# more. no-new-privileges is applied regardless.
+CLAUDE_HARDEN_CAPS="${CLAUDE_HARDEN_CAPS:-1}"
+CLAUDE_MIN_CAPS="${CLAUDE_MIN_CAPS:-CHOWN DAC_OVERRIDE FOWNER FSETID KILL SETGID SETUID SETPCAP NET_BIND_SERVICE SYS_CHROOT AUDIT_WRITE}"
 
 # --- Output helpers ----------------------------------------------------------
 if [[ -t 1 ]]; then
@@ -46,6 +54,51 @@ die()   { err "$*"; exit 1; }
 need_docker() {
     command -v docker >/dev/null 2>&1 || die "docker not found in PATH"
     docker info >/dev/null 2>&1 || die "cannot talk to the Docker daemon"
+}
+
+# Docker-run hardening flags (no-new-privileges + minimal capabilities), as a
+# space-separated string the launcher reads into an array. Used by claude-launch;
+# claude-compose-gen emits the equivalent YAML.
+harden_run_args() {
+    local out="--security-opt no-new-privileges"
+    if [[ "$CLAUDE_HARDEN_CAPS" =~ ^(1|true|yes|on)$ ]]; then
+        out+=" --cap-drop ALL"
+        local c; for c in $CLAUDE_MIN_CAPS; do out+=" --cap-add $c"; done
+    fi
+    echo "$out"
+}
+
+# Warn (don't block) if the host's runC is vulnerable to the Nov-2025 container-
+# escape CVEs (CVE-2025-31133 / 52565 / 52881), fixed in runC 1.2.8 / 1.3.3 /
+# 1.4.0-rc.3. A weaponized in-container agent could escape an unpatched runtime,
+# defeating every other control here — so this is the highest-leverage check.
+preflight_runc() {
+    local rv base M m p
+    rv="$(runc --version 2>/dev/null | awk '/^runc version/{print $3; exit}')"
+    [[ -z "$rv" ]] && rv="$(docker info 2>/dev/null | sed -n 's/.*[Rr]unc version[: ]*v\?\([0-9][^ ,]*\).*/\1/p' | head -1)"
+    if [[ -z "$rv" ]]; then
+        warn "could not determine host runC version — ensure it is >= 1.2.8 / 1.3.3 (CVE-2025-31133/52565/52881 escapes)"
+        return 0
+    fi
+    base="${rv#v}"; base="${base%%-*}"
+    IFS=. read -r M m p <<<"$base"; M=${M:-0} m=${m:-0} p=${p:-0}
+    local safe=0
+    if   (( M > 1 )); then safe=1
+    elif (( M == 1 )); then
+        if   (( m > 3 )); then safe=1
+        elif (( m == 3 && p >= 3 )); then safe=1
+        elif (( m == 2 && p >= 8 )); then safe=1
+        fi
+    fi
+    # 1.4.0 release candidates: only rc.3+ carry the fix.
+    if [[ "$base" == "1.4.0" && "$rv" == *-rc.* ]]; then
+        local rc="${rv##*-rc.}"; [[ "$rc" =~ ^[0-9]+$ ]] && (( rc < 3 )) && safe=0
+    fi
+    if (( safe == 0 )); then
+        warn "host runC $rv is vulnerable to the Nov-2025 container-escape CVEs (CVE-2025-31133/52565/52881)."
+        warn "  Patch runC to >= 1.2.8 (1.2.x) / >= 1.3.3 (1.3.x) / >= 1.4.0-rc.3, then restart Docker."
+        warn "  Until then, container isolation can be escaped by a weaponized agent — treat each container as fully trusted."
+    fi
 }
 
 # Container/volume-safe name: lowercase, only [a-z0-9._-].

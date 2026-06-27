@@ -361,6 +361,16 @@ for row in "${FINAL[@]}"; do
     ports:
       - "${BIND_PREFIX}${port}:22"
 EOF
+    # Escape hardening (mirrors claude-launch via _common.sh): no-new-privileges
+    # always; drop ALL caps + re-add the minimal set unless CLAUDE_HARDEN_CAPS=0.
+    echo "    security_opt:"
+    echo "      - no-new-privileges:true"
+    if [[ "$CLAUDE_HARDEN_CAPS" =~ ^(1|true|yes|on)$ ]]; then
+        echo "    cap_drop:"
+        echo "      - ALL"
+        echo "    cap_add:"
+        for c in $CLAUDE_MIN_CAPS; do echo "      - $c"; done
+    fi
     if [[ -n "${EXPOSE[$svc]:-}" ]]; then
         while IFS= read -r m; do
             [[ -n "$m" ]] && echo "      - \"${m}\""
