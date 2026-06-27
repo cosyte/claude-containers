@@ -362,14 +362,20 @@ for row in "${FINAL[@]}"; do
       - "${BIND_PREFIX}${port}:22"
 EOF
     # Escape hardening (mirrors claude-launch via _common.sh): no-new-privileges
-    # always; drop ALL caps + re-add the minimal set unless CLAUDE_HARDEN_CAPS=0.
+    # always; drop ALL caps + re-add the minimal set unless CLAUDE_HARDEN_CAPS=0;
+    # add NET_ADMIN when the egress firewall is enabled.
     echo "    security_opt:"
     echo "      - no-new-privileges:true"
+    _caps=""
     if [[ "$CLAUDE_HARDEN_CAPS" =~ ^(1|true|yes|on)$ ]]; then
         echo "    cap_drop:"
         echo "      - ALL"
+        _caps="$CLAUDE_MIN_CAPS"
+    fi
+    [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]] && _caps="$_caps NET_ADMIN"
+    if [[ -n "${_caps// }" ]]; then
         echo "    cap_add:"
-        for c in $CLAUDE_MIN_CAPS; do echo "      - $c"; done
+        for c in $_caps; do echo "      - $c"; done
     fi
     if [[ -n "${EXPOSE[$svc]:-}" ]]; then
         while IFS= read -r m; do
@@ -381,6 +387,8 @@ EOF
       CLAUDE_PROJECT_NAME: "${svc}"
       CLAUDE_PERMISSION_MODE: "\${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
       CLAUDE_SECRET_GUARD: "\${CLAUDE_SECRET_GUARD:-1}"
+      CLAUDE_EGRESS_LOCKDOWN: "\${CLAUDE_EGRESS_LOCKDOWN:-0}"
+      CLAUDE_EGRESS_EXTRA_HOSTS: "\${CLAUDE_EGRESS_EXTRA_HOSTS:-}"
       CLAUDE_OTEL_ENABLED: "\${CLAUDE_OTEL_ENABLED:-0}"
       CLAUDE_OTEL_TRACES: "\${CLAUDE_OTEL_TRACES:-0}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "\${OTEL_EXPORTER_OTLP_ENDPOINT:-}"

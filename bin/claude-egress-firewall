@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Default-deny egress firewall for the container's network namespace.
+#
+# Run by the entrypoint AS ROOT (before it drops to the non-root claude user)
+# when CLAUDE_EGRESS_LOCKDOWN=1. Because the agent runs unprivileged without
+# NET_ADMIN, it cannot alter these rules — egress enforcement lives outside the
+# agent's reach, which is the property the security research demanded (app-layer
+# / SNI allowlists are bypassable; an IP-pinned netfilter allowlist is not).
+# Modeled on Anthropic's own .devcontainer/init-firewall.sh.
+#
+# FAIL-OPEN: rules are applied in one atomic `iptables-restore`. Either the whole
+# default-deny ruleset commits, or the filter table is left untouched (egress
+# stays open). Any earlier failure calls fail_open(). A misconfigured firewall
+# never bricks a homelab's connectivity; it logs loudly and stays open.
+#
+# Allowlist = a baked default set (Claude API + OAuth + Remote Control feature
+# flags + npm + GitHub) plus CLAUDE_EGRESS_EXTRA_HOSTS (space/comma separated).
+# Allowed: 443/80/22 to allowlisted IPs, 53 (DNS) anywhere, loopback, established.
+set -uo pipefail
+[[ "${CLAUDE_EGRESS_DEBUG:-0}" == 1 ]] && set -x
+
+log() { echo "[egress] $*"; }
+fail_open() {
+    log "ERROR: $* — failing OPEN (egress UNRESTRICTED). Fix and restart the container." >&2
+    iptables -P OUTPUT ACCEPT 2>/dev/null || true
+    exit 1
+}
+
+command -v iptables         >/dev/null 2>&1 || fail_open "iptables not installed"
+command -v iptables-restore >/dev/null 2>&1 || fail_open "iptables-restore not installed"
+
+# Default allowlist. Wildcards can't be IP-resolved, so we list the concrete
+# hosts the CLI actually dials (the artifact viewer's *.claudeusercontent.com is
+# browser-only and intentionally omitted). See the egress-allowlist memo.
+DEFAULT_HOSTS="
+api.anthropic.com claude.ai platform.claude.com downloads.claude.ai
+bridge.claudeusercontent.com raw.githubusercontent.com objects.githubusercontent.com
+storage.googleapis.com
+statsig.anthropic.com statsig.com api.growthbook.io cdn.growthbook.io
+us.sentry.io downloads.sentry-cdn.com
+registry.npmjs.org
+github.com api.github.com codeload.github.com
+"
+EXTRA="${CLAUDE_EGRESS_EXTRA_HOSTS:-}"; EXTRA="${EXTRA//,/ }"
+HOSTS="$DEFAULT_HOSTS $EXTRA"
+
+# Collect the allowed IPv4 nets (single IPs and CIDRs) while egress is still open.
+declare -A SEEN=()
+NETS=()
+add_net() { [[ -n "$1" && -z "${SEEN[$1]:-}" ]] && { SEEN[$1]=1; NETS+=("$1"); }; }
+
+# GitHub serves git/clone/raw from a large, published IP space — resolving a few
+# hostnames misses codeload/objects mirrors. Pull the official ranges (best-
+# effort; falls back to per-host resolution below).
+if meta="$(curl -fsS --max-time 10 https://api.github.com/meta 2>/dev/null)"; then
+    while IFS= read -r cidr; do add_net "$cidr"; done < <(
+        echo "$meta" | jq -r '(.web // []) + (.api // []) + (.git // []) + (.packages // [])
+                              | .[] | select(test(":")|not)' 2>/dev/null)
+    log "added GitHub published IPv4 ranges from api.github.com/meta"
+else
+    log "WARNING: could not fetch api.github.com/meta — relying on per-host DNS for GitHub"
+fi
+
+# Resolve each allowlist host to its current IPv4s and pin them. Docker's
+# embedded DNS can take ~5s per name on the AAAA path, so resolve all hosts in
+# PARALLEL with a per-host timeout — total stays ~one lookup, not their sum, and
+# no single slow/hung name blocks boot.
+rdir="$(mktemp -d)"
+for h in $HOSTS; do
+    [[ -z "$h" ]] && continue
+    ( timeout 6 getent ahostsv4 "$h" 2>/dev/null | awk '{print $1}' | sort -u > "$rdir/${h//\//_}" ) &
+done
+wait
+for h in $HOSTS; do
+    [[ -z "$h" ]] && continue
+    ips="$(cat "$rdir/${h//\//_}" 2>/dev/null)"
+    [[ -z "$ips" ]] && { log "WARNING: could not resolve $h (timeout/NXDOMAIN) — skipping"; continue; }
+    for ip in $ips; do add_net "$ip"; done
+done
+rm -rf "$rdir"
+(( ${#NETS[@]} > 0 )) || fail_open "allowlist resolved to zero IPs"
+log "allowlist holds ${#NETS[@]} IPv4 nets from $(echo "$HOSTS" | wc -w) hosts"
+
+# Build the filter-table ruleset and apply it atomically. INPUT stays ACCEPT
+# (inbound SSH; replies ride conntrack), OUTPUT defaults to DROP with the
+# allowlist punched through on 22/80/443. $1=1 includes a rate-limited LOG of
+# drops (needs the LOG target; we retry without it if unavailable).
+build_rules() {
+    echo "*filter"
+    echo ":INPUT ACCEPT [0:0]"
+    echo ":FORWARD ACCEPT [0:0]"
+    echo ":OUTPUT DROP [0:0]"
+    echo "-A OUTPUT -o lo -j ACCEPT"
+    echo "-A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+    echo "-A OUTPUT -p udp --dport 53 -j ACCEPT"
+    echo "-A OUTPUT -p tcp --dport 53 -j ACCEPT"
+    local net
+    for net in "${NETS[@]}"; do
+        echo "-A OUTPUT -p tcp -d $net -m multiport --dports 22,80,443 -j ACCEPT"
+    done
+    [[ "${1:-0}" == 1 ]] && echo '-A OUTPUT -m limit --limit 5/min -j LOG --log-prefix "[egress-drop] "'
+    echo "COMMIT"
+}
+
+if   build_rules 1 | iptables-restore 2>/dev/null; then :
+elif build_rules 0 | iptables-restore 2>/dev/null; then log "applied without drop-logging (LOG target unavailable)"
+else fail_open "iptables-restore failed to apply the ruleset"
+fi
+
+# Confirm the policy actually flipped (atomic restore should guarantee it).
+[[ "$(iptables -S OUTPUT 2>/dev/null | head -1)" == "-P OUTPUT DROP" ]] \
+    || fail_open "default-deny policy not in effect after restore"
+
+log "default-deny egress active (allow: loopback, established, DNS, + ${#NETS[@]} pinned nets on 22/80/443)"

@@ -65,6 +65,9 @@ harden_run_args() {
         out+=" --cap-drop ALL"
         local c; for c in $CLAUDE_MIN_CAPS; do out+=" --cap-add $c"; done
     fi
+    # The egress firewall needs NET_ADMIN at boot (used by root only; the agent
+    # stays unprivileged and so cannot alter the rules).
+    [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]] && out+=" --cap-add NET_ADMIN"
     echo "$out"
 }
 

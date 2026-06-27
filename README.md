@@ -190,6 +190,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_CPU_LIMIT`/`CLAUDE_MEM_LIMIT` | `2`/`4g` | Per-container resource caps |
 | `CLAUDE_SHM_SIZE` | `2g` | `/dev/shm` size |
 | `CLAUDE_HARDEN_CAPS` | `1` | `1` = `--cap-drop ALL` + minimal `--cap-add` (drops NET_RAW/MKNOD/SETFCAP); `0` = Docker defaults. `no-new-privileges` is always set. Override the set with `CLAUDE_MIN_CAPS` |
+| `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts. Extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. Fail-open on error |
 | `CLAUDE_STOP_TIMEOUT` | `20` | Graceful stop timeout (s) |
 | `AUTH_VOLUME`/`SSHKEYS_VOLUME` | `claude-auth`/`claude-sshkeys` | Shared volume names |
 | `ANTHROPIC_API_KEY` | unset | **Must stay unset** — entrypoint hard-fails otherwise |
@@ -414,6 +415,20 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   `claude-auth` credential volume. For an untrusted-input / multi-tenant threat
   model, run a microVM runtime (gVisor/Kata) and broker those secrets out of the
   agent's reach rather than relying on container isolation.
+- **Egress lockdown (opt-in).** `CLAUDE_EGRESS_LOCKDOWN=1` applies a default-deny
+  iptables firewall at boot — as root, before the agent starts and while it's
+  still unprivileged, so a prompt-injected agent can neither exfiltrate to
+  arbitrary hosts nor disable its own egress rules. Enforcement is at the network
+  layer on a pinned IP allowlist, because the research that motivated this found
+  Claude Code's own app-layer allowlist was bypassable (a SOCKS5 null-byte parser
+  differential) and SNI/CONNECT proxy allowlists are evadable by domain fronting.
+  The baked allowlist covers the Claude API, OAuth, the Remote Control feature
+  flags (`statsig.*`/`growthbook.*` — blocking those breaks RC), npm, and GitHub
+  (via its published IP ranges); extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. It adds
+  ~10s to boot and the `NET_ADMIN` cap, and **fails open** (logs loudly, leaves
+  egress unrestricted) rather than bricking connectivity. Caveat: an IP-pinned
+  allowlist can go stale as CDNs rotate IPs, and `statsig.anthropic.com` isn't
+  publicly resolvable so it can't be pinned — re-verify if RC eligibility fails.
 - **`claude-auth` volume** holds your live OAuth credentials
   (`.credentials.json`) — effectively your Claude session. Anyone who can read
   this Docker volume can act as you. Rotate by `docker volume rm claude-auth`
