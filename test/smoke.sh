@@ -18,12 +18,13 @@ TMP="$(mktemp -d)"
 CN="claude-smoke-$$"
 OTELCN="claude-smoke-otel-$$"
 EGCN="claude-smoke-egress-$$"
+BRKCN="claude-smoke-broker-$$"
 AUTHVOL="claude-smoke-auth-$$"
 WSVOL="claude-smoke-ws-$$"
 PASS=0 FAIL=0
 
 cleanup() {
-    docker rm -f "$CN" "$OTELCN" "$EGCN" >/dev/null 2>&1 || true
+    docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" >/dev/null 2>&1 || true
     docker volume rm "$AUTHVOL" "$WSVOL" >/dev/null 2>&1 || true
     rm -rf "$TMP"
 }
@@ -289,6 +290,31 @@ else
     echo "  SKIP  default-deny allow/deny checks (lockdown failed open — no network in test env)"
 fi
 docker rm -f "$EGCN" >/dev/null 2>&1 || true
+
+echo
+echo "== 15. git-key brokering: usable by the agent, not readable =="
+# Mount a throwaway deploy key and broker it. The agent must be able to USE it
+# (ssh-agent lists it) but never READ the private bytes.
+ssh-keygen -q -t ed25519 -f "$TMP/gitkey" -N ''
+docker run -d --name "$BRKCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=broker \
+    -e CLAUDE_BROKER_GIT_KEY=1 \
+    -v "$TMP/repo:/workspace" -v "$TMP/key.pub:/etc/claude/authorized_keys:ro" \
+    -v "$TMP/gitkey:/etc/claude/git-key:ro" "$IMAGE" >/dev/null 2>&1 || true
+for _ in $(seq 1 40); do docker logs "$BRKCN" 2>&1 | grep -q "started in tmux" && break; sleep 1; done
+brk() { docker exec "$BRKCN" gosu claude bash -lc "$1"; }
+check "broker engaged (key held in root ssh-agent)" \
+    'docker logs "$BRKCN" 2>&1 | grep -q "key broker.*root ssh-agent"'
+check "agent can USE the key (ssh-agent lists it via the relay)" \
+    'brk "ssh-add -l" 2>/dev/null | grep -qE "ED25519|SHA256"'
+check "agent CANNOT read the private key (no readable key file)" \
+    '! brk "test -e ~/.ssh/id_ed25519"'
+check "agent CANNOT extract the key (ssh-add -L gives public only)" \
+    '! brk "ssh-add -L 2>/dev/null | grep -qi PRIVATE"'
+check "real ssh-agent socket is root-only (claude cannot reach it directly)" \
+    '[ "$(docker exec "$BRKCN" stat -c %U /run/claude/agent-root.sock)" = root ] && ! brk "cat /run/claude/agent-root.sock" 2>/dev/null'
+check "shared /auth credential master is locked to root (agent cannot list it)" \
+    '[ "$(docker exec "$BRKCN" stat -c "%A %U" /auth)" = "drwx------ root" ] && ! brk "ls /auth" 2>/dev/null'
+docker rm -f "$BRKCN" >/dev/null 2>&1 || true
 
 echo
 echo "==============================================="

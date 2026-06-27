@@ -38,7 +38,7 @@ RUN set -eux; \
         git openssh-server tmux \
         ripgrep fzf jq gettext-base \
         build-essential python3 python3-venv python3-pip \
-        iptables \
+        iptables socat \
         gosu less nano vim-tiny procps; \
     # GitHub CLI from the official apt repo
     mkdir -p -m 755 /etc/apt/keyrings; \

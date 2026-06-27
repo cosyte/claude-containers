@@ -69,18 +69,54 @@ else
 fi
 
 # --- 5. Git SSH key + identity -----------------------------------------------
+# CLAUDE_BROKER_GIT_KEY=1 loads the deploy key into a ROOT-owned ssh-agent and
+# exposes only the agent socket to the claude user: git can sign/push with the
+# key, but the unprivileged (prompt-injectable) agent can never read the private
+# key bytes, so it can't be exfiltrated. Default off keeps the historical
+# readable key file. Either way the key is never baked into the image.
+git_brokered=0
 if [[ -s "$GITKEY_SRC" ]]; then
-    install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 \
-        "$GITKEY_SRC" "$CLAUDE_HOME/.ssh/id_ed25519"
     cat > "$CLAUDE_HOME/.ssh/config" <<EOF
 Host *
-    IdentityFile ~/.ssh/id_ed25519
     StrictHostKeyChecking accept-new
     UserKnownHostsFile ~/.ssh/known_hosts
 EOF
+    if [[ "${CLAUDE_BROKER_GIT_KEY:-0}" =~ ^(1|true|yes|on)$ ]]; then
+        # Key lives only in a ROOT ssh-agent's memory (+ the root-only mounted
+        # key file). ssh-agent rejects cross-uid peers, so a root socat relay
+        # exposes a claude-usable socket and forwards to the root agent: claude
+        # signs through it (git push works) but can neither extract the key
+        # (agent protocol never returns private keys) nor read root's memory.
+        mkdir -p /run/claude && chmod 711 /run/claude
+        AGENT_SOCK="/run/claude/agent-root.sock"     # root-only
+        CLAUDE_SOCK="/run/claude/agent.sock"         # claude-usable, via relay
+        rm -f "$AGENT_SOCK" "$CLAUDE_SOCK"
+        if ssh-agent -a "$AGENT_SOCK" >/dev/null 2>&1; then
+            for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -S "$AGENT_SOCK" ]] && break; sleep 0.2; done
+        fi
+        if [[ -S "$AGENT_SOCK" ]] && SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add "$GITKEY_SRC" >/dev/null 2>&1; then
+            socat "UNIX-LISTEN:$CLAUDE_SOCK,fork,mode=0600,user=$CLAUDE_USER" \
+                  "UNIX-CONNECT:$AGENT_SOCK" >/dev/null 2>&1 &
+            for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -S "$CLAUDE_SOCK" ]] && break; sleep 0.2; done
+        fi
+        if [[ -S "$CLAUDE_SOCK" ]]; then
+            chmod 600 "$AGENT_SOCK" 2>/dev/null || true     # keep the real agent root-only
+            export SSH_AUTH_SOCK="$CLAUDE_SOCK"
+            printf 'export SSH_AUTH_SOCK=%s\n' "$CLAUDE_SOCK" > /etc/profile.d/claude-ssh-agent.sh
+            git_brokered=1
+            log "Git SSH key broker  : key held in a root ssh-agent (claude signs via relay, cannot read it)"
+        else
+            log "Git SSH key broker  : WARNING — ssh-agent/relay setup failed; falling back to a readable key file"
+        fi
+    fi
+    if [[ "$git_brokered" == 0 ]]; then
+        install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 \
+            "$GITKEY_SRC" "$CLAUDE_HOME/.ssh/id_ed25519"
+        printf 'Host *\n    IdentityFile ~/.ssh/id_ed25519\n' >> "$CLAUDE_HOME/.ssh/config"
+        log "Installed git SSH key"
+    fi
     chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_HOME/.ssh/config"
     chmod 600 "$CLAUDE_HOME/.ssh/config"
-    log "Installed git SSH key"
 else
     log "No git SSH key mounted at $GITKEY_SRC (https/public repos still work)"
 fi
@@ -149,6 +185,14 @@ if [[ -s "$AUTH_DIR/.credentials.json" && ! -s "$CLAUDE_CONFIG_DIR/.credentials.
     install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 \
         "$AUTH_DIR/.credentials.json" "$CLAUDE_CONFIG_DIR/.credentials.json"
 fi
+# Defense-in-depth: lock the SHARED fleet-wide credential master to root-only so
+# a prompt-injected agent can't read or even list it. The agent keeps its OWN
+# per-container session token ($CLAUDE_CONFIG_DIR/.credentials.json, claude:600,
+# unavoidable — Claude Code authenticates with it), but cannot reach the master
+# that backs every other container. `make login` (root-chowns /auth) is separate.
+chown root:root "$AUTH_DIR" 2>/dev/null || true
+chmod 700 "$AUTH_DIR" 2>/dev/null || true
+[[ -e "$AUTH_DIR/.credentials.json" ]] && { chown root:root "$AUTH_DIR/.credentials.json" 2>/dev/null || true; chmod 600 "$AUTH_DIR/.credentials.json" 2>/dev/null || true; }
 
 reconcile_creds() {
     local a="$AUTH_DIR/.credentials.json"

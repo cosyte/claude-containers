@@ -191,6 +191,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_SHM_SIZE` | `2g` | `/dev/shm` size |
 | `CLAUDE_HARDEN_CAPS` | `1` | `1` = `--cap-drop ALL` + minimal `--cap-add` (drops NET_RAW/MKNOD/SETFCAP); `0` = Docker defaults. `no-new-privileges` is always set. Override the set with `CLAUDE_MIN_CAPS` |
 | `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts. Extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. Fail-open on error |
+| `CLAUDE_BROKER_GIT_KEY` | `0` | `1` = hold the SSH deploy key in a root ssh-agent (agent signs/pushes but can't read the key bytes) instead of a readable `~/.ssh/id_ed25519` |
 | `CLAUDE_STOP_TIMEOUT` | `20` | Graceful stop timeout (s) |
 | `AUTH_VOLUME`/`SSHKEYS_VOLUME` | `claude-auth`/`claude-sshkeys` | Shared volume names |
 | `ANTHROPIC_API_KEY` | unset | **Must stay unset** — entrypoint hard-fails otherwise |
@@ -410,11 +411,22 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   CVEs CVE-2025-31133/52565/52881) — patching the host runtime is the single
   highest-leverage control, because **a container is not a security boundary
   against a fully weaponized agent** (AWS says as much of its own runtime). These
-  controls shrink blast radius but do **not** contain what matters most: the
-  agent still holds the mounted git deploy key and can read the shared
-  `claude-auth` credential volume. For an untrusted-input / multi-tenant threat
-  model, run a microVM runtime (gVisor/Kata) and broker those secrets out of the
-  agent's reach rather than relying on container isolation.
+  controls shrink blast radius but do **not** by themselves contain the secrets
+  the agent can reach — see secret brokering below. For an untrusted-input /
+  multi-tenant threat model, also run a microVM runtime (gVisor/Kata) rather than
+  relying on container isolation alone.
+- **Secret brokering (git key + credentials).** By default the SSH deploy key is
+  copied to a `claude`-readable `~/.ssh/id_ed25519`, so a prompt-injected agent
+  could exfiltrate it. `CLAUDE_BROKER_GIT_KEY=1` instead loads the key into a
+  **root-owned `ssh-agent`** and exposes only a signing socket (via a root
+  `socat` relay): git still pushes, but the unprivileged agent can never read the
+  key bytes — not from a file, the agent protocol, the socket, or root's
+  `/proc/<pid>/mem`. The shared **`claude-auth` credential master is always**
+  locked to `root` (`/auth`, mode 700), so the agent can't reach the token that
+  backs the rest of the fleet; it only ever holds its **own** per-container
+  session token, which is unavoidable (Claude Code authenticates with it, and a
+  Max subscription has no scopable API key). Rotate the master with
+  `docker volume rm claude-auth` + `make login`.
 - **Egress lockdown (opt-in).** `CLAUDE_EGRESS_LOCKDOWN=1` applies a default-deny
   iptables firewall at boot — as root, before the agent starts and while it's
   still unprivileged, so a prompt-injected agent can neither exfiltrate to
