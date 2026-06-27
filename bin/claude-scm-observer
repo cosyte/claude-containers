@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# SCM event observer — the event-driven half of the autopilot queue.
+#
+# Polls the workspace repo's GitHub PRs and routes actionable events into the
+# durable task queue (the autopilot loop consumes them). This closes the loop
+# from "blind timer" toward observe → derive → act: instead of only running
+# /next on a clock, the fleet reacts to CI failures, change requests, and merge
+# conflicts as they appear. Polling (not webhooks) keeps the container's
+# outbound-only posture — no inbound port.
+#
+# Started by the entrypoint in its own tmux window 'scm' when
+# CLAUDE_SCM_OBSERVER=1. Feeds the queue, so pair it with CLAUDE_AUTOPILOT=1 +
+# CLAUDE_AUTOPILOT_QUEUE=1 for a container that consumes what it observes.
+#
+# Tunables (env, all optional):
+#   CLAUDE_SCM_INTERVAL   seconds between polls                  (default: 300)
+#   CLAUDE_SCM_EVENTS     csv of ci,review,conflict to watch     (default: all)
+#   CLAUDE_SCM_PR_FILTER  extra `gh pr list` args (e.g. --author @me)
+#   CLAUDE_SCM_PR_LIMIT   max PRs scanned per poll               (default: 50)
+#   CLAUDE_SCM_PRIORITY   enqueue priority (lower = sooner)      (default: 40)
+#   CLAUDE_AUTOPILOT_QUEUE_DIR  queue location (shared w/ autopilot)
+set -uo pipefail
+
+EVENTS="${CLAUDE_SCM_EVENTS:-ci,review,conflict}"
+PR_LIMIT="${CLAUDE_SCM_PR_LIMIT:-50}"
+PRIORITY="${CLAUDE_SCM_PRIORITY:-40}"
+QUEUE_DIR="${CLAUDE_AUTOPILOT_QUEUE_DIR:-$HOME/.claude/autopilot-queue}"
+SEEN="$QUEUE_DIR/.scm-seen"
+mkdir -p "$QUEUE_DIR/pending"
+touch "$SEEN"
+
+# Pure transform: `gh pr list` JSON (stdin) → one TSV event per actionable PR:
+# key \t kind \t number \t title \t url. The key embeds headRefOid, so an event
+# re-fires when new commits land (a fresh failure) but not on every poll. Kept
+# separate from the gh/enqueue plumbing so it can be unit-tested with fixtures.
+scm_events() {
+    jq -r --arg evstr "$EVENTS" '
+        ($evstr | split(",")) as $ev
+        | .[] as $pr
+        | ($pr.statusCheckRollup // []) as $checks
+        | [
+            (if ($ev|index("ci")) and
+                ([$checks[] | select(.conclusion=="FAILURE" or .conclusion=="ERROR"
+                                     or .state=="FAILURE" or .state=="ERROR")] | length > 0)
+             then "ci" else empty end),
+            (if ($ev|index("review")) and ($pr.reviewDecision=="CHANGES_REQUESTED")
+             then "review" else empty end),
+            (if ($ev|index("conflict")) and ($pr.mergeable=="CONFLICTING")
+             then "conflict" else empty end)
+          ][]
+        | [ "pr\($pr.number)-\(.)-\($pr.headRefOid // "nohead")",
+            ., ($pr.number|tostring), ($pr.title // ""), ($pr.url // "") ] | @tsv
+    '
+}
+
+# `events` dry-run: read `gh pr list` JSON on stdin and print the events that
+# would be routed. Pure transform — needs no /workspace, gh, or queue. Used to
+# preview what the observer would enqueue, and by the test suite.
+if [[ "${1:-}" == "events" ]]; then scm_events; exit 0; fi
+
+cd /workspace 2>/dev/null || { echo "[scm] no /workspace — nothing to observe"; exec bash -l; }
+
+INTERVAL="${CLAUDE_SCM_INTERVAL:-300}"
+PR_FILTER="${CLAUDE_SCM_PR_FILTER:-}"
+PR_LIMIT="${CLAUDE_SCM_PR_LIMIT:-50}"
+PRIORITY="${CLAUDE_SCM_PRIORITY:-40}"
+QUEUE_DIR="${CLAUDE_AUTOPILOT_QUEUE_DIR:-$HOME/.claude/autopilot-queue}"
+SEEN="$QUEUE_DIR/.scm-seen"
+mkdir -p "$QUEUE_DIR/pending"
+touch "$SEEN"
+
+# Build the task prompt the agent will receive for a given event.
+build_prompt() {
+    local kind="$1" num="$2" title="$3" url="$4"
+    case "$kind" in
+        ci)       echo "CI is failing on PR #$num ($title): $url . Run \`gh pr checks $num\` to see which checks failed, read their logs, fix the root cause on the PR's branch, commit, and push. Do not merge." ;;
+        review)   echo "PR #$num ($title) has changes requested in review: $url . Read the review with \`gh pr view $num --comments\`, address every point on the branch, commit, push, and reply to the threads you resolved." ;;
+        conflict) echo "PR #$num ($title) has merge conflicts: $url . Check out the branch, merge or rebase its base branch, resolve the conflicts, run the tests, commit, and push." ;;
+        *)        echo "Look at PR #$num ($title): $url" ;;
+    esac
+}
+
+echo "[scm] observer  : watching $EVENTS"
+echo "[scm] repo      : $(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo '(gh cannot resolve a GitHub repo from this workspace remote)')"
+echo "[scm] interval  : ${INTERVAL}s   queue: $QUEUE_DIR"
+[[ -z "${GH_TOKEN:-}" ]] && echo "[scm] WARNING: no GH_TOKEN — gh is unauthenticated; private repo data will be unavailable"
+echo
+
+poll() {
+    local json events line key kind num title url n=0
+    json="$(gh pr list --state open --limit "$PR_LIMIT" $PR_FILTER \
+        --json number,title,url,headRefOid,mergeable,reviewDecision,statusCheckRollup 2>/dev/null)" || {
+        echo "[scm] gh pr list failed (auth? not a GitHub repo?) — will retry next poll"; return; }
+    [[ -z "$json" || "$json" == "[]" ]] && { echo "[scm] no open PRs"; return; }
+
+    events="$(echo "$json" | scm_events)"
+    while IFS=$'\t' read -r key kind num title url; do
+        [[ -z "$key" ]] && continue
+        if grep -qxF "$key" "$SEEN"; then continue; fi          # already routed
+        claude-enqueue --priority "$PRIORITY" "$(build_prompt "$kind" "$num" "$title" "$url")" >/dev/null \
+            && { echo "$key" >> "$SEEN"; n=$((n+1)); echo "[scm] enqueued $kind for PR #$num — $title"; }
+    done <<< "$events"
+    [[ "$n" -eq 0 ]] && echo "[scm] no new events"
+    # Keep the seen-ledger bounded.
+    if [[ "$(wc -l < "$SEEN")" -gt 2000 ]]; then tail -n 1000 "$SEEN" > "$SEEN.tmp" && mv -f "$SEEN.tmp" "$SEEN"; fi
+}
+
+# If invoked as `claude-scm-observer poll`, run one poll and exit (used by tests
+# and for a manual one-shot). Otherwise loop forever.
+if [[ "${1:-}" == "poll" ]]; then poll; exit 0; fi
+
+while :; do
+    echo "[scm] === poll $(date -u +%Y%m%dT%H%M%SZ) ==="
+    poll
+    sleep "$INTERVAL"
+done
