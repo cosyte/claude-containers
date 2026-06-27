@@ -14,6 +14,7 @@ cd /workspace || cd "$HOME"
 
 NAME="${CLAUDE_PROJECT_NAME:-claude}"
 EXTRA="${CLAUDE_EXTRA_ARGS:-}"
+PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 
 # Remote Control debug log. Claude writes RC bridge events here so the
 # healthcheck and the RC watchdog can tell when the Remote Control link drops
@@ -21,7 +22,15 @@ EXTRA="${CLAUDE_EXTRA_ARGS:-}"
 RC_DEBUG_LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
 RC_DEBUG_FILTER="${CLAUDE_RC_DEBUG_FILTER:-bridge}"
 
-ARGS=(--dangerously-skip-permissions --remote-control "$NAME")
+# Permission posture from CLAUDE_PERMISSION_MODE. bypassPermissions keeps the
+# historical --dangerously-skip-permissions (verified to combine with Remote
+# Control on the pinned CLI); any other mode goes through --permission-mode so a
+# hardened fleet can run acceptEdits/plan/etc. without editing this script.
+case "$PERM_MODE" in
+    bypassPermissions|bypass|"") ARGS=(--dangerously-skip-permissions) ;;
+    *)                           ARGS=(--permission-mode "$PERM_MODE") ;;
+esac
+ARGS+=(--remote-control "$NAME")
 
 if [[ "${1:-}" == "--continue" || "${1:-}" == "-c" ]]; then
     ARGS+=(--continue)

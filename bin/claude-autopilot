@@ -17,6 +17,10 @@
 #   CLAUDE_AUTOPILOT_MAX_RUNS     stop after N runs, 0 = unlimited   (default: 0)
 #   CLAUDE_AUTOPILOT_BACKOFF_MAX  cap on failure backoff, seconds    (default: 21600)
 #   CLAUDE_AUTOPILOT_LOG_DIR      where per-run JSON logs go         (default: ~/.claude/autopilot-logs)
+#   CLAUDE_AUTOPILOT_RESUME       1 = resume the prior session each  (default: 0; each run a
+#                                 run via --resume <id> instead of   fresh session, the original
+#                                 a fresh session                    /next-recovers-from-disk model)
+#   CLAUDE_PERMISSION_MODE        default/acceptEdits/plan/bypass…   (default: bypassPermissions)
 #   CLAUDE_EXTRA_ARGS             extra args appended to `claude`
 set -uo pipefail
 
@@ -28,30 +32,84 @@ MAX_RUNS="${CLAUDE_AUTOPILOT_MAX_RUNS:-0}"
 BACKOFF_MAX="${CLAUDE_AUTOPILOT_BACKOFF_MAX:-21600}"
 EXTRA="${CLAUDE_EXTRA_ARGS:-}"
 LOG_DIR="${CLAUDE_AUTOPILOT_LOG_DIR:-$HOME/.claude/autopilot-logs}"
+RESUME="${CLAUDE_AUTOPILOT_RESUME:-0}"
+PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 mkdir -p "$LOG_DIR"
+SESSION_FILE="$LOG_DIR/.session-id"   # persists on the per-container config volume
+
+# Map CLAUDE_PERMISSION_MODE to the right claude(1) flag. bypassPermissions keeps
+# the historical --dangerously-skip-permissions (full autonomy, accepted for a
+# headless container-isolated run). Any other mode goes through --permission-mode
+# so the fleet can run hardened (acceptEdits gates shell/network; auto uses the
+# classifier) without editing this script.
+perm_flags() {
+    case "$PERM_MODE" in
+        bypassPermissions|bypass|"") printf '%s' '--dangerously-skip-permissions' ;;
+        *)                           printf '%s %s' '--permission-mode' "$PERM_MODE" ;;
+    esac
+}
+
+# Best-effort: turn a rate-limit reset hint in the run output into seconds-to-sleep.
+# Handles a unix-epoch reset field in the JSON and a human "reset at 3pm"/"resets
+# at 23:00" string in stdout/stderr. Echoes seconds (>0) or nothing.
+seconds_until_reset() {
+    local file="$1" now epoch target secs
+    now="$(date -u +%s)"
+    # 1) Structured: any *reset*/retry epoch the CLI may emit in JSON.
+    if command -v jq >/dev/null 2>&1; then
+        epoch="$(jq -r '
+            [.. | objects | (.resetsAt? // .reset_at? // .retryAt? // .retry_at? // empty)]
+            | map(select(type=="number")) | (.[0] // empty)' "$file" 2>/dev/null)"
+        if [[ "$epoch" =~ ^[0-9]+$ ]]; then
+            [[ "$epoch" -gt 9999999999 ]] && epoch=$((epoch / 1000))   # ms → s
+            secs=$((epoch - now))
+            (( secs > 0 )) && { echo "$secs"; return; }
+        fi
+    fi
+    # 2) Human string: "reset(s) at 3pm" / "reset at 23:00" (local tz).
+    local hint
+    hint="$(grep -oiE 'reset[s]?[^0-9]{0,12}([0-9]{1,2}(:[0-9]{2})?\s*(am|pm)?)' "$file" 2>/dev/null | head -n1)"
+    if [[ -n "$hint" ]]; then
+        local clock; clock="$(grep -oiE '[0-9]{1,2}(:[0-9]{2})?\s*(am|pm)?' <<<"$hint" | head -n1)"
+        if [[ -n "$clock" ]] && target="$(date -d "$clock" +%s 2>/dev/null)"; then
+            secs=$((target - $(date +%s)))
+            (( secs <= 0 )) && secs=$((secs + 86400))   # already past today → tomorrow
+            (( secs > 0 )) && { echo "$secs"; return; }
+        fi
+    fi
+}
 
 echo "[autopilot] prompt   : $PROMPT"
 echo "[autopilot] interval : ${INTERVAL}s   max_runs: $([ "$MAX_RUNS" = 0 ] && echo ∞ || echo "$MAX_RUNS")"
 echo "[autopilot] workspace: $(pwd)"
 echo "[autopilot] logs     : $LOG_DIR"
+echo "[autopilot] perm     : $PERM_MODE   resume: $([ "$RESUME" = 1 ] && echo on || echo off)"
 echo "[autopilot] auth     : Max subscription OAuth (entrypoint refuses ANTHROPIC_API_KEY)"
 echo
 
 run=0
 fails=0
+total_cost=0
 while :; do
     run=$((run + 1))
     ts="$(date -u +%Y%m%dT%H%M%SZ)"
     out="$LOG_DIR/run-$ts.json"
     echo "[autopilot] === run #$run ($ts) ==="
 
-    # Headless and container-isolated, so --dangerously-skip-permissions is the
-    # accepted model here (identical to claude-session). NOT --remote-control:
-    # this is unattended. Each run is a fresh session by design — /next is
-    # session-independent and recovers its state from disk.
+    # Headless and container-isolated. Permission posture comes from
+    # CLAUDE_PERMISSION_MODE (see perm_flags). NOT --remote-control: unattended.
+    # Each run is a fresh session by default — /next is session-independent and
+    # recovers its state from disk. Set CLAUDE_AUTOPILOT_RESUME=1 to instead
+    # carry the exact conversation forward with --resume.
+    resume_flags=""
+    if [[ "$RESUME" = 1 && -s "$SESSION_FILE" ]]; then
+        resume_flags="--resume $(cat "$SESSION_FILE")"
+        echo "[autopilot] resuming session $(cat "$SESSION_FILE")"
+    fi
+
     ok=1
-    # shellcheck disable=SC2086  # EXTRA is intentionally word-split
-    if claude -p "$PROMPT" --dangerously-skip-permissions --output-format json $EXTRA >"$out" 2>&1; then
+    # shellcheck disable=SC2086  # flag vars are intentionally word-split
+    if claude -p "$PROMPT" $(perm_flags) --output-format json $resume_flags $EXTRA >"$out" 2>&1; then
         if command -v jq >/dev/null 2>&1 \
             && [ "$(jq -r '.is_error // false' "$out" 2>/dev/null)" = "true" ]; then
             ok=0
@@ -62,6 +120,18 @@ while :; do
 
     if command -v jq >/dev/null 2>&1; then
         jq -r '.result // "(no result field)"' "$out" 2>/dev/null | head -n 40
+
+        # Per-run cost/token accounting (total_cost_usd + modelUsage), so the
+        # shared subscription's spend is attributable per container without the
+        # usage dashboard. Carry session_id forward for --resume.
+        sid="$(jq -r '.session_id // empty' "$out" 2>/dev/null)"
+        [[ -n "$sid" ]] && printf '%s' "$sid" > "$SESSION_FILE"
+        read -r cost turns dur <<<"$(jq -r '[(.total_cost_usd // 0), (.num_turns // 0), (.duration_ms // 0)] | @tsv' "$out" 2>/dev/null)"
+        if [[ -n "${cost:-}" ]]; then
+            total_cost="$(awk -v a="$total_cost" -v b="$cost" 'BEGIN{printf "%.4f", a+b}')"
+            printf '[autopilot] cost: $%s this run · $%s cumulative · turns=%s · %ss\n' \
+                "$cost" "$total_cost" "${turns:-?}" "$(( ${dur:-0} / 1000 ))"
+        fi
     else
         tail -n 5 "$out"
     fi
@@ -71,16 +141,24 @@ while :; do
         sleep_for="$INTERVAL"
     else
         fails=$((fails + 1))
-        # Exponential backoff on failure (rate-limit / error), capped. Protects
-        # the shared Max quota from a hot failure loop.
-        shift_by=$((fails > 4 ? 4 : fails))
-        sleep_for=$((INTERVAL * (1 << shift_by)))
+        # Prefer the actual reset time when the failure is a rate/usage limit:
+        # sleeping exactly until reset beats blind backoff for shared-quota
+        # throughput. Otherwise exponential backoff, capped, to protect the
+        # shared Max quota from a hot failure loop.
+        reset_secs="$(seconds_until_reset "$out")"
+        if [[ -n "$reset_secs" ]]; then
+            sleep_for=$((reset_secs + 30))   # small buffer past the reset
+            echo "[autopilot] run FAILED (consecutive=$fails) — rate/usage limit; sleeping until reset (~${reset_secs}s). Log: $out"
+        else
+            shift_by=$((fails > 4 ? 4 : fails))
+            sleep_for=$((INTERVAL * (1 << shift_by)))
+            echo "[autopilot] run FAILED (consecutive=$fails) — backing off. Log: $out"
+        fi
         [ "$sleep_for" -gt "$BACKOFF_MAX" ] && sleep_for="$BACKOFF_MAX"
-        echo "[autopilot] run FAILED (consecutive=$fails) — backing off. Log: $out"
     fi
 
     if [ "$MAX_RUNS" != 0 ] && [ "$run" -ge "$MAX_RUNS" ]; then
-        echo "[autopilot] reached max_runs=$MAX_RUNS — stopping."
+        echo "[autopilot] reached max_runs=$MAX_RUNS — stopping. Cumulative cost: \$$total_cost"
         break
     fi
 
