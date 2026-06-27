@@ -162,8 +162,10 @@ echo
 echo "== 9. claude-compose-gen per-repo resource overrides =="
 GENOUT="$TMP/gen-compose.yml"
 # Sentinel values 7 / 777m won't collide with any plausible global default.
+# Repos given as owner/repo so no --org / gh enumeration is needed offline; the
+# service names (and override keys) are the bare repo names alpha / beta.
 if "$REPO_ROOT/bin/claude-compose-gen" --out "$GENOUT" \
-       --cpu alpha=7 --mem alpha=777m --browser beta alpha beta >/dev/null 2>&1; then
+       --cpu alpha=7 --mem alpha=777m --browser beta acme/alpha acme/beta >/dev/null 2>&1; then
     check "--cpu override applies cpus to the target repo" \
         'grep -A20 "^  alpha:" "$GENOUT" | grep -q "cpus: 7"'
     check "--mem override applies mem_limit to the target repo" \
