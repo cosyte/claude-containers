@@ -94,7 +94,9 @@ small descriptive commits as you change things.
 | `Makefile` | `build` (host arch, loaded), `build-all`/`push` (amd64+arm64 via buildx), `login`, `launch/list/attach/stop/rm/logs`, `lint`, `smoke` (build + smoke test), `clean`. |
 | `.env.example` | Every tunable, documented. Copy to `.env`. |
 | `test/smoke.sh` | Automated acceptance for everything that doesn't need real OAuth/phone. |
-| `docs/` | `architecture.md` (decisions + acceptance map), `customizing-bakeins.md`, `troubleshooting.md`. |
+| `test/unit.sh` | Docker-free unit tests (Sysbox version-floor refusal, warn-only runc posture) — what CI runs. |
+| `bin/claude-sysbox-verify` | Stand up the Sysbox-nested worker substrate and prove containment on the host (`--check` = prereqs only). Gate for the parallel-worker tier (CC-*). |
+| `docs/` | `architecture.md` (decisions + acceptance map), `substrate.md` (Sysbox-nested substrate: decision, install runbook, containment proof), `customizing-bakeins.md`, `troubleshooting.md`. |
 
 ## Operational playbook
 
@@ -178,10 +180,13 @@ Chromium is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
 lean image. Pair `--browser` with `--dev-cmd`/`--expose` so the agent both
 runs and debugs the dev server.
 
-**Validate changes:** `make lint` (shell syntax) and `make smoke` (builds the
-image, then runs `test/smoke.sh` against it). The smoke test covers API-key
-hard-fail, both fail-fast paths, bake-in merge, trust pre-accept, tmux, sshd,
-and SSH-into-session. Real OAuth + the phone-app green-dot remain manual.
+**Validate changes:** `make lint` (shell syntax, incl. `test/*.sh`),
+`test/unit.sh` (docker-free; also what `.github/workflows/ci.yml` runs), and
+`make smoke` (builds the image, then runs `test/smoke.sh` against it). The
+smoke test covers API-key hard-fail, both fail-fast paths, bake-in merge,
+trust pre-accept, tmux, sshd, and SSH-into-session. Real OAuth + the
+phone-app green-dot remain manual. Substrate changes additionally need
+`bin/claude-sysbox-verify` green on the fleet host (see `docs/substrate.md`).
 
 ## Customizing bake-ins (rebuild after editing `claude-config/`)
 

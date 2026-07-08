@@ -4,3 +4,6 @@
 # Build / runtime artifacts
 *.log
 workspace/
+
+# npm task-runner shim (zero deps) — npm ci leaves only a marker here
+node_modules/

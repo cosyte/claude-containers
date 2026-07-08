@@ -84,8 +84,10 @@ rm:    ## make rm ARGS="myproj --purge"
 logs:  ## make logs ARGS="myproj"
 	@./bin/claude-logs $(ARGS)
 
-lint: ## Shell-syntax check the scripts
-	@for f in entrypoint.sh bin/_common.sh bin/claude-*; do bash -n $$f && echo "ok $$f"; done
+lint: ## Shell-syntax check the scripts (any failure fails the target, not just the last file)
+	@fail=0; for f in entrypoint.sh bin/_common.sh bin/claude-* test/*.sh; do \
+	  if bash -n $$f; then echo "ok $$f"; else echo "SYNTAX ERROR $$f"; fail=1; fi; \
+	done; exit $$fail
 
 smoke: build ## Build the image, then run the automated smoke test against it
 	IMAGE=$(CLAUDE_IMAGE) test/smoke.sh

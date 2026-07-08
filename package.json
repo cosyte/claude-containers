@@ -1,0 +1,10 @@
+{
+  "name": "claude-containers",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Task-runner shim only — this repo is bash + Make + Docker, ships no package, and has zero dependencies. The scripts below exist so the umbrella's scripts/verify.sh and CI drive the same gates.",
+  "scripts": {
+    "lint": "make lint",
+    "test": "test/unit.sh"
+  }
+}
