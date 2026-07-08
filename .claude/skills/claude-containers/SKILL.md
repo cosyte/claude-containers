@@ -95,7 +95,11 @@ small descriptive commits as you change things.
 | `.env.example` | Every tunable, documented. Copy to `.env`. |
 | `test/smoke.sh` | Automated acceptance for everything that doesn't need real OAuth/phone. |
 | `test/unit.sh` | Docker-free unit tests (Sysbox version-floor refusal, warn-only runc posture) — what CI runs. |
+| `test/broker-unit.sh` | Docker-free broker unit tests (deny-by-default validator, fixed-template golden argv, substrate refusals, lease counters) — also CI. |
 | `bin/claude-sysbox-verify` | Stand up the Sysbox-nested worker substrate and prove containment on the host (`--check` = prereqs only). Gate for the parallel-worker tier (CC-*). |
+| `bin/claude-worker-broker` | ROOT-owned worker control plane (CC-2): sole principal on the inner dockerd; fixed hardened launch template; deny-by-default request spool; lease discipline; fails closed without userns + a host-attested CVE-patched Sysbox (`CLAUDE_WORKER_BROKER=1` starts it at boot). |
+| `bin/claude-worker-request` | Unprivileged client: `claude-worker-request <repo> <item-id>` drops a two-value request in the spool and waits for `ok <container>` / `error <reason>`. No docker access needed or possible. |
+| `bin/claude-broker-verify` | On-host CC-2 proof: real Sysbox controller + real unprivileged user; socket unreachability, template-exact worker, forged-request rejection, lease cap, pre-patch-attestation refusal. |
 | `docs/` | `architecture.md` (decisions + acceptance map), `substrate.md` (Sysbox-nested substrate: decision, install runbook, containment proof), `customizing-bakeins.md`, `troubleshooting.md`. |
 
 ## Operational playbook
@@ -181,12 +185,14 @@ lean image. Pair `--browser` with `--dev-cmd`/`--expose` so the agent both
 runs and debugs the dev server.
 
 **Validate changes:** `make lint` (shell syntax, incl. `test/*.sh`),
-`test/unit.sh` (docker-free; also what `.github/workflows/ci.yml` runs), and
-`make smoke` (builds the image, then runs `test/smoke.sh` against it). The
-smoke test covers API-key hard-fail, both fail-fast paths, bake-in merge,
-trust pre-accept, tmux, sshd, and SSH-into-session. Real OAuth + the
-phone-app green-dot remain manual. Substrate changes additionally need
-`bin/claude-sysbox-verify` green on the fleet host (see `docs/substrate.md`).
+`test/unit.sh` + `test/broker-unit.sh` (docker-free; also what
+`.github/workflows/ci.yml` runs), and `make smoke` (builds the image, then runs
+`test/smoke.sh` against it). The smoke test covers API-key hard-fail, both
+fail-fast paths, bake-in merge, trust pre-accept, tmux, sshd, and
+SSH-into-session. Real OAuth + the phone-app green-dot remain manual. Substrate
+changes additionally need `bin/claude-sysbox-verify` green on the fleet host
+(see `docs/substrate.md`); broker/template changes additionally need
+`bin/claude-broker-verify` green there too.
 
 ## Customizing bake-ins (rebuild after editing `claude-config/`)
 

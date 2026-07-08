@@ -168,6 +168,28 @@ else
     log "No GH_TOKEN: git uses the SSH deploy key only; gh CLI is unauthenticated"
 fi
 
+# --- 5b. Worker broker (controller mode, CC-2) --------------------------------
+# CLAUDE_WORKER_BROKER=1 starts the ROOT-owned worker broker: on a controller
+# (a Sysbox container running an inner dockerd) it is the ONLY principal that
+# may launch nested workers. Mirrors the git-key broker above — root owns the
+# capability, the unprivileged agent gets a narrow request channel
+# (claude-worker-request → spool dir), never the inner Docker socket. The broker
+# FAILS CLOSED unless the substrate holds: userns containment readable from
+# /proc/self/uid_map AND a host-attested, CVE-patched Sysbox version in
+# CLAUDE_SYSBOX_ATTESTED_VERSION (the host launch path runs preflight_sysbox and
+# passes SYSBOX_VERSION in). See bin/claude-worker-broker for the template.
+if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    # Best-effort early lock: keep the agent off an already-present inner socket
+    # even before the broker's own lockdown (the broker re-asserts at startup).
+    if [[ -S /var/run/docker.sock ]]; then
+        chown root:root /var/run/docker.sock 2>/dev/null || true
+        chmod 600 /var/run/docker.sock 2>/dev/null || true
+    fi
+    CLAUDE_BROKER_CLIENT_USER="${CLAUDE_BROKER_CLIENT_USER:-$CLAUDE_USER}" \
+        /usr/local/bin/claude-worker-broker >> /var/log/claude-worker-broker.log 2>&1 &
+    log "Worker broker       : starting as root (agent requests via claude-worker-request; refuses if the substrate checks fail — see /var/log/claude-worker-broker.log)"
+fi
+
 # --- 6. Credentials reconcile (shared auth volume) ---------------------------
 # Credentials are shared across all containers via the claude-auth volume; the
 # rest of the config dir is per-container so sessions never collide. Claude
