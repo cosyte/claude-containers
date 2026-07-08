@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# claude-broker-verify — prove the root-owned worker broker on a real controller (CC-2).
+#
+# Complements bin/claude-sysbox-verify (CC-1, the substrate floor): this script stands
+# up a real Sysbox controller with an inner dockerd, installs the broker + client from
+# this checkout, creates a real unprivileged "agent" user, and proves the CC-2 claims
+# end-to-end (roadmap operations/roadmaps/claude-containers.md §8 CC-2):
+#
+#   1. the agent has NO inner-docker reachability (socket locked root:root 600);
+#   2. a well-formed agent request yields a worker with EXACTLY the fixed hardened
+#      template (caps, no-new-privileges, resource caps, labels, inheritance);
+#   3. a forged request (unknown key / cap drop / limit raise / flag smuggling) is
+#      rejected whole — no container appears;
+#   4. lease discipline holds: a second request for a live item is refused, and the
+#      worker cap refuses request K+1;
+#   5. a pre-patch Sysbox attestation (0.6.7) makes the broker REFUSE to serve.
+#
+# Needs Sysbox installed on the host (run bin/claude-sysbox-verify first). The
+# docker-free logic tests live in test/broker-unit.sh (CI); this is the on-host gate.
+#
+#   bin/claude-broker-verify           # full stand-up + proofs
+#   bin/claude-broker-verify --keep    # leave the controller running for inspection
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+# This script PROVES the gate — no ambient/leftover seam may neutralize it.
+unset CLAUDE_SYSBOX_FAKE_VERSION CLAUDE_SYSBOX_SKIP_DOCKER \
+      CLAUDE_BROKER_FAKE_UID_MAP CLAUDE_BROKER_SKIP_ROOT CLAUDE_BROKER_DRYRUN
+
+KEEP=0
+for a in "$@"; do
+    case "$a" in
+        --keep) KEEP=1 ;;
+        *) die "unknown flag '$a' (usage: claude-broker-verify [--keep])" ;;
+    esac
+done
+
+CTR="claude-broker-verify"
+IMAGE="${CLAUDE_SYSBOX_VERIFY_IMAGE:-docker:28-dind}"
+WORKER_IMG="alpine:3.20"
+AGENT=agent
+
+PASS=0 FAIL=0
+okp()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
+badp() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
+
+cleanup() { (( KEEP )) || docker rm -f "$CTR" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+as_root()  { docker exec "$CTR" "$@"; }
+# Exec as the agent by NUMERIC uid:gid — the host dockerd resolves user NAMES
+# via the container's /etc/passwd, which it cannot read through the Sysbox
+# uid-shifted rootfs (a name lookup errors, which would make negative tests
+# pass spuriously). AGENT_UID/GID are resolved in phase 1.
+as_agent() { docker exec -u "$AGENT_UID:$AGENT_GID" "$CTR" "$@"; }
+
+# --- phase 0: host prerequisites (CC-1's gate is this proof's precondition) -----------
+info "phase 0 — host prerequisites"
+need_docker
+preflight_sysbox
+okp "Sysbox $SYSBOX_VERSION installed, registered, and at/above the CVE floor"
+
+# --- phase 1: controller stand-up ------------------------------------------------------
+info "phase 1 — Sysbox controller ($IMAGE) + broker install"
+docker rm -f "$CTR" >/dev/null 2>&1 || true
+docker run --runtime=sysbox-runc -d --name "$CTR" \
+    --label claude.broker-verify=1 \
+    --cpus 2 --memory 2g --pids-limit 1024 \
+    -e DOCKER_TLS_CERTDIR="" \
+    "$IMAGE" >/dev/null
+
+inner_ready=0
+for _ in $(seq 1 60); do
+    if as_root docker info >/dev/null 2>&1; then inner_ready=1; break; fi
+    sleep 1
+done
+(( inner_ready )) || { docker logs --tail 15 "$CTR" >&2 || true; die "inner dockerd did not come up within 60s"; }
+okp "inner dockerd is up inside the Sysbox controller"
+
+as_root apk add --no-cache bash procps >/dev/null 2>&1 || die "could not install bash+procps in the controller"
+as_root adduser -D "$AGENT" >/dev/null 2>&1 || true
+AGENT_UID="$(as_root id -u "$AGENT")" && [[ "$AGENT_UID" =~ ^[0-9]+$ ]] \
+    || die "unprivileged user '$AGENT' was not created in the controller"
+AGENT_GID="$(as_root id -g "$AGENT")"
+(( AGENT_UID != 0 )) || die "agent resolved to uid 0 — the proof needs an unprivileged user"
+# Stream the scripts in via exec (docker cp into a RUNNING Sysbox container can
+# fail against the uid-shifted rootfs — exec-streaming works everywhere).
+install_file() {  # install_file <local-path> <container-path>
+    docker exec -i "$CTR" sh -c "cat > '$2' && chmod 755 '$2'" < "$1"
+}
+install_file "$CLAUDE_DOCKER_ROOT/bin/_common.sh"            /usr/local/bin/_common.sh
+install_file "$CLAUDE_DOCKER_ROOT/bin/claude-worker-broker"  /usr/local/bin/claude-worker-broker
+install_file "$CLAUDE_DOCKER_ROOT/bin/claude-worker-request" /usr/local/bin/claude-worker-request
+as_root docker pull "$WORKER_IMG" >/dev/null 2>&1 || die "inner daemon could not pull $WORKER_IMG"
+okp "broker + client installed; unprivileged user '$AGENT' exists; worker image pulled"
+
+# Start the broker as root with the HOST-attested Sysbox version — the same value
+# preflight_sysbox just proved. Small poll interval keeps the proof fast.
+docker exec -d \
+    -e CLAUDE_SYSBOX_ATTESTED_VERSION="$SYSBOX_VERSION" \
+    -e CLAUDE_BROKER_CLIENT_USER="$AGENT" \
+    -e CLAUDE_BROKER_MAX_WORKERS=2 \
+    -e CLAUDE_BROKER_POLL=0.2 \
+    -e CLAUDE_WORKER_IMAGE="$WORKER_IMG" \
+    -e CLAUDE_BROKER_WORKER_CMD="sleep 373573" \
+    "$CTR" bash -c '/usr/local/bin/claude-worker-broker >/var/log/claude-worker-broker.log 2>&1'
+
+broker_up=0
+for _ in $(seq 1 30); do
+    if as_root test -d /run/claude/broker/requests; then broker_up=1; break; fi
+    sleep 0.5
+done
+(( broker_up )) || { as_root cat /var/log/claude-worker-broker.log >&2 || true; die "broker did not come up (no spool)"; }
+okp "broker is serving (spool present)"
+
+# --- phase 2: the agent is OFF the inner daemon ----------------------------------------
+info "phase 2 — no inner-docker reachability for the agent"
+
+sock_perm="$(as_root stat -c '%U:%G %a' /var/run/docker.sock)"
+if [[ "$sock_perm" == "root:root 600" ]]; then
+    okp "inner docker.sock is root:root 600"
+else
+    badp "inner docker.sock is '$sock_perm' (want root:root 600)"
+fi
+
+if as_agent docker ps >/dev/null 2>&1; then
+    badp "the agent CAN talk to the inner daemon — broker bypass"
+else
+    okp "the agent cannot talk to the inner daemon (docker ps refused)"
+fi
+
+if as_agent ls /run/claude/broker/requests >/dev/null 2>&1; then
+    badp "the agent can LIST the request spool (should be write-only)"
+else
+    okp "the agent cannot list the request spool (write-only channel)"
+fi
+
+# --- phase 3: a valid request yields EXACTLY the template ------------------------------
+info "phase 3 — valid request → template-exact worker"
+
+resp="$(as_agent claude-worker-request hl7 CC2-T1 --timeout 30 || true)"
+if [[ "$resp" == "ok claude-worker-cc2-t1" ]]; then
+    okp "agent request accepted: $resp"
+else
+    as_root cat /var/log/claude-worker-broker.log >&2 || true
+    badp "agent request failed (got '$resp')"
+fi
+
+wjson() { as_root docker inspect -f "$1" claude-worker-cc2-t1 2>/dev/null || echo MISSING; }
+
+[[ "$(wjson '{{.HostConfig.Privileged}}')" == false ]] \
+    && okp "worker is not privileged" || badp "worker Privileged != false"
+[[ "$(wjson '{{.HostConfig.CapDrop}}')" == "[ALL]" ]] \
+    && okp "worker cap-drop ALL" || badp "worker CapDrop is '$(wjson '{{.HostConfig.CapDrop}}')'"
+# The daemon canonicalizes CapAdd (CAP_ prefix, sorted) — normalize both sides
+# and require an EXACT set match, so a smuggled extra cap can never hide.
+caps_got="$(wjson '{{range .HostConfig.CapAdd}}{{.}} {{end}}' | tr ' ' '\n' | sed 's/^CAP_//' | grep . | sort | tr '\n' ' ')"
+caps_want="$(tr ' ' '\n' <<<"CHOWN DAC_OVERRIDE FOWNER FSETID KILL SETGID SETUID SETPCAP NET_BIND_SERVICE SYS_CHROOT AUDIT_WRITE" | sort | tr '\n' ' ')"
+if [[ "$caps_got" == "$caps_want" ]]; then
+    okp "worker cap-add is exactly the minimal set (NET_RAW/MKNOD/SETFCAP stay dropped)"
+else
+    badp "worker CapAdd is '$caps_got' (want '$caps_want')"
+fi
+[[ "$(wjson '{{.HostConfig.SecurityOpt}}')" == "[no-new-privileges]" ]] \
+    && okp "worker has no-new-privileges" || badp "worker SecurityOpt is '$(wjson '{{.HostConfig.SecurityOpt}}')'"
+[[ "$(wjson '{{.HostConfig.Memory}}')" == 4294967296 ]] \
+    && okp "worker --memory 4g enforced in the template" || badp "worker Memory is '$(wjson '{{.HostConfig.Memory}}')'"
+[[ "$(wjson '{{.HostConfig.MemoryReservation}}')" == 3221225472 ]] \
+    && okp "worker --memory-reservation 3g" || badp "worker MemoryReservation is '$(wjson '{{.HostConfig.MemoryReservation}}')'"
+[[ "$(wjson '{{.HostConfig.NanoCpus}}')" == 2000000000 ]] \
+    && okp "worker --cpus 2" || badp "worker NanoCpus is '$(wjson '{{.HostConfig.NanoCpus}}')'"
+[[ "$(wjson '{{.HostConfig.PidsLimit}}')" == 2048 ]] \
+    && okp "worker --pids-limit 2048" || badp "worker PidsLimit is '$(wjson '{{.HostConfig.PidsLimit}}')'"
+[[ "$(wjson '{{.HostConfig.ShmSize}}')" == 2147483648 ]] \
+    && okp "worker --shm-size 2g" || badp "worker ShmSize is '$(wjson '{{.HostConfig.ShmSize}}')'"
+[[ "$(wjson '{{index .Config.Labels "claude.item"}}')" == CC2-T1 ]] \
+    && okp "worker labelled claude.item=CC2-T1" || badp "worker claude.item label wrong"
+[[ "$(wjson '{{index .Config.Labels "claude.repo"}}')" == hl7 ]] \
+    && okp "worker labelled claude.repo=hl7" || badp "worker claude.repo label wrong"
+if as_root docker inspect -f '{{.Config.Env}}' claude-worker-cc2-t1 2>/dev/null | grep -q 'CLAUDE_SECRET_GUARD=1'; then
+    okp "secret guard inherited into the worker"
+else
+    badp "CLAUDE_SECRET_GUARD=1 missing from the worker env"
+fi
+
+# --- phase 4: forged requests are rejected whole ---------------------------------------
+info "phase 4 — forged requests rejected (deny by default)"
+
+forge() {  # forge <reqid> <content…> — raw spool write, bypassing the client
+    as_agent bash -c "printf '%b' \"\$1\" > /run/claude/broker/requests/.tmp-\$\$ && mv /run/claude/broker/requests/.tmp-\$\$ /run/claude/broker/requests/$1" -- "$2"
+}
+wait_resp() {  # wait_resp <reqid> → echoes the response line (or TIMEOUT)
+    local i
+    for i in $(seq 1 50); do
+        if as_agent test -f "/run/claude/broker/responses/$1" 2>/dev/null; then
+            as_agent cat "/run/claude/broker/responses/$1"; return 0
+        fi
+        sleep 0.2
+    done
+    echo TIMEOUT
+}
+
+forge fx1 'repo=hl7\nitem=CC2-FORGE\ncap-add=SYS_ADMIN\n'
+r="$(wait_resp fx1)"
+if [[ "$r" == error* ]] && ! as_root docker ps -a --filter label=claude.item=CC2-FORGE -q | grep -q .; then
+    okp "forged cap-add request rejected, no container ($r)"
+else
+    badp "forged cap-add request must be rejected with no container (got '$r')"
+fi
+
+forge fx2 'repo=hl7\nitem=CC2-FORGE\nmemory=64g\n'
+r="$(wait_resp fx2)"
+if [[ "$r" == error* ]] && ! as_root docker ps -a --filter label=claude.item=CC2-FORGE -q | grep -q .; then
+    okp "forged limit-raise request rejected, no container ($r)"
+else
+    badp "forged limit-raise request must be rejected (got '$r')"
+fi
+
+if as_agent claude-worker-request 'hl7' 'CC2 --privileged' --timeout 5 >/dev/null 2>&1; then
+    badp "client accepted a flag-smuggling item id"
+else
+    okp "flag-smuggling item id refused client-side"
+fi
+
+# --- phase 4b: spool hardening — staging closes the swap TOCTOU + no root leak ----------
+info "phase 4b — request staging (root-only) + symlink/FIFO can't leak or hang"
+
+# The agent must not be able to reach, list, or write the staging dir.
+if as_agent sh -c 'ls /run/claude/broker/staging' >/dev/null 2>&1 \
+   || as_agent sh -c ': > /run/claude/broker/staging/x' >/dev/null 2>&1; then
+    badp "the agent can read or write the staging dir (must be root-only 700)"
+else
+    okp "staging dir is root-only (agent cannot list or write it)"
+fi
+
+# A symlink the agent plants in requests/ (pointing at a root-only secret) must NOT
+# leak the target's bytes and must NOT wedge the broker — it is renamed into staging
+# then rejected by the -L check, and the broker keeps serving.
+as_root sh -c 'echo "TOPSECRET_ROOT_ONLY_abc123" > /root/cc2-secret && chmod 600 /root/cc2-secret'
+as_agent sh -c 'ln -s /root/cc2-secret /run/claude/broker/requests/lk1'
+r="$(wait_resp lk1)"
+if [[ "$r" == error* && "$r" != *TOPSECRET* ]]; then
+    okp "a symlinked request is rejected and leaks no target bytes ($r)"
+else
+    badp "symlinked request must be rejected without leaking the target (got '$r')"
+fi
+
+# A FIFO AND a directory planted in requests/ must not hang or kill the single-
+# threaded serve loop (the directory is the errexit-rm trap: reject → rm a
+# non-regular entry → must not exit the broker). A valid request submitted AFTER
+# both must still get an ok, proving the broker neither blocked nor died.
+as_agent sh -c 'mkfifo /run/claude/broker/requests/ff1 2>/dev/null || true'
+as_agent sh -c 'mkdir  /run/claude/broker/requests/dd1 2>/dev/null || true'
+resp="$(as_agent claude-worker-request ncpdp CC2-FIFO --timeout 20 || true)"
+if [[ "$resp" == "ok claude-worker-cc2-fifo" || "$resp" == error*"cap reached"* ]]; then
+    okp "a FIFO + a directory in the spool neither hang nor kill the broker (later request served: $resp)"
+else
+    badp "a FIFO/directory in the spool wedged or killed the serve loop (later request got '$resp')"
+fi
+# The broker process must still be running (not exited on the errexit-rm trap).
+if as_root sh -c 'pgrep -f claude-worker-broker >/dev/null'; then
+    okp "the broker process is still alive after the hostile spool entries"
+else
+    badp "the broker process exited after a hostile spool entry (serve loop killed)"
+fi
+# Clean the FIFO worker so it doesn't hold a slot in phase 5.
+as_root docker rm -f claude-worker-cc2-fifo >/dev/null 2>&1 || true
+
+# --- phase 5: lease discipline -----------------------------------------------------------
+info "phase 5 — lease discipline (one worker per item; cap at K)"
+
+resp="$(as_agent claude-worker-request hl7 CC2-T1 --timeout 30 || true)"
+if [[ "$resp" == error*"already has a live worker"* ]]; then
+    okp "second request for a live item is refused ($resp)"
+else
+    badp "second request for CC2-T1 must be refused (got '$resp')"
+fi
+
+resp="$(as_agent claude-worker-request mllp CC2-T2 --timeout 30 || true)"
+if [[ "$resp" == "ok claude-worker-cc2-t2" ]]; then
+    okp "second item leases the second slot"
+else
+    badp "second item must lease slot 2 (got '$resp')"
+fi
+
+resp="$(as_agent claude-worker-request dicom CC2-T3 --timeout 30 || true)"
+if [[ "$resp" == error*"cap reached"* ]]; then
+    okp "request K+1 is refused at the worker cap ($resp)"
+else
+    badp "request K+1 must be refused at the cap (got '$resp')"
+fi
+
+# --- phase 6: a pre-patch attestation refuses to serve -----------------------------------
+info "phase 6 — pre-patch Sysbox attestation → broker refusal"
+
+refusal_out="$(docker exec \
+    -e CLAUDE_SYSBOX_ATTESTED_VERSION=0.6.7 \
+    -e CLAUDE_BROKER_DIR=/run/claude/broker-refusal-drill \
+    "$CTR" bash /usr/local/bin/claude-worker-broker 2>&1)" && refusal_rc=0 || refusal_rc=$?
+if (( refusal_rc != 0 )) && [[ "$refusal_out" == *"predates the Nov-2025 escape-CVE patches"* ]]; then
+    okp "broker refuses to serve on a 0.6.7 attestation (exit $refusal_rc)"
+else
+    badp "broker must refuse a 0.6.7 attestation (rc=$refusal_rc, out=$refusal_out)"
+fi
+
+refusal_out="$(docker exec \
+    -e CLAUDE_BROKER_DIR=/run/claude/broker-refusal-drill2 \
+    "$CTR" bash -c 'unset CLAUDE_SYSBOX_ATTESTED_VERSION; /usr/local/bin/claude-worker-broker' 2>&1)" && refusal_rc=0 || refusal_rc=$?
+if (( refusal_rc != 0 )) && [[ "$refusal_out" == *"CLAUDE_SYSBOX_ATTESTED_VERSION is not set"* ]]; then
+    okp "broker refuses to serve with NO attestation (exit $refusal_rc)"
+else
+    badp "broker must refuse a missing attestation (rc=$refusal_rc, out=$refusal_out)"
+fi
+
+# --- summary ------------------------------------------------------------------------------
+echo
+echo "== $PASS passed, $FAIL failed =="
+(( KEEP )) && info "--keep: controller '$CTR' left running (docker rm -f $CTR to clean up)"
+(( FAIL == 0 )) || { err "broker NOT proven — do not build CC-4+ on this"; exit 1; }
+ok "broker proven: template + lease discipline hold; the agent never touches the inner daemon"

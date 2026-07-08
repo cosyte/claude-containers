@@ -133,33 +133,21 @@ if ! readonly SYSBOX_CVE_FLOOR=0.7.0 2>/dev/null; then
 fi
 SYSBOX_MIN_VERSION="${SYSBOX_MIN_VERSION:-$SYSBOX_CVE_FLOOR}"
 
-# Die unless a CVE-patched Sysbox is installed AND registered with Docker. On success,
-# exports SYSBOX_VERSION (the parsed full version) for callers to report.
-# Test seams — UNIT TESTS ONLY, loudly warned when active (bin/claude-sysbox-verify
-# unsets both up front so an ambient/leftover value can never neutralize the real gate):
-# CLAUDE_SYSBOX_FAKE_VERSION injects a version string (skips the binary);
-# CLAUDE_SYSBOX_SKIP_DOCKER=1 skips the Docker daemon + runtime-registration check.
-preflight_sysbox() {
+# sysbox_version_check <raw-version-string> — the ONE floor compare, shared by
+# preflight_sysbox (host binary path) and bin/claude-worker-broker (in-container
+# attestation path, CC-2) so the two can never drift. Normalizes the string
+# (v-prefix, +build-metadata, pre-release suffix), fails CLOSED on garbage on either
+# side, refuses below the operative floor, and refuses a pre-release of exactly the
+# floor. Also re-asserts floor integrity (raise-only) so every caller binds. On
+# success exports SYSBOX_VERSION (the normalized version) for callers to report.
+sysbox_version_check() {
+    local sv="$1"
     # The operative floor may only sit AT or ABOVE the immovable CVE floor — a lowered
     # (or garbage) SYSBOX_MIN_VERSION from env/.env dies here, fail closed. Checked
     # inside the function so an in-process reassignment after sourcing binds too.
     local floor_ok=0; version_ge "$SYSBOX_MIN_VERSION" "$SYSBOX_CVE_FLOOR" || floor_ok=$?
     (( floor_ok == 0 )) || die "SYSBOX_MIN_VERSION '$SYSBOX_MIN_VERSION' is below (or unparseable against) the immovable CVE floor $SYSBOX_CVE_FLOOR (CVE-2025-31133/52565/52881) — the floor may be raised, never lowered"
 
-    local sv=""
-    if [[ -n "${CLAUDE_SYSBOX_FAKE_VERSION:-}" ]]; then
-        warn "TEST SEAM ACTIVE: CLAUDE_SYSBOX_FAKE_VERSION='${CLAUDE_SYSBOX_FAKE_VERSION}' — the real sysbox-runc is NOT being checked"
-        sv="$CLAUDE_SYSBOX_FAKE_VERSION"
-    else
-        command -v sysbox-runc >/dev/null 2>&1 \
-            || die "sysbox-runc not found — install Sysbox >= $SYSBOX_MIN_VERSION first (docs/substrate.md)"
-        # Robust to both output shapes ("sysbox-runc version X.Y.Z" and the multi-line
-        # "version: X.Y.Z" form). Keep any pre-release/build suffix — the floor logic
-        # below must SEE a suffix to refuse it. `|| true`: a no-match grep must reach
-        # the die below with its message, not be eaten by errexit.
-        sv="$(sysbox-runc --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*' | head -1 || true)"
-        [[ -n "$sv" ]] || die "could not parse a version out of 'sysbox-runc --version'"
-    fi
     sv="${sv#v}"
     sv="${sv%%+*}"   # build metadata (+…) carries no release semantics — off first
     local pre=""; [[ "$sv" == *-* ]] && pre="${sv#*-}"
@@ -174,7 +162,7 @@ preflight_sysbox() {
         *) die "unparseable Sysbox version '$sv' or floor '$SYSBOX_MIN_VERSION' — refusing (fail closed)" ;;
     esac
     # A pre-release of exactly the floor (e.g. 0.7.0-rc.1) cannot be proven to carry the
-    # patches — fail closed. Reachable on the real path: the parse above keeps suffixes.
+    # patches — fail closed. Reachable on the real path: callers' parses keep suffixes.
     if [[ -n "$pre" ]]; then
         local fM fm fp
         IFS=. read -r fM fm fp <<<"$SYSBOX_MIN_VERSION"
@@ -182,6 +170,32 @@ preflight_sysbox() {
             die "Sysbox $sv-$pre is a pre-release of the floor $SYSBOX_MIN_VERSION — cannot prove it carries the CVE patches, refusing"
         fi
     fi
+    SYSBOX_VERSION="$sv${pre:+-$pre}"
+    export SYSBOX_VERSION
+}
+
+# Die unless a CVE-patched Sysbox is installed AND registered with Docker. On success,
+# exports SYSBOX_VERSION (the parsed full version) for callers to report.
+# Test seams — UNIT TESTS ONLY, loudly warned when active (bin/claude-sysbox-verify
+# unsets both up front so an ambient/leftover value can never neutralize the real gate):
+# CLAUDE_SYSBOX_FAKE_VERSION injects a version string (skips the binary);
+# CLAUDE_SYSBOX_SKIP_DOCKER=1 skips the Docker daemon + runtime-registration check.
+preflight_sysbox() {
+    local sv=""
+    if [[ -n "${CLAUDE_SYSBOX_FAKE_VERSION:-}" ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_SYSBOX_FAKE_VERSION='${CLAUDE_SYSBOX_FAKE_VERSION}' — the real sysbox-runc is NOT being checked"
+        sv="$CLAUDE_SYSBOX_FAKE_VERSION"
+    else
+        command -v sysbox-runc >/dev/null 2>&1 \
+            || die "sysbox-runc not found — install Sysbox >= $SYSBOX_MIN_VERSION first (docs/substrate.md)"
+        # Robust to both output shapes ("sysbox-runc version X.Y.Z" and the multi-line
+        # "version: X.Y.Z" form). Keep any pre-release/build suffix — the floor logic
+        # in sysbox_version_check must SEE a suffix to refuse it. `|| true`: a no-match
+        # grep must reach the die below with its message, not be eaten by errexit.
+        sv="$(sysbox-runc --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*' | head -1 || true)"
+        [[ -n "$sv" ]] || die "could not parse a version out of 'sysbox-runc --version'"
+    fi
+    sysbox_version_check "$sv"
     if [[ "${CLAUDE_SYSBOX_SKIP_DOCKER:-0}" != 1 ]]; then
         need_docker
         docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"sysbox-runc"' \
@@ -189,8 +203,7 @@ preflight_sysbox() {
     else
         warn "TEST SEAM ACTIVE: CLAUDE_SYSBOX_SKIP_DOCKER=1 — Docker runtime registration is NOT being checked"
     fi
-    SYSBOX_VERSION="$sv${pre:+-$pre}"
-    export SYSBOX_VERSION
+    # SYSBOX_VERSION was normalized + exported by sysbox_version_check above.
 }
 
 # Container/volume-safe name: lowercase, only [a-z0-9._-].

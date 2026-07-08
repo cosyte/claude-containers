@@ -1,0 +1,410 @@
+#!/usr/bin/env bash
+# claude-worker-broker — the ROOT-owned worker control plane (CC-2).
+#
+# The only principal that may create nested worker containers on a controller's
+# INNER dockerd. Mirrors the entrypoint's CLAUDE_BROKER_GIT_KEY pattern (root owns
+# the capability, the unprivileged agent gets a narrow channel): the agent never
+# holds the inner Docker socket — socket access is root-in-controller, i.e. every
+# peer worker, its leases, and the launch template. Instead the agent *requests* a
+# launch by dropping a tiny KEY=VALUE file into a root-owned spool dir
+# (bin/claude-worker-request is the client); this broker validates the request
+# against a strict allowlist and launches the worker with a FIXED hardened
+# template. Requests contribute two sanitized VALUES (repo, item) into fixed
+# positions — never a flag, never a template override.
+#
+# Defence-in-depth position (roadmap operations/roadmaps/claude-containers.md §5,
+# umbrella ADR 0011): CC-1's Sysbox userns already contains host escape; this
+# broker adds template + resource/lease discipline INSIDE the controller and keeps
+# the prompt-injectable agent off the inner daemon.
+#
+# Fail-closed startup refusals (any failure exits; the broker never serves "a bit"):
+#   1. must run as root (the capability owner);
+#   2. userns containment must be REAL: /proc/self/uid_map must map container-root
+#      to a non-root host uid (a controller started without --runtime=sysbox-runc
+#      shows base 0 and is refused — no nested workers on an uncontained daemon);
+#   3. the Sysbox runtime version must be ATTESTED >= the CVE floor: the host-side
+#      launch path runs preflight_sysbox and passes its result in as
+#      CLAUDE_SYSBOX_ATTESTED_VERSION (sysbox-runc is a HOST binary — it cannot be
+#      probed from inside the container, so the attestation seam carries the proof
+#      in). Missing, garbage, or pre-patch (< v0.7.0, the first release porting the
+#      Nov-2025 CVE-2025-31133/52565/52881 patches) all REFUSE — same immovable
+#      floor as preflight_sysbox, via the shared sysbox_version_check;
+#   4. the inner docker socket must appear within CLAUDE_BROKER_SOCKET_WAIT and is
+#      locked to root:root 600 (the agent stays off it even if a docker group
+#      exists); a second broker instance is refused by lock.
+#
+# Request protocol (deny by default — an unknown key, duplicate key, bad charset,
+# oversize, or missing key rejects the WHOLE request; nothing is partially applied):
+#   requests/<id>     KEY=VALUE lines; exactly the keys `repo` and `item`, once
+#                     each; values match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$. The
+#                     agent owns its entry here, so the broker RENAMES it into the
+#                     root-only staging/ dir before reading — closing the swap
+#                     (FIFO/symlink) TOCTOU the -L/-f check alone couldn't.
+#   responses/<id>    single line: `ok <container-name>` | `error <reason>`
+#
+# Lease discipline: at most one live worker per item (a second request for the same
+# item is refused while its worker runs) and at most CLAUDE_BROKER_MAX_WORKERS live
+# workers total (default 2 = the founder-called K; CC-3 single-sources this from
+# umbrella operations/parallel.config.json — do not fork K here).
+#
+# Env (all read at startup as ROOT — nothing here is settable via a request):
+#   CLAUDE_SYSBOX_ATTESTED_VERSION  host-attested Sysbox version (REQUIRED)
+#   CLAUDE_BROKER_DIR               spool root        (default /run/claude/broker)
+#   CLAUDE_BROKER_CLIENT_USER       unprivileged requester (default claude)
+#   CLAUDE_BROKER_MAX_WORKERS       live-worker cap   (default 2)
+#   CLAUDE_BROKER_SOCKET_WAIT       secs to wait for the inner socket (default 60)
+#   CLAUDE_BROKER_POLL              spool poll seconds (default 1)
+#   CLAUDE_WORKER_IMAGE             worker image      (default claude-code-box:latest)
+#   CLAUDE_BROKER_WORKER_CMD        worker command    (default `sleep infinity` —
+#                                   the CC-4 seam; claude-worker-run replaces it)
+#   CLAUDE_WORKER_MEM / _MEM_RESERVATION / _CPUS / _PIDS / _SHM
+#                                   per-worker resource profile (defaults 4g / 3g /
+#                                   2 / 2048 / 2g — roadmap §5 starting numbers;
+#                                   CC-3 derives them from K + config)
+#   CLAUDE_SECRET_GUARD / CLAUDE_EGRESS_LOCKDOWN / CLAUDE_EGRESS_EXTRA_HOSTS
+#                                   inherited INTO every worker (secret-guard on by
+#                                   default; egress lockdown mirrored + NET_ADMIN
+#                                   only when it needs it)
+#
+# Test seams — UNIT TESTS ONLY, loudly warned when active:
+#   CLAUDE_BROKER_FAKE_UID_MAP      overrides the /proc/self/uid_map line
+#   CLAUDE_BROKER_SKIP_ROOT=1       skips the uid-0 check
+#   CLAUDE_BROKER_DRYRUN=1          prints the launch argv instead of running it
+#
+# Sourcing this file defines the broker_* functions and returns (the unit-test
+# seam); executing it runs the daemon.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+BROKER_DIR="${CLAUDE_BROKER_DIR:-/run/claude/broker}"
+BROKER_CLIENT_USER="${CLAUDE_BROKER_CLIENT_USER:-claude}"
+BROKER_MAX_WORKERS="${CLAUDE_BROKER_MAX_WORKERS:-2}"
+BROKER_SOCKET_WAIT="${CLAUDE_BROKER_SOCKET_WAIT:-60}"
+BROKER_POLL="${CLAUDE_BROKER_POLL:-1}"
+WORKER_IMAGE="${CLAUDE_WORKER_IMAGE:-claude-code-box:latest}"
+WORKER_CMD="${CLAUDE_BROKER_WORKER_CMD:-sleep infinity}"
+WORKER_MEM="${CLAUDE_WORKER_MEM:-4g}"
+WORKER_MEM_RESERVATION="${CLAUDE_WORKER_MEM_RESERVATION:-3g}"
+WORKER_CPUS="${CLAUDE_WORKER_CPUS:-2}"
+WORKER_PIDS="${CLAUDE_WORKER_PIDS:-2048}"
+WORKER_SHM="${CLAUDE_WORKER_SHM:-2g}"
+
+# One value pattern for both request keys: starts alphanumeric (can never read as a
+# flag), then a tight middle set — no space, slash, or quote survives, so a value
+# cannot smuggle an argv token, a path, or a label injection.
+BROKER_VALUE_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+BROKER_REQ_MAX_BYTES=4096
+
+blog() { echo "[broker] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
+
+# All inner-daemon traffic funnels through this one wrapper (and the unit tests
+# stub it here — nothing else in the broker may call docker directly).
+broker_docker() { docker "$@"; }
+
+# --- startup refusals ---------------------------------------------------------
+
+# Refuse to serve unless the substrate this broker assumes is actually beneath it.
+broker_check_substrate() {
+    if [[ "${CLAUDE_BROKER_SKIP_ROOT:-0}" == 1 ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_BROKER_SKIP_ROOT=1 — the root check is NOT being enforced"
+    else
+        [[ "$(id -u)" == 0 ]] || die "claude-worker-broker must run as root (it owns worker creation; the agent only requests)"
+    fi
+
+    # userns containment, provable from inside: the first uid_map line maps
+    # container-root to a HOST base uid. Base 0 = the initial user namespace =
+    # this controller was NOT started under sysbox-runc → no nested workers.
+    local map_line
+    if [[ -n "${CLAUDE_BROKER_FAKE_UID_MAP:-}" ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_BROKER_FAKE_UID_MAP='${CLAUDE_BROKER_FAKE_UID_MAP}' — the real uid_map is NOT being checked"
+        map_line="$CLAUDE_BROKER_FAKE_UID_MAP"
+    else
+        map_line="$(head -1 /proc/self/uid_map 2>/dev/null || true)"
+    fi
+    local in_uid host_base _rest
+    read -r in_uid host_base _rest <<<"$map_line"
+    [[ "$in_uid" == 0 && "$host_base" =~ ^[0-9]+$ ]] \
+        || die "cannot read a root mapping from /proc/self/uid_map ('$map_line') — refusing (fail closed)"
+    (( host_base != 0 )) \
+        || die "uid_map maps container-root to HOST uid 0 — no userns containment (controller not under sysbox-runc?); refusing to run nested workers"
+
+    # Sysbox version attestation: carried in from the host-side preflight_sysbox
+    # (the binary lives on the host and cannot be probed from here). The shared
+    # sysbox_version_check applies the SAME immovable CVE floor + fail-closed
+    # parse as the host check — missing/garbage/pre-patch all die.
+    [[ -n "${CLAUDE_SYSBOX_ATTESTED_VERSION:-}" ]] \
+        || die "CLAUDE_SYSBOX_ATTESTED_VERSION is not set — the host launch path must run preflight_sysbox and pass its SYSBOX_VERSION in; refusing without an attested, CVE-patched Sysbox"
+    sysbox_version_check "$CLAUDE_SYSBOX_ATTESTED_VERSION"
+    blog "substrate ok: userns root→host-uid $host_base, attested Sysbox $SYSBOX_VERSION (floor $SYSBOX_MIN_VERSION)"
+}
+
+# Wait for the inner daemon's socket, then lock it to root — the agent must not be
+# able to reach it even if the image ships a docker group.
+broker_check_socket() {
+    local sock="/var/run/docker.sock" waited=0
+    while [[ ! -S "$sock" ]]; do
+        (( waited >= BROKER_SOCKET_WAIT )) \
+            && die "inner docker socket $sock did not appear within ${BROKER_SOCKET_WAIT}s — is the inner dockerd running?"
+        sleep 1; waited=$((waited + 1))
+    done
+    # The lockdown must actually take — a broker that logs "locked" over a
+    # still-group-reachable socket defeats its own reason to exist.
+    { chown root:root "$sock" && chmod 600 "$sock"; } 2>/dev/null \
+        || die "could not lock $sock to root:root 600 — refusing to serve over a reachable socket"
+    broker_docker info >/dev/null 2>&1 || die "cannot talk to the inner dockerd on $sock"
+    blog "inner docker socket locked to root:root 600"
+}
+
+# --- request validation (deny by default) ---------------------------------------
+
+# broker_validate_request <file> — sets REQ_REPO/REQ_ITEM on success; on failure
+# sets REQ_ERROR and returns 1. The whole request is rejected on the first
+# violation — a request is never partially honored.
+broker_validate_request() {
+    local f="$1" size line key val
+    REQ_REPO="" REQ_ITEM="" REQ_ERROR=""
+
+    # $f MUST already be a root-only staged copy (broker_process_request renames
+    # the agent's entry into staging/ before calling us). The agent owns its
+    # entry in the group-writable requests/ dir, so validating it in place is a
+    # TOCTOU: it could swap a regular file for a FIFO between this check and the
+    # read, hanging the serve loop, or for a symlink to leak a root-file's bytes.
+    # Once renamed into the root-only (700) staging dir the inode can no longer
+    # be swapped, so the type check and reads below all bind the same file. This
+    # -L/-f check is then a cheap belt-and-suspenders (rejects a symlink/FIFO the
+    # agent had already placed, which rename moves verbatim) — not the guarantee.
+    if [[ -L "$f" || ! -f "$f" ]]; then REQ_ERROR="request is not a regular file"; return 1; fi
+
+    size="$(wc -c < "$f" 2>/dev/null || echo -1)"
+    if (( size < 0 )); then REQ_ERROR="unreadable request"; return 1; fi
+    if (( size > BROKER_REQ_MAX_BYTES )); then REQ_ERROR="request exceeds ${BROKER_REQ_MAX_BYTES} bytes"; return 1; fi
+    if (( size == 0 )); then REQ_ERROR="empty request"; return 1; fi
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" ]] && { REQ_ERROR="blank line in request"; return 1; }
+        [[ "$line" == *$'\r'* ]] && { REQ_ERROR="carriage return in request"; return 1; }
+        key="${line%%=*}"; val="${line#*=}"
+        [[ "$line" == *"="* ]] || { REQ_ERROR="malformed line (want KEY=VALUE)"; return 1; }
+        [[ "$val" =~ $BROKER_VALUE_RE ]] || { REQ_ERROR="illegal value for '$key'"; return 1; }
+        case "$key" in
+            repo) [[ -n "$REQ_REPO" ]] && { REQ_ERROR="duplicate key 'repo'"; return 1; }
+                  REQ_REPO="$val" ;;
+            item) [[ -n "$REQ_ITEM" ]] && { REQ_ERROR="duplicate key 'item'"; return 1; }
+                  REQ_ITEM="$val" ;;
+            *)    REQ_ERROR="unknown key '$key' (a request names repo + item; it can NEVER carry flags, caps, limits, or template overrides)"; return 1 ;;
+        esac
+    done < "$f"
+
+    [[ -n "$REQ_REPO" ]] || { REQ_ERROR="missing key 'repo'"; return 1; }
+    [[ -n "$REQ_ITEM" ]] || { REQ_ERROR="missing key 'item'"; return 1; }
+    return 0
+}
+
+# --- the FIXED launch template ---------------------------------------------------
+
+# broker_template_args <repo> <item> — the hardened template, one argv token per
+# line (unit tests golden-compare this output verbatim). The two arguments land
+# only as label/name VALUES; every flag below is broker-owned:
+#   - cap-drop ALL + re-add CLAUDE_MIN_CAPS (drops the Docker-default NET_RAW,
+#     MKNOD, SETFCAP a compromised agent would reach for) + no-new-privileges
+#   - per-worker resource caps: memory (hard) + reservation (soft) + cpus +
+#     pids-limit (fork-bomb guard) + shm-size
+#   - fleet controls inherited INTO the worker: secret guard (default on) and
+#     egress lockdown (mirrored; NET_ADMIN added only when the firewall needs it)
+#   - labels so claude-list / the CC-4 reaper can see and manage workers
+broker_template_args() {
+    local repo="$1" item="$2"
+    local name; name="claude-worker-$(echo "$item" | tr '[:upper:]' '[:lower:]')"
+    printf '%s\n' \
+        run -d \
+        --name "$name" \
+        --label claude.worker=1 \
+        --label "claude.item=$item" \
+        --label "claude.repo=$repo" \
+        --label claude.managed=1 \
+        --security-opt no-new-privileges \
+        --cap-drop ALL
+    local c; for c in $CLAUDE_MIN_CAPS; do printf '%s\n' --cap-add "$c"; done
+    if [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]]; then
+        printf '%s\n' --cap-add NET_ADMIN
+    fi
+    printf '%s\n' \
+        --memory "$WORKER_MEM" \
+        --memory-reservation "$WORKER_MEM_RESERVATION" \
+        --cpus "$WORKER_CPUS" \
+        --pids-limit "$WORKER_PIDS" \
+        --shm-size "$WORKER_SHM" \
+        -e "CLAUDE_SECRET_GUARD=${CLAUDE_SECRET_GUARD:-1}" \
+        -e "CLAUDE_EGRESS_LOCKDOWN=${CLAUDE_EGRESS_LOCKDOWN:-0}"
+    if [[ -n "${CLAUDE_EGRESS_EXTRA_HOSTS:-}" ]]; then
+        printf '%s\n' -e "CLAUDE_EGRESS_EXTRA_HOSTS=${CLAUDE_EGRESS_EXTRA_HOSTS}"
+    fi
+}
+
+# --- lease discipline -------------------------------------------------------------
+
+broker_live_workers() {  # prints the count; returns 1 if the daemon can't be queried
+    # Fail CLOSED on a daemon error: a transient `docker ps` failure must refuse
+    # the launch upstream, never read as "zero live workers" and over-admit.
+    local out
+    out="$(broker_docker ps -q --filter label=claude.worker=1)" || return 1
+    grep -c . <<<"$out" || true
+}
+
+broker_item_live() {  # 0 iff a live worker already carries this item (case-folded)
+    # Compare case-insensitively: container names are lowercased, so `CC-2` and
+    # `cc-2` are the same worker — the LEASE predicate must say so itself rather
+    # than leaning on the docker name-collision error to hold the invariant.
+    local want it
+    want="$(tr '[:upper:]' '[:lower:]' <<<"$1")"
+    while IFS= read -r it; do
+        [[ "$(tr '[:upper:]' '[:lower:]' <<<"$it")" == "$want" ]] && return 0
+    done < <(broker_docker ps --filter label=claude.worker=1 --format '{{.Label "claude.item"}}')
+    return 1
+}
+
+# --- launch ------------------------------------------------------------------------
+
+# broker_launch <repo> <item> — assemble template + image + fixed command and run
+# it on the inner daemon. Echoes the container name. Everything after the image
+# token is broker-owned (CC-4's claude-worker-run replaces the placeholder cmd).
+broker_launch() {
+    local repo="$1" item="$2"
+    local -a args cmd
+    mapfile -t args < <(broker_template_args "$repo" "$item")
+    read -ra cmd <<<"$WORKER_CMD"
+    local name
+    name="claude-worker-$(echo "$item" | tr '[:upper:]' '[:lower:]')"
+    if [[ "${CLAUDE_BROKER_DRYRUN:-0}" == 1 ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_BROKER_DRYRUN=1 — printing the launch argv, NOT launching"
+        printf 'docker %s %s %s\n' "${args[*]}" "$WORKER_IMAGE" "${cmd[*]}"
+    else
+        # Explicit `|| return`: this function is called from an `if` context,
+        # where bash suspends errexit — without it a failed `docker run` would
+        # fall through to the name echo and be mis-reported as success.
+        broker_docker "${args[@]}" "$WORKER_IMAGE" "${cmd[@]}" >/dev/null || return 1
+    fi
+    echo "$name"
+}
+
+# --- spool ------------------------------------------------------------------------
+
+# Requests dir: the client may CREATE (w) and traverse (x) but never list (no r);
+# the sticky bit keeps one requester from unlinking another's file. Staging dir:
+# root-only (700) — the broker renames each request here before reading it, so
+# the agent can no longer swap the inode (TOCTOU). Responses dir: list+read for
+# the client group; files are root-written, group-readable.
+broker_setup_spool() {
+    local grp
+    grp="$(id -gn "$BROKER_CLIENT_USER" 2>/dev/null)" \
+        || die "client user '$BROKER_CLIENT_USER' does not exist (set CLAUDE_BROKER_CLIENT_USER)"
+    mkdir -p "$BROKER_DIR/requests" "$BROKER_DIR/staging" "$BROKER_DIR/responses"
+    chown root:root "$BROKER_DIR"; chmod 755 "$BROKER_DIR"
+    chown "root:$grp" "$BROKER_DIR/requests";  chmod 1730 "$BROKER_DIR/requests"
+    chown root:root   "$BROKER_DIR/staging";   chmod 700  "$BROKER_DIR/staging"
+    chown "root:$grp" "$BROKER_DIR/responses"; chmod 750 "$BROKER_DIR/responses"
+}
+
+broker_respond() {  # broker_respond <reqid> <text…>
+    local id="$1"; shift
+    local grp; grp="$(id -gn "$BROKER_CLIENT_USER" 2>/dev/null || echo root)"
+    local tmp="$BROKER_DIR/responses/.tmp-$id"
+    # A response-write failure degrades one request (the client times out) — it
+    # must not kill the serve loop under errexit.
+    { printf '%s\n' "$*" > "$tmp" \
+        && chown "root:$grp" "$tmp" \
+        && chmod 640 "$tmp" \
+        && mv -f "$tmp" "$BROKER_DIR/responses/$id"; } 2>/dev/null \
+        || blog "WARNING: could not write response for $id (client will time out)"
+}
+
+# broker_process_request <file> — stage → validate → lease checks → launch →
+# respond. The request file is consumed whatever the verdict; the verdict is
+# always written so the client never hangs on a processed request.
+broker_process_request() {
+    local f="$1" id staged; id="$(basename "$f")"
+    if ! [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$ ]]; then
+        blog "reject: illegal request filename '$id' (dropped, no response possible)"
+        rm -rf "$f"; return 0
+    fi
+    # Move the agent-owned entry into the root-only staging dir FIRST. rename(2)
+    # opens nothing and never dereferences the final component, so a swap-to-FIFO
+    # or swap-to-symlink racing this either loses (we move the original inode) or
+    # moves the FIFO/symlink node verbatim — which the -L/-f check in
+    # broker_validate_request then rejects. Once staged, the agent has no write
+    # in the dir, so the inode the reads bind can no longer be swapped.
+    staged="$BROKER_DIR/staging/$id"
+    if ! mv -f "$f" "$staged" 2>/dev/null; then
+        blog "reject $id: could not stage the request (vanished or unmovable)"
+        broker_respond "$id" "error could not stage request"
+        rm -rf "$f"; return 0
+    fi
+    if ! broker_validate_request "$staged"; then
+        blog "reject $id: $REQ_ERROR"
+        broker_respond "$id" "error $REQ_ERROR"
+        rm -rf "$staged"; return 0
+    fi
+    if broker_item_live "$REQ_ITEM"; then
+        blog "reject $id: item $REQ_ITEM already has a live worker (lease discipline)"
+        broker_respond "$id" "error item $REQ_ITEM already has a live worker"
+        rm -rf "$staged"; return 0
+    fi
+    local live
+    if ! live="$(broker_live_workers)"; then
+        blog "reject $id: cannot query live workers (inner daemon error) — refusing, fail closed"
+        broker_respond "$id" "error cannot query live workers — refusing (fail closed), retry"
+        rm -rf "$staged"; return 0
+    fi
+    if (( live >= BROKER_MAX_WORKERS )); then
+        blog "reject $id: $live live workers >= cap $BROKER_MAX_WORKERS"
+        broker_respond "$id" "error worker cap reached ($live/$BROKER_MAX_WORKERS) — retry when a slot frees"
+        rm -rf "$staged"; return 0
+    fi
+    local name out
+    if out="$(broker_launch "$REQ_REPO" "$REQ_ITEM" 2>&1)"; then
+        name="$(tail -1 <<<"$out")"
+        blog "launch $id: item=$REQ_ITEM repo=$REQ_REPO → $name"
+        broker_respond "$id" "ok $name"
+    else
+        # docker's own diagnostic is benign (name conflict / missing image) but
+        # keep it to one truncated line — never dump env or the template.
+        out="$(head -1 <<<"$out" | cut -c1-200)"
+        blog "launch FAILED $id: $out"
+        broker_respond "$id" "error launch failed: $out"
+    fi
+    rm -rf "$staged"; return 0
+}
+
+broker_serve() {
+    broker_check_substrate
+    broker_check_socket
+    broker_setup_spool
+
+    # Exactly one broker per controller — a second instance double-launching
+    # would break the one-worker-per-item lease discipline.
+    exec 9>"$BROKER_DIR/.lock"
+    flock -n 9 || die "another claude-worker-broker already holds $BROKER_DIR/.lock"
+
+    blog "serving: spool=$BROKER_DIR client=$BROKER_CLIENT_USER cap=$BROKER_MAX_WORKERS image=$WORKER_IMAGE"
+    local f
+    while :; do
+        # `-e || -L` so a broken symlink (which `-e` reports absent) is still
+        # handled — staged and rejected — rather than lingering as flood.
+        for f in "$BROKER_DIR"/requests/*; do
+            [[ -e "$f" || -L "$f" ]] || continue
+            # Resilience backstop: the handler already returns 0 on every path,
+            # but a single hostile spool entry (e.g. a directory the agent
+            # mkdir'd) must NEVER be able to exit the root control plane under
+            # errexit. Any non-zero from the handler is logged, and the loop
+            # continues — one bad request degrades itself, never the broker.
+            broker_process_request "$f" \
+                || blog "WARNING: request handler exited $? for $(basename "$f") — serve loop continues"
+        done
+        sleep "$BROKER_POLL"
+    done
+}
+
+# Executed → run the daemon; sourced → expose the functions for unit tests.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    broker_serve
+fi

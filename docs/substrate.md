@@ -160,6 +160,11 @@ incompatibility fails the proof rather than surfacing later in a worker.
   founder-gated umbrella-side (`PAR-7.1`).
 - The flat, unprivileged K=1 leaf-container path is completely unchanged — `sysbox-runc`
   is used only where a controller must run nested workers.
-- The broker (CC-2), K-aware sizing (CC-3), worker lifecycle (CC-4), and disk safety
-  (CC-5) all build **on top of** this floor; a green `claude-sysbox-verify` is their
-  precondition, not their proof.
+- The K-aware sizing (CC-3), worker lifecycle (CC-4), and disk safety (CC-5) still
+  build **on top of** this floor; a green `claude-sysbox-verify` is their
+  precondition, not their proof. The **root-owned worker broker (CC-2) is built**:
+  `bin/claude-worker-broker` owns worker creation on the inner daemon (fixed
+  hardened template, deny-by-default requests, lease discipline; the agent never
+  touches the inner socket) and fails closed without userns containment + a
+  host-attested CVE-patched Sysbox — its own on-host proof is
+  `bin/claude-broker-verify`.

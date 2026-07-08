@@ -20,3 +20,5 @@ jobs:
         run: make lint
       - name: unit tests (version-floor refusal + warn-only runc posture)
         run: test/unit.sh
+      - name: broker unit tests (deny-by-default validator + fixed template + substrate refusals)
+        run: test/broker-unit.sh

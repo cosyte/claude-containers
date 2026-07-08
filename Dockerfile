@@ -149,6 +149,11 @@ COPY bin/claude-egress-firewall /usr/local/bin/claude-egress-firewall
 COPY bin/claude-secret-guard /usr/local/bin/claude-secret-guard
 COPY bin/claude-rc-watchdog /usr/local/bin/claude-rc-watchdog
 COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
+# Worker broker (CC-2): _common.sh rides along because the broker sources it for
+# the shared Sysbox version-floor check — ONE floor definition, host and container.
+COPY bin/_common.sh /usr/local/bin/_common.sh
+COPY bin/claude-worker-broker /usr/local/bin/claude-worker-broker
+COPY bin/claude-worker-request /usr/local/bin/claude-worker-request
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-dev /usr/local/bin/claude-autopilot \
@@ -157,6 +162,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-secret-guard \
         /usr/local/bin/claude-rc-watchdog \
         /usr/local/bin/claude-healthcheck \
+        /usr/local/bin/claude-worker-broker \
+        /usr/local/bin/claude-worker-request \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
 

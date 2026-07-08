@@ -156,6 +156,33 @@ from `settings.json` and, if any were present, clears
 Trade-off accepted: this image cannot be fully telemetry-silent and also
 provide Remote Control; RC is the product, so telemetry stays on.
 
+## Decision: worker launches are brokered by root (CC-2)
+
+Where a controller runs nested workers (the Sysbox substrate, docs/substrate.md),
+the unprivileged agent never talks to the inner `dockerd`: inside the controller,
+socket access is still every peer worker, its leases, and the launch template —
+even with host escape already contained by userns (CC-1). So worker creation is
+owned by a **root broker** (`bin/claude-worker-broker`), the same
+root-owns-the-capability pattern as the git-key broker: the agent submits a
+KEY=VALUE request file (`bin/claude-worker-request`) into a write-only spool; the
+broker **renames the entry into a root-only staging dir before reading it** (the
+agent owns its spool entry, so validating in place is a swap-TOCTOU — a FIFO would
+hang the serve loop, a symlink would leak a root file; rename opens nothing and,
+once staged, the inode can't be swapped), validates it **deny-by-default** (exactly
+`repo` + `item`, tight charset, size cap — an unknown key, forged cap/limit, or
+flag-shaped value rejects the whole request) and launches with a **fixed hardened
+template** (cap-drop ALL +
+minimal re-add, `no-new-privileges`, per-worker memory/reservation/cpus/pids/shm,
+secret-guard + egress inheritance, `claude.worker`/`claude.item`/`claude.repo`
+labels). Lease discipline: one live worker per item, `CLAUDE_BROKER_MAX_WORKERS`
+total (CC-3 single-sources K from the umbrella). Fail-closed startup: root only,
+real userns in `/proc/self/uid_map`, and a host-attested CVE-patched Sysbox in
+`CLAUDE_SYSBOX_ATTESTED_VERSION` (set by the launch path from `preflight_sysbox`
+— the host binary is not probeable from inside; the shared `sysbox_version_check`
+keeps the two floors identical). Verify: `test/broker-unit.sh` (docker-free, CI)
++ `bin/claude-broker-verify` (on-host, 28 checks). The CC-4 worker lifecycle
+replaces the placeholder worker command; the template is the contract it inherits.
+
 ## Acceptance
 
 | # | Criterion | How it's met / verify |

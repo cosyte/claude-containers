@@ -231,7 +231,13 @@ claude-attach <name>              attach to its live tmux session (local host)
 claude-stop  <name>               graceful stop (state preserved)
 claude-rm    <name> [--yes] [--purge]   remove (+volumes with --purge)
 claude-logs  <name> [-n LINES]    tail the entrypoint/sshd log
+claude-sysbox-verify [--check]    prove the Sysbox-nested substrate (CC-1)
+claude-broker-verify [--keep]     prove the root-owned worker broker (CC-2)
 ```
+
+Inside a controller (`CLAUDE_WORKER_BROKER=1`), the unprivileged agent asks the
+root broker for a worker with `claude-worker-request <repo> <item-id>` — see
+[Security notes](#security-notes).
 
 Inside an autopilot container (over SSH), `claude-enqueue "<prompt>"` adds a task
 to the durable queue (`CLAUDE_AUTOPILOT_QUEUE=1`); `--priority N` orders it
@@ -426,6 +432,26 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   agent are rejected outright (socket access == host root). Decision, runbook, and
   the on-host containment proof: [docs/substrate.md](docs/substrate.md) +
   `bin/claude-sysbox-verify`.
+- **Worker launches are brokered by root — the agent never holds the inner Docker
+  socket.** On a controller, `CLAUDE_WORKER_BROKER=1` starts a **root-owned
+  broker** (`bin/claude-worker-broker`, mirroring the git-key broker pattern) that
+  is the only principal talking to the inner `dockerd` — the socket is locked to
+  `root:root 600`, because inside the controller socket access is still every peer
+  worker, its leases, and the launch template. The unprivileged agent *requests* a
+  worker via `claude-worker-request <repo> <item>`: a tiny KEY=VALUE file in a
+  write-only spool. The broker **renames each request into a root-only staging dir
+  before reading it** (closing the swap-TOCTOU on the agent-owned spool entry —
+  no FIFO can hang the loop, no symlink can leak a root file) and validates it
+  **deny-by-default** (exactly two sanitized values; an unknown key, forged
+  cap/limit, flag smuggling, duplicate, or oversize rejects the whole request). The broker applies a **fixed hardened template** — cap-drop
+  ALL + minimal re-add (`NET_RAW`/`MKNOD`/`SETFCAP` stay dropped),
+  `no-new-privileges`, per-worker memory/reservation/cpus/pids/shm caps, secret-
+  guard + egress inheritance — and enforces lease discipline (one live worker per
+  item, `CLAUDE_BROKER_MAX_WORKERS` total). It **fails closed** unless userns
+  containment is real (`/proc/self/uid_map`) *and* the host attested a CVE-patched
+  Sysbox (`CLAUDE_SYSBOX_ATTESTED_VERSION`, exported by the launch path from
+  `preflight_sysbox`). On-host proof: `bin/claude-broker-verify` (28 checks);
+  docker-free logic tests: `test/broker-unit.sh` (CI).
 - **Secret brokering (git key + credentials).** By default the SSH deploy key is
   copied to a `claude`-readable `~/.ssh/id_ed25519`, so a prompt-injected agent
   could exfiltrate it. `CLAUDE_BROKER_GIT_KEY=1` instead loads the key into a
