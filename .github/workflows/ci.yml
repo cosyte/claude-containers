@@ -1,0 +1,22 @@
+name: ci
+
+# Lint + unit tests — everything provable on a hosted runner. The on-host substrate proof
+# (bin/claude-sysbox-verify) needs Sysbox on the machine and stays a fleet-host step; the
+# image smoke test (make smoke) needs a full image build and stays a local/manual gate.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: lint (bash -n over all shell entrypoints)
+        run: make lint
+      - name: unit tests (version-floor refusal + warn-only runc posture)
+        run: test/unit.sh

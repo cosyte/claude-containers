@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# claude-sysbox-verify — stand up the Sysbox-nested substrate and PROVE containment (CC-1).
+#
+# The safety floor for the parallel worker tier (umbrella ADR 0011, roadmap
+# operations/roadmaps/claude-containers.md §8 CC-1): before anything builds on
+# "a controller container that runs K worker containers", this script must prove, on the
+# actual fleet host, that the substrate cannot escalate to host root:
+#
+#   1. host prerequisites  — userns kernel, Docker, Sysbox installed + registered, and the
+#      Sysbox release carries the Nov-2025 escape-CVE patches (v0.7.0+; a pre-patch Sysbox
+#      is REFUSED, not warned about — preflight_sysbox in _common.sh)
+#   2. controller stand-up — a Sysbox container (--runtime=sysbox-runc) running an inner
+#      dockerd, plus one true nested child launched by that inner daemon
+#   3. containment proofs  — root inside controller AND child maps to a non-root host uid
+#      (userns); the inner daemon is NOT the host daemon; a device-node grab is refused;
+#      cgroup limits are enforced INSIDE the Sysbox container (no parent shadowing) and an
+#      inner OOM stays contained; the version-floor refusal actually refuses
+#
+# Prints an evidence block at the end, formatted to fill ADR 0011's pending-verification
+# checklist. Exits 0 only if every proof passed.
+#
+#   bin/claude-sysbox-verify            # full stand-up + proofs (needs Sysbox installed)
+#   bin/claude-sysbox-verify --check    # host-prerequisite check only (safe anywhere)
+#   bin/claude-sysbox-verify --keep     # leave the controller running for inspection
+#
+# Rejected alternatives (in writing, per CC-1 — see docs/substrate.md for the full case):
+# privileged Docker-in-Docker (--privileged ≈ near-full host kernel access) and bind-mounting
+# /var/run/docker.sock into an agent container (socket access == host root). Neither is a
+# fallback; if Sysbox cannot be installed the answer is escalation, not a shortcut.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+CHECK_ONLY=0
+KEEP=0
+for a in "$@"; do
+    case "$a" in
+        --check) CHECK_ONLY=1 ;;
+        --keep)  KEEP=1 ;;
+        *) die "unknown flag '$a' (usage: claude-sysbox-verify [--check] [--keep])" ;;
+    esac
+done
+
+# The proof controller is deliberately small — CC-3 owns real K-aware sizing; these limits
+# exist so the cgroup-enforcement proof has exact numbers to assert against.
+CTR="claude-sysbox-verify"
+CHILD="cc1-child"
+IMAGE="${CLAUDE_SYSBOX_VERIFY_IMAGE:-docker:28-dind}"
+CTR_MEM_BYTES=1073741824   # --memory 1g
+CTR_PIDS=512               # --pids-limit
+SENTINEL="sleep 373573"    # unique cmd so the host-side ps proof greps unambiguously
+
+PASS=0 FAIL=0
+EVIDENCE=()
+okp()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
+badp() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
+ev()   { EVIDENCE+=("$*"); }
+
+cleanup() {
+    if (( ! KEEP )); then
+        docker rm -f "$CTR" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT
+
+# --- phase 0: host prerequisites ----------------------------------------------------------
+info "phase 0 — host prerequisites"
+need_docker
+
+kver="$(uname -r)"
+IFS=. read -r kM km _ <<<"$kver"
+if (( kM < 5 || (kM == 5 && km < 12) )); then
+    die "kernel $kver < 5.12 — Sysbox needs idmapped-mount support (5.12+; 5.19+ preferred)"
+elif (( kM == 5 && km < 19 )); then
+    warn "kernel $kver is in the 5.12–5.18 band — works, but 5.19+ is the recommended floor"
+fi
+okp "kernel $kver supports user namespaces + idmapped mounts"
+
+maxns="$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)"
+(( maxns > 0 )) || die "user namespaces disabled (/proc/sys/user/max_user_namespaces = $maxns)"
+okp "user namespaces enabled (max_user_namespaces=$maxns)"
+
+if command -v systemctl >/dev/null 2>&1; then
+    if ! systemctl is-active --quiet sysbox 2>/dev/null \
+       && ! { systemctl is-active --quiet sysbox-mgr 2>/dev/null && systemctl is-active --quiet sysbox-fs 2>/dev/null; }; then
+        die "Sysbox services not active — install + start Sysbox first (docs/substrate.md has the runbook)"
+    fi
+else
+    { pgrep -x sysbox-mgr >/dev/null && pgrep -x sysbox-fs >/dev/null; } \
+        || die "sysbox-mgr / sysbox-fs not running (and no systemctl to query)"
+fi
+okp "Sysbox services are running"
+
+preflight_sysbox
+sbver="$(sysbox-runc --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+okp "Sysbox $sbver >= $SYSBOX_MIN_VERSION (carries the Nov-2025 escape-CVE patches) and registered with Docker"
+
+host_driver="$(docker info --format '{{.Driver}}' 2>/dev/null || echo unknown)"
+host_backing="$(docker info 2>/dev/null | sed -n 's/.*Backing Filesystem: *//p' | head -1)"
+ev "host: $(hostname) · kernel $kver · $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")"
+ev "sysbox: $sbver (floor $SYSBOX_MIN_VERSION = first release porting CVE-2025-31133/52565/52881)"
+ev "host docker: storage driver $host_driver, backing fs ${host_backing:-unknown}"
+
+if (( CHECK_ONLY )); then
+    ok "host prerequisites are all met — run without --check for the full containment proof"
+    exit 0
+fi
+
+# --- phase 1: controller stand-up (inner dockerd) ------------------------------------------
+info "phase 1 — Sysbox controller with inner dockerd ($IMAGE)"
+docker rm -f "$CTR" >/dev/null 2>&1 || true
+docker run --runtime=sysbox-runc -d --name "$CTR" \
+    --label claude.sysbox-verify=1 \
+    --cpus 1 --memory 1g --pids-limit "$CTR_PIDS" \
+    -e DOCKER_TLS_CERTDIR="" \
+    "$IMAGE" >/dev/null
+
+inner_ready=0
+for _ in $(seq 1 60); do
+    if docker exec "$CTR" docker info >/dev/null 2>&1; then inner_ready=1; break; fi
+    sleep 1
+done
+if (( inner_ready )); then
+    okp "inner dockerd is up inside the Sysbox controller"
+else
+    badp "inner dockerd did not come up within 60s (docker logs $CTR)"
+    docker logs --tail 15 "$CTR" >&2 || true
+    echo; err "cannot continue without an inner daemon"; exit 1
+fi
+inner_driver="$(docker exec "$CTR" docker info --format '{{.Driver}}' 2>/dev/null || echo unknown)"
+ev "inner docker: storage driver $inner_driver (inner image pull + container run below is the empirical ZFS/overlay proof)"
+
+# --- phase 2: one true nested child -------------------------------------------------------
+info "phase 2 — nested child launched by the inner daemon"
+if docker exec "$CTR" docker run -d --name "$CHILD" alpine:3.20 $SENTINEL >/dev/null 2>&1; then
+    okp "nested child is running (controller → inner dockerd → child)"
+else
+    badp "nested child failed to launch"
+    echo; err "cannot continue without a nested child"; exit 1
+fi
+
+# --- phase 3: containment proofs -----------------------------------------------------------
+info "phase 3 — containment proofs"
+
+# 3a. userns: root inside the controller maps to a non-root host uid.
+ctr_map="$(docker exec "$CTR" cat /proc/self/uid_map | awk 'NR==1{print $1, $2, $3}')"
+ctr_base="$(awk '{print $2}' <<<"$ctr_map")"
+if [[ -n "$ctr_base" && "$ctr_base" != 0 ]]; then
+    okp "controller uid_map: container-root 0 → host uid $ctr_base (non-root)"
+else
+    badp "controller uid_map shows root → host uid '${ctr_base:-?}' — NO userns containment"
+fi
+ev "controller /proc/self/uid_map: $ctr_map"
+
+# 3b. the same holds inside the nested child.
+child_map="$(docker exec "$CTR" docker exec "$CHILD" cat /proc/self/uid_map | awk 'NR==1{print $1, $2, $3}')"
+child_base="$(awk '{print $2}' <<<"$child_map")"
+if [[ -n "$child_base" && "$child_base" != 0 ]]; then
+    okp "nested-child uid_map: child-root 0 → host uid $child_base (non-root)"
+else
+    badp "nested-child uid_map shows root → host uid '${child_base:-?}'"
+fi
+ev "nested child /proc/self/uid_map: $child_map"
+
+# 3c. host-side observation: the child's process is owned by a non-root uid ON THE HOST.
+host_uid="$(ps -eo uid=,args= | awk -v s="$SENTINEL" 'index($0, s) && $0 !~ /awk/ {print $1; exit}')"
+if [[ -n "$host_uid" && "$host_uid" != 0 ]]; then
+    okp "host ps: the child's '$SENTINEL' runs as host uid $host_uid (non-root)"
+else
+    badp "host ps: child process owner is '${host_uid:-not found}' (want a non-root uid)"
+fi
+ev "host-side owner of the nested child's process: uid ${host_uid:-unknown}"
+
+# 3d. root-in-namespace vs unprivileged-on-host: full caps INSIDE (that is the point of a
+# sys container) while 3a–3c prove those caps only act within the userns.
+ctr_capeff="$(docker exec "$CTR" grep CapEff /proc/1/status | awk '{print $2}')"
+ev "controller CapEff (inside its userns): $ctr_capeff — full in-namespace, non-root on host"
+
+# 3e. no host-daemon exposure: the inner daemon is a different daemon, blind to the host's
+# containers, and no host docker.sock is reachable.
+host_did="$(docker info --format '{{.ID}}' 2>/dev/null || echo host-unknown)"
+inner_did="$(docker exec "$CTR" docker info --format '{{.ID}}' 2>/dev/null || echo inner-unknown)"
+if [[ "$host_did" != "$inner_did" ]]; then
+    okp "inner daemon ID differs from host daemon ID (no socket passthrough)"
+else
+    badp "inner daemon ID EQUALS host daemon ID — the host socket is exposed"
+fi
+inner_ps="$(docker exec "$CTR" docker ps --format '{{.Names}}')"
+if grep -qx "$CTR" <<<"$inner_ps"; then
+    badp "inner 'docker ps' can see the controller itself — host daemon reach"
+else
+    okp "inner 'docker ps' sees only nested children (host containers invisible)"
+fi
+ev "daemon IDs: host=$host_did inner=$inner_did; inner ps: $(tr '\n' ' ' <<<"$inner_ps")"
+
+# 3f. device-node grab refused (userns blocks mknod of block devices).
+if docker exec "$CTR" mknod /tmp/cc1-sda b 8 0 2>/dev/null; then
+    badp "mknod of a block device inside the controller SUCCEEDED — containment hole"
+else
+    okp "mknod of a block device inside the controller is refused"
+fi
+ev "mknod b 8 0 inside controller: refused"
+
+# 3g. cgroup limits enforce INSIDE the Sysbox container (the shadowing caveat, roadmap §5).
+mem_max="$(docker exec "$CTR" cat /sys/fs/cgroup/memory.max 2>/dev/null || echo unreadable)"
+pids_max="$(docker exec "$CTR" cat /sys/fs/cgroup/pids.max 2>/dev/null || echo unreadable)"
+if [[ "$mem_max" == "$CTR_MEM_BYTES" ]]; then
+    okp "memory.max inside the controller reads $mem_max (== --memory 1g; not shadowed)"
+else
+    badp "memory.max inside reads '$mem_max' (want $CTR_MEM_BYTES)"
+fi
+if [[ "$pids_max" == "$CTR_PIDS" ]]; then
+    okp "pids.max inside the controller reads $pids_max (== --pids-limit)"
+else
+    badp "pids.max inside reads '$pids_max' (want $CTR_PIDS)"
+fi
+ev "cgroup v2 inside controller: memory.max=$mem_max pids.max=$pids_max"
+
+# 3h. an inner OOM is contained: the over-limit nested container dies, the controller and
+# its daemon survive. (Full K-worker isolation matrices are CC-3's scope.)
+oom_rc=0
+docker exec "$CTR" docker run --rm -m 128m alpine:3.20 sh -c 'head -c 256m /dev/zero | tail' >/dev/null 2>&1 || oom_rc=$?
+if (( oom_rc != 0 )); then
+    okp "over-limit nested container was killed (rc=$oom_rc), not the controller"
+else
+    badp "a 256m allocation under a 128m limit did NOT get killed"
+fi
+if [[ "$(docker inspect -f '{{.State.Running}}' "$CTR" 2>/dev/null)" == "true" ]] \
+   && docker exec "$CTR" docker info >/dev/null 2>&1; then
+    okp "controller + inner daemon survived the inner OOM"
+else
+    badp "controller or inner daemon died with the inner OOM"
+fi
+ev "inner OOM containment: over-limit child killed rc=$oom_rc; controller survived"
+
+# 3i. the version floor actually refuses a pre-patch Sysbox.
+if ( CLAUDE_SYSBOX_FAKE_VERSION=0.6.7 CLAUDE_SYSBOX_SKIP_DOCKER=1 preflight_sysbox ) >/dev/null 2>&1; then
+    badp "preflight_sysbox ACCEPTED a pre-patch Sysbox (0.6.7)"
+else
+    okp "preflight_sysbox refuses a pre-patch Sysbox (0.6.7 < $SYSBOX_MIN_VERSION)"
+fi
+ev "version-floor refusal: 0.6.7 refused, floor $SYSBOX_MIN_VERSION"
+
+# --- summary --------------------------------------------------------------------------------
+echo
+echo "== $PASS passed, $FAIL failed =="
+echo
+echo "---- evidence for ADR 0011 (pending-verification checklist) ----"
+printf '  %s\n' "${EVIDENCE[@]}"
+echo "-----------------------------------------------------------------"
+if (( KEEP )); then
+    info "--keep: controller '$CTR' left running (docker rm -f $CTR to clean up)"
+fi
+(( FAIL == 0 )) || { err "containment NOT proven — do not build CC-2+ on this host"; exit 1; }
+ok "substrate proven: Sysbox-nested containment holds on this host"

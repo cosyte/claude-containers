@@ -85,7 +85,7 @@ logs:  ## make logs ARGS="myproj"
 	@./bin/claude-logs $(ARGS)
 
 lint: ## Shell-syntax check the scripts
-	@for f in entrypoint.sh bin/_common.sh bin/claude-*; do bash -n $$f && echo "ok $$f"; done
+	@for f in entrypoint.sh bin/_common.sh bin/claude-* test/*.sh; do bash -n $$f && echo "ok $$f"; done
 
 smoke: build ## Build the image, then run the automated smoke test against it
 	IMAGE=$(CLAUDE_IMAGE) test/smoke.sh

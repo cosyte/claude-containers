@@ -1,0 +1,162 @@
+# The parallel worker substrate — Sysbox-nested (CC-1)
+
+How this repo runs *containers inside a container* for the umbrella's parallel `/work-on`
+workers, without handing a prompt-injectable agent a path to host root. This is the
+`claude-containers` side of umbrella **ADR 0011** ("parallel worker substrate =
+Sysbox-nested"); the phased plan is `operations/roadmaps/claude-containers.md` (CC-1…CC-7).
+
+**Status:** decision accepted (founder call 2026-07-08); proven on a host only when
+`bin/claude-sysbox-verify` passes there. Nothing in CC-2+ may build on a host where it
+hasn't.
+
+## The decision
+
+The controller is a **Sysbox container** (`docker run --runtime=sysbox-runc …`) running an
+**inner `dockerd`**; the K workers are **true nested children** launched by that inner
+daemon. [Sysbox](https://github.com/nestybox/sysbox) puts a Linux **user namespace** on the
+container: root inside the controller — and inside every nested child — maps to an
+**unprivileged host uid**. The inner daemon is contained by construction, and the host's
+Docker daemon is never exposed to the agent at all.
+
+## Rejected alternatives (in writing — these are refusals, not preferences)
+
+Two tempting shortcuts both dissolve the "blast radius of one repo" property this repo is
+built around. They are **rejected**, including as fallbacks:
+
+1. **Privileged Docker-in-Docker** (`--privileged` + nested dockerd). `--privileged` grants
+   near-full host kernel access — a single injected `docker run` away from host root — and
+   nested Docker under it breaks in practice anyway (storage-driver-inside-overlayfs, the
+   daemon's exclusive `/var/lib/docker` lock, LSM policy conflicts, lost build cache; see
+   [jpetazzo's classic write-up](https://jpetazzo.github.io/2015/09/03/do-not-use-docker-in-docker-for-ci/)).
+   This is the exact posture our cap-drop hardening exists to prevent.
+2. **Bind-mounting `/var/run/docker.sock` into the agent container.** Socket access **is
+   host root**: anyone who can reach the daemon can
+   `docker run -v /:/host --privileged …` and own the machine. Handing that to a
+   semi-trusted agent deletes the container boundary entirely.
+
+If Sysbox cannot be installed on a fleet host, the documented escalation path is the
+**root-owned-broker host-sibling** model (the agent never holds a socket; a root broker
+owns worker creation) — a **founder decision**, never a silent fallback. See ADR 0011.
+
+## Version floor — a refusal, not a warning
+
+Nested workers run under `sysbox-runc`, so the Nov-2025 runc escape CVEs
+(**CVE-2025-31133 / CVE-2025-52565 / CVE-2025-52881**, fixed in runc 1.2.8 / 1.3.3 /
+1.4.0-rc.3) apply to the Sysbox release line: **Sysbox v0.7.0 (2026-06-02) is the first
+release that ports those patches**. `preflight_sysbox` in `bin/_common.sh` therefore
+**refuses** (exits) on a missing, unregistered, or pre-0.7.0 Sysbox — unlike
+`preflight_runc`, which stays warn-only because the existing flat K=1 launch path predates
+nesting and its behavior must not change. `SYSBOX_MIN_VERSION` can raise (never lower —
+the default is the security floor) the bar fleet-wide.
+
+## Host prerequisites
+
+| Requirement | Why | This repo's check |
+|---|---|---|
+| Linux kernel ≥ 5.12 (≥ 5.19 preferred) | idmapped mounts replace shiftfs | `claude-sysbox-verify` phase 0 |
+| User namespaces enabled | the entire containment model | `/proc/sys/user/max_user_namespaces > 0` |
+| Docker installed natively (not snap), systemd | Sysbox services + runtime registration | `need_docker` + `systemctl is-active sysbox` |
+| Sysbox ≥ 0.7.0 installed + registered | CVE floor above | `preflight_sysbox` |
+
+Sysbox is a **host prerequisite this repo can verify and refuse on, but cannot supply** —
+installation needs root on the host.
+
+## Install runbook (fleet host)
+
+Sysbox ships as a single `.deb`
+([releases](https://github.com/nestybox/sysbox/releases)). This runbook is the sequence
+**proven on the fleet host** (r730xd, 2026-07-08, with 63 running containers and zero
+downtime). Read the maintainer scripts before trusting it on a newer release
+(`dpkg-deb -e <deb> ctrl && less ctrl/config ctrl/postinst`) — the v0.7.0 behavior it is
+built around:
+
+- the **debconf `config` script aborts the whole install** (`exit 1`, package left
+  half-configured) when `daemon.json` lacks `bip`/`default-address-pools` lines AND any
+  container exists — it wants a Docker restart it refuses to do over live containers, and
+  its "any container" test is a brittle `docker ps -a | wc -l | egrep -q "1$"` (a total of
+  exactly 11/21/31… lines reads as *empty* and triggers a **restart** instead — check
+  `docker ps -a | wc -l` first). **Pre-seeding the two keys makes the whole restart
+  question moot**: the network branch finds nothing to change;
+- the postinst then merges `runtimes."sysbox-runc"` into `daemon.json` and applies it with
+  a **SIGHUP** (`runtimes` is documented reload-safe:
+  [dockerd → configuration reload behavior](https://docs.docker.com/reference/cli/dockerd/)
+  — running containers untouched), starts `sysbox`/`sysbox-mgr`/`sysbox-fs`, and bumps
+  kernel-keyring sysctl limits (all inert until a container uses `--runtime=sysbox-runc`).
+
+```bash
+# 0) fetch + checksum (compare against the release page before installing)
+wget https://github.com/nestybox/sysbox/releases/download/v0.7.0/sysbox-ce_0.7.0.linux_amd64.deb
+sha256sum sysbox-ce_0.7.0.linux_amd64.deb
+
+# 1) back up, then pre-seed the network keys with values that PIN current behavior:
+#    bip = exactly what docker0 already is (ip -4 addr show docker0), and a pool base
+#    covering the 172.16/12 range bridges already draw from — deliberately excluding
+#    192.168.x so a future docker network can never collide with a home LAN. Existing
+#    networks keep their persisted subnets regardless.
+sudo cp -a /etc/docker/daemon.json /etc/docker/daemon.json.bak-cc1
+sudo sh -c 'jq --indent 4 ". + {\"bip\": \"172.17.0.1/16\",
+    \"default-address-pools\": [{\"base\": \"172.16.0.0/12\", \"size\": 16}]}" \
+    /etc/docker/daemon.json.bak-cc1 > /etc/docker/daemon.json'
+
+# 2) install — with the keys pre-seeded there is no restart path left; the runtime is
+#    registered live via SIGHUP. (An "_apt … Permission denied" download note is cosmetic.)
+sudo apt-get install -y ./sysbox-ce_0.7.0.linux_amd64.deb
+
+# 3) confirm: runtime registered, services up, fleet untouched
+docker info --format '{{json .Runtimes}}' | grep -o sysbox-runc
+systemctl is-active sysbox
+docker ps -q | wc -l
+
+# 4) prove containment before building anything on it
+bin/claude-sysbox-verify
+```
+
+If the install already aborted once (the half-configured `iF` state blocks every later
+`apt` run): pre-seed as in step 1, then `sudo dpkg --configure sysbox-ce` — that is the
+exact recovery used on the fleet host. Rollback (also container-safe):
+`sudo apt-get remove -y sysbox-ce && sudo cp /etc/docker/daemon.json.bak-cc1
+/etc/docker/daemon.json && sudo kill -SIGHUP "$(pidof dockerd)"`.
+
+## Verification — `bin/claude-sysbox-verify`
+
+Run `--check` for host prerequisites only; run bare for the full stand-up + containment
+proof. The full run stands up a small Sysbox controller (`docker:28-dind`, 1 CPU / 1 GB /
+512 pids), launches one true nested child through the inner daemon, and asserts:
+
+- **userns containment** — `/proc/self/uid_map` inside the controller *and* the nested
+  child shows container-root → a non-root host uid; the child's process is owned by that
+  non-root uid in the **host's** `ps`.
+- **No host-daemon exposure** — the inner daemon ID differs from the host's; inner
+  `docker ps` cannot see host containers; a device-node grab (`mknod` of a block device)
+  is refused.
+- **cgroup limits enforce inside** (the nested-cgroup "shadowing" caveat): `memory.max` /
+  `pids.max` read back exactly as set on the controller, and an over-limit nested
+  container is OOM-killed **in isolation** — controller and inner daemon survive.
+- **The version floor refuses** — a simulated pre-patch Sysbox (0.6.7) is rejected by
+  `preflight_sysbox`.
+
+It prints an evidence block formatted for ADR 0011's pending-verification checklist and
+exits non-zero if any proof fails. The exhaustive resource-isolation matrix (per-worker
+OOM/fork-bomb/disk budgets at K) is **CC-3**'s scope, not this proof's.
+
+### ZFS note (this fleet)
+
+Older Sysbox reports ([#849](https://github.com/nestybox/sysbox/issues/849)) show inner
+Docker failing on ZFS-backed hosts — overlayfs historically couldn't use a ZFS upperdir.
+OpenZFS ≥ 2.2 supports overlayfs upperdirs (the current fleet host runs OpenZFS 2.3 and
+already runs the *host* daemon as `overlay2` on ZFS). The nested proof exercises this
+empirically: the inner daemon pulls an image and runs containers, so a ZFS/overlay
+incompatibility fails the proof rather than surfacing later in a worker.
+
+## Known limitations (do not over-trust)
+
+- Sysbox isolation is **stronger than runc, weaker than a VM/gVisor/Kata**. A container —
+  Sysbox included — is **not** a security boundary against a fully-weaponized agent;
+  multi-tenant/hostile-tenant use stays a non-goal (see README).
+- This substrate makes K>1 **runnable and safe**; it does not raise K. The ramp is
+  founder-gated umbrella-side (`PAR-7.1`).
+- The flat, unprivileged K=1 leaf-container path is completely unchanged — `sysbox-runc`
+  is used only where a controller must run nested workers.
+- The broker (CC-2), K-aware sizing (CC-3), worker lifecycle (CC-4), and disk safety
+  (CC-5) all build **on top of** this floor; a green `claude-sysbox-verify` is their
+  precondition, not their proof.

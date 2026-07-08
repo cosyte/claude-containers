@@ -417,6 +417,15 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   the agent can reach — see secret brokering below. For an untrusted-input /
   multi-tenant threat model, also run a microVM runtime (gVisor/Kata) rather than
   relying on container isolation alone.
+- **Nested workers run Sysbox, never privileged DinD or a socket mount.** Where a
+  controller container must itself run worker containers (the umbrella's parallel
+  `/work-on` tier), the only sanctioned mechanism is **Sysbox-nested** children —
+  root-in-container maps to an unprivileged host uid, and a pre-0.7.0 Sysbox
+  (missing the Nov-2025 escape-CVE patches) is **refused**, not warned about.
+  `--privileged` Docker-in-Docker and bind-mounting `/var/run/docker.sock` into an
+  agent are rejected outright (socket access == host root). Decision, runbook, and
+  the on-host containment proof: [docs/substrate.md](docs/substrate.md) +
+  `bin/claude-sysbox-verify`.
 - **Secret brokering (git key + credentials).** By default the SSH deploy key is
   copied to a `claude`-readable `~/.ssh/id_ed25519`, so a prompt-injected agent
   could exfiltrate it. `CLAUDE_BROKER_GIT_KEY=1` instead loads the key into a
