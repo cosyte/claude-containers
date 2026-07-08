@@ -104,6 +104,18 @@ preflight_runc() {
     fi
 }
 
+# version_ge A B — true iff dotted-numeric version A >= B (first three components).
+# Both must be numeric triples (missing parts default to 0); anything non-numeric is an
+# ERROR (return 2) so security callers can fail CLOSED instead of comparing garbage as 0.
+# Base-10 forced (10#) so a leading zero can't trip octal arithmetic.
+version_ge() {
+    local aM am ap bM bm bp
+    IFS=. read -r aM am ap <<<"$1"; aM=${aM:-0} am=${am:-0} ap=${ap:-0}
+    IFS=. read -r bM bm bp <<<"$2"; bM=${bM:-0} bm=${bm:-0} bp=${bp:-0}
+    [[ "$aM$am$ap$bM$bm$bp" =~ ^[0-9]+$ ]] || return 2
+    (( 10#$aM > 10#$bM || (10#$aM == 10#$bM && (10#$am > 10#$bm || (10#$am == 10#$bm && 10#$ap >= 10#$bp))) ))
+}
+
 # Sysbox version floor for the nested-worker substrate (CC-1, umbrella ADR 0011). Nested
 # workers run under sysbox-runc instead of runc, so the Nov-2025 runc escape-CVE floor
 # (CVE-2025-31133 / 52565 / 52881) generalizes to "a Sysbox release that ports those
@@ -112,40 +124,58 @@ preflight_runc() {
 # check is a REFUSAL: nothing may stand up a nested worker on a pre-patch runtime.
 SYSBOX_MIN_VERSION="${SYSBOX_MIN_VERSION:-0.7.0}"
 
-# Die unless a CVE-patched Sysbox is installed AND registered with Docker.
-# Test seams: CLAUDE_SYSBOX_FAKE_VERSION injects a version string (skips the binary);
-# CLAUDE_SYSBOX_SKIP_DOCKER=1 skips the Docker runtime-registration check.
+# Die unless a CVE-patched Sysbox is installed AND registered with Docker. On success,
+# exports SYSBOX_VERSION (the parsed full version) for callers to report.
+# Test seams — UNIT TESTS ONLY, loudly warned when active (bin/claude-sysbox-verify
+# unsets both up front so an ambient/leftover value can never neutralize the real gate):
+# CLAUDE_SYSBOX_FAKE_VERSION injects a version string (skips the binary);
+# CLAUDE_SYSBOX_SKIP_DOCKER=1 skips the Docker daemon + runtime-registration check.
 preflight_sysbox() {
     local sv=""
     if [[ -n "${CLAUDE_SYSBOX_FAKE_VERSION:-}" ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_SYSBOX_FAKE_VERSION='${CLAUDE_SYSBOX_FAKE_VERSION}' — the real sysbox-runc is NOT being checked"
         sv="$CLAUDE_SYSBOX_FAKE_VERSION"
     else
         command -v sysbox-runc >/dev/null 2>&1 \
             || die "sysbox-runc not found — install Sysbox >= $SYSBOX_MIN_VERSION first (docs/substrate.md)"
         # Robust to both output shapes ("sysbox-runc version X.Y.Z" and the multi-line
-        # "version: X.Y.Z" form): first semver token wins.
-        sv="$(sysbox-runc --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+        # "version: X.Y.Z" form). Keep any pre-release/build suffix — the floor logic
+        # below must SEE a suffix to refuse it. `|| true`: a no-match grep must reach
+        # the die below with its message, not be eaten by errexit.
+        sv="$(sysbox-runc --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*' | head -1 || true)"
         [[ -n "$sv" ]] || die "could not parse a version out of 'sysbox-runc --version'"
     fi
     sv="${sv#v}"
+    sv="${sv%%+*}"   # build metadata (+…) carries no release semantics — off first
     local pre=""; [[ "$sv" == *-* ]] && pre="${sv#*-}"
-    sv="${sv%%[+-]*}"
-    local M m p fM fm fp
-    IFS=. read -r M m p <<<"$sv";                 M=${M:-0} m=${m:-0} p=${p:-0}
-    IFS=. read -r fM fm fp <<<"$SYSBOX_MIN_VERSION"; fM=${fM:-0} fm=${fm:-0} fp=${fp:-0}
-    [[ "$M$m$p" =~ ^[0-9]+$ ]] || die "unparseable Sysbox version '$sv'"
-    if ! (( M > fM || (M == fM && m > fm) || (M == fM && m == fm && p >= fp) )); then
-        die "Sysbox $sv predates the Nov-2025 escape-CVE patches (CVE-2025-31133/52565/52881, ported in $SYSBOX_MIN_VERSION) — refusing to use it for nested workers"
-    fi
+    sv="${sv%%-*}"
+    # Fail CLOSED on garbage on EITHER side: an unparseable version or floor must refuse,
+    # never collapse to 0 and wave a pre-patch runtime through. (|| capture: a bare call
+    # would trip callers' errexit before the case could name the reason.)
+    local vge=0; version_ge "$sv" "$SYSBOX_MIN_VERSION" || vge=$?
+    case $vge in
+        0) ;;
+        1) die "Sysbox $sv predates the Nov-2025 escape-CVE patches (CVE-2025-31133/52565/52881, ported in $SYSBOX_MIN_VERSION) — refusing to use it for nested workers" ;;
+        *) die "unparseable Sysbox version '$sv' or floor '$SYSBOX_MIN_VERSION' — refusing (fail closed)" ;;
+    esac
     # A pre-release of exactly the floor (e.g. 0.7.0-rc.1) cannot be proven to carry the
-    # patches — fail closed. (Release-line parses never carry a suffix; this guards the seam.)
-    if [[ -n "$pre" && "$M.$m.$p" == "$fM.$fm.$fp" ]]; then
-        die "Sysbox $M.$m.$p-$pre is a pre-release of the floor $SYSBOX_MIN_VERSION — cannot prove it carries the CVE patches, refusing"
+    # patches — fail closed. Reachable on the real path: the parse above keeps suffixes.
+    if [[ -n "$pre" ]]; then
+        local fM fm fp
+        IFS=. read -r fM fm fp <<<"$SYSBOX_MIN_VERSION"
+        if [[ "$sv" == "${fM:-0}.${fm:-0}.${fp:-0}" ]]; then
+            die "Sysbox $sv-$pre is a pre-release of the floor $SYSBOX_MIN_VERSION — cannot prove it carries the CVE patches, refusing"
+        fi
     fi
     if [[ "${CLAUDE_SYSBOX_SKIP_DOCKER:-0}" != 1 ]]; then
+        need_docker
         docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"sysbox-runc"' \
             || die "Docker has no 'sysbox-runc' runtime registered — see docs/substrate.md (daemon.json + SIGHUP reload)"
+    else
+        warn "TEST SEAM ACTIVE: CLAUDE_SYSBOX_SKIP_DOCKER=1 — Docker runtime registration is NOT being checked"
     fi
+    SYSBOX_VERSION="$sv${pre:+-$pre}"
+    export SYSBOX_VERSION
 }
 
 # Container/volume-safe name: lowercase, only [a-z0-9._-].

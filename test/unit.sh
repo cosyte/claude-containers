@@ -92,12 +92,84 @@ else
     ok  "absent sysbox-runc is refused"
 fi
 
+# A malformed FLOOR must fail CLOSED — garbage on either side of the compare refuses.
+if in_env SYSBOX_MIN_VERSION=banana CLAUDE_SYSBOX_FAKE_VERSION=0.7.0 CLAUDE_SYSBOX_SKIP_DOCKER=1 -- preflight_sysbox; then
+    bad "a malformed SYSBOX_MIN_VERSION must REFUSE (fail closed), not collapse to 0.0.0"
+else
+    ok  "a malformed SYSBOX_MIN_VERSION refuses (fail closed)"
+fi
+
+echo
+echo "== preflight_sysbox: REAL-binary path (PATH-stubbed sysbox-runc) =="
+
+# The refusals must be reachable from the real parse, not just the fake-version seam:
+# the parser keeps pre-release/build suffixes so the floor logic can see them.
+STUBBIN="$(mktemp -d)"
+trap 'rm -rf "$STUBBIN"' EXIT
+mkstub() { printf '#!/bin/sh\nprintf "sysbox-runc\\n\\tedition: \\tCommunity Edition (CE)\\n\\tversion: \\t%s\\n"\n' "$1" > "$STUBBIN/sysbox-runc"; chmod +x "$STUBBIN/sysbox-runc"; }
+
+mkstub "0.7.0-rc.1"
+if in_env PATH="$STUBBIN:/usr/bin:/bin" CLAUDE_SYSBOX_SKIP_DOCKER=1 -- preflight_sysbox; then
+    bad "REAL binary reporting 0.7.0-rc.1 must be REFUSED (pre-release of the floor)"
+else
+    ok  "REAL binary reporting 0.7.0-rc.1 is refused — the suffix survives the parse"
+fi
+
+mkstub "0.7.0"
+if in_env PATH="$STUBBIN:/usr/bin:/bin" CLAUDE_SYSBOX_SKIP_DOCKER=1 -- preflight_sysbox; then
+    ok  "REAL binary reporting 0.7.0 is accepted"
+else
+    bad "REAL binary reporting 0.7.0 must be accepted"
+fi
+
+mkstub "0.7.0+build.7"
+if in_env PATH="$STUBBIN:/usr/bin:/bin" CLAUDE_SYSBOX_SKIP_DOCKER=1 -- preflight_sysbox; then
+    ok  "REAL binary reporting 0.7.0+build.7 is accepted (build metadata stripped, not a pre-release)"
+else
+    bad "0.7.0+build.7 must be accepted — build metadata carries no release semantics"
+fi
+
+mkstub "0.6.7"
+if in_env PATH="$STUBBIN:/usr/bin:/bin" CLAUDE_SYSBOX_SKIP_DOCKER=1 -- preflight_sysbox; then
+    bad "REAL binary reporting 0.6.7 must be REFUSED"
+else
+    ok  "REAL binary reporting 0.6.7 is refused"
+fi
+
+# A binary emitting no version token must die WITH the parse diagnostic (reachable
+# under errexit), never silently.
+printf '#!/bin/sh\necho "sysbox-runc (no version here)"\n' > "$STUBBIN/sysbox-runc"; chmod +x "$STUBBIN/sysbox-runc"
+outp="$( ( export PATH="$STUBBIN:/usr/bin:/bin" CLAUDE_SYSBOX_SKIP_DOCKER=1
+           # shellcheck disable=SC1091
+           source "$REPO_ROOT/bin/_common.sh"; preflight_sysbox ) 2>&1 )" && rc=0 || rc=$?
+if [[ $rc -ne 0 && "$outp" == *"could not parse a version"* ]]; then
+    ok  "version-less output dies WITH the parse diagnostic (not a silent errexit death)"
+else
+    bad "version-less output must die with the parse diagnostic (rc=$rc, out=$outp)"
+fi
+
+echo
+echo "== version_ge helper =="
+( # shellcheck disable=SC1091
+  source "$REPO_ROOT/bin/_common.sh"
+  version_ge 0.7.0 0.7.0        || exit 1
+  version_ge 0.7.1 0.7.0        || exit 1
+  version_ge 1.0.0 0.7.0        || exit 1
+  version_ge 0.10.0 0.9.9       || exit 1   # numeric, not lexical
+  version_ge 0.08.0 0.7.0       || exit 1   # leading zero must not trip octal
+  ! version_ge 0.6.7 0.7.0      || exit 1
+  ! version_ge 0.7 0.7.1        || exit 1   # missing part defaults to 0
+  rc=0; version_ge banana 0.7.0 || rc=$?
+  [[ $rc -eq 2 ]] || exit 1                 # garbage → ERROR, not a verdict
+) >/dev/null 2>&1 && ok "version_ge truth table holds (incl. leading-zero + garbage→error)" \
+                  || bad "version_ge truth table failed"
+
 echo
 echo "== preflight_runc: warn-only posture preserved (K=1 non-regression) =="
 
 # preflight_runc must never exit non-zero — it warns. Feed it a vulnerable runc via a stub.
 STUB="$(mktemp -d)"
-trap 'rm -rf "$STUB"' EXIT
+trap 'rm -rf "$STUB" "$STUBBIN"' EXIT
 printf '#!/bin/sh\necho "runc version 1.2.7"\n' > "$STUB/runc" && chmod +x "$STUB/runc"
 if in_env PATH="$STUB:/usr/bin:/bin" -- preflight_runc; then
     ok  "a vulnerable runc (1.2.7) only WARNS — flat launch path behavior unchanged"

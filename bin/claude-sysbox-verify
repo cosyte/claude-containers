@@ -30,6 +30,11 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
+# This script PROVES the gate — an ambient/leftover unit-test seam (or one smuggled in
+# via .env, which _common.sh auto-sources) must never neutralize the checks it exists
+# to run. The refusal drill in phase 3 re-sets the seam explicitly in its own subshell.
+unset CLAUDE_SYSBOX_FAKE_VERSION CLAUDE_SYSBOX_SKIP_DOCKER
+
 CHECK_ONLY=0
 KEEP=0
 for a in "$@"; do
@@ -91,13 +96,12 @@ fi
 okp "Sysbox services are running"
 
 preflight_sysbox
-sbver="$(sysbox-runc --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-okp "Sysbox $sbver >= $SYSBOX_MIN_VERSION (carries the Nov-2025 escape-CVE patches) and registered with Docker"
+okp "Sysbox $SYSBOX_VERSION >= $SYSBOX_MIN_VERSION (carries the Nov-2025 escape-CVE patches) and registered with Docker"
 
 host_driver="$(docker info --format '{{.Driver}}' 2>/dev/null || echo unknown)"
 host_backing="$(docker info 2>/dev/null | sed -n 's/.*Backing Filesystem: *//p' | head -1)"
 ev "host: $(hostname) · kernel $kver · $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")"
-ev "sysbox: $sbver (floor $SYSBOX_MIN_VERSION = first release porting CVE-2025-31133/52565/52881)"
+ev "sysbox: $SYSBOX_VERSION (floor $SYSBOX_MIN_VERSION = first release porting CVE-2025-31133/52565/52881)"
 ev "host docker: storage driver $host_driver, backing fs ${host_backing:-unknown}"
 
 if (( CHECK_ONLY )); then
@@ -195,10 +199,12 @@ ev "daemon IDs: host=$host_did inner=$inner_did; inner ps: $(tr '\n' ' ' <<<"$in
 # 3f. device-node grab refused (userns blocks mknod of block devices).
 if docker exec "$CTR" mknod /tmp/cc1-sda b 8 0 2>/dev/null; then
     badp "mknod of a block device inside the controller SUCCEEDED — containment hole"
+    mknod_result="SUCCEEDED (containment hole)"
 else
     okp "mknod of a block device inside the controller is refused"
+    mknod_result="refused"
 fi
-ev "mknod b 8 0 inside controller: refused"
+ev "mknod b 8 0 inside controller: $mknod_result"
 
 # 3g. cgroup limits enforce INSIDE the Sysbox container (the shadowing caveat, roadmap §5).
 mem_max="$(docker exec "$CTR" cat /sys/fs/cgroup/memory.max 2>/dev/null || echo unreadable)"
@@ -215,22 +221,26 @@ else
 fi
 ev "cgroup v2 inside controller: memory.max=$mem_max pids.max=$pids_max"
 
-# 3h. an inner OOM is contained: the over-limit nested container dies, the controller and
-# its daemon survive. (Full K-worker isolation matrices are CC-3's scope.)
+# 3h. an inner OOM is contained: the over-limit nested container dies BY OOM-KILL
+# (rc 137 = SIGKILL from the kernel OOM killer — any other rc is an unrelated failure,
+# not proof), and the controller and its daemon survive. (Full K-worker isolation
+# matrices are CC-3's scope.)
 oom_rc=0
 docker exec "$CTR" docker run --rm -m 128m alpine:3.20 sh -c 'head -c 256m /dev/zero | tail' >/dev/null 2>&1 || oom_rc=$?
-if (( oom_rc != 0 )); then
-    okp "over-limit nested container was killed (rc=$oom_rc), not the controller"
+if (( oom_rc == 137 )); then
+    okp "over-limit nested container was OOM-killed (rc=137), not the controller"
 else
-    badp "a 256m allocation under a 128m limit did NOT get killed"
+    badp "expected an OOM kill (rc=137) of the over-limit nested container, got rc=$oom_rc"
 fi
+ctr_survived="no"
 if [[ "$(docker inspect -f '{{.State.Running}}' "$CTR" 2>/dev/null)" == "true" ]] \
    && docker exec "$CTR" docker info >/dev/null 2>&1; then
     okp "controller + inner daemon survived the inner OOM"
+    ctr_survived="yes"
 else
     badp "controller or inner daemon died with the inner OOM"
 fi
-ev "inner OOM containment: over-limit child killed rc=$oom_rc; controller survived"
+ev "inner OOM containment: over-limit child rc=$oom_rc (137=OOM-kill); controller+daemon survived: $ctr_survived"
 
 # 3i. the version floor actually refuses a pre-patch Sysbox.
 if ( CLAUDE_SYSBOX_FAKE_VERSION=0.6.7 CLAUDE_SYSBOX_SKIP_DOCKER=1 preflight_sysbox ) >/dev/null 2>&1; then
