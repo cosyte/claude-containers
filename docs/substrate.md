@@ -46,8 +46,11 @@ Nested workers run under `sysbox-runc`, so the Nov-2025 runc escape CVEs
 release that ports those patches**. `preflight_sysbox` in `bin/_common.sh` therefore
 **refuses** (exits) on a missing, unregistered, or pre-0.7.0 Sysbox — unlike
 `preflight_runc`, which stays warn-only because the existing flat K=1 launch path predates
-nesting and its behavior must not change. `SYSBOX_MIN_VERSION` can raise (never lower —
-the default is the security floor) the bar fleet-wide.
+nesting and its behavior must not change. `SYSBOX_MIN_VERSION` can raise the bar
+fleet-wide but never lower it — that is **enforced**, not advisory: the readonly
+`SYSBOX_CVE_FLOOR` constant is immovable, and `preflight_sysbox` dies on any
+`SYSBOX_MIN_VERSION` below it (the same `.env`/ambient neutralize-the-gate vector as the
+test seams, closed the same way).
 
 ## Host prerequisites
 

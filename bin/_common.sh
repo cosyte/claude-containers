@@ -122,7 +122,16 @@ version_ge() {
 # patches" — v0.7.0 (2026-06-02) is the first. Unlike preflight_runc above (warn-only,
 # because the flat K=1 launch path predates nesting and must not change behavior), this
 # check is a REFUSAL: nothing may stand up a nested worker on a pre-patch runtime.
-SYSBOX_MIN_VERSION="${SYSBOX_MIN_VERSION:-0.7.0}"
+#
+# SYSBOX_CVE_FLOOR is IMMOVABLE (readonly, assigned after the .env auto-source above so
+# no .env/ambient value can redefine it). SYSBOX_MIN_VERSION may RAISE the operative bar
+# fleet-wide; preflight_sysbox dies if it is set below the CVE floor — the same
+# neutralize-the-gate vector as the test seams, closed the same way.
+if ! readonly SYSBOX_CVE_FLOOR=0.7.0 2>/dev/null; then
+    # Already readonly (this file sourced twice in one shell): value must be OURS.
+    [[ "${SYSBOX_CVE_FLOOR:-}" == "0.7.0" ]] || die "SYSBOX_CVE_FLOOR is '$SYSBOX_CVE_FLOOR' (expected 0.7.0) — refusing"
+fi
+SYSBOX_MIN_VERSION="${SYSBOX_MIN_VERSION:-$SYSBOX_CVE_FLOOR}"
 
 # Die unless a CVE-patched Sysbox is installed AND registered with Docker. On success,
 # exports SYSBOX_VERSION (the parsed full version) for callers to report.
@@ -131,6 +140,12 @@ SYSBOX_MIN_VERSION="${SYSBOX_MIN_VERSION:-0.7.0}"
 # CLAUDE_SYSBOX_FAKE_VERSION injects a version string (skips the binary);
 # CLAUDE_SYSBOX_SKIP_DOCKER=1 skips the Docker daemon + runtime-registration check.
 preflight_sysbox() {
+    # The operative floor may only sit AT or ABOVE the immovable CVE floor — a lowered
+    # (or garbage) SYSBOX_MIN_VERSION from env/.env dies here, fail closed. Checked
+    # inside the function so an in-process reassignment after sourcing binds too.
+    local floor_ok=0; version_ge "$SYSBOX_MIN_VERSION" "$SYSBOX_CVE_FLOOR" || floor_ok=$?
+    (( floor_ok == 0 )) || die "SYSBOX_MIN_VERSION '$SYSBOX_MIN_VERSION' is below (or unparseable against) the immovable CVE floor $SYSBOX_CVE_FLOOR (CVE-2025-31133/52565/52881) — the floor may be raised, never lowered"
+
     local sv=""
     if [[ -n "${CLAUDE_SYSBOX_FAKE_VERSION:-}" ]]; then
         warn "TEST SEAM ACTIVE: CLAUDE_SYSBOX_FAKE_VERSION='${CLAUDE_SYSBOX_FAKE_VERSION}' — the real sysbox-runc is NOT being checked"

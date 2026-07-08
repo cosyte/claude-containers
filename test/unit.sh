@@ -99,6 +99,21 @@ else
     ok  "a malformed SYSBOX_MIN_VERSION refuses (fail closed)"
 fi
 
+# The floor may be RAISED, never LOWERED: a well-formed-but-low SYSBOX_MIN_VERSION
+# (the .env/ambient neutralize-the-gate vector) dies against the immovable CVE floor —
+# even when the installed version would satisfy the lowered bar.
+if in_env SYSBOX_MIN_VERSION=0.0.0 CLAUDE_SYSBOX_FAKE_VERSION=0.6.7 CLAUDE_SYSBOX_SKIP_DOCKER=1 -- preflight_sysbox; then
+    bad "SYSBOX_MIN_VERSION=0.0.0 must be REFUSED — the CVE floor is immovable"
+else
+    ok  "SYSBOX_MIN_VERSION=0.0.0 is refused (CVE floor is immovable)"
+fi
+
+if in_env SYSBOX_MIN_VERSION=0.6.0 CLAUDE_SYSBOX_FAKE_VERSION=1.0.0 CLAUDE_SYSBOX_SKIP_DOCKER=1 -- preflight_sysbox; then
+    bad "SYSBOX_MIN_VERSION=0.6.0 must be REFUSED even with a new Sysbox installed — a lowered floor is a config error, not a pass"
+else
+    ok  "SYSBOX_MIN_VERSION=0.6.0 is refused even though the installed version is new (lowered floor = config error)"
+fi
+
 echo
 echo "== preflight_sysbox: REAL-binary path (PATH-stubbed sysbox-runc) =="
 
