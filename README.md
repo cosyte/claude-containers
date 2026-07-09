@@ -153,6 +153,15 @@ shared across all running containers via the converged `claude-auth` volume, so
 mind the plan's 5-hour and weekly limits when choosing the interval and how many
 autopilot containers run at once — a too-tight cadence exhausts the subscription.
 
+**Controller mode** (`CLAUDE_CONTROLLER=1`, CC-6) is a third main-pane mode, for a
+Sysbox-nested controller that also dispatches nested workers via the umbrella's
+`PAR-*` lease/scheduler/bump-worker control plane instead of just running `/next`
+in-process. Its effective worker slots default to `1` — which collapses it,
+byte-identical, to exactly the autopilot loop above — and only ramp past that on
+an explicit `CLAUDE_CONTROLLER_MAX_SLOTS` override once the umbrella's `PAR-4.1`
+and `PAR-7.1` land. See `docs/substrate.md`'s "Controller mode (CC-6)" section for
+the full design; most containers should keep using plain `CLAUDE_AUTOPILOT=1`.
+
 ## Environment variables
 
 Set in `.env` (auto-loaded by the scripts and passed into containers). Real env
@@ -202,6 +211,11 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_DISK_FLOOR_MIB` | `10240` | Free-space floor (MiB) on `CLAUDE_DISK_DATA_ROOT`; the broker refuses a launch below it |
 | `CLAUDE_DISK_DATA_ROOT` | `/var/lib/docker` | The inner dockerd data-root nested worker layers land on — what the disk floor and `claude-disk-gc` watch |
 | `CLAUDE_DISK_GC_INTERVAL` | `3600` | Seconds between `claude-disk-gc --loop` cycles (controller mode) |
+| `CLAUDE_CONTROLLER` | `0` | `1` = controller mode (CC-6): main pane runs `claude-controller`, wiring this substrate to the umbrella `PAR-*` lease/scheduler/bump-worker. Implies `CLAUDE_WORKER_BROKER=1` (refuses at boot if that's explicitly `0`). Takes priority over `CLAUDE_AUTOPILOT` if both are set; no Remote Control link either way |
+| `CLAUDE_CONTROLLER_MAX_SLOTS` | `1` | Ceiling on worker slots the controller may use: effective slots = `min(K, this)`. **Defaults to 1 regardless of K** — the controller never auto-ramps; raising it is a deliberate operator action gated by the umbrella's `PAR-7.1` founder ramp (and needs `PAR-4.1` first). `1` collapses to today's autopilot, byte-identical |
+| `CLAUDE_CONTROLLER_UMBRELLA` | `/workspace` (if it looks right) | Umbrella root override for `claude-controller` — must have both `.gitmodules` and `scripts/reconcile.sh`; refuses (fail closed) otherwise |
+| `CLAUDE_CONTROLLER_INTERVAL` | `60` | Seconds between controller dispatch cycles (the slots>1 loop) |
+| `CLAUDE_CONTROLLER_SOCKET_WAIT` | `90` | Seconds the entrypoint blocks, in controller mode, for the inner docker socket to be confirmed `root:root 600` before starting the agent's tmux session |
 | `CLAUDE_STOP_TIMEOUT` | `20` | Graceful stop timeout (s) |
 | `AUTH_VOLUME`/`SSHKEYS_VOLUME` | `claude-auth`/`claude-sshkeys` | Shared volume names |
 | `ANTHROPIC_API_KEY` | unset | **Must stay unset** — entrypoint hard-fails otherwise |
@@ -249,6 +263,8 @@ claude-reaper [--loop]            reap dead worker containers + prune the broker
 claude-worker-lifecycle-verify [--check] [--keep]   prove one-shot-then-vanish + reaping (CC-4)
 claude-disk-gc [--loop]           GC the inner daemon's image/build-cache layers (CC-5)
 claude-disk-verify [--check] [--keep]   prove the disk-space floor + gc + image reuse (CC-5)
+claude-controller                 wire the substrate to the umbrella PAR-* lease/scheduler/bump-worker (CC-6)
+claude-controller-verify [--check] [--keep]   prove controller-mode dispatch + non-double-ship (CC-6)
 ```
 
 Inside a controller (`CLAUDE_WORKER_BROKER=1`), the unprivileged agent asks the

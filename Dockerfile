@@ -168,6 +168,10 @@ COPY bin/claude-reaper /usr/local/bin/claude-reaper
 # controller mode (entrypoint.sh §5b), scheduled GC of the inner daemon's image/
 # container/build-cache layers so nested workers don't fill the host.
 COPY bin/claude-disk-gc /usr/local/bin/claude-disk-gc
+# Controller mode (CC-6): wires this substrate to the umbrella PAR-* lease/scheduler/
+# bump-worker. slots==1 collapses to claude-autopilot (byte-identical); slots>1 is the
+# built-but-gated K>1 loop (CLAUDE_CONTROLLER_MAX_SLOTS defaults to 1 — never auto-ramps).
+COPY bin/claude-controller /usr/local/bin/claude-controller
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-dev /usr/local/bin/claude-autopilot \
@@ -181,6 +185,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-worker-run \
         /usr/local/bin/claude-reaper \
         /usr/local/bin/claude-disk-gc \
+        /usr/local/bin/claude-controller \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
 

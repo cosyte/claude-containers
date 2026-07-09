@@ -30,3 +30,5 @@ jobs:
         run: test/reaper-unit.sh
       - name: disk unit tests (free-space floor + broker refusal + gc plan safety + fail-safe)
         run: test/disk-unit.sh
+      - name: controller unit tests (K=1 byte-identical autopilot collapse + K>1 dispatch/lease/drain wiring)
+        run: test/controller-unit.sh
