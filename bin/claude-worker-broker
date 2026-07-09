@@ -65,8 +65,13 @@
 #   CLAUDE_BROKER_SOCKET_WAIT       secs to wait for the inner socket (default 60)
 #   CLAUDE_BROKER_POLL              spool poll seconds (default 1)
 #   CLAUDE_WORKER_IMAGE             worker image      (default claude-code-box:latest)
-#   CLAUDE_BROKER_WORKER_CMD        worker command    (default `sleep infinity` —
-#                                   the CC-4 seam; claude-worker-run replaces it)
+#   CLAUDE_BROKER_WORKER_CMD        worker command    (default `claude-worker-run` — CC-4;
+#                                   broker_launch appends the validated <repo> <item> as
+#                                   trailing argv, so the worker runs EXACTLY
+#                                   `claude-worker-run <repo> <item>` and drives one
+#                                   /work-on, then exits — the container is `--rm`, so a
+#                                   clean exit leaves no residue; bin/claude-reaper mops up
+#                                   anything an unclean exit leaves behind)
 #   CLAUDE_WORKER_MEM / _MEM_RESERVATION / _CPUS / _PIDS / _SHM
 #                                   per-worker resource profile — single-sourced
 #                                   from bin/_common.sh (defaults 4g / 3g / 2 /
@@ -96,7 +101,7 @@ BROKER_MAX_WORKERS="${CLAUDE_BROKER_MAX_WORKERS:-$(resolve_parallel_k)}"
 BROKER_SOCKET_WAIT="${CLAUDE_BROKER_SOCKET_WAIT:-60}"
 BROKER_POLL="${CLAUDE_BROKER_POLL:-1}"
 WORKER_IMAGE="${CLAUDE_WORKER_IMAGE:-claude-code-box:latest}"
-WORKER_CMD="${CLAUDE_BROKER_WORKER_CMD:-sleep infinity}"
+WORKER_CMD="${CLAUDE_BROKER_WORKER_CMD:-claude-worker-run}"
 # Per-worker resource profile: the single definition in bin/_common.sh (CC-3).
 WORKER_MEM="$CLAUDE_WORKER_MEM"
 WORKER_MEM_RESERVATION="$CLAUDE_WORKER_MEM_RESERVATION"
@@ -334,13 +339,16 @@ broker_item_live() {  # 0 iff a live worker already carries this item (case-fold
 # --- launch ------------------------------------------------------------------------
 
 # broker_launch <repo> <item> — assemble template + image + fixed command and run
-# it on the inner daemon. Echoes the container name. Everything after the image
-# token is broker-owned (CC-4's claude-worker-run replaces the placeholder cmd).
+# it on the inner daemon. Echoes the container name. Everything after the image token is
+# broker-owned; the two request VALUES (repo, item) are appended as trailing argv to
+# WORKER_CMD so the default command line runs `claude-worker-run <repo> <item>` — never a
+# flag, never a template override (worker_run_validate_args re-checks the same charset).
 broker_launch() {
     local repo="$1" item="$2"
     local -a args cmd
     mapfile -t args < <(broker_template_args "$repo" "$item")
     read -ra cmd <<<"$WORKER_CMD"
+    cmd+=("$repo" "$item")
     local name
     name="claude-worker-$(echo "$item" | tr '[:upper:]' '[:lower:]')"
     if [[ "${CLAUDE_BROKER_DRYRUN:-0}" == 1 ]]; then
