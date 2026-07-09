@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# claude-cgroup-verify — PROVE K-aware resource caps actually enforce on THIS host (CC-3).
+#
+# CC-1's claude-sysbox-verify proved the SINGLE-controller case (one cgroup limit
+# enforces inside the Sysbox container, one inner OOM stays contained). CC-3 sizes
+# the controller for Σ(K workers) and gives each worker its own caps — so the
+# property to prove here is the K-WORKER ISOLATION MATRIX:
+#
+#   1. each worker's --memory / --pids-limit actually ENFORCE inside the worker
+#      (memory.max / pids.max read the profile value — no parent-cgroup shadowing,
+#      the caveat in roadmap §5);
+#   2. one worker driven over --memory is OOM-killed IN ISOLATION — its PEER worker
+#      and the controller both survive (resource blast contained, roadmap §4.3);
+#   3. a worker fork-bomb hits --pids-limit and is contained, peer survives;
+#   4. the controller's own --memory is the hard Σ ceiling (enforced, not shadowed);
+#   5. the capacity fail-safe REFUSES an over-subscribed K (never overcommits).
+#
+# Needs Docker + Sysbox on the host — a fleet-host / manual gate, NOT a CI step
+# (CI has neither). Uses a deliberately SMALL proof profile so a modest host can
+# run K workers at once; the arithmetic it exercises is identical to production.
+#
+#   bin/claude-cgroup-verify           # full K-worker isolation proof (needs Sysbox)
+#   bin/claude-cgroup-verify --check   # sizing + fail-safe only (safe anywhere)
+#   bin/claude-cgroup-verify --keep    # leave the controller running for inspection
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+# This script PROVES the gate — clear any ambient/.env test seam that could
+# neutralize a real check (the deliberate-refusal drills re-set seams in subshells).
+unset CLAUDE_SYSBOX_FAKE_VERSION CLAUDE_SYSBOX_SKIP_DOCKER CLAUDE_HOST_CPUS_OVERRIDE CLAUDE_HOST_MEM_MIB_OVERRIDE
+
+CHECK_ONLY=0; KEEP=0
+for a in "$@"; do
+    case "$a" in
+        --check) CHECK_ONLY=1 ;;
+        --keep)  KEEP=1 ;;
+        *) die "unknown flag '$a' (usage: claude-cgroup-verify [--check] [--keep])" ;;
+    esac
+done
+
+# Small proof profile: 2 workers of 256m/128pids each → controller Σ well under any
+# real fleet host. This drives claude-controller-sizing's own arithmetic (same code
+# path as production) with numbers a modest host can actually satisfy.
+PROOF_K=2
+export CLAUDE_WORKER_MEM=256m
+export CLAUDE_WORKER_SHM=64m
+export CLAUDE_WORKER_PIDS=128
+export CLAUDE_WORKER_CPUS=1
+export CLAUDE_CONTROLLER_MEM_OVERHEAD=256m
+export CLAUDE_CONTROLLER_CPU_OVERHEAD=1
+WORKER_MEM_BYTES=268435456   # 256m
+WORKER_PIDS=128
+
+CTR="claude-cgroup-verify"
+IMAGE="${CLAUDE_SYSBOX_VERIFY_IMAGE:-docker:28-dind}"
+PASS=0 FAIL=0
+okp()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
+badp() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
+
+cleanup() { (( KEEP )) || docker rm -f "$CTR" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+# --- phase 0: sizing + the fail-safe (pure arithmetic — safe anywhere) --------------------
+info "phase 0 — K-aware sizing + the capacity fail-safe"
+
+# The controller envelope for the proof profile at K=2.
+controller_envelope "$PROOF_K"
+okp "controller_envelope(K=$PROOF_K) = ${CTRL_CPUS} CPU / ${CTRL_MEM} / ${CTRL_SHM} shm (Σ 2×256m + 256m overhead → ${CTRL_MEM_MIB} MiB)"
+[[ "$CTRL_MEM_MIB" == 768 ]] || badp "expected 768 MiB controller memory (2×256 + 256), got ${CTRL_MEM_MIB}"
+
+# The fail-safe must REFUSE an over-subscribed K: a huge worker profile on a tiny
+# pretend host exits non-zero rather than overcommitting.
+if ( CLAUDE_WORKER_MEM=64g CLAUDE_HOST_MEM_MIB_OVERRIDE=2048 CLAUDE_HOST_CPUS_OVERRIDE=4 \
+     check_controller_capacity "$PROOF_K" ) >/dev/null 2>&1; then
+    badp "the fail-safe ACCEPTED an over-subscribed K (2×64g on a 2 GB host) — must refuse"
+else
+    okp "the fail-safe refuses an over-subscribed K (never overcommits the host)"
+fi
+
+# And it PASSES when it fits (the small proof profile on the real host).
+if check_controller_capacity "$PROOF_K" >/dev/null 2>&1; then
+    okp "the proof profile fits this host (capacity check passes)"
+else
+    badp "the proof profile does NOT fit this host — even 2×256m is over budget?"
+    err "cannot run the isolation proof on a host this small"; exit 1
+fi
+
+if (( CHECK_ONLY )); then
+    echo; echo "== $PASS passed, $FAIL failed =="
+    (( FAIL == 0 )) || exit 1
+    ok "sizing + fail-safe verified (run without --check for the on-host K-worker isolation proof)"
+    exit 0
+fi
+
+# --- phase 1: controller sized for Σ(K), inner dockerd ------------------------------------
+info "phase 1 — Sysbox controller sized for Σ(K=$PROOF_K) ($IMAGE)"
+need_docker
+preflight_sysbox
+docker rm -f "$CTR" >/dev/null 2>&1 || true
+# Size the controller from the derived envelope — the exact numbers CC-6 will use.
+docker run --runtime=sysbox-runc -d --name "$CTR" \
+    --label claude.cgroup-verify=1 \
+    --cpus "$CTRL_CPUS" --memory "$CTRL_MEM" --shm-size "$CTRL_SHM" \
+    -e DOCKER_TLS_CERTDIR="" \
+    "$IMAGE" >/dev/null
+
+inner_ready=0
+for _ in $(seq 1 60); do
+    if docker exec "$CTR" docker info >/dev/null 2>&1; then inner_ready=1; break; fi
+    sleep 1
+done
+(( inner_ready )) && okp "inner dockerd is up in the Σ-sized controller" || {
+    badp "inner dockerd did not come up in 60s"; docker logs --tail 15 "$CTR" >&2 || true; exit 1; }
+
+# The controller's own --memory is the hard Σ ceiling and must enforce (not shadowed).
+ctr_memmax="$(docker exec "$CTR" cat /sys/fs/cgroup/memory.max 2>/dev/null || echo unreadable)"
+exp_ctr_bytes=$(( CTRL_MEM_MIB * 1024 * 1024 ))
+[[ "$ctr_memmax" == "$exp_ctr_bytes" ]] \
+    && okp "controller memory.max reads $ctr_memmax (== ${CTRL_MEM}, the Σ ceiling; not shadowed)" \
+    || badp "controller memory.max reads '$ctr_memmax' (want $exp_ctr_bytes) — Σ ceiling shadowed?"
+
+# --- phase 2: K nested workers, each capped ------------------------------------------------
+info "phase 2 — $PROOF_K nested workers, each with the per-worker caps"
+for i in $(seq 1 "$PROOF_K"); do
+    if docker exec "$CTR" docker run -d --name "w$i" \
+         -m "$CLAUDE_WORKER_MEM" --pids-limit "$WORKER_PIDS" --cpus "$CLAUDE_WORKER_CPUS" \
+         alpine:3.20 sleep 99999 >/dev/null 2>&1; then
+        okp "worker w$i launched (-m $CLAUDE_WORKER_MEM --pids-limit $WORKER_PIDS)"
+    else
+        badp "worker w$i failed to launch"; exit 1
+    fi
+done
+
+# --- phase 3: the isolation matrix ---------------------------------------------------------
+info "phase 3 — per-worker enforcement + isolation"
+
+# 3a. each worker's caps enforce INSIDE the worker (no shadowing across two nesting levels).
+for i in $(seq 1 "$PROOF_K"); do
+    wmax="$(docker exec "$CTR" docker exec "w$i" cat /sys/fs/cgroup/memory.max 2>/dev/null || echo unreadable)"
+    wpids="$(docker exec "$CTR" docker exec "w$i" cat /sys/fs/cgroup/pids.max 2>/dev/null || echo unreadable)"
+    [[ "$wmax" == "$WORKER_MEM_BYTES" ]] \
+        && okp "w$i memory.max=$wmax (== $CLAUDE_WORKER_MEM; enforced, not shadowed)" \
+        || badp "w$i memory.max='$wmax' (want $WORKER_MEM_BYTES)"
+    [[ "$wpids" == "$WORKER_PIDS" ]] \
+        && okp "w$i pids.max=$wpids (== --pids-limit)" \
+        || badp "w$i pids.max='$wpids' (want $WORKER_PIDS)"
+done
+
+# 3b. drive w1 over --memory: it is OOM-killed IN ISOLATION; w2 + controller survive.
+# Assert the SPECIFIC OOM-kill signature (rc 137 = SIGKILL from the kernel OOM killer),
+# not merely "nonzero" — a non-OOM failure must NOT read as an enforced cap.
+oom_rc=0
+docker exec "$CTR" docker exec "w1" sh -c 'head -c 512m /dev/zero | tail' >/dev/null 2>&1 || oom_rc=$?
+(( oom_rc == 137 )) \
+    && okp "w1 over-memory workload was OOM-killed (rc=137, SIGKILL from the OOM killer inside w1's cgroup)" \
+    || badp "w1 over-memory workload exited rc=$oom_rc (want 137=OOM-kill) — the worker --memory cap did not enforce"
+w2_alive="$(docker exec "$CTR" docker inspect -f '{{.State.Running}}' w2 2>/dev/null || echo false)"
+[[ "$w2_alive" == "true" ]] \
+    && okp "peer worker w2 survived w1's OOM (blast contained to one worker)" \
+    || badp "peer worker w2 died with w1's OOM — isolation breach"
+docker exec "$CTR" docker info >/dev/null 2>&1 \
+    && okp "controller + inner daemon survived w1's OOM" \
+    || badp "controller died with w1's OOM — Σ ceiling did not isolate the peak"
+
+# 3c. PROVE --pids-limit actually enforces (not just that pids.max is configured, which
+# 3a already checked). Attempt to spawn WORKER_PIDS+50 live processes inside w2, then
+# read pids.current: a working cap PINS live PIDs at <= pids.max, so despite 50 excess
+# fork attempts the count cannot exceed WORKER_PIDS. If --pids-limit were SHADOWED
+# (pids.max='max'/unlimited — the very failure this tool exists to catch), the storm
+# would blow past WORKER_PIDS and this assertion FAILS. The sleeps persist (300s) so
+# the read sees the live peak; the controller teardown reaps them.
+storm="$(docker exec "$CTR" docker exec "w2" sh -c '
+  i=0
+  while [ $i -lt '"$((WORKER_PIDS + 50))"' ]; do sleep 300 & i=$((i + 1)); done 2>/dev/null
+  printf "cur=%s\n" "$(cat /sys/fs/cgroup/pids.current 2>/dev/null || echo -1)"
+' 2>/dev/null || true)"
+cur="$(sed -n 's/.*cur=\(-\{0,1\}[0-9]*\).*/\1/p' <<<"$storm")"
+if [[ "$cur" =~ ^[0-9]+$ ]] && (( cur > 1 && cur <= WORKER_PIDS )); then
+    okp "w2 fork storm capped: pids.current=$cur despite $((WORKER_PIDS + 50)) attempts (<= pids.max=$WORKER_PIDS; enforced, not shadowed)"
+else
+    badp "w2 fork storm reached pids.current='$cur' (want 2..$WORKER_PIDS) — --pids-limit did NOT bound the worker"
+fi
+w1_alive="$(docker exec "$CTR" docker inspect -f '{{.State.Running}}' w1 2>/dev/null || echo false)"
+[[ "$w1_alive" == "true" ]] \
+    && okp "peer worker w1 survived w2's fork storm (pids blast contained to one worker)" \
+    || badp "peer worker w1 died with w2's fork storm — isolation breach"
+docker exec "$CTR" docker info >/dev/null 2>&1 \
+    && okp "controller survived w2's fork storm (pids cap contained it)" \
+    || badp "controller died with w2's fork storm — --pids-limit did not contain it"
+
+# --- summary --------------------------------------------------------------------------------
+echo
+echo "== $PASS passed, $FAIL failed =="
+(( KEEP )) && info "--keep: controller '$CTR' left running (docker rm -f $CTR to clean up)"
+(( FAIL == 0 )) || { err "K-worker resource isolation NOT proven on this host"; exit 1; }
+ok "K-worker resource caps enforce + isolate on this host (Σ ceiling, per-worker OOM, pids-limit)"

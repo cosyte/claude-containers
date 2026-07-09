@@ -377,6 +377,12 @@ for row in "${FINAL[@]}"; do
     shm_size: ${CLAUDE_SHM_SIZE}
     cpus: ${svc_cpu}
     mem_limit: ${svc_mem}
+EOF
+    # Optional leaf resource guards (CC-3) — emitted only when set, so the default
+    # compose output is unchanged. Compose keys: mem_reservation / pids_limit.
+    [[ -n "${CLAUDE_MEM_RESERVATION:-}" ]] && echo "    mem_reservation: ${CLAUDE_MEM_RESERVATION}"
+    [[ -n "${CLAUDE_PIDS_LIMIT:-}" ]]      && echo "    pids_limit: ${CLAUDE_PIDS_LIMIT}"
+    cat <<EOF
     stop_grace_period: ${CLAUDE_STOP_TIMEOUT}s
     tmpfs:
       - /tmp:rw,nosuid,nodev,exec,size=1g

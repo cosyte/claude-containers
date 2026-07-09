@@ -190,6 +190,9 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_SSH_BIND` | — | Bind the SSH port to one host interface (e.g. `127.0.0.1`); empty = all |
 | `CLAUDE_CPU_LIMIT`/`CLAUDE_MEM_LIMIT` | `2`/`4g` | Per-container resource caps |
 | `CLAUDE_SHM_SIZE` | `2g` | `/dev/shm` size |
+| `CLAUDE_MEM_RESERVATION`/`CLAUDE_PIDS_LIMIT` | — | Opt-in leaf guards: soft memory floor / fork-bomb cap on single-session containers. Empty = omitted, so the flat launch is unchanged (CC-3) |
+| `CLAUDE_WORKER_CPUS`/`_MEM`/`_MEM_RESERVATION`/`_PIDS`/`_SHM` | `2`/`4g`/`3g`/`2048`/`2g` | Per-**worker** resource profile for the parallel tier — the single source read by the broker + controller sizing (CC-3) |
+| `CLAUDE_K` | from umbrella `parallel.config.json` (`.K`, else `1`) | Worker count for controller sizing. Single-sourced; a manual override for a what-if only (CC-3) |
 | `CLAUDE_HARDEN_CAPS` | `1` | `1` = `--cap-drop ALL` + minimal `--cap-add` (drops NET_RAW/MKNOD/SETFCAP); `0` = Docker defaults. `no-new-privileges` is always set. Override the set with `CLAUDE_MIN_CAPS` |
 | `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts. Extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. Fail-open on error |
 | `CLAUDE_BROKER_GIT_KEY` | `0` | `1` = hold the SSH deploy key in a root ssh-agent (agent signs/pushes but can't read the key bytes) instead of a readable `~/.ssh/id_ed25519` |
@@ -233,6 +236,8 @@ claude-rm    <name> [--yes] [--purge]   remove (+volumes with --purge)
 claude-logs  <name> [-n LINES]    tail the entrypoint/sshd log
 claude-sysbox-verify [--check]    prove the Sysbox-nested substrate (CC-1)
 claude-broker-verify [--keep]     prove the root-owned worker broker (CC-2)
+claude-controller-sizing [--check|--json] [--k N]   K-aware controller sizing + host-fit verdict (CC-3)
+claude-cgroup-verify [--check]    prove K-worker resource caps enforce + isolate on this host (CC-3)
 ```
 
 Inside a controller (`CLAUDE_WORKER_BROKER=1`), the unprivileged agent asks the

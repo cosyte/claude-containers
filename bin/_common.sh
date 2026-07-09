@@ -28,6 +28,12 @@ CLAUDE_SSH_BIND="${CLAUDE_SSH_BIND:-}"   # empty = publish SSH on all interfaces
 CLAUDE_SHM_SIZE="${CLAUDE_SHM_SIZE:-2g}"
 CLAUDE_CPU_LIMIT="${CLAUDE_CPU_LIMIT:-2}"
 CLAUDE_MEM_LIMIT="${CLAUDE_MEM_LIMIT:-4g}"
+# Leaf (single-session) launch resource guards — OPT-IN, default empty so the flat
+# K=1 autopilot launch stays byte-for-byte unchanged (roadmap §6 non-regression).
+# Set to add a soft memory floor / a fork-bomb guard to session containers too; the
+# WORKER profile (above) always carries these, the leaf path only when asked.
+CLAUDE_MEM_RESERVATION="${CLAUDE_MEM_RESERVATION:-}"   # e.g. 3g — omitted when empty
+CLAUDE_PIDS_LIMIT="${CLAUDE_PIDS_LIMIT:-}"             # e.g. 2048 — omitted when empty
 CLAUDE_STOP_TIMEOUT="${CLAUDE_STOP_TIMEOUT:-20}"
 # Escape hardening: drop ALL Linux capabilities and re-add only the minimal set
 # the container needs (sshd binding :22 + dropping privileges to the claude user,
@@ -69,6 +75,17 @@ harden_run_args() {
     # stays unprivileged and so cannot alter the rules).
     [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]] && out+=" --cap-add NET_ADMIN"
     echo "$out"
+}
+
+# Optional leaf-launch resource guards as a space-separated string (empty when
+# neither is set → the flat launch is byte-identical). claude-launch reads this
+# into an array; claude-compose-gen emits the YAML equivalent. Values are simple
+# tokens (a size / an integer), so space-joining is safe.
+leaf_resource_args() {
+    local out=""
+    [[ -n "${CLAUDE_MEM_RESERVATION:-}" ]] && out+=" --memory-reservation $CLAUDE_MEM_RESERVATION"
+    [[ -n "${CLAUDE_PIDS_LIMIT:-}" ]]      && out+=" --pids-limit $CLAUDE_PIDS_LIMIT"
+    echo "${out# }"
 }
 
 # Warn (don't block) if the host's runC is vulnerable to the Nov-2025 container-
@@ -204,6 +221,197 @@ preflight_sysbox() {
         warn "TEST SEAM ACTIVE: CLAUDE_SYSBOX_SKIP_DOCKER=1 — Docker runtime registration is NOT being checked"
     fi
     # SYSBOX_VERSION was normalized + exported by sysbox_version_check above.
+}
+
+# =============================================================================
+# K-aware resource sizing + single-source config (CC-3, roadmap §5)
+# =============================================================================
+# The parallel engine runs up to K worker containers under one Sysbox controller.
+# Every sizing decision is derived from TWO inputs and no more: the number K and
+# one per-worker resource profile. So the controller/host envelope is computed,
+# never guessed, and never double-sourced.
+#
+# K is single-sourced from the UMBRELLA operations/parallel.config.json (the
+# founder-set value — K=2 there today). This repo deliberately keeps NO K of its
+# own: a forked copy would drift from the umbrella control plane the moment the
+# founder ramps K (PAR-7.1). resolve_k walks up from the submodule to that file;
+# absent it (this repo used standalone, no parallel engine) K collapses to 1 —
+# today's single-container autopilot, unchanged.
+
+# resolve_parallel_config — echo the umbrella parallel.config.json path, else
+# return 1. COSYTE_PARALLEL_CONFIG overrides outright; otherwise walk up from the
+# submodule root (this repo is a submodule of the umbrella; the file sits at the
+# umbrella's operations/parallel.config.json, above the submodule dir).
+resolve_parallel_config() {
+    if [[ -n "${COSYTE_PARALLEL_CONFIG:-}" ]]; then
+        [[ -f "$COSYTE_PARALLEL_CONFIG" ]] && { echo "$COSYTE_PARALLEL_CONFIG"; return 0; }
+        return 1
+    fi
+    local d="$CLAUDE_DOCKER_ROOT"
+    while [[ -n "$d" && "$d" != "/" ]]; do
+        if [[ -f "$d/operations/parallel.config.json" ]]; then
+            echo "$d/operations/parallel.config.json"; return 0
+        fi
+        d="$(dirname "$d")"
+    done
+    return 1
+}
+
+# resolve_k — echo the single-source worker count K (integer >= 1). Priority:
+#   1. CLAUDE_K explicit override (tests / a manual run) — validated, never < 1;
+#   2. the umbrella parallel.config.json .K (the founder-set source of truth);
+#   3. no umbrella config found → 1 (standalone: no parallel engine, single box).
+# Fails CLOSED: a config that IS present but carries a non-numeric / absent K dies
+# rather than defaulting, so a corrupt control-plane value can never silently size
+# a controller wrong. Uses jq when present; a suffix-free sed fallback otherwise.
+resolve_k() {
+    local k="" cfg
+    if [[ -n "${CLAUDE_K:-}" ]]; then
+        k="$CLAUDE_K"
+    elif cfg="$(resolve_parallel_config)"; then
+        if command -v jq >/dev/null 2>&1; then
+            k="$(jq -r '.K // empty' "$cfg" 2>/dev/null || true)"
+        else
+            # Capture the WHOLE numeric token (incl. any '.') so a float like 2.5
+            # reaches the ^[0-9]+$ validator below and is REFUSED — matching the jq
+            # path — instead of being silently truncated to '2'.
+            k="$(sed -n 's/.*"K"[[:space:]]*:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' "$cfg" | head -1)"
+        fi
+        [[ -n "$k" ]] || die "parallel.config.json ($cfg) has no numeric K — refusing to guess (fail closed)"
+    else
+        k=1
+    fi
+    [[ "$k" =~ ^[0-9]+$ ]] || die "K value '$k' is not a non-negative integer — refusing (fail closed)"
+    (( k >= 1 )) || die "K value '$k' is < 1 — the engine needs at least one worker"
+    echo "$k"
+}
+
+# --- per-worker resource profile (the single source) -------------------------
+# A full /work-on worker ~= today's single-container leaf envelope (roadmap §5
+# starting numbers). The broker (bin/claude-worker-broker) AND the controller
+# sizing below both read THESE names — the profile is defined once, here.
+# Override per-fleet via env/.env; re-measured before any K-ramp (PAR-6.1/CC-7).
+CLAUDE_WORKER_CPUS="${CLAUDE_WORKER_CPUS:-2}"
+CLAUDE_WORKER_MEM="${CLAUDE_WORKER_MEM:-4g}"
+CLAUDE_WORKER_MEM_RESERVATION="${CLAUDE_WORKER_MEM_RESERVATION:-3g}"
+CLAUDE_WORKER_PIDS="${CLAUDE_WORKER_PIDS:-2048}"
+CLAUDE_WORKER_SHM="${CLAUDE_WORKER_SHM:-2g}"
+# Controller overhead ON TOP of Σ(K workers): the lead agent session + the broker
+# + the inner dockerd + headroom (roadmap §5: ~1 CPU / ~2g).
+CLAUDE_CONTROLLER_CPU_OVERHEAD="${CLAUDE_CONTROLLER_CPU_OVERHEAD:-1}"
+CLAUDE_CONTROLLER_MEM_OVERHEAD="${CLAUDE_CONTROLLER_MEM_OVERHEAD:-2g}"
+
+# mem_to_mib <size> — parse a Docker memory size (Ng | Nm | Nk | Nb | bare bytes)
+# to integer MiB, rounding UP. Returns 2 (fail closed) on anything unparseable, so
+# a bad size can never collapse to 0 and under-size a controller. Docker's own
+# convention: a bare number is BYTES (our profile always suffixes, but honor it).
+mem_to_mib() {
+    local s="$1" n unit
+    [[ "$s" =~ ^([0-9]+)([bBkKmMgG]?)$ ]] || return 2
+    n="${BASH_REMATCH[1]}"; unit="${BASH_REMATCH[2],,}"
+    case "$unit" in
+        g) echo $(( n * 1024 )) ;;
+        m) echo "$n" ;;
+        k) echo $(( (n + 1023) / 1024 )) ;;
+        b|"") echo $(( (n + 1048575) / 1048576 )) ;;
+    esac
+}
+
+# mib_to_docker <mib> — render integer MiB as a Docker --memory arg: Ng on an exact
+# GiB multiple, else Nm.
+mib_to_docker() {
+    local mib="$1"
+    if (( mib % 1024 == 0 )); then echo "$(( mib / 1024 ))g"; else echo "${mib}m"; fi
+}
+
+# is_num <val> — true iff a non-negative decimal (integer or one/more fractional
+# digits), the shape Docker --cpus accepts. Used to fail closed before awk math.
+is_num() { [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]; }
+
+# controller_envelope <K> — compute the Sysbox controller envelope that must hold
+# Σ(K workers) + overhead, and set CTRL_CPUS / CTRL_CPUS_MILLI / CTRL_MEM /
+# CTRL_MEM_MIB / CTRL_SHM. Under Sysbox nesting the controller's --cpus/--memory is
+# a HARD ceiling on the SUM of its nested children (cgroup v2), so it must cover Σ
+# (roadmap §5 — verify actual enforcement on-host via bin/claude-cgroup-verify;
+# a parent cgroup can shadow a child limit in some nested setups).
+controller_envelope() {
+    local k="$1"
+    { [[ "$k" =~ ^[0-9]+$ ]] && (( k >= 1 )); } || die "controller_envelope: K '$k' invalid"
+    is_num "$CLAUDE_WORKER_CPUS"              || die "CLAUDE_WORKER_CPUS '$CLAUDE_WORKER_CPUS' is not numeric"
+    is_num "$CLAUDE_CONTROLLER_CPU_OVERHEAD"  || die "CLAUDE_CONTROLLER_CPU_OVERHEAD '$CLAUDE_CONTROLLER_CPU_OVERHEAD' is not numeric"
+    # pids is the one profile field with no downstream parse — validate it here so a
+    # garbage/quote-bearing value fails closed (not silently into --pids-limit or the
+    # sizing JSON). Must be a positive integer.
+    { [[ "$CLAUDE_WORKER_PIDS" =~ ^[0-9]+$ ]] && (( CLAUDE_WORKER_PIDS >= 1 )); } \
+        || die "CLAUDE_WORKER_PIDS '$CLAUDE_WORKER_PIDS' is not a positive integer"
+    local wmib omib wshm
+    wmib="$(mem_to_mib "$CLAUDE_WORKER_MEM")"             || die "unparseable CLAUDE_WORKER_MEM '$CLAUDE_WORKER_MEM'"
+    omib="$(mem_to_mib "$CLAUDE_CONTROLLER_MEM_OVERHEAD")" || die "unparseable CLAUDE_CONTROLLER_MEM_OVERHEAD '$CLAUDE_CONTROLLER_MEM_OVERHEAD'"
+    wshm="$(mem_to_mib "$CLAUDE_WORKER_SHM")"             || die "unparseable CLAUDE_WORKER_SHM '$CLAUDE_WORKER_SHM'"
+    # A zero-sized worker (--memory 0g / --cpus 0) is misuse, not a valid envelope —
+    # refuse rather than sizing a controller of pure overhead that "fits" any host.
+    (( wmib >= 1 )) || die "CLAUDE_WORKER_MEM '$CLAUDE_WORKER_MEM' resolves to 0 MiB — a worker needs real memory"
+    awk -v w="$CLAUDE_WORKER_CPUS" 'BEGIN{ exit (w > 0) ? 0 : 1 }' \
+        || die "CLAUDE_WORKER_CPUS '$CLAUDE_WORKER_CPUS' must be > 0"
+    CTRL_MEM_MIB=$(( k * wmib + omib ))
+    CTRL_MEM="$(mib_to_docker "$CTRL_MEM_MIB")"
+    CTRL_SHM="$(mib_to_docker $(( k * wshm )))"
+    # CPU may be fractional (--cpus accepts floats). awk keeps a clean integer when
+    # exact, else two decimals; CTRL_CPUS_MILLI is the integer-milli form for
+    # host-headroom compares that must not use bash-only integer math on a float.
+    CTRL_CPUS="$(awk -v k="$k" -v w="$CLAUDE_WORKER_CPUS" -v o="$CLAUDE_CONTROLLER_CPU_OVERHEAD" \
+        'BEGIN{ c=k*w+o; if (c==int(c)) printf "%d", c; else printf "%.2f", c }')"
+    CTRL_CPUS_MILLI="$(awk -v k="$k" -v w="$CLAUDE_WORKER_CPUS" -v o="$CLAUDE_CONTROLLER_CPU_OVERHEAD" \
+        'BEGIN{ printf "%d", (k*w+o)*1000 }')"
+    export CTRL_CPUS CTRL_CPUS_MILLI CTRL_MEM CTRL_MEM_MIB CTRL_SHM
+}
+
+# detect_host_cpus / detect_host_mem_mib — the host's total CPU and memory. Test
+# seams (loudly warned) let the unit tests drive the fail-safe on any machine.
+detect_host_cpus() {
+    if [[ -n "${CLAUDE_HOST_CPUS_OVERRIDE:-}" ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_HOST_CPUS_OVERRIDE=${CLAUDE_HOST_CPUS_OVERRIDE} — host CPU count is NOT being probed"
+        echo "$CLAUDE_HOST_CPUS_OVERRIDE"; return 0
+    fi
+    nproc 2>/dev/null || echo 0
+}
+detect_host_mem_mib() {
+    if [[ -n "${CLAUDE_HOST_MEM_MIB_OVERRIDE:-}" ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_HOST_MEM_MIB_OVERRIDE=${CLAUDE_HOST_MEM_MIB_OVERRIDE} — host memory is NOT being probed"
+        echo "$CLAUDE_HOST_MEM_MIB_OVERRIDE"; return 0
+    fi
+    local kb
+    kb="$(sed -n 's/^MemTotal:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null | head -1)"
+    [[ -n "$kb" ]] && echo $(( kb / 1024 )) || echo 0
+}
+
+# check_controller_capacity <K> — the FAIL-SAFE (roadmap §4.3 / CC-3 done-line): if
+# the K-derived controller envelope exceeds detected host capacity, REFUSE (die)
+# and report the deficit. Never silently overcommit. A host that cannot be probed
+# (0) is reported as a deficit, not waved through (fail closed). On success emits a
+# one-line "fits" summary to stderr and returns 0, with CTRL_* set for the caller.
+check_controller_capacity() {
+    local k="$1"
+    controller_envelope "$k"
+    local hcpus hmem host_milli reasons=()
+    hcpus="$(detect_host_cpus)"; hmem="$(detect_host_mem_mib)"
+    host_milli="$(awk -v h="$hcpus" 'BEGIN{ printf "%d", h*1000 }' 2>/dev/null || echo 0)"
+    if (( host_milli <= 0 )); then
+        reasons+=("host CPU count unknown (could not probe) — cannot prove headroom")
+    elif (( CTRL_CPUS_MILLI > host_milli )); then
+        reasons+=("needs ${CTRL_CPUS} CPUs, host has ${hcpus}")
+    fi
+    if (( hmem <= 0 )); then
+        reasons+=("host memory unknown (could not probe) — cannot prove headroom")
+    elif (( CTRL_MEM_MIB > hmem )); then
+        reasons+=("needs ${CTRL_MEM} (${CTRL_MEM_MIB} MiB), host has $(mib_to_docker "$hmem") (${hmem} MiB)")
+    fi
+    if (( ${#reasons[@]} > 0 )); then
+        local r; for r in "${reasons[@]}"; do err "capacity: $r"; done
+        die "K=$k controller envelope (${CTRL_CPUS} CPU / ${CTRL_MEM} / ${CTRL_SHM} shm) exceeds host capacity — refusing to overcommit (lower K in operations/parallel.config.json, shrink the worker profile, or add host capacity)"
+    fi
+    ok "K=$k fits: controller ${CTRL_CPUS} CPU / ${CTRL_MEM} / ${CTRL_SHM} shm  ≤  host ${hcpus} CPU / $(mib_to_docker "$hmem")" >&2
+    return 0
 }
 
 # Container/volume-safe name: lowercase, only [a-z0-9._-].

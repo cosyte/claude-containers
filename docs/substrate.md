@@ -151,6 +151,61 @@ already runs the *host* daemon as `overlay2` on ZFS). The nested proof exercises
 empirically: the inner daemon pulls an image and runs containers, so a ZFS/overlay
 incompatibility fails the proof rather than surfacing later in a worker.
 
+## K-aware sizing (CC-3)
+
+The controller and its workers are sized from **two inputs and no more**: the worker
+count **K** and one **per-worker resource profile**. Everything else is derived, so the
+envelope is computed, never guessed — and never double-sourced.
+
+- **K is single-sourced** from the umbrella `operations/parallel.config.json` (`.K`, the
+  founder-set value — `2` today). This repo keeps **no K of its own**: a forked copy would
+  drift the moment the founder ramps K (`PAR-7.1`). `resolve_k` (`bin/_common.sh`) walks up
+  from the submodule to that file; absent it (this repo used standalone), K collapses to
+  **1** — the single-container autopilot, unchanged. A present-but-garbage `.K` **refuses**
+  (fail closed) rather than defaulting.
+- **The per-worker profile is defined once** in `bin/_common.sh`
+  (`CLAUDE_WORKER_CPUS/_MEM/_MEM_RESERVATION/_PIDS/_SHM`, defaults `2 / 4g / 3g / 2048 / 2g`
+  — roadmap §5). The broker (`bin/claude-worker-broker`) reads these names; it no longer
+  carries its own literals.
+- **The controller envelope = Σ(K workers) + overhead.** Under Sysbox nesting the
+  controller's `--memory`/`--cpus` is a **hard cgroup ceiling on the sum of its nested
+  children**, so it must cover Σ. `controller_envelope K` computes it:
+
+  | K | worker Σ | + overhead (1 CPU / 2g) | **controller** |
+  |---|---|---|---|
+  | **2** (default) | 4 CPU / 8g / 4g shm | +1 / +2g | **5 CPU / 10g / 4g shm** |
+  | 4 (deferred ceiling, `PAR-7.1`) | 8 CPU / 16g / 8g shm | +1 / +2g | 9 CPU / 18g / 8g shm |
+
+- **Fail-safe — never overcommit.** `check_controller_capacity K` refuses (non-zero exit,
+  deficit report) when the K-derived envelope exceeds detected host CPU/memory, or when the
+  host **can't be probed** (fail closed — an unknown host is a deficit, not a pass). Lower K,
+  shrink the profile, or add capacity.
+
+Operator surface — `bin/claude-controller-sizing`:
+
+```bash
+claude-controller-sizing            # human report: profile, derived envelope, host verdict
+claude-controller-sizing --check    # verdict only (exit 1 if it won't fit) — for CC-4/CC-6
+claude-controller-sizing --json     # machine-readable sizing
+claude-controller-sizing --k 4      # what-if a specific K (else single-sourced)
+```
+
+### Verification — `bin/claude-cgroup-verify`
+
+Sizing is arithmetic; **enforcement** must be proven on the host, because a parent cgroup
+can *shadow* a child limit in some nested/VM setups (roadmap §5). `claude-cgroup-verify`
+stands up a Σ-sized Sysbox controller with **K nested workers** (a small proof profile) and
+proves the **K-worker isolation matrix**: each worker's `memory.max`/`pids.max` read back the
+profile value (not shadowed); one worker driven over `--memory` is **OOM-killed in
+isolation** (its peer and the controller survive); a worker fork-bomb hits `--pids-limit` and
+is contained; the controller's own `--memory` is the enforced Σ ceiling. It needs Sysbox, so
+like `claude-sysbox-verify` it is a **fleet-host step, not CI**; `--check` runs the sizing +
+fail-safe arithmetic anywhere. The pure-logic math is covered in CI by `test/sizing-unit.sh`.
+
+The **opt-in leaf guards** `CLAUDE_MEM_RESERVATION` / `CLAUDE_PIDS_LIMIT` add a soft memory
+floor / a fork-bomb guard to ordinary single-session containers too; both default **empty**,
+so the flat K=1 launch stays byte-for-byte unchanged.
+
 ## Known limitations (do not over-trust)
 
 - Sysbox isolation is **stronger than runc, weaker than a VM/gVisor/Kata**. A container —
@@ -160,9 +215,12 @@ incompatibility fails the proof rather than surfacing later in a worker.
   founder-gated umbrella-side (`PAR-7.1`).
 - The flat, unprivileged K=1 leaf-container path is completely unchanged — `sysbox-runc`
   is used only where a controller must run nested workers.
-- The K-aware sizing (CC-3), worker lifecycle (CC-4), and disk safety (CC-5) still
-  build **on top of** this floor; a green `claude-sysbox-verify` is their
-  precondition, not their proof. The **root-owned worker broker (CC-2) is built**:
+- The worker lifecycle (CC-4) and disk safety (CC-5) still build **on top of** this
+  floor; a green `claude-sysbox-verify` is their precondition, not their proof. The
+  **K-aware sizing (CC-3) is built** (see the section above:
+  `resolve_k`/`controller_envelope`/`check_controller_capacity` in `bin/_common.sh`,
+  `bin/claude-controller-sizing`, `bin/claude-cgroup-verify`). The **root-owned worker
+  broker (CC-2) is built**:
   `bin/claude-worker-broker` owns worker creation on the inner daemon (fixed
   hardened template, deny-by-default requests, lease discipline; the agent never
   touches the inner socket) and fails closed without userns containment + a

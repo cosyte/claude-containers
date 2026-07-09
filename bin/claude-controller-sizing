@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# claude-controller-sizing — the single-source, K-aware sizing surface (CC-3).
+#
+# One command that answers "how big must the Sysbox controller be, and does this
+# host have room?" — deriving EVERYTHING from two inputs: K (single-sourced from
+# the umbrella operations/parallel.config.json via resolve_k — never a forked
+# literal) and the per-worker resource profile (single-sourced in _common.sh). It
+# prints the resolved profile, the derived controller envelope (Σ(K workers) +
+# overhead — the hard cgroup ceiling under Sysbox nesting), and the host-capacity
+# verdict.
+#
+# FAIL-SAFE (roadmap §4.3 / CC-3): if the K-derived envelope exceeds detected host
+# capacity, it REFUSES with a non-zero exit and a deficit report — never silently
+# overcommits. CC-4's worker launch and CC-6's controller mode call this before
+# standing anything up; an operator runs it to see the numbers.
+#
+# Usage:
+#   claude-controller-sizing            human-readable report + verdict (exit 1 if over)
+#   claude-controller-sizing --check    verdict only, quiet on success (for scripts/CC-4)
+#   claude-controller-sizing --json     machine-readable sizing (no host refusal — reports)
+#   claude-controller-sizing --k N      override K (else single-sourced)
+#
+# The cgroup limits this SIZES must still be proven to ENFORCE on the real host —
+# a parent cgroup can shadow a child limit in some nested/VM setups (roadmap §5).
+# That on-host proof is bin/claude-cgroup-verify, not this arithmetic.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+MODE=report
+K_OVERRIDE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --check) MODE=check; shift ;;
+        --json)  MODE=json;  shift ;;
+        --k)     [[ -n "${2:-}" ]] || die "--k needs a value (an integer K)"; K_OVERRIDE="$2"; shift 2 ;;
+        -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) die "unknown argument '$1' (see --help)" ;;
+    esac
+done
+
+# Single-source K (or honor an explicit --k for a what-if). resolve_k fails closed
+# on a garbage config value; an explicit override still goes through the same
+# integer/>=1 validation.
+if [[ -n "$K_OVERRIDE" ]]; then
+    K="$(CLAUDE_K="$K_OVERRIDE" resolve_k)"
+else
+    K="$(resolve_k)"
+fi
+
+# Where did K come from? (report only — never changes the number.)
+k_source() {
+    [[ -n "$K_OVERRIDE" ]] && { echo "--k override"; return; }
+    [[ -n "${CLAUDE_K:-}" ]] && { echo "CLAUDE_K env"; return; }
+    local cfg; if cfg="$(resolve_parallel_config)"; then echo "$cfg"; else echo "default (no umbrella config found → standalone K=1)"; fi
+}
+
+case "$MODE" in
+  json)
+    # Pure sizing, no host refusal — a reporter. controller_envelope sets CTRL_*.
+    controller_envelope "$K"
+    hcpus="$(detect_host_cpus 2>/dev/null)"; hmem="$(detect_host_mem_mib 2>/dev/null)"
+    fits=true
+    hmilli="$(awk -v h="$hcpus" 'BEGIN{printf "%d", h*1000}')"
+    { (( hmilli <= 0 || CTRL_CPUS_MILLI > hmilli )) || (( hmem <= 0 || CTRL_MEM_MIB > hmem )); } && fits=false
+    printf '{\n'
+    printf '  "k": %s,\n' "$K"
+    printf '  "worker": { "cpus": "%s", "mem": "%s", "memReservation": "%s", "pids": %s, "shm": "%s" },\n' \
+        "$CLAUDE_WORKER_CPUS" "$CLAUDE_WORKER_MEM" "$CLAUDE_WORKER_MEM_RESERVATION" "$CLAUDE_WORKER_PIDS" "$CLAUDE_WORKER_SHM"
+    printf '  "controller": { "cpus": "%s", "mem": "%s", "memMib": %s, "shm": "%s" },\n' \
+        "$CTRL_CPUS" "$CTRL_MEM" "$CTRL_MEM_MIB" "$CTRL_SHM"
+    printf '  "host": { "cpus": "%s", "memMib": %s },\n' "$hcpus" "$hmem"
+    printf '  "fits": %s\n' "$fits"
+    printf '}\n'
+    ;;
+  check)
+    # Verdict only: die (exit 1) with the deficit if it doesn't fit; silent-ish otherwise.
+    check_controller_capacity "$K" >/dev/null
+    ;;
+  report)
+    info "Controller sizing (K single-sourced)"
+    echo   "  K = $K   (source: $(k_source))"
+    echo
+    echo   "  per-worker profile (_common.sh, single source):"
+    echo   "    cpus=$CLAUDE_WORKER_CPUS  mem=$CLAUDE_WORKER_MEM  mem-reservation=$CLAUDE_WORKER_MEM_RESERVATION  pids=$CLAUDE_WORKER_PIDS  shm=$CLAUDE_WORKER_SHM"
+    echo   "  controller overhead: cpu=$CLAUDE_CONTROLLER_CPU_OVERHEAD  mem=$CLAUDE_CONTROLLER_MEM_OVERHEAD"
+    echo
+    controller_envelope "$K"
+    echo   "  derived controller envelope (Σ(K workers) + overhead — hard cgroup ceiling):"
+    echo   "    --cpus $CTRL_CPUS   --memory $CTRL_MEM   --shm-size $CTRL_SHM"
+    echo
+    # The fail-safe. On success it prints the "fits" line to stderr; on a deficit
+    # it prints the reasons and exits non-zero.
+    check_controller_capacity "$K"
+    echo
+    warn "sizing only — prove the caps actually ENFORCE on this host with: bin/claude-cgroup-verify"
+    ;;
+esac

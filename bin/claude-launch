@@ -194,6 +194,9 @@ ENV_FILE_ARG=()
 # escape-hardening flags (no-new-privileges + minimal capabilities).
 preflight_runc
 read -r -a HARDEN_ARGS <<<"$(harden_run_args)"
+# Optional leaf resource guards (--memory-reservation / --pids-limit). Empty by
+# default → RES_ARGS is empty → the launch is byte-for-byte unchanged (CC-3).
+read -r -a RES_ARGS <<<"$(leaf_resource_args)"
 
 # Only pin CLAUDE_BROWSER when the user forced it on/off; in auto mode leave it
 # unset so a browser image self-enables the MCP (and any .env value flows through
@@ -211,6 +214,7 @@ docker run -d \
     --shm-size "$CLAUDE_SHM_SIZE" \
     --cpus "$CLAUDE_CPU_LIMIT" \
     --memory "$CLAUDE_MEM_LIMIT" \
+    "${RES_ARGS[@]}" \
     --tmpfs /tmp:rw,nosuid,nodev,exec,size=1g \
     -p "$SSH_PUBLISH" \
     "${EXPOSE_ARGS[@]}" \

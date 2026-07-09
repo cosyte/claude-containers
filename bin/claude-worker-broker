@@ -44,23 +44,24 @@
 #
 # Lease discipline: at most one live worker per item (a second request for the same
 # item is refused while its worker runs) and at most CLAUDE_BROKER_MAX_WORKERS live
-# workers total (default 2 = the founder-called K; CC-3 single-sources this from
-# umbrella operations/parallel.config.json — do not fork K here).
+# workers total. That cap DEFAULTS to K, single-sourced from the umbrella
+# operations/parallel.config.json via resolve_k (CC-3) — never a forked literal here.
 #
 # Env (all read at startup as ROOT — nothing here is settable via a request):
 #   CLAUDE_SYSBOX_ATTESTED_VERSION  host-attested Sysbox version (REQUIRED)
 #   CLAUDE_BROKER_DIR               spool root        (default /run/claude/broker)
 #   CLAUDE_BROKER_CLIENT_USER       unprivileged requester (default claude)
-#   CLAUDE_BROKER_MAX_WORKERS       live-worker cap   (default 2)
+#   CLAUDE_BROKER_MAX_WORKERS       live-worker cap   (default = resolve_k, i.e.
+#                                   K from umbrella parallel.config.json — CC-3)
 #   CLAUDE_BROKER_SOCKET_WAIT       secs to wait for the inner socket (default 60)
 #   CLAUDE_BROKER_POLL              spool poll seconds (default 1)
 #   CLAUDE_WORKER_IMAGE             worker image      (default claude-code-box:latest)
 #   CLAUDE_BROKER_WORKER_CMD        worker command    (default `sleep infinity` —
 #                                   the CC-4 seam; claude-worker-run replaces it)
 #   CLAUDE_WORKER_MEM / _MEM_RESERVATION / _CPUS / _PIDS / _SHM
-#                                   per-worker resource profile (defaults 4g / 3g /
-#                                   2 / 2048 / 2g — roadmap §5 starting numbers;
-#                                   CC-3 derives them from K + config)
+#                                   per-worker resource profile — single-sourced in
+#                                   _common.sh (CC-3; defaults 4g / 3g / 2 / 2048 /
+#                                   2g, roadmap §5). Read here, not re-defaulted.
 #   CLAUDE_SECRET_GUARD / CLAUDE_EGRESS_LOCKDOWN / CLAUDE_EGRESS_EXTRA_HOSTS
 #                                   inherited INTO every worker (secret-guard on by
 #                                   default; egress lockdown mirrored + NET_ADMIN
@@ -78,16 +79,23 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 BROKER_DIR="${CLAUDE_BROKER_DIR:-/run/claude/broker}"
 BROKER_CLIENT_USER="${CLAUDE_BROKER_CLIENT_USER:-claude}"
-BROKER_MAX_WORKERS="${CLAUDE_BROKER_MAX_WORKERS:-2}"
+# The live-worker cap is K, single-sourced from the umbrella parallel.config.json
+# via resolve_k (CC-3) — NOT a forked literal here. An explicit
+# CLAUDE_BROKER_MAX_WORKERS still overrides (a fleet may cap below K); absent both
+# the umbrella config and the override, resolve_k collapses to 1 (standalone).
+BROKER_MAX_WORKERS="${CLAUDE_BROKER_MAX_WORKERS:-$(resolve_k)}"
 BROKER_SOCKET_WAIT="${CLAUDE_BROKER_SOCKET_WAIT:-60}"
 BROKER_POLL="${CLAUDE_BROKER_POLL:-1}"
 WORKER_IMAGE="${CLAUDE_WORKER_IMAGE:-claude-code-box:latest}"
 WORKER_CMD="${CLAUDE_BROKER_WORKER_CMD:-sleep infinity}"
-WORKER_MEM="${CLAUDE_WORKER_MEM:-4g}"
-WORKER_MEM_RESERVATION="${CLAUDE_WORKER_MEM_RESERVATION:-3g}"
-WORKER_CPUS="${CLAUDE_WORKER_CPUS:-2}"
-WORKER_PIDS="${CLAUDE_WORKER_PIDS:-2048}"
-WORKER_SHM="${CLAUDE_WORKER_SHM:-2g}"
+# The per-worker resource profile is the single source in _common.sh (CC-3); the
+# CLAUDE_WORKER_* names are already resolved (with their defaults) by the time this
+# file is sourced above, so read them straight — do not re-default the literals.
+WORKER_MEM="$CLAUDE_WORKER_MEM"
+WORKER_MEM_RESERVATION="$CLAUDE_WORKER_MEM_RESERVATION"
+WORKER_CPUS="$CLAUDE_WORKER_CPUS"
+WORKER_PIDS="$CLAUDE_WORKER_PIDS"
+WORKER_SHM="$CLAUDE_WORKER_SHM"
 
 # One value pattern for both request keys: starts alphanumeric (can never read as a
 # flag), then a tight middle set — no space, slash, or quote survives, so a value
