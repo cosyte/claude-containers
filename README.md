@@ -195,6 +195,10 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_HARDEN_CAPS` | `1` | `1` = `--cap-drop ALL` + minimal `--cap-add` (drops NET_RAW/MKNOD/SETFCAP); `0` = Docker defaults. `no-new-privileges` is always set. Override the set with `CLAUDE_MIN_CAPS` |
 | `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts. Extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. Fail-open on error |
 | `CLAUDE_BROKER_GIT_KEY` | `0` | `1` = hold the SSH deploy key in a root ssh-agent (agent signs/pushes but can't read the key bytes) instead of a readable `~/.ssh/id_ed25519` |
+| `CLAUDE_WORKER_UMBRELLA` | `/workspace` (if it looks right) | Umbrella root override for `claude-worker-run` — must have both `.gitmodules` and `scripts/isolate.sh`; refuses (fail closed) otherwise |
+| `CLAUDE_WORKER_HEARTBEAT_SECS` | `60` | Seconds between `claude-worker-run`'s best-effort `scripts/lease.sh renew` calls |
+| `CLAUDE_REAPER_INTERVAL` | `300` | Seconds between `claude-reaper --loop` cycles (controller mode) |
+| `CLAUDE_REAPER_SPOOL_TTL` | `3600` | Seconds before an orphaned broker-spool file (`responses/`, `requests/`, `staging/`) is pruned by `claude-reaper` |
 | `CLAUDE_STOP_TIMEOUT` | `20` | Graceful stop timeout (s) |
 | `AUTH_VOLUME`/`SSHKEYS_VOLUME` | `claude-auth`/`claude-sshkeys` | Shared volume names |
 | `ANTHROPIC_API_KEY` | unset | **Must stay unset** — entrypoint hard-fails otherwise |
@@ -237,6 +241,9 @@ claude-sysbox-verify [--check]    prove the Sysbox-nested substrate (CC-1)
 claude-broker-verify [--keep]     prove the root-owned worker broker (CC-2)
 claude-controller-size [--flags]  K-derived controller envelope + capacity check (CC-3)
 claude-sizing-verify [--keep]     prove limits enforce inside + OOM/fork isolation (CC-3)
+claude-worker-run <repo> <item>   one-shot worker driver: isolate + exactly one /work-on (CC-4)
+claude-reaper [--loop]            reap dead worker containers + prune the broker spool (CC-4)
+claude-worker-lifecycle-verify [--check] [--keep]   prove one-shot-then-vanish + reaping (CC-4)
 ```
 
 Inside a controller (`CLAUDE_WORKER_BROKER=1`), the unprivileged agent asks the

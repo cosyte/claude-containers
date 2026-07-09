@@ -188,6 +188,13 @@ if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
     CLAUDE_BROKER_CLIENT_USER="${CLAUDE_BROKER_CLIENT_USER:-$CLAUDE_USER}" \
         /usr/local/bin/claude-worker-broker >> /var/log/claude-worker-broker.log 2>&1 &
     log "Worker broker       : starting as root (agent requests via claude-worker-request; refuses if the substrate checks fail — see /var/log/claude-worker-broker.log)"
+
+    # Worker lifecycle reaper (CC-4): removes exited/dead/created claude.worker=1
+    # containers a `--rm` worker's unclean exit missed (freeing the name for a
+    # re-request) and prunes aged broker-spool files. Controller-mode only,
+    # alongside the broker above.
+    /usr/local/bin/claude-reaper --loop >> /var/log/claude-reaper.log 2>&1 &
+    log "Worker reaper       : starting as root, looping every ${CLAUDE_REAPER_INTERVAL:-300}s (removes dead worker residue + prunes the spool — see /var/log/claude-reaper.log)"
 fi
 
 # --- 6. Credentials reconcile (shared auth volume) ---------------------------

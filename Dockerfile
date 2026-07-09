@@ -159,6 +159,11 @@ COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
 COPY bin/_common.sh /usr/local/bin/_common.sh
 COPY bin/claude-worker-broker /usr/local/bin/claude-worker-broker
 COPY bin/claude-worker-request /usr/local/bin/claude-worker-request
+# Worker lifecycle (CC-4): claude-worker-run is the broker's default worker command
+# (runs INSIDE each ephemeral worker); claude-reaper runs alongside the broker in
+# controller mode (entrypoint.sh §5b) to mop up unclean-exit residue + spool litter.
+COPY bin/claude-worker-run /usr/local/bin/claude-worker-run
+COPY bin/claude-reaper /usr/local/bin/claude-reaper
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-dev /usr/local/bin/claude-autopilot \
@@ -169,6 +174,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-healthcheck \
         /usr/local/bin/claude-worker-broker \
         /usr/local/bin/claude-worker-request \
+        /usr/local/bin/claude-worker-run \
+        /usr/local/bin/claude-reaper \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
 

@@ -24,3 +24,7 @@ jobs:
         run: test/broker-unit.sh
       - name: sizing unit tests (K resolution + controller envelope + capacity refusals)
         run: test/sizing-unit.sh
+      - name: worker-run unit tests (argv validation + umbrella/submodule checks + run-exactly-once)
+        run: test/worker-run-unit.sh
+      - name: reaper unit tests (exited/dead/created selection + spool-prune + fail-safe)
+        run: test/reaper-unit.sh
