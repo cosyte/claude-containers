@@ -229,7 +229,7 @@ AUDIT_WRITE
 --memory
 4g
 --memory-reservation
-3g
+3072m
 --cpus
 2
 --pids-limit

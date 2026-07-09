@@ -96,10 +96,22 @@ small descriptive commits as you change things.
 | `test/smoke.sh` | Automated acceptance for everything that doesn't need real OAuth/phone. |
 | `test/unit.sh` | Docker-free unit tests (Sysbox version-floor refusal, warn-only runc posture) — what CI runs. |
 | `test/broker-unit.sh` | Docker-free broker unit tests (deny-by-default validator, fixed-template golden argv, substrate refusals, lease counters) — also CI. |
+| `test/sizing-unit.sh` | Docker-free CC-3 sizing tests (size parsing, K resolution from the umbrella config, controller envelope, broker capacity fail-safe, compose reservation/pids, the 75% worker-reservation derivation) — CI. |
+| `test/worker-run-unit.sh` | Docker-free CC-4 worker-run tests (arg/umbrella/submodule validation, run-exactly-once via DRYRUN) — CI. |
+| `test/reaper-unit.sh` | Docker-free CC-4 reaper tests (exited-selected/running-never, stale-spool selection, `.lock` never, idempotency, fail-safe) — CI. |
+| `test/disk-unit.sh` | Docker-free CC-5 disk tests (`disk_free_mib` parse/fail-closed, `broker_check_disk` floor refusal + fail-fast config, gc-plan safety) — CI. |
+| `test/controller-unit.sh` | Docker-free CC-6 controller tests (slots = `min(K,MAX_SLOTS)` fail-closed at 1, K=1 byte-identical vs `claude-autopilot`, DRYRUN dispatch plan, frontier parse, skip-not-crash) — CI. |
 | `bin/claude-sysbox-verify` | Stand up the Sysbox-nested worker substrate and prove containment on the host (`--check` = prereqs only). Gate for the parallel-worker tier (CC-*). |
 | `bin/claude-worker-broker` | ROOT-owned worker control plane (CC-2): sole principal on the inner dockerd; fixed hardened launch template; deny-by-default request spool; lease discipline; fails closed without userns + a host-attested CVE-patched Sysbox (`CLAUDE_WORKER_BROKER=1` starts it at boot). |
 | `bin/claude-worker-request` | Unprivileged client: `claude-worker-request <repo> <item-id>` drops a two-value request in the spool and waits for `ok <container>` / `error <reason>`. No docker access needed or possible. |
 | `bin/claude-broker-verify` | On-host CC-2 proof: real Sysbox controller + real unprivileged user; socket unreachability, template-exact worker, forged-request rejection, lease cap, pre-patch-attestation refusal. |
+| `bin/claude-controller-size` | CC-3: K-aware sizing CLI. Reads K from the umbrella `parallel.config.json` + the per-worker profile (`CLAUDE_WORKER_MEM/_CPUS/_PIDS/_SHM`, reservation derived 75% of mem), computes the controller envelope Σ(K·profile)+overhead, prints/`--flags` it, and **refuses** (reports the deficit) when it exceeds host capacity. |
+| `bin/claude-sizing-verify` | On-host CC-3 proof (needs Sysbox): flags match the K-derived budget; limits enforce INSIDE the Sysbox controller and each nested worker (no shadowing); an over-`--memory` worker is OOM-killed in isolation; a fork-bomb hits `--pids-limit`; an overcommitting cap makes the broker refuse. |
+| `bin/claude-worker-run` | CC-4: the broker-launched one-shot worker (`claude-worker-run <repo> <item>`). Isolates a submodule worktree (`isolate.sh`), best-effort lease heartbeat, drives EXACTLY ONE `/work-on`, then `--rm`-vanishes. |
+| `bin/claude-reaper` | CC-4: removes exited/orphaned worker containers `--rm` missed + prunes the broker spool (`responses/`/orphaned `requests/staging`; never `.lock`). Never a RUNNING worker; idempotent; fail-safe; one-shot or `--loop` (started controller-mode-only). |
+| `bin/claude-worker-lifecycle-verify` | On-host CC-4 proof (needs Sysbox): a worker runs once then vanishes (no residue); a `kill -9`'d worker is reaped + its name freed; reaper idempotency; spool-prune age-correctness. `--check` = docker-free arg/reaper-selection logic. |
+| `bin/claude-disk-gc` | CC-5: scheduled `docker system prune -f` + `docker builder prune -f` (a fixed plan — never `-a`/`--volumes`, never a running worker) on a controller timer; `--loop`; fail-safe. |
+| `bin/claude-disk-verify` | On-host CC-5 proof (needs Sysbox): N worker cycles don't grow disk unbounded (gc reclaims); a below-`CLAUDE_DISK_FLOOR_MIB` launch is refused (the broker's free-space floor); the base image is reused not rebuilt. `--check` = docker-free floor/gc logic. |
 | `bin/claude-controller` | CC-6: wires the substrate to the umbrella `PAR-*` lease/scheduler/bump-worker (`CLAUDE_CONTROLLER=1`, implies the broker). Effective slots = `min(K, CLAUDE_CONTROLLER_MAX_SLOTS)`, MAX_SLOTS defaulting to 1 — which **collapses byte-identical to `claude-autopilot`**; the K>1 loop (reconcile → lease → worker-request → bump-worker drain) is built but gated behind an explicit override + the umbrella's `PAR-4.1`/`PAR-7.1`. |
 | `bin/claude-controller-verify` | `--check` = docker-free (slots math, frontier parse, DRYRUN plan); full run builds a git-backed K=2 fixture umbrella and proves two-independent-item dispatch, repo-conflict wait, sole-bump-worker-writer, and no double-ship on a simulated restart. |
 | `docs/` | `architecture.md` (decisions + acceptance map), `substrate.md` (Sysbox-nested substrate: decision, install runbook, containment proof, and the "Controller mode (CC-6)" section), `customizing-bakeins.md`, `troubleshooting.md`. |
@@ -186,9 +198,10 @@ Chromium is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
 lean image. Pair `--browser` with `--dev-cmd`/`--expose` so the agent both
 runs and debugs the dev server.
 
-**Validate changes:** `make lint` (shell syntax, incl. `test/*.sh`),
-`test/unit.sh` + `test/broker-unit.sh` (docker-free; also what
-`.github/workflows/ci.yml` runs), and `make smoke` (builds the image, then runs
+**Validate changes:** `make lint` (shell syntax, incl. `test/*.sh`), `npm test`
+(all the docker-free suites — `unit` · `broker-unit` · `sizing-unit` ·
+`worker-run-unit` · `reaper-unit` · `disk-unit` · `controller-unit`; the same
+set `.github/workflows/ci.yml` runs), and `make smoke` (builds the image, then runs
 `test/smoke.sh` against it). The smoke test covers API-key hard-fail, both
 fail-fast paths, bake-in merge, trust pre-accept, tmux, sshd, and
 SSH-into-session. Real OAuth + the phone-app green-dot remain manual. Substrate

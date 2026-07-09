@@ -74,8 +74,11 @@
 #                                   anything an unclean exit leaves behind)
 #   CLAUDE_WORKER_MEM / _MEM_RESERVATION / _CPUS / _PIDS / _SHM
 #                                   per-worker resource profile — single-sourced
-#                                   from bin/_common.sh (defaults 4g / 3g / 2 /
-#                                   2048 / 2g, roadmap §5 starting numbers)
+#                                   from bin/_common.sh (defaults 4g mem / 2 cpus
+#                                   / 2048 pids / 2g shm, roadmap §5; the mem
+#                                   reservation is DERIVED 75% of mem = 3072m,
+#                                   CC-4-RESIDUAL, so it never inverts on a
+#                                   lowered profile)
 #   CLAUDE_SECRET_GUARD / CLAUDE_EGRESS_LOCKDOWN / CLAUDE_EGRESS_EXTRA_HOSTS
 #                                   inherited INTO every worker (secret-guard on by
 #                                   default; egress lockdown mirrored + NET_ADMIN

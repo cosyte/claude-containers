@@ -214,7 +214,11 @@ preflight_sysbox() {
 # defined here — it comes from the umbrella operations/parallel.config.json via
 # resolve_parallel_k below (one source of truth, never forked into this repo).
 CLAUDE_WORKER_MEM="${CLAUDE_WORKER_MEM:-4g}"
-CLAUDE_WORKER_MEM_RESERVATION="${CLAUDE_WORKER_MEM_RESERVATION:-3g}"
+# CLAUDE_WORKER_MEM_RESERVATION (the soft floor) is DERIVED from the worker mem
+# below (once mem_reservation_for is defined) when unset — 75% of the effective
+# mem, mirroring the flat-session CLAUDE_MEM_RESERVATION path. A fixed default
+# (the old `3g`) would INVERT (reservation > limit) the moment an operator lowers
+# CLAUDE_WORKER_MEM below it (e.g. a 2g worker profile), which Docker rejects.
 CLAUDE_WORKER_CPUS="${CLAUDE_WORKER_CPUS:-2}"
 CLAUDE_WORKER_PIDS="${CLAUDE_WORKER_PIDS:-2048}"
 CLAUDE_WORKER_SHM="${CLAUDE_WORKER_SHM:-2g}"
@@ -257,6 +261,15 @@ mem_reservation_for() {
 if [[ -z "${CLAUDE_MEM_RESERVATION:-}" ]]; then
     CLAUDE_MEM_RESERVATION="$(mem_reservation_for "$CLAUDE_MEM_LIMIT")" \
         || die "unparseable CLAUDE_MEM_LIMIT '$CLAUDE_MEM_LIMIT' — cannot derive a memory reservation (fail closed)"
+fi
+
+# Per-worker soft memory floor (CC-4-RESIDUAL): same rule as the flat path — an
+# explicit CLAUDE_WORKER_MEM_RESERVATION wins; else derive 75% of the worker mem
+# so it always scales with (and never inverts above) the hard --memory limit,
+# even when an operator lowers CLAUDE_WORKER_MEM below the old fixed 3g default.
+if [[ -z "${CLAUDE_WORKER_MEM_RESERVATION:-}" ]]; then
+    CLAUDE_WORKER_MEM_RESERVATION="$(mem_reservation_for "$CLAUDE_WORKER_MEM")" \
+        || die "unparseable CLAUDE_WORKER_MEM '$CLAUDE_WORKER_MEM' — cannot derive a worker memory reservation (fail closed)"
 fi
 
 # resolve_parallel_k — print K, the fleet parallelism, read from the umbrella's
