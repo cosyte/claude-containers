@@ -189,6 +189,8 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_SSH_HOST` | this host's name | Hostname shown in the connect line |
 | `CLAUDE_SSH_BIND` | — | Bind the SSH port to one host interface (e.g. `127.0.0.1`); empty = all |
 | `CLAUDE_CPU_LIMIT`/`CLAUDE_MEM_LIMIT` | `2`/`4g` | Per-container resource caps |
+| `CLAUDE_MEM_RESERVATION` | 75% of `CLAUDE_MEM_LIMIT` | Soft memory floor (`--memory-reservation`) |
+| `CLAUDE_PIDS_LIMIT` | `2048` | Fork-bomb guard (`--pids-limit`) |
 | `CLAUDE_SHM_SIZE` | `2g` | `/dev/shm` size |
 | `CLAUDE_HARDEN_CAPS` | `1` | `1` = `--cap-drop ALL` + minimal `--cap-add` (drops NET_RAW/MKNOD/SETFCAP); `0` = Docker defaults. `no-new-privileges` is always set. Override the set with `CLAUDE_MIN_CAPS` |
 | `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts. Extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. Fail-open on error |
@@ -233,6 +235,8 @@ claude-rm    <name> [--yes] [--purge]   remove (+volumes with --purge)
 claude-logs  <name> [-n LINES]    tail the entrypoint/sshd log
 claude-sysbox-verify [--check]    prove the Sysbox-nested substrate (CC-1)
 claude-broker-verify [--keep]     prove the root-owned worker broker (CC-2)
+claude-controller-size [--flags]  K-derived controller envelope + capacity check (CC-3)
+claude-sizing-verify [--keep]     prove limits enforce inside + OOM/fork isolation (CC-3)
 ```
 
 Inside a controller (`CLAUDE_WORKER_BROKER=1`), the unprivileged agent asks the
@@ -459,6 +463,17 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   Sysbox (`CLAUDE_SYSBOX_ATTESTED_VERSION`, exported by the launch path from
   `preflight_sysbox`). On-host proof: `bin/claude-broker-verify` (28 checks);
   docker-free logic tests: `test/broker-unit.sh` (CI).
+- **Resources are K-aware and overcommit is a refusal.** The worker cap defaults to
+  **K from the umbrella `operations/parallel.config.json`** (one source of truth,
+  never forked here), the per-worker profile (`4g/3g/2cpu/2048pids/2g shm`) is
+  single-sourced in `bin/_common.sh`, and the Sysbox controller must carry
+  **Σ(K·profile) + overhead** — `claude-controller-size` derives it (K=2 → 5 CPUs /
+  10240 MiB / 5120 pids) and refuses an envelope the host can't fit; the broker
+  refuses to *serve* in a controller whose own cgroup budget can't carry its cap.
+  Every flat session also gets `--memory-reservation` + `--pids-limit`. On-host
+  proof (limits enforce *inside*, OOM + fork-bomb stay isolated per worker):
+  `bin/claude-sizing-verify`; math/refusal tests: `test/sizing-unit.sh` (CI).
+  See [docs/substrate.md](docs/substrate.md) § K-aware resource sizing.
 - **Secret brokering (git key + credentials).** By default the SSH deploy key is
   copied to a `claude`-readable `~/.ssh/id_ed25519`, so a prompt-injected agent
   could exfiltrate it. `CLAUDE_BROKER_GIT_KEY=1` instead loads the key into a

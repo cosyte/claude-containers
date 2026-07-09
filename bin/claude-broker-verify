@@ -63,9 +63,16 @@ okp "Sysbox $SYSBOX_VERSION installed, registered, and at/above the CVE floor"
 # --- phase 1: controller stand-up ------------------------------------------------------
 info "phase 1 — Sysbox controller ($IMAGE) + broker install"
 docker rm -f "$CTR" >/dev/null 2>&1 || true
-docker run --runtime=sysbox-runc -d --name "$CTR" \
+# Size the controller with the real K=2 envelope (CC-3): the broker now refuses
+# to serve inside a controller that can't carry Σ(cap · worker profile) +
+# overhead, so the proof controller must be envelope-sized like a real one.
+mapfile -t CTR_FLAGS < <("$CLAUDE_DOCKER_ROOT/bin/claude-controller-size" --k 2 --flags)
+# A refused sizing dies inside the process substitution (errexit can't see it);
+# an empty argv would silently launch an unlimited, non-sysbox container.
+(( ${#CTR_FLAGS[@]} )) || die "claude-controller-size refused or failed — no controller flags (does the K=2 envelope fit this host?)"
+docker run -d --name "$CTR" \
+    "${CTR_FLAGS[@]}" \
     --label claude.broker-verify=1 \
-    --cpus 2 --memory 2g --pids-limit 1024 \
     -e DOCKER_TLS_CERTDIR="" \
     "$IMAGE" >/dev/null
 
