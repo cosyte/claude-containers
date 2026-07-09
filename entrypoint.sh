@@ -195,6 +195,14 @@ if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
     # alongside the broker above.
     /usr/local/bin/claude-reaper --loop >> /var/log/claude-reaper.log 2>&1 &
     log "Worker reaper       : starting as root, looping every ${CLAUDE_REAPER_INTERVAL:-300}s (removes dead worker residue + prunes the spool — see /var/log/claude-reaper.log)"
+
+    # Disk GC timer (CC-5): scheduled `docker system prune -f` + `docker builder
+    # prune -f` on the inner daemon so nested-worker layers + build cache don't
+    # fill the host. Runs alongside the broker's per-launch free-space floor
+    # (bin/claude-worker-broker, broker_check_disk) — the floor refuses a launch
+    # under pressure, this reclaims space so future launches don't have to.
+    /usr/local/bin/claude-disk-gc --loop >> /var/log/claude-disk-gc.log 2>&1 &
+    log "Disk GC             : starting as root, looping every ${CLAUDE_DISK_GC_INTERVAL:-3600}s (docker system + builder prune -f — see /var/log/claude-disk-gc.log)"
 fi
 
 # --- 6. Credentials reconcile (shared auth volume) ---------------------------

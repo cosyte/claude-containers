@@ -164,6 +164,10 @@ COPY bin/claude-worker-request /usr/local/bin/claude-worker-request
 # controller mode (entrypoint.sh §5b) to mop up unclean-exit residue + spool litter.
 COPY bin/claude-worker-run /usr/local/bin/claude-worker-run
 COPY bin/claude-reaper /usr/local/bin/claude-reaper
+# Storage/disk safety (CC-5): claude-disk-gc runs alongside the broker + reaper in
+# controller mode (entrypoint.sh §5b), scheduled GC of the inner daemon's image/
+# container/build-cache layers so nested workers don't fill the host.
+COPY bin/claude-disk-gc /usr/local/bin/claude-disk-gc
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-dev /usr/local/bin/claude-autopilot \
@@ -176,6 +180,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-worker-request \
         /usr/local/bin/claude-worker-run \
         /usr/local/bin/claude-reaper \
+        /usr/local/bin/claude-disk-gc \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
 

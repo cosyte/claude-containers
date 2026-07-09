@@ -199,6 +199,9 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_WORKER_HEARTBEAT_SECS` | `60` | Seconds between `claude-worker-run`'s best-effort `scripts/lease.sh renew` calls |
 | `CLAUDE_REAPER_INTERVAL` | `300` | Seconds between `claude-reaper --loop` cycles (controller mode) |
 | `CLAUDE_REAPER_SPOOL_TTL` | `3600` | Seconds before an orphaned broker-spool file (`responses/`, `requests/`, `staging/`) is pruned by `claude-reaper` |
+| `CLAUDE_DISK_FLOOR_MIB` | `10240` | Free-space floor (MiB) on `CLAUDE_DISK_DATA_ROOT`; the broker refuses a launch below it |
+| `CLAUDE_DISK_DATA_ROOT` | `/var/lib/docker` | The inner dockerd data-root nested worker layers land on — what the disk floor and `claude-disk-gc` watch |
+| `CLAUDE_DISK_GC_INTERVAL` | `3600` | Seconds between `claude-disk-gc --loop` cycles (controller mode) |
 | `CLAUDE_STOP_TIMEOUT` | `20` | Graceful stop timeout (s) |
 | `AUTH_VOLUME`/`SSHKEYS_VOLUME` | `claude-auth`/`claude-sshkeys` | Shared volume names |
 | `ANTHROPIC_API_KEY` | unset | **Must stay unset** — entrypoint hard-fails otherwise |
@@ -244,6 +247,8 @@ claude-sizing-verify [--keep]     prove limits enforce inside + OOM/fork isolati
 claude-worker-run <repo> <item>   one-shot worker driver: isolate + exactly one /work-on (CC-4)
 claude-reaper [--loop]            reap dead worker containers + prune the broker spool (CC-4)
 claude-worker-lifecycle-verify [--check] [--keep]   prove one-shot-then-vanish + reaping (CC-4)
+claude-disk-gc [--loop]           GC the inner daemon's image/build-cache layers (CC-5)
+claude-disk-verify [--check] [--keep]   prove the disk-space floor + gc + image reuse (CC-5)
 ```
 
 Inside a controller (`CLAUDE_WORKER_BROKER=1`), the unprivileged agent asks the
@@ -481,6 +486,16 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   proof (limits enforce *inside*, OOM + fork-bomb stay isolated per worker):
   `bin/claude-sizing-verify`; math/refusal tests: `test/sizing-unit.sh` (CI).
   See [docs/substrate.md](docs/substrate.md) § K-aware resource sizing.
+- **Disk pressure is a per-launch refusal, and layers get reclaimed.** The broker
+  checks free space on `CLAUDE_DISK_DATA_ROOT` (the inner dockerd data-root)
+  before every launch and refuses (`error disk pressure: … — retry after gc`)
+  below `CLAUDE_DISK_FLOOR_MIB` (default 10 GiB) — **fails closed** if free space
+  can't be determined at all. `claude-disk-gc --loop` runs alongside the broker +
+  reaper, pruning dangling images/containers/networks **and** the build cache
+  (`docker system prune -f` + `docker builder prune -f`) without ever touching a
+  running container or a volume. On-host proof: `bin/claude-disk-verify`;
+  docker-free logic tests: `test/disk-unit.sh` (CI). See
+  [docs/substrate.md](docs/substrate.md) § Storage/disk safety.
 - **Secret brokering (git key + credentials).** By default the SSH deploy key is
   copied to a `claude`-readable `~/.ssh/id_ed25519`, so a prompt-injected agent
   could exfiltrate it. `CLAUDE_BROKER_GIT_KEY=1` instead loads the key into a
