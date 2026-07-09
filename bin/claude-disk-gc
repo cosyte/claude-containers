@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# claude-disk-gc — scheduled Docker GC so nested-daemon layers + build cache don't fill
+# the host (CC-5).
+#
+# A Sysbox controller's inner dockerd accumulates image/container/build-cache layers as
+# workers come and go (CC-2/CC-4). `docker system prune -f` alone leaves the BUILD CACHE
+# behind — it only clears dangling images, stopped containers, and unused networks — so
+# this runs BOTH:
+#   1. `docker system prune -f`    dangling images, stopped containers, unused networks
+#   2. `docker builder prune -f`   the build cache `system prune` does not touch
+#
+# Never force-removes a running container and never touches volumes: plain `-f` (no `-a`,
+# no `--volumes`) only ever reaps stopped/dangling/unused resources, so a live worker's
+# image layers and data volumes are untouched. This is the reclaim half of CC-5; the
+# refusal half is the broker's per-launch free-space floor (bin/claude-worker-broker,
+# broker_check_disk).
+#
+# Usage:
+#   bin/claude-disk-gc           one-shot: report free space before/after + reclaimed
+#   bin/claude-disk-gc --loop    gc every CLAUDE_DISK_GC_INTERVAL seconds, forever
+#
+# Env:
+#   CLAUDE_DISK_GC_INTERVAL     seconds between --loop cycles (default 3600)
+#   CLAUDE_DISK_DATA_ROOT       path whose free space is reported before/after (default
+#                               /var/lib/docker — same default as the broker's floor)
+#
+# Test seam — UNIT TESTS / OPERATOR DRY-RUNS ONLY, loudly warned when active:
+#   CLAUDE_DISK_GC_DRYRUN=1     prints the prune commands it WOULD run, runs nothing
+#
+# Sourcing this file defines the gc_* / disk_gc_* functions and returns (the unit-test
+# seam); executing it runs a one-shot or --loop GC.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+# All docker traffic funnels through this one wrapper (stubbable by unit tests — nothing
+# else in this script may call docker directly).
+gc_docker() { docker "$@"; }
+
+# --- the plan: the exact prune commands, never varying with docker's real state --------
+# disk_gc_plan — print, one argv per line prefixed "docker ", the commands GC will run.
+# Golden-comparable by unit tests: MUST always be exactly `system prune -f` then
+# `builder prune -f` — never `-a`, never `--volumes`, never anything that could reach a
+# running container or a volume.
+disk_gc_plan() {
+    printf 'docker %s\n' "system prune -f"
+    printf 'docker %s\n' "builder prune -f"
+}
+
+# --- the driver: run the plan (or print it under DRYRUN), fail-safe on docker errors ---
+# disk_gc_once — run both prunes via gc_docker, reporting free space before/after and the
+# reclaimed delta on CLAUDE_DISK_DATA_ROOT. NEVER dies: a docker error on either prune is
+# a loud warn and the other prune still runs — one bad cycle under --loop must log and
+# continue, never take the loop down. Always returns 0.
+disk_gc_once() {
+    local data_root="${CLAUDE_DISK_DATA_ROOT:-/var/lib/docker}"
+    local dryrun=0
+    if [[ "${CLAUDE_DISK_GC_DRYRUN:-0}" == 1 ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_DISK_GC_DRYRUN=1 — printing the prune commands, running nothing"
+        dryrun=1
+    fi
+
+    local before="" after=""
+    before="$(disk_free_mib "$data_root" 2>/dev/null || true)"
+    [[ "$before" =~ ^[0-9]+$ ]] || { warn "claude-disk-gc: could not read free space on $data_root before GC (continuing anyway)"; before=""; }
+
+    if (( dryrun )); then
+        while IFS= read -r line; do echo "would run: $line"; done < <(disk_gc_plan)
+    else
+        # Each prune is independent: a failure in one (a busy daemon, a transient
+        # error) must not skip the other, and must never `die` mid-cycle — under
+        # --loop a bad cycle logs and the loop continues.
+        if ! gc_docker system prune -f >/dev/null 2>&1; then
+            warn "claude-disk-gc: 'docker system prune -f' failed — continuing (will retry next cycle)"
+        fi
+        if ! gc_docker builder prune -f >/dev/null 2>&1; then
+            warn "claude-disk-gc: 'docker builder prune -f' failed — continuing (will retry next cycle)"
+        fi
+    fi
+
+    after="$(disk_free_mib "$data_root" 2>/dev/null || true)"
+    [[ "$after" =~ ^[0-9]+$ ]] || { warn "claude-disk-gc: could not read free space on $data_root after GC"; after=""; }
+
+    if (( dryrun )); then
+        ok "claude-disk-gc (dry-run): free space on $data_root before=${before:-unknown} MiB (nothing pruned)"
+    elif [[ -n "$before" && -n "$after" ]]; then
+        local reclaimed=$(( after - before ))
+        ok "claude-disk-gc: free space on $data_root before=${before} MiB after=${after} MiB (reclaimed ${reclaimed} MiB)"
+    else
+        ok "claude-disk-gc: pruned (free-space accounting unavailable: before=${before:-unknown} after=${after:-unknown})"
+    fi
+    return 0
+}
+
+gc_main() {
+    local loop=0
+    local a
+    for a in "$@"; do
+        case "$a" in
+            --loop) loop=1 ;;
+            *) die "unknown flag '$a' (usage: claude-disk-gc [--loop])" ;;
+        esac
+    done
+
+    if (( ! loop )); then
+        disk_gc_once
+        return 0
+    fi
+
+    local interval="${CLAUDE_DISK_GC_INTERVAL:-3600}"
+    [[ "$interval" =~ ^[0-9]+$ ]] && (( interval > 0 )) \
+        || die "CLAUDE_DISK_GC_INTERVAL '$interval' is not a positive integer"
+    info "claude-disk-gc: looping every ${interval}s (Ctrl-C / SIGTERM to stop)"
+    while :; do
+        # A bad cycle must log and continue — never take the loop down.
+        disk_gc_once || warn "claude-disk-gc: a gc cycle failed unexpectedly — continuing the loop"
+        sleep "$interval"
+    done
+}
+
+# Executed → run the gc; sourced → expose the functions for unit tests.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    gc_main "$@"
+fi

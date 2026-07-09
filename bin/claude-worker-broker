@@ -80,12 +80,20 @@
 #                                   inherited INTO every worker (secret-guard on by
 #                                   default; egress lockdown mirrored + NET_ADMIN
 #                                   only when it needs it)
+#   CLAUDE_DISK_FLOOR_MIB           free-space floor on CLAUDE_DISK_DATA_ROOT
+#                                   below which a launch is refused (CC-5,
+#                                   default 10240 = 10 GiB)
+#   CLAUDE_DISK_DATA_ROOT           the path whose filesystem is checked — the
+#                                   inner dockerd data-root the nested worker
+#                                   layers land on (CC-5, default
+#                                   /var/lib/docker)
 #
 # Test seams — UNIT TESTS ONLY, loudly warned when active:
 #   CLAUDE_BROKER_FAKE_UID_MAP      overrides the /proc/self/uid_map line
 #   CLAUDE_BROKER_SKIP_ROOT=1       skips the uid-0 check
 #   CLAUDE_BROKER_DRYRUN=1          prints the launch argv instead of running it
 #   CLAUDE_BROKER_FAKE_CGROUP_DIR   overrides /sys/fs/cgroup for the capacity check
+#   CLAUDE_DISK_FREE_MIB_OVERRIDE   forces disk_free_mib's return (see _common.sh)
 #
 # Sourcing this file defines the broker_* functions and returns (the unit-test
 # seam); executing it runs the daemon.
@@ -108,6 +116,12 @@ WORKER_MEM_RESERVATION="$CLAUDE_WORKER_MEM_RESERVATION"
 WORKER_CPUS="$CLAUDE_WORKER_CPUS"
 WORKER_PIDS="$CLAUDE_WORKER_PIDS"
 WORKER_SHM="$CLAUDE_WORKER_SHM"
+# Disk-space safety (CC-5): the free-space floor on the inner dockerd
+# data-root, and the path checked against it. CC-6 wires the controller to
+# mount a SIZED volume at this path (docs/substrate.md) — this floor is the
+# runtime backstop that watches it.
+DISK_FLOOR_MIB="${CLAUDE_DISK_FLOOR_MIB:-10240}"
+DISK_DATA_ROOT="${CLAUDE_DISK_DATA_ROOT:-/var/lib/docker}"
 
 # One value pattern for both request keys: starts alphanumeric (can never read as a
 # flag), then a tight middle set — no space, slash, or quote survives, so a value
@@ -226,6 +240,43 @@ broker_check_capacity() {
             || die "controller UNDERSIZED for cap=$BROKER_MAX_WORKERS workers: needs $CTRL_CPUS cpus but the controller cpu budget is $cpu_budget — refusing to overcommit"
     fi
     blog "capacity ok: cap=$BROKER_MAX_WORKERS needs ${CTRL_MEM_MIB} MiB / $CTRL_CPUS cpus / $CTRL_PIDS pids; controller budget ${budget_mib} MiB mem"
+}
+
+# --- per-launch disk-floor check (CC-5) ------------------------------------------
+# broker_check_disk — 0 iff there is at least DISK_FLOOR_MIB free on
+# DISK_DATA_ROOT's filesystem (the inner dockerd data-root the nested worker
+# layers land on). Called per-launch (broker_process_request, right before
+# broker_launch) — NOT a startup refusal like broker_check_capacity, because
+# free disk drains and refills over the controller's lifetime as workers run
+# and claude-disk-gc reclaims; a stale one-time check at startup would miss a
+# host that fills up hours into serving.
+#
+# FAIL CLOSED: if disk_free_mib cannot determine the free space (unreadable
+# path, unparseable df), this returns 1 (refuse) — never treats "unknown" as
+# "plenty free". Sets DISK_FREE_MIB on success (for the caller's message);
+# on failure DISK_FREE_MIB is unset/empty.
+broker_check_disk() {
+    # A bad floor is a config error caught at STARTUP (broker_check_disk_config,
+    # called from broker_serve). Here — the per-request path — degrade to a
+    # REFUSAL (return 1), NEVER die: `die`=exit would kill the whole serve loop
+    # (the `broker_process_request … || blog` wrapper cannot catch exit), turning
+    # one misconfig into a total control-plane outage. Belt-and-suspenders with
+    # the startup check so this path is fail-closed even if reached directly.
+    [[ "$DISK_FLOOR_MIB" =~ ^[0-9]+$ ]] || { DISK_FREE_MIB=""; return 1; }
+    DISK_FREE_MIB=""
+    DISK_FREE_MIB="$(disk_free_mib "$DISK_DATA_ROOT")" || { DISK_FREE_MIB=""; return 1; }
+    [[ "$DISK_FREE_MIB" =~ ^[0-9]+$ ]] || { DISK_FREE_MIB=""; return 1; }
+    (( DISK_FREE_MIB >= DISK_FLOOR_MIB ))
+}
+
+# Validate the disk-floor config ONCE at startup — fail fast, before "serving",
+# consistent with broker_check_capacity's cap validation. A misconfigured
+# CLAUDE_DISK_FLOOR_MIB refuses to START rather than starting and then dying on
+# the first request (which would take the whole daemon down).
+broker_check_disk_config() {
+    [[ "$DISK_FLOOR_MIB" =~ ^[0-9]+$ ]] \
+        || die "CLAUDE_DISK_FLOOR_MIB '$DISK_FLOOR_MIB' is not a non-negative integer — refusing to serve (fail closed)"
+    blog "disk floor ok: $DISK_FLOOR_MIB MiB free required on $DISK_DATA_ROOT"
 }
 
 # --- request validation (deny by default) ---------------------------------------
@@ -436,6 +487,16 @@ broker_process_request() {
         broker_respond "$id" "error worker cap reached ($live/$BROKER_MAX_WORKERS) — retry when a slot frees"
         rm -rf "$staged"; return 0
     fi
+    if ! broker_check_disk; then
+        if [[ -n "$DISK_FREE_MIB" ]]; then
+            blog "reject $id: disk pressure — ${DISK_FREE_MIB} MiB free < floor ${DISK_FLOOR_MIB} MiB on $DISK_DATA_ROOT"
+            broker_respond "$id" "error disk pressure: ${DISK_FREE_MIB} MiB free < floor ${DISK_FLOOR_MIB} MiB on $DISK_DATA_ROOT — retry after gc"
+        else
+            blog "reject $id: cannot determine free disk space on $DISK_DATA_ROOT — refusing (fail closed)"
+            broker_respond "$id" "error disk pressure: could not determine free space on $DISK_DATA_ROOT — refusing (fail closed), retry after gc"
+        fi
+        rm -rf "$staged"; return 0
+    fi
     local name out
     if out="$(broker_launch "$REQ_REPO" "$REQ_ITEM" 2>&1)"; then
         name="$(tail -1 <<<"$out")"
@@ -454,6 +515,7 @@ broker_process_request() {
 broker_serve() {
     broker_check_substrate
     broker_check_capacity
+    broker_check_disk_config
     broker_check_socket
     broker_setup_spool
 

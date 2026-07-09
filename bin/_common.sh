@@ -325,6 +325,45 @@ controller_envelope() {
     export CTRL_CPUS CTRL_MEM_MIB CTRL_MEM_RESERVATION_MIB CTRL_PIDS
 }
 
+# --- Disk-space safety (CC-5) --------------------------------------------------
+# disk_free_mib <path> — print the free space, in integer MiB, on the
+# filesystem holding <path>. Backs both the broker's per-launch disk-floor
+# refusal (broker_check_disk) and bin/claude-disk-gc/-verify.
+#
+# `df -P -B1M <path>` gives POSIX-format, 1-MiB-block output regardless of
+# locale/column-width quirks; the "Available" column is the 4th field of the
+# second (data) line. Parsed robustly — an unreadable/missing path, a `df`
+# that errors, or non-numeric output all FAIL CLOSED (return 1, print
+# nothing): a blind disk check must never be misread as "plenty of free
+# space", which is the one failure mode that could wedge the host by letting
+# a launch through.
+#
+# Test seam — UNIT TESTS ONLY, loudly warned when active:
+#   CLAUDE_DISK_FREE_MIB_OVERRIDE   forces the returned value (skips `df`)
+disk_free_mib() {
+    local path="$1" line avail
+    if [[ -n "${CLAUDE_DISK_FREE_MIB_OVERRIDE:-}" ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_DISK_FREE_MIB_OVERRIDE='${CLAUDE_DISK_FREE_MIB_OVERRIDE}' — the real free disk space is NOT being checked"
+        [[ "$CLAUDE_DISK_FREE_MIB_OVERRIDE" =~ ^[0-9]+$ ]] || return 1
+        echo "$CLAUDE_DISK_FREE_MIB_OVERRIDE"
+        return 0
+    fi
+    [[ -n "$path" ]] || return 1
+    # -P: POSIX one-line-per-filesystem output (no wrapping); -B1M: 1-MiB
+    # blocks so the "Available" column is already in MiB. `|| true`: a df
+    # error must fall through to the parse check below and fail closed there,
+    # not blow up this function under the caller's set -e.
+    line="$(df -P -B1M "$path" 2>/dev/null | tail -n +2 || true)"
+    [[ -n "$line" ]] || return 1
+    # Field 4 = Available. awk (not cut) so extra/odd whitespace from a long
+    # filesystem-name column (which wraps df's normally-fixed columns even
+    # under -P) can't shift the field index.
+    avail="$(awk 'NR==1{print $4}' <<<"$line")"
+    [[ "$avail" =~ ^[0-9]+$ ]] || return 1
+    echo "$avail"
+    return 0
+}
+
 # Container/volume-safe name: lowercase, only [a-z0-9._-].
 sanitize() {
     local n

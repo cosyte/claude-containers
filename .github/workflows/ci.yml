@@ -28,3 +28,5 @@ jobs:
         run: test/worker-run-unit.sh
       - name: reaper unit tests (exited/dead/created selection + spool-prune + fail-safe)
         run: test/reaper-unit.sh
+      - name: disk unit tests (free-space floor + broker refusal + gc plan safety + fail-safe)
+        run: test/disk-unit.sh

@@ -141,7 +141,7 @@ proof. The full run stands up a small Sysbox controller (`docker:28-dind`, 1 CPU
 It prints an evidence block formatted for ADR 0011's pending-verification checklist and
 exits non-zero if any proof fails. The exhaustive resource-isolation matrix (per-worker
 OOM/fork-bomb budgets at K) is `bin/claude-sizing-verify` (CC-3, below); disk budgets are
-**CC-5**'s scope.
+**CC-5**'s scope (Storage/disk safety, below).
 
 ## K-aware resource sizing (CC-3)
 
@@ -285,6 +285,86 @@ reap over clean state is a no-op; an aged `responses/` file is pruned while a fr
 and `.lock` are kept. `bin/claude-worker-lifecycle-verify --check` runs the arg/selection
 half safely on any host (no Sysbox needed).
 
+## Storage/disk safety (CC-5)
+
+Nested workers (CC-2/CC-4) land their image/container/build-cache layers on the
+controller's **inner dockerd data-root** — by default `/var/lib/docker` inside the
+controller. Left unmanaged, that fills the host across enough worker cycles. CC-5 closes
+this with two halves — a runtime refusal and a scheduled reclaim — plus two structural
+requirements that CC-6 wires and this doc documents + the verify script asserts.
+
+### The free-space floor (broker refusal)
+
+`bin/_common.sh`'s `disk_free_mib <path>` prints the free space, in integer MiB, on the
+filesystem holding `<path>` — parsed from `df -P -B1M <path>`'s "Available" column.
+**Fails closed**: an unreadable/missing path, a `df` error, or unparseable output all
+return nonzero/empty rather than ever being misread as "plenty of free space" — the one
+failure mode that could wedge the host by letting a launch through blind.
+`CLAUDE_DISK_FREE_MIB_OVERRIDE` forces the value for tests (loud `TEST SEAM ACTIVE` warn).
+
+The broker (`bin/claude-worker-broker`) reads `CLAUDE_DISK_FLOOR_MIB` (default `10240` =
+10 GiB) and `CLAUDE_DISK_DATA_ROOT` (default `/var/lib/docker`, the inner dockerd
+data-root) and calls `broker_check_disk` **per launch** — in `broker_process_request`,
+right before `broker_launch`, mirroring the worker-cap-reached refusal exactly. Unlike the
+CC-3 capacity check (a **startup** refusal — the controller's own cgroup budget doesn't
+change while it's serving), free disk drains and refills continuously as workers run and
+`claude-disk-gc` reclaims, so this must be re-checked on every launch, not just once at
+boot. On refusal: `broker_respond "$id" "error disk pressure: <free> MiB free < floor
+<floor> MiB on <data-root> — retry after gc"`, logged, staging cleaned, and the handler
+returns 0 — the item is never partially launched and stays retry-able, exactly like every
+other broker refusal path. **Fails closed**: if free space can't be determined at all, the
+launch is refused with a "could not determine free space" message, never silently allowed.
+
+### The GC timer (`bin/claude-disk-gc`)
+
+Scheduled Docker GC on the inner daemon so nested-worker layers + build cache don't
+accumulate unbounded. Runs **both** `docker system prune -f` (dangling images, stopped
+containers, unused networks) **and** `docker builder prune -f` (the build cache —
+`system prune` alone does not touch it), reporting free space before/after + reclaimed.
+**Never** touches a running container or a volume: plain `-f` with no `-a`/`--all`/
+`--volumes` only ever reaps stopped/dangling/unused resources, so a live worker's image
+layers and data are untouched by construction — `disk_gc_plan` is unit-tested to assert
+exactly that shape. One-shot by default; `--loop` runs every `CLAUDE_DISK_GC_INTERVAL`
+seconds (default 3600). Fail-safe like the reaper: a docker error on either prune is a
+loud `warn`, the other prune still runs, and under `--loop` one bad cycle logs and
+continues — it never dies mid-cycle. `CLAUDE_DISK_GC_DRYRUN=1` prints the prune commands
+without running them. In controller mode (`CLAUDE_WORKER_BROKER=1`), `entrypoint.sh`
+starts `claude-disk-gc --loop` as root alongside the broker + reaper, logging to
+`/var/log/claude-disk-gc.log`.
+
+### Sized data-root + image reuse (structural requirements)
+
+Two things the free-space floor and the GC timer *watch* rather than *are* — required for
+either to mean anything on a real fleet host:
+
+- **A sized data-root volume.** The floor and GC operate on whatever filesystem backs
+  `CLAUDE_DISK_DATA_ROOT`. If the Sysbox controller's inner `/var/lib/docker` is backed by
+  the controller's own (unbounded) root filesystem, worker layers can still fill the
+  **host** root fs even while the floor correctly reports "plenty free" on that path — the
+  floor is only as good as the volume it's measuring. **CC-6 wires the actual controller
+  launch to mount a sized volume at the inner data-root**; CC-5's job is documenting the
+  requirement and building the floor that watches it once that volume exists.
+- **Image reuse, not per-worker rebuild.** Workers already reuse the prebuilt
+  `CLAUDE_WORKER_IMAGE` (`claude-code-box`, the broker's fixed template — CC-2/CC-4): the
+  broker's `broker_launch` runs `docker run … "$WORKER_IMAGE" …`, never `docker build`, so
+  no worker cycle adds a new image layer set. This is disk-safety-**by-construction** — it
+  bounds per-cycle growth to container/log/cache churn rather than image storage, which is
+  what makes the floor + GC combination tractable in the first place. `bin/claude-disk-verify`
+  asserts it on the real path (same image ID + created-time across two workers).
+
+### Verification — `bin/claude-disk-verify`
+
+The docker-free logic (`disk_free_mib` parsing + fail-closed behavior, the
+`broker_check_disk` refusal matrix, `disk_gc_plan`'s never-`-a`/`--volumes` shape, and
+`disk_gc_once`'s fail-safe posture) runs in CI: `test/disk-unit.sh`. The on-host proof —
+needs Sysbox + the broker proven first — is `bin/claude-disk-verify`: N sequential worker
+cycles with `claude-disk-gc` run between them don't grow disk unbounded; a launch under an
+absurdly-high `CLAUDE_DISK_FLOOR_MIB` is refused with "disk pressure" on the real broker
+path; the worker image's ID + created-time are identical across workers (reused, never
+rebuilt). `bin/claude-disk-verify --check` runs the docker-free half safely on any host (no
+Sysbox needed) — the same logic test/disk-unit.sh covers, re-run here for a one-command
+fleet-host sanity pass alongside the other `*-verify --check` scripts.
+
 ## Known limitations (do not over-trust)
 
 - Sysbox isolation is **stronger than runc, weaker than a VM/gVisor/Kata**. A container —
@@ -294,8 +374,8 @@ half safely on any host (no Sysbox needed).
   founder-gated umbrella-side (`PAR-7.1`).
 - The flat, unprivileged K=1 leaf-container path is completely unchanged — `sysbox-runc`
   is used only where a controller must run nested workers.
-- Disk safety (CC-5) still builds **on top of** this floor; a green
-  `claude-sysbox-verify` is its precondition, not its proof. The **root-owned worker
+- Every capability here builds **on top of** the Sysbox floor; a green
+  `claude-sysbox-verify` is each one's precondition, not its proof. The **root-owned worker
   broker (CC-2) is built**: `bin/claude-worker-broker` owns worker creation on the inner
   daemon (fixed hardened template, deny-by-default requests, lease discipline; the agent
   never touches the inner socket) and fails closed without userns containment + a
@@ -309,4 +389,10 @@ half safely on any host (no Sysbox needed).
   `claude-reaper` mops up unclean-exit residue + spool litter; its own on-host proof,
   `bin/claude-worker-lifecycle-verify`, has **not yet run on the fleet host** either (same
   reason — built on a box without Sysbox) — run it green there alongside
-  `claude-sizing-verify` before CC-6.
+  `claude-sizing-verify` before CC-6. The **storage/disk safety (CC-5) is built** (section
+  above): the broker refuses a launch under `CLAUDE_DISK_FLOOR_MIB` free space on the inner
+  data-root, and `claude-disk-gc --loop` reclaims image/build-cache layers alongside the
+  broker + reaper; its own on-host proof, `bin/claude-disk-verify`, has **not yet run on the
+  fleet host** either (same reason) — run it green there too before CC-6. CC-5 assumes CC-6
+  mounts a **sized volume** at the inner data-root; until then the floor is watching an
+  unbounded path and only bounds the *rate* workers can fill it, not the ceiling.
