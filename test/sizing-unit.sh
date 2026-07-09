@@ -302,5 +302,27 @@ else
 fi
 
 echo
+echo "-- CC-4-RESIDUAL: per-worker mem-reservation derives 75% (never inverts) --"
+# Default worker mem (4g) → 3072m (= the old fixed 3g, so no behavior change).
+got="$(bash -c 'source '"$REPO_ROOT"'/bin/_common.sh; printf %s "$CLAUDE_WORKER_MEM_RESERVATION"' 2>/dev/null)"
+[[ "$got" == 3072m ]] && ok "default worker reservation = 3072m (= 3g, unchanged)" \
+    || bad "default worker reservation should be 3072m, got '$got'"
+# Lowered worker mem (2g): the OLD fixed 3g would invert (3g > 2g, Docker rejects);
+# the derived 75% (1536m) never exceeds the limit.
+got="$(CLAUDE_WORKER_MEM=2g bash -c 'source '"$REPO_ROOT"'/bin/_common.sh; printf %s "$CLAUDE_WORKER_MEM_RESERVATION"' 2>/dev/null)"
+[[ "$got" == 1536m ]] && ok "lowered worker mem 2g → reservation 1536m (75%, never inverts)" \
+    || bad "lowered worker mem 2g should derive 1536m, got '$got'"
+# An explicit reservation wins (not overridden by the derivation).
+got="$(CLAUDE_WORKER_MEM_RESERVATION=1g bash -c 'source '"$REPO_ROOT"'/bin/_common.sh; printf %s "$CLAUDE_WORKER_MEM_RESERVATION"' 2>/dev/null)"
+[[ "$got" == 1g ]] && ok "explicit CLAUDE_WORKER_MEM_RESERVATION wins" \
+    || bad "explicit worker reservation should be respected, got '$got'"
+# Garbage worker mem fails closed (the sizing math can't derive a reservation).
+if CLAUDE_WORKER_MEM=bogus bash -c 'source '"$REPO_ROOT"'/bin/_common.sh' >/dev/null 2>&1; then
+    bad "garbage CLAUDE_WORKER_MEM must fail closed when deriving the reservation"
+else
+    ok "garbage CLAUDE_WORKER_MEM fails closed (no silent bad reservation)"
+fi
+
+echo
 echo "== $PASS passed, $FAIL failed =="
 exit $(( FAIL > 0 ? 1 : 0 ))
