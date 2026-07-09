@@ -365,6 +365,109 @@ rebuilt). `bin/claude-disk-verify --check` runs the docker-free half safely on a
 Sysbox needed) — the same logic test/disk-unit.sh covers, re-run here for a one-command
 fleet-host sanity pass alongside the other `*-verify --check` scripts.
 
+## Controller mode (CC-6)
+
+Wires the substrate above (CC-1 Sysbox nesting, CC-2 broker, CC-3 sizing, CC-4 worker
+lifecycle, CC-5 disk safety) to the **umbrella's** `PAR-*` lease/scheduler/bump-worker
+control plane. `CLAUDE_CONTROLLER=1` on the entrypoint runs `bin/claude-controller` as the
+main tmux pane instead of `claude-session`/`claude-autopilot`; it implies
+`CLAUDE_WORKER_BROKER=1` (the controller cannot dispatch anything without a live broker) —
+an operator who explicitly set `CLAUDE_WORKER_BROKER=0` alongside `CLAUDE_CONTROLLER=1` gets
+a loud refusal at boot rather than a controller that starts and can never dispatch.
+
+### Effective slots stay at 1 until PAR-4.1 + PAR-7.1 land
+
+`bin/claude-controller` computes **effective worker slots** as
+`min(resolve_parallel_k, CLAUDE_CONTROLLER_MAX_SLOTS)`. `CLAUDE_CONTROLLER_MAX_SLOTS`
+**defaults to 1** regardless of what K the umbrella config says — the controller never
+raises its own ceiling just because K rose; ramping past 1 is a deliberate operator/founder
+action (`CLAUDE_CONTROLLER_MAX_SLOTS`), gated by the umbrella's own `PAR-7.1` founder ramp,
+and additionally requires `PAR-4.1` (per-item bump-queue/ledger scoping) — `bump-worker.sh`'s
+own header documents its cockpit-set sweep as **K=1-safe only**: at K>1 it would sweep a
+peer's in-progress cockpit edits into an unrelated item's bump commit. So out of the box:
+
+- **`slots == 1` (the operative default) collapses to today's autopilot, byte-identical.**
+  `controller_run_autopilot` does exactly `exec bash bin/claude-autopilot` — no flag
+  translation, no wrapper argv, the identical `claude -p "$CLAUDE_AUTOPILOT_CMD"` loop on
+  `CLAUDE_AUTOPILOT_INTERVAL` that a plain `CLAUDE_AUTOPILOT=1` container already runs.
+  `test/controller-unit.sh` proves this by diffing a controller-mode run against a direct
+  `claude-autopilot` run (mod the run timestamp and per-test `$HOME`) — every other line,
+  including the cost/turn accounting, matches verbatim.
+- **`slots > 1` is the built-but-gated loop**, exercised only by tests/fixtures or an
+  explicit `CLAUDE_CONTROLLER_MAX_SLOTS` override:
+  1. `controller_frontier` — `scripts/reconcile.sh --frontier` (read-only here; `/next`
+     running inside a worker is what does the `--age-tick`), parsed into `(item, repo)`
+     pairs, capped at the header's own `cap = K − live` value. Lines that aren't a
+     selection (`eligible-but-unpicked`, `promoted-by-aging`, `(empty — …)`, malformed-
+     inflight `!` lines) are explicitly ignored, not mis-parsed. A **multi-repo** item
+     (`reconcile.sh`'s repo field can be comma-separated, e.g. `crew, knowledgebase`) is
+     **skipped** — `claude-worker-request`/`claude-worker-run` both take exactly one
+     `<repo>` token (CC-2/CC-4's own contract), so rather than guess a "primary" repo and
+     mis-scope a worker, the controller leaves it eligible-but-unpicked (it still ages
+     normally; a human/interactive session can run `/work-on` on it directly).
+  2. `controller_dispatch` — for each selected item, **the controller itself** calls
+     `scripts/lease.sh acquire <item> <worker-id>` (the controller holds the lease, not the
+     worker). A refused acquire (already leased, ineligible, a transient error) skips just
+     that item this cycle — the loop never crashes on one bad item. For each acquired
+     item, `claude-worker-request <repo> <item>` asks the broker (CC-2) to spawn a
+     `claude-worker-run` (CC-4) worker that runs exactly one `/work-on <repo> <item>`. A
+     failed worker-request leaves the lease held — a live lease with no worker self-heals
+     via its TTL / the umbrella's `PAR-5.1` reclaim, so this never double-requests either.
+  3. `controller_drain` — `scripts/bump-worker.sh` (drain). **Runs only here, in the
+     controller — never inside a worker.** This is the single invariant a refuter should
+     check hardest: nothing in `bin/claude-controller` issues a `git commit`/`git push`
+     itself; the umbrella's own `bump-worker.sh` is the sole writer of umbrella `main`,
+     and the controller's only job is to call it on a cadence.
+  4. `controller_cycle` glues the three together once; the caller loops it on
+     `CLAUDE_CONTROLLER_INTERVAL` (default 60s), or runs exactly one cycle under
+     `CLAUDE_CONTROLLER_ONESHOT=1` (what the tests/verify script use).
+
+A worker releases **its own** lease on ship (`/work-on` Step 10's tick) — the controller
+never double-releases. **Crash safety:** the controller holds no un-checkpointed state.
+Leases live in the backlog file on disk (reclaimable by the umbrella's `PAR-5.1` after TTL
+expiry) and the bump-queue is a directory of durable request files
+(`operations/bump-queue/*.json`) — a controller restart just re-reconciles from whatever is
+on disk: an already-leased item's lease is already `[~]` (reconcile's own `cap = K − live`
+excludes it from re-selection) and an already-shipped item is already `[x]`, so a restart
+can neither double-ship nor double-request.
+
+### The socket-lockdown-before-agent ordering fix
+
+CC-2 discovered a boot-window gap: the broker (§5b) is started **backgrounded**, so between
+the inner `dockerd` creating `/var/run/docker.sock` (`root:docker 660`, group-reachable) and
+the broker's own `broker_check_socket` locking it to `root:root 600`, there is a window
+where the socket is reachable by the `docker` group. The entrypoint already did a
+best-effort early `chown`/`chmod` right before backgrounding the broker, but that only
+covers a socket that **already existed** at that instant — not one the inner daemon creates
+a moment later while the broker is still polling for it.
+
+In controller mode this is now closed **authoritatively**: right after §5b starts the
+broker/reaper/disk-gc, and before §12 launches the agent's tmux session, the entrypoint
+blocks (bounded by `CLAUDE_CONTROLLER_SOCKET_WAIT`, default 90s) until the socket exists
+**and** is already `root:root 600` — the exact same predicate the broker itself enforces at
+startup (`broker_check_socket`). Only after that check passes does §12 start the
+unprivileged agent's tmux session. A container **without** `CLAUDE_CONTROLLER=1` is
+byte-for-byte unchanged — this ordering fix is scoped to controller mode only, since that is
+the mode where the agent shares a boot sequence with a backgrounded broker whose socket
+lockdown timing actually matters to the agent's own start time.
+
+### Verification — `bin/claude-controller-verify`
+
+`bin/claude-controller-verify --check` runs docker-free: the slots math (`min(K,
+MAX_SLOTS)`, MAX_SLOTS defaulting to 1 regardless of K), the frontier parser against a
+real-shaped `--frontier` output, and the `CLAUDE_CONTROLLER_DRYRUN=1` dispatch plan. The
+full run (needs `docker`; does **not** need Sysbox — CC-6 proves the wiring to the umbrella
+control plane, not the Sysbox substrate itself, which is CC-1/CC-3/CC-4's own on-host proof)
+builds a **git-backed K=2 fixture umbrella** (two fake submodules, a real
+`reconcile.sh`/`lease.sh`/`bump-worker.sh`, a stubbed `claude-worker-request` that launches
+trivial containers instead of real `/work-on` runs) and proves: two independent items
+(different repos) are leased and dispatched in one cycle while a third, repo-conflicting
+item waits for a slot; the controller — not a worker — holds the lease; `bump-worker.sh` is
+the sole umbrella-`main` writer; and a simulated controller restart (a second cycle over the
+same on-disk fixture state) issues **zero** new worker-requests for the already-leased
+items — no double-ship, no double-request. `test/controller-unit.sh` (CI) covers the same
+ground with fully stubbed scripts, plus the byte-identical K=1 proof.
+
 ## Known limitations (do not over-trust)
 
 - Sysbox isolation is **stronger than runc, weaker than a VM/gVisor/Kata**. A container —
@@ -395,4 +498,15 @@ fleet-host sanity pass alongside the other `*-verify --check` scripts.
   broker + reaper; its own on-host proof, `bin/claude-disk-verify`, has **not yet run on the
   fleet host** either (same reason) — run it green there too before CC-6. CC-5 assumes CC-6
   mounts a **sized volume** at the inner data-root; until then the floor is watching an
-  unbounded path and only bounds the *rate* workers can fill it, not the ceiling.
+  unbounded path and only bounds the *rate* workers can fill it, not the ceiling. The
+  **controller mode (CC-6) is built** (section above): `bin/claude-controller` wires the
+  substrate to the umbrella's `PAR-*` lease/scheduler/bump-worker control plane, but its
+  effective worker slots **default to 1** (byte-identical to today's autopilot) — the K>1
+  loop is exercised only by `test/controller-unit.sh` (stubbed) and
+  `bin/claude-controller-verify` (a fixture umbrella, needs `docker`); it still depends on
+  CC-3/CC-4/CC-5's own fleet-host proofs above landing first, and additionally needs the
+  umbrella's `PAR-4.1` (per-item bump-queue scoping) before `CLAUDE_CONTROLLER_MAX_SLOTS`
+  may ever be raised past 1 in production — that raise is `PAR-7.1`'s founder gate, not a
+  container-side setting to flip casually. CC-6 mounting the **sized data-root volume**
+  CC-5 assumes is still open (a future slice, once a fleet host is actually running
+  controller mode).

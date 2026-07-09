@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# claude-controller — the lead-session entrypoint for CONTROLLER MODE (CC-6): wires this
+# repo's substrate (CC-1 Sysbox nesting, CC-2 broker, CC-3 sizing, CC-4 worker lifecycle,
+# CC-5 disk safety) to the UMBRELLA'S PAR-* lease/scheduler/bump-worker control plane.
+#
+# Effective worker slots = min(resolve_parallel_k, CLAUDE_CONTROLLER_MAX_SLOTS). SLOTS
+# defaults to 1 — the founder-gated K-ramp is umbrella PAR-7.1, and K>1 also needs
+# umbrella PAR-4.1 (per-item ledger scoping; the PAR-3.1 bump-worker cockpit-sweep is
+# K=1-safe only, see scripts/bump-worker.sh's own "Known limitation" note). This script
+# NEVER raises slots on its own — CLAUDE_CONTROLLER_MAX_SLOTS is the one dial, and it
+# defaults closed.
+#
+#   slots == 1  →  COLLAPSES to today's autopilot: run claude-autopilot, unmodified,
+#                  in-process (exec). Byte-identical launch — proven in test/controller-unit.sh.
+#   slots  > 1  →  the built-but-gated loop (exercised only by tests/fixtures + an
+#                  explicit override):
+#     1. controller_frontier  — scripts/reconcile.sh --frontier (read-only here; /next
+#        inside a worker does the --age-tick), parse up to `cap` selected `<ITEM> · <repo>`
+#        lines (ignoring the cap/promoted/eligible-but-unpicked/malformed-inflight lines).
+#     2. controller_dispatch  — for each selected item: scripts/lease.sh acquire <item>
+#        <worker-id-for-that-item> (the CONTROLLER holds the lease); a refused acquire skips
+#        that item this cycle (never crashes the loop). For each acquired item:
+#        claude-worker-request <repo> <item> → the broker (CC-2) spawns a claude-worker-run
+#        (CC-4) worker that runs ONE /work-on <repo> <item>.
+#     3. controller_drain     — scripts/bump-worker.sh (drain) — runs ONLY here in the
+#        controller, NEVER in a worker; it is the sole umbrella-main writer.
+#     4. controller_cycle     — glues 1-3 together; the caller loops it on an interval
+#        (or once, under CLAUDE_CONTROLLER_ONESHOT=1, for tests).
+#
+# A worker that finishes releases its OWN lease (via /work-on Step 10's tick) — the
+# controller never double-releases. A controller restart re-reconciles from disk: leases
+# live in the backlog file (reclaimable by PAR-5.1 after TTL) and the bump-queue is a
+# directory of durable request files — the controller itself holds no un-checkpointed
+# state, so a crash cannot double-ship or strand an item unrecoverably.
+#
+# Env:
+#   CLAUDE_CONTROLLER_MAX_SLOTS   cap on worker slots this controller may use (default 1;
+#                                 the ramp past 1 is the umbrella PAR-7.1 founder gate)
+#   CLAUDE_CONTROLLER_UMBRELLA    umbrella root override (default: /workspace if it looks
+#                                 like the umbrella — has .gitmodules + scripts/reconcile.sh)
+#   CLAUDE_CONTROLLER_INTERVAL    seconds between cycles in the slots>1 loop (default 60)
+#   CLAUDE_CONTROLLER_WORKER_ID_PREFIX   lease-holder id prefix (default: hostname)
+#   CLAUDE_CONTROLLER_ONESHOT=1   run exactly one cycle then return/exit (tests)
+#   CLAUDE_CONTROLLER_DRYRUN=1    loud warn; print the reconcile→lease→worker-request→drain
+#                                 plan without running any of it
+#   CLAUDE_PARALLEL_CONFIG        passed through to resolve_parallel_k (bin/_common.sh)
+#
+# Test seams (all UNIT TESTS ONLY, loudly warned when active):
+#   CLAUDE_CONTROLLER_DRYRUN=1    (see above — also usable outside tests as an operator preview)
+#
+# Sourcing this file defines the controller_* functions and returns (the unit-test seam);
+# executing it runs the controller.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+# --- slots -----------------------------------------------------------------------------
+# controller_slots — echo the effective worker-slot count: min(K, MAX_SLOTS). MAX_SLOTS
+# defaults to 1 (closed) regardless of K, so a container never auto-ramps past 1 just
+# because the umbrella config's K rose — raising the cap is a deliberate operator/founder
+# action (CLAUDE_CONTROLLER_MAX_SLOTS), never an automatic consequence of K.
+controller_slots() {
+    local k max
+    k="$(resolve_parallel_k)" || die "controller_slots: could not resolve K"
+    max="${CLAUDE_CONTROLLER_MAX_SLOTS:-1}"
+    [[ "$max" =~ ^[0-9]+$ ]] && (( max >= 1 )) \
+        || die "CLAUDE_CONTROLLER_MAX_SLOTS '$max' is not a positive integer — refusing (fail closed)"
+    if (( k <= max )); then echo "$k"; else echo "$max"; fi
+}
+
+# --- umbrella location -------------------------------------------------------------------
+controller_looks_like_umbrella() {
+    local d="$1"
+    [[ -f "$d/.gitmodules" && -f "$d/scripts/reconcile.sh" ]]
+}
+
+controller_locate_umbrella() {
+    local cand="${CLAUDE_CONTROLLER_UMBRELLA:-}"
+    if [[ -n "$cand" ]]; then
+        controller_looks_like_umbrella "$cand" \
+            || die "CLAUDE_CONTROLLER_UMBRELLA='$cand' does not look like the umbrella (need .gitmodules + scripts/reconcile.sh) — refusing (fail closed)"
+        CTRL_UMBRELLA="$cand"
+        return 0
+    fi
+    if controller_looks_like_umbrella /workspace; then
+        CTRL_UMBRELLA=/workspace
+        return 0
+    fi
+    die "no umbrella found — set CLAUDE_CONTROLLER_UMBRELLA or run in a container with the umbrella checked out at /workspace (fail closed)"
+}
+
+# --- the K==1 path: collapse to today's autopilot, byte-identical ------------------------
+# Deliberately just `exec claude-autopilot` — no flag translation, no wrapper logic. Any
+# CLAUDE_AUTOPILOT_* env the caller set is inherited untouched, so the launch this process
+# becomes is IDENTICAL to running claude-autopilot directly (test/controller-unit.sh proves
+# this by diffing the two invocations' resolved argv/env under a stub).
+controller_run_autopilot() {
+    local bin
+    bin="$(dirname "${BASH_SOURCE[0]}")/claude-autopilot"
+    info "controller: effective slots=1 — collapsing to today's autopilot (byte-identical launch)"
+    # `exec bash "$bin"` rather than `exec "$bin"`: bin/claude-autopilot is tracked
+    # non-executable in this repo (its Dockerfile COPY is chmod +x'd at image build time,
+    # same as every other bin/claude-* the image installs to /usr/local/bin) — invoking it
+    # via `bash` works identically whether or not the exec bit happens to be set on this
+    # checkout, and is exactly how a raw `bash bin/claude-autopilot` invocation runs it, so
+    # the launch this collapses to is unchanged either way.
+    exec bash "$bin"
+}
+
+# --- controller_frontier: read the scheduler's frontier, parse selected items ------------
+# Prints one line per selected item: "<item-id> <repo>". Read-only (the controller does not
+# pass --age-tick; that belongs to /next running inside a worker, not the controller reading
+# the frontier to decide dispatch). A reconcile error WARNS and yields no candidates (the
+# cycle just does nothing productive this time — never crashes the loop).
+controller_frontier() {
+    local umbrella="$1" out rc=0
+    out="$("$umbrella/scripts/reconcile.sh" --frontier 2>&1)" || rc=$?
+    if (( rc != 0 )); then
+        warn "controller_frontier: reconcile.sh --frontier exited $rc — treating this cycle as having no candidates: $(head -1 <<<"$out")"
+        return 0
+    fi
+    # Selected lines look like "  <ID> · <repo> (TAG)" where TAG is AGED/NOW/NEXT — emitted
+    # by reconcile.sh's consider_candidate(). Explicitly IGNORE the header line (starts
+    # "reconcile --frontier"), "(empty — ...)", "promoted-by-aging:", "eligible-but-unpicked",
+    # and "! ..." malformed-inflight lines — these are the shapes reconcile.sh emits
+    # alongside the selected set, never a selection themselves.
+    local line id repo
+    while IFS= read -r line; do
+        case "$line" in
+            "reconcile --frontier"*) continue ;;
+            "  (empty"*)             continue ;;
+            "  promoted-by-aging:"*) continue ;;
+            "  eligible-but-unpicked"*) continue ;;
+            "  ! "*)                 continue ;;
+            "  "*" · "*)
+                # "  <ID> · <repo> (TAG)" — split on the first " · ", then drop the
+                # trailing " (TAG)" from the repo field.
+                id="$(sed -n 's/^  \([^ ]*\) · .*/\1/p' <<<"$line")"
+                repo="$(sed -n 's/^  [^ ]* · \([^(]*\) (.*/\1/p' <<<"$line")"
+                repo="${repo%% }"   # trim any trailing space left by the pattern
+                [[ -z "$id" || -z "$repo" ]] && continue
+                # A multi-repo item (reconcile.sh's repo field is comma-separated for
+                # cross-repo work, e.g. "crew, knowledgebase") cannot be dispatched: both
+                # claude-worker-request and claude-worker-run take exactly ONE <repo> token
+                # (CC-2/CC-4's own single-repo contract). Rather than guess a "primary" repo
+                # and silently mis-scope the worker, skip it here (fail-closed) — it stays
+                # eligible-but-unpicked and ages normally; a human/interactive session can
+                # still run /work-on on it directly.
+                if [[ "$repo" == *,* ]]; then
+                    warn "controller_frontier: $id is multi-repo ('$repo') — claude-worker-request/-run take one repo; skipping dispatch this cycle (fail-closed)"
+                    continue
+                fi
+                printf '%s %s\n' "$id" "$repo"
+                ;;
+            *) continue ;;
+        esac
+    done <<<"$out"
+}
+
+# --- controller_dispatch: lease.sh acquire, then claude-worker-request, per item ---------
+# Reads "<item> <repo>" lines on stdin (as controller_frontier emits), up to <cap> of them.
+# A refused lease.sh acquire (already leased elsewhere, ineligible, cap reached upstream,
+# transient error) SKIPS that item this cycle — never dies. Same for a refused
+# claude-worker-request. Prints one "dispatched <item> <repo>" line per successful request
+# (the unit tests count these).
+controller_dispatch() {
+    local umbrella="$1" cap="$2" worker_id_prefix="$3"
+    [[ "$cap" =~ ^[0-9]+$ ]] || die "controller_dispatch: cap '$cap' is not a non-negative integer"
+    local dispatched=0 item repo worker_id rc tmp
+    tmp="$(mktemp)" || die "controller_dispatch: could not create a temp file"
+    while IFS=' ' read -r item repo; do
+        [[ -n "$item" && -n "$repo" ]] || continue
+        (( dispatched >= cap )) && break
+        worker_id="${worker_id_prefix}-${item}"
+        rc=0
+        "$umbrella/scripts/lease.sh" acquire "$item" "$worker_id" >"$tmp" 2>&1 || rc=$?
+        if (( rc != 0 )); then
+            warn "controller_dispatch: lease.sh acquire $item refused (rc=$rc) — skipping this cycle: $(head -1 "$tmp" 2>/dev/null)"
+            continue
+        fi
+        rc=0
+        claude-worker-request "$repo" "$item" >"$tmp" 2>&1 || rc=$?
+        if (( rc != 0 )); then
+            warn "controller_dispatch: claude-worker-request $repo $item failed (rc=$rc) — leaving the lease held (a live lease with no worker self-heals via TTL/PAR-5.1 reclaim): $(head -1 "$tmp" 2>/dev/null)"
+            continue
+        fi
+        dispatched=$((dispatched + 1))
+        echo "dispatched $item $repo"
+    done
+    rm -f "$tmp"
+    return 0
+}
+
+# --- controller_drain: run the umbrella bump-worker drain here, never in a worker --------
+controller_drain() {
+    local umbrella="$1" rc=0 tmp
+    tmp="$(mktemp)" || die "controller_drain: could not create a temp file"
+    bash "$umbrella/scripts/bump-worker.sh" >"$tmp" 2>&1 || rc=$?
+    if (( rc != 0 )); then
+        warn "controller_drain: bump-worker.sh drain exited $rc — pointers stay queued for the next drain: $(head -1 "$tmp" 2>/dev/null)"
+    fi
+    cat "$tmp" 2>/dev/null || true
+    rm -f "$tmp"
+    return 0
+}
+
+# --- DRYRUN: print the plan, touch nothing --------------------------------------------
+controller_dryrun_cycle() {
+    local umbrella="$1" cap="$2"
+    warn "TEST SEAM ACTIVE: CLAUDE_CONTROLLER_DRYRUN=1 — printing the reconcile→lease→worker-request→drain plan, NOT running any of it"
+    echo "1. reconcile: $umbrella/scripts/reconcile.sh --frontier   (cap=$cap)"
+    local n=0 item repo
+    while IFS=' ' read -r item repo; do
+        [[ -n "$item" && -n "$repo" ]] || continue
+        (( n >= cap )) && break
+        n=$((n + 1))
+        echo "2. lease.sh acquire $item <worker-id>   →   claude-worker-request $repo $item"
+    done < <(controller_frontier "$umbrella")
+    echo "3. bump-worker.sh   (drain — sole umbrella-main writer)"
+}
+
+# --- controller_cycle: glue frontier → dispatch → drain ---------------------------------
+controller_cycle() {
+    local umbrella="$1" slots="$2"
+    local worker_id_prefix="${CLAUDE_CONTROLLER_WORKER_ID_PREFIX:-$(hostname 2>/dev/null || echo controller)}"
+
+    # Live-worker accounting is delegated entirely to reconcile.sh --frontier's own
+    # `cap = K − live` (it already subtracts in-flight [~] items) — the controller does not
+    # keep a second copy of "how many workers are live" (no double-count, no drift).
+    local frontier_out cap=0
+    frontier_out="$("$umbrella/scripts/reconcile.sh" --frontier 2>&1)" || {
+        warn "controller_cycle: reconcile.sh --frontier failed — skipping dispatch this cycle: $(head -1 <<<"$frontier_out")"
+        controller_drain "$umbrella"
+        return 0
+    }
+    # The header's "cap = K − live = X − Y = <cap>):" uses a Unicode minus (U+2212), not
+    # ASCII '-' — match on "= <digits>):" at the end instead of trying to spell the glyph.
+    cap="$(sed -n 's/.*= \([0-9]*\)):.*/\1/p' <<<"$frontier_out" | head -1)"
+    [[ "$cap" =~ ^[0-9]+$ ]] || cap=0
+    (( cap > slots )) && cap="$slots"   # never dispatch more than THIS controller's own slot budget
+
+    if [[ "${CLAUDE_CONTROLLER_DRYRUN:-0}" == 1 ]]; then
+        controller_dryrun_cycle "$umbrella" "$cap"
+        return 0
+    fi
+
+    if (( cap > 0 )); then
+        controller_frontier "$umbrella" | controller_dispatch "$umbrella" "$cap" "$worker_id_prefix"
+    else
+        info "controller_cycle: cap=0 this cycle — nothing to dispatch"
+    fi
+    controller_drain "$umbrella"
+}
+
+# --- main --------------------------------------------------------------------------------
+controller_main() {
+    local slots
+    slots="$(controller_slots)"
+
+    if (( slots == 1 )); then
+        controller_run_autopilot
+        return   # unreachable (exec above), kept for sourcing/unit-test callers
+    fi
+
+    warn "controller: effective slots=$slots (K>1 path) — this is the BUILT-BUT-GATED loop; K>1 also needs umbrella PAR-4.1 before it is safe in production. Set CLAUDE_CONTROLLER_MAX_SLOTS=1 to force the safe collapse."
+
+    controller_locate_umbrella
+    local umbrella="$CTRL_UMBRELLA"
+    local interval="${CLAUDE_CONTROLLER_INTERVAL:-60}"
+    [[ "$interval" =~ ^[0-9]+$ ]] && (( interval > 0 )) \
+        || die "CLAUDE_CONTROLLER_INTERVAL '$interval' is not a positive integer"
+
+    if [[ "${CLAUDE_CONTROLLER_ONESHOT:-0}" == 1 ]]; then
+        controller_cycle "$umbrella" "$slots"
+        return 0
+    fi
+
+    while :; do
+        controller_cycle "$umbrella" "$slots" || warn "controller_cycle failed — continuing the loop (fail-closed per item, never a crashed controller)"
+        sleep "$interval"
+    done
+}
+
+# Executed → run the controller; sourced → expose the functions for unit tests.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    controller_main
+fi

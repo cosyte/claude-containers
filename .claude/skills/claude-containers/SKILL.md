@@ -100,7 +100,9 @@ small descriptive commits as you change things.
 | `bin/claude-worker-broker` | ROOT-owned worker control plane (CC-2): sole principal on the inner dockerd; fixed hardened launch template; deny-by-default request spool; lease discipline; fails closed without userns + a host-attested CVE-patched Sysbox (`CLAUDE_WORKER_BROKER=1` starts it at boot). |
 | `bin/claude-worker-request` | Unprivileged client: `claude-worker-request <repo> <item-id>` drops a two-value request in the spool and waits for `ok <container>` / `error <reason>`. No docker access needed or possible. |
 | `bin/claude-broker-verify` | On-host CC-2 proof: real Sysbox controller + real unprivileged user; socket unreachability, template-exact worker, forged-request rejection, lease cap, pre-patch-attestation refusal. |
-| `docs/` | `architecture.md` (decisions + acceptance map), `substrate.md` (Sysbox-nested substrate: decision, install runbook, containment proof), `customizing-bakeins.md`, `troubleshooting.md`. |
+| `bin/claude-controller` | CC-6: wires the substrate to the umbrella `PAR-*` lease/scheduler/bump-worker (`CLAUDE_CONTROLLER=1`, implies the broker). Effective slots = `min(K, CLAUDE_CONTROLLER_MAX_SLOTS)`, MAX_SLOTS defaulting to 1 — which **collapses byte-identical to `claude-autopilot`**; the K>1 loop (reconcile → lease → worker-request → bump-worker drain) is built but gated behind an explicit override + the umbrella's `PAR-4.1`/`PAR-7.1`. |
+| `bin/claude-controller-verify` | `--check` = docker-free (slots math, frontier parse, DRYRUN plan); full run builds a git-backed K=2 fixture umbrella and proves two-independent-item dispatch, repo-conflict wait, sole-bump-worker-writer, and no double-ship on a simulated restart. |
+| `docs/` | `architecture.md` (decisions + acceptance map), `substrate.md` (Sysbox-nested substrate: decision, install runbook, containment proof, and the "Controller mode (CC-6)" section), `customizing-bakeins.md`, `troubleshooting.md`. |
 
 ## Operational playbook
 

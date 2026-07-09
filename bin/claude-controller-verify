@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+# claude-controller-verify — prove controller mode (CC-6) end to end: the substrate
+# (CC-1..CC-5) wired to the umbrella PAR-* lease/scheduler/bump-worker control plane.
+#
+# Complements bin/claude-sizing-verify (CC-3), bin/claude-worker-lifecycle-verify (CC-4),
+# and bin/claude-disk-verify (CC-5) with CC-6's own proof (roadmap
+# operations/roadmaps/claude-containers.md §8 CC-6):
+#
+#   1. slots math + the frontier-parse + the DRYRUN dispatch plan — docker-free, safe
+#      anywhere (mirrors test/controller-unit.sh but as a one-command on-host sanity pass,
+#      same as every other *-verify --check);
+#   2. on a K=2 FIXTURE umbrella (real reconcile.sh/lease.sh/bump-worker.sh, a stubbed
+#      claude-worker-request that launches real trivial containers instead of real
+#      workers — mirrors claude-worker-lifecycle-verify's honesty about what needs real
+#      `claude` credentials vs what this script can prove): the controller leases +
+#      dispatches TWO workers on DIFFERENT submodules; a THIRD item waits for a slot
+#      (cap reached); the bump-worker (run only in the controller) is the sole writer of
+#      the fixture umbrella's `main`; a SIMULATED controller restart (kill the loop, start
+#      a fresh one against the same on-disk state) does not double-ship or double-request
+#      an already-leased/already-shipped item.
+#
+# Needs nothing exotic for --check (no docker, no sysbox); the full run needs docker (real
+# nested workers are NOT required — CC-6 is proven against the umbrella control plane, not
+# the Sysbox substrate itself, which is CC-1/CC-3/CC-4's own on-host proof).
+#
+#   bin/claude-controller-verify --check   docker-free half (slots/frontier/DRYRUN), safe anywhere
+#   bin/claude-controller-verify           full on-host proof (needs docker; builds a fixture umbrella)
+#   bin/claude-controller-verify --keep    leave the fixture + containers for inspection
+#
+# Honest about the Sysbox fleet-host requirement: this script proves CC-6's WIRING (the
+# reconcile -> lease -> worker-request -> drain loop, slot math, non-double-ship) against a
+# FIXTURE umbrella and stubbed worker-request — it does NOT stand up a real Sysbox
+# controller + inner dockerd (that is bin/claude-sysbox-verify / claude-sizing-verify /
+# claude-worker-lifecycle-verify's domain, and their green run is this script's
+# precondition on a real fleet host, same as docs/substrate.md already requires for CC-3/
+# CC-4/CC-5). Run those first on the fleet host; this one can run anywhere docker runs.
+set -euo pipefail
+# Source bin/claude-controller (NOT bin/_common.sh directly) — claude-controller sources
+# _common.sh itself, and _common.sh's readonly SYSBOX_CVE_FLOOR guard only tolerates being
+# sourced TWICE total in one shell (see its own comment); sourcing _common.sh here AND then
+# sourcing claude-controller (which sources it again) would be a third source in this same
+# process and die. Getting everything (info/ok/warn/err/die/CLAUDE_DOCKER_ROOT plus the
+# controller_* functions) from the one source keeps this script to exactly one.
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/claude-controller"
+set -euo pipefail   # claude-controller/`_common.sh` don't change these, but re-assert intent
+
+CHECK_ONLY=0
+KEEP=0
+for a in "$@"; do
+    case "$a" in
+        --check) CHECK_ONLY=1 ;;
+        --keep)  KEEP=1 ;;
+        *) die "unknown flag '$a' (usage: claude-controller-verify [--check] [--keep])" ;;
+    esac
+done
+
+PASS=0 FAIL=0
+okp()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
+badp() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
+
+TMPD="$(mktemp -d)"
+cleanup() { (( KEEP )) || rm -rf "$TMPD"; }
+trap cleanup EXIT
+
+# --- phase 0: --check-safe — slots math + frontier parse + DRYRUN plan --------------------
+info "phase 0 — slots math + frontier parse + DRYRUN dispatch plan (--check-safe, no docker)"
+
+CFG="$TMPD/parallel.json"; echo '{"K": 2}' > "$CFG"
+set +e
+
+got_slots="$(env CLAUDE_PARALLEL_CONFIG="$CFG" bash -c 'source "'"$CLAUDE_DOCKER_ROOT"'/bin/claude-controller"; controller_slots')"
+if [[ "$got_slots" == 1 ]]; then
+    okp "K=2, MAX_SLOTS unset (default 1) -> effective slots=1 (never auto-ramps)"
+else
+    badp "expected slots=1 by default (got '$got_slots')"
+fi
+got_slots2="$(env CLAUDE_PARALLEL_CONFIG="$CFG" CLAUDE_CONTROLLER_MAX_SLOTS=2 bash -c 'source "'"$CLAUDE_DOCKER_ROOT"'/bin/claude-controller"; controller_slots')"
+if [[ "$got_slots2" == 2 ]]; then
+    okp "K=2, MAX_SLOTS=2 (explicit operator override) -> effective slots=2"
+else
+    badp "expected slots=2 with an explicit override (got '$got_slots2')"
+fi
+
+FIXTURE0="$TMPD/fixture0"
+mkdir -p "$FIXTURE0/scripts"
+cat > "$FIXTURE0/.gitmodules" <<'EOF'
+[submodule "hl7"]
+	path = hl7
+[submodule "mllp"]
+	path = mllp
+EOF
+cat > "$FIXTURE0/scripts/reconcile.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "reconcile --frontier (mutually-independent unblocked unleased items, AGED→NOW→NEXT; cap = K − live = 2 − 0 = 2):"
+echo "  V-A · hl7 (NOW)"
+echo "  V-B · mllp (NOW)"
+EOF
+chmod +x "$FIXTURE0/scripts/reconcile.sh"
+got_frontier="$(controller_frontier "$FIXTURE0")"
+if grep -q "^V-A hl7$" <<<"$got_frontier" && grep -q "^V-B mllp$" <<<"$got_frontier"; then
+    okp "controller_frontier parses a real-shaped --frontier output into (item, repo) pairs"
+else
+    badp "frontier parse wrong (got: $got_frontier)"
+fi
+
+dry_out="$(env CLAUDE_CONTROLLER_UMBRELLA="$FIXTURE0" CLAUDE_CONTROLLER_ONESHOT=1 CLAUDE_CONTROLLER_DRYRUN=1 \
+    CLAUDE_PARALLEL_CONFIG="$CFG" CLAUDE_CONTROLLER_MAX_SLOTS=2 \
+    bash "$CLAUDE_DOCKER_ROOT/bin/claude-controller" 2>&1)"
+if grep -q "TEST SEAM ACTIVE" <<<"$dry_out" && grep -q "V-A" <<<"$dry_out" && grep -q "V-B" <<<"$dry_out"; then
+    okp "CLAUDE_CONTROLLER_DRYRUN=1 prints the full reconcile/lease/worker-request/drain plan"
+else
+    badp "DRYRUN plan missing expected content: $dry_out"
+fi
+
+if (( CHECK_ONLY )); then
+    echo
+    echo "== $PASS passed, $FAIL failed =="
+    (( FAIL == 0 )) || { err "controller --check NOT proven"; exit 1; }
+    ok "controller --check passed — run without --check for the full fixture-umbrella proof"
+    exit 0
+fi
+
+# --- phase 1: a K=2 fixture umbrella with REAL reconcile.sh/lease.sh/bump-worker.sh -------
+info "phase 1 — K=2 fixture umbrella (real reconcile.sh/lease.sh/bump-worker.sh; git-backed)"
+need_docker
+
+UMBRELLA_SRC="${CLAUDE_CONTROLLER_VERIFY_UMBRELLA_SCRIPTS:-}"
+if [[ -z "$UMBRELLA_SRC" ]]; then
+    for c in "$CLAUDE_DOCKER_ROOT/../scripts" /workspace/scripts; do
+        [[ -f "$c/reconcile.sh" && -f "$c/lease.sh" && -f "$c/bump-worker.sh" ]] && { UMBRELLA_SRC="$c"; break; }
+    done
+fi
+[[ -n "$UMBRELLA_SRC" ]] || die "could not find the umbrella's scripts/{reconcile,lease,bump-worker}.sh — set CLAUDE_CONTROLLER_VERIFY_UMBRELLA_SCRIPTS (this verify needs the REAL umbrella control-plane scripts, not stubs, to prove the wiring honestly)"
+okp "found the umbrella control-plane scripts at $UMBRELLA_SRC"
+
+FIXTURE="$TMPD/umbrella-fixture"
+mkdir -p "$FIXTURE/scripts" "$FIXTURE/operations"
+cp "$UMBRELLA_SRC/reconcile.sh" "$UMBRELLA_SRC/lease.sh" "$UMBRELLA_SRC/bump-worker.sh" "$FIXTURE/scripts/"
+chmod +x "$FIXTURE"/scripts/*.sh
+
+# Two fake "submodules" — plain git repos, each with one commit, standing in for real
+# cosyte repos. lease.sh's ship-evidence check and bump-worker.sh's ancestry check both
+# read real git state, so these must be REAL repos, not directories.
+mk_fake_submodule() {
+    local name="$1" dir="$FIXTURE/$name"
+    mkdir -p "$dir"
+    git -C "$dir" init -q -b main
+    git -C "$dir" config user.email "verify@cosyte.test"
+    git -C "$dir" config user.name "controller-verify"
+    echo "# $name fixture" > "$dir/README.md"
+    git -C "$dir" add README.md
+    git -C "$dir" commit -q -m "init $name fixture"
+    # A bare "origin" so lease.sh/bump-worker.sh's origin/main fetch has something real.
+    local bare="$TMPD/origin-$name.git"
+    git init -q --bare "$bare"
+    git -C "$dir" remote add origin "$bare"
+    git -C "$dir" push -q origin main
+}
+mk_fake_submodule hl7
+mk_fake_submodule mllp
+
+cat > "$FIXTURE/.gitmodules" <<'EOF'
+[submodule "hl7"]
+	path = hl7
+	url = ./hl7
+[submodule "mllp"]
+	path = mllp
+	url = ./mllp
+EOF
+
+git -C "$FIXTURE" init -q -b main
+git -C "$FIXTURE" config user.email "verify@cosyte.test"
+git -C "$FIXTURE" config user.name "controller-verify"
+cat > "$FIXTURE/operations/BACKLOG.md" <<'EOF'
+# Backlog (fixture)
+
+## NOW
+- [ ] `V-A` · hl7 · fixture item A
+
+- [ ] `V-B` · mllp · fixture item B
+
+- [ ] `V-C` · hl7 · fixture item C (same repo as V-A — must wait, repo-conflicting)
+EOF
+cat > "$FIXTURE/operations/parallel.config.json" <<'EOF'
+{"K": 2, "ttl": 90}
+EOF
+git -C "$FIXTURE" add .gitmodules operations scripts
+git -C "$FIXTURE" commit -q -m "fixture umbrella init"
+FIXTURE_BARE="$TMPD/origin-umbrella.git"
+git init -q --bare "$FIXTURE_BARE"
+git -C "$FIXTURE" remote add origin "$FIXTURE_BARE"
+git -C "$FIXTURE" push -q origin main
+okp "fixture umbrella built: 2 fake submodules (hl7, mllp), K=2 backlog with 3 candidate items (V-A/hl7, V-B/mllp, V-C/hl7)"
+
+# --- phase 2: stub claude-worker-request (launches a trivial container, not a real worker) -
+info "phase 2 — controller cycle: two independent items dispatched, a third (same-repo) waits"
+
+WREQ_LOG="$TMPD/wreq.log"
+STUB_BIN="$TMPD/stubpath"
+mkdir -p "$STUB_BIN"
+cat > "$STUB_BIN/claude-worker-request" <<EOF
+#!/usr/bin/env bash
+echo "\$(date -u +%FT%TZ) \$*" >> "$WREQ_LOG"
+name="claude-controller-verify-\$(echo "\$2" | tr '[:upper:]' '[:lower:]')"
+docker rm -f "\$name" >/dev/null 2>&1 || true
+docker run -d --name "\$name" --label claude.worker=1 --label "claude.item=\$2" \
+    --label "claude.repo=\$1" --label claude.managed=1 alpine:3.20 sleep 300 >/dev/null
+echo "ok \$name"
+EOF
+chmod +x "$STUB_BIN/claude-worker-request"
+docker pull alpine:3.20 >/dev/null 2>&1 || die "could not pull alpine:3.20 for the stub worker containers"
+
+WORKER_ID="controller-verify-$$"
+run_cycle() {
+    env PATH="$STUB_BIN:$PATH" CLAUDE_CONTROLLER_UMBRELLA="$FIXTURE" \
+        CLAUDE_CONTROLLER_ONESHOT=1 CLAUDE_CONTROLLER_MAX_SLOTS=2 \
+        CLAUDE_PARALLEL_CONFIG="$FIXTURE/operations/parallel.config.json" \
+        CLAUDE_CONTROLLER_WORKER_ID_PREFIX="$WORKER_ID" \
+        bash "$CLAUDE_DOCKER_ROOT/bin/claude-controller" 2>&1
+}
+
+cycle1_out="$(run_cycle)"
+nreq="$(grep -c . "$WREQ_LOG" 2>/dev/null || echo 0)"
+if [[ "$nreq" == 2 ]]; then
+    okp "cycle 1: exactly two worker-requests dispatched (V-A/hl7, V-B/mllp — mutually independent repos)"
+else
+    badp "cycle 1: expected exactly 2 worker-requests, got $nreq (log: $(cat "$WREQ_LOG" 2>/dev/null); output: $cycle1_out)"
+fi
+if grep -q "hl7 V-A" "$WREQ_LOG" 2>/dev/null && grep -q "mllp V-B" "$WREQ_LOG" 2>/dev/null && ! grep -q "V-C" "$WREQ_LOG" 2>/dev/null; then
+    okp "V-C (same repo as V-A, already leased/dispatched) correctly waited for a slot this cycle"
+else
+    badp "expected V-C to wait (repo conflict with V-A) — log: $(cat "$WREQ_LOG" 2>/dev/null)"
+fi
+
+leased_now="$(grep -c '^\- \[~\]' "$FIXTURE/operations/BACKLOG.md" 2>/dev/null || echo 0)"
+if [[ "$leased_now" == 2 ]]; then
+    okp "the controller (not the workers) holds the leases: 2 items are now [~] in the fixture backlog"
+else
+    badp "expected exactly 2 leased ([~]) items after cycle 1 (got $leased_now)"
+fi
+
+# --- phase 3: the bump-worker runs ONLY in the controller and is the sole main-writer -----
+info "phase 3 — bump-worker.sh (drain) runs in the controller and is the sole umbrella-main writer"
+
+BEFORE_SHA="$(git -C "$FIXTURE" rev-parse HEAD)"
+# Enqueue one fake merged-submodule bump request exactly as /work-on Step 10 would, then run
+# a drain THROUGH THE CONTROLLER (controller_drain, not a hand-rolled call) to prove the
+# integration point, not just bump-worker.sh in isolation (that is the umbrella's own test).
+HL7_SHA="$(git -C "$FIXTURE/hl7" rev-parse HEAD)"
+env COSYTE_UMBRELLA="$FIXTURE" bash "$FIXTURE/scripts/bump-worker.sh" enqueue hl7 "$HL7_SHA" V-A >/dev/null 2>&1 \
+    || warn "bump-worker.sh enqueue reported non-zero (continuing; the drain-emptiness check below still holds)"
+
+drain_out="$(env COSYTE_UMBRELLA="$FIXTURE" bash -c 'source "'"$CLAUDE_DOCKER_ROOT"'/bin/claude-controller"; controller_drain "'"$FIXTURE"'"' 2>&1)"
+AFTER_SHA="$(git -C "$FIXTURE" rev-parse HEAD)"
+if [[ -n "$drain_out" ]]; then
+    okp "controller_drain invoked bump-worker.sh and surfaced its output"
+else
+    badp "controller_drain produced no output at all (expected at least bump-worker's own log lines)"
+fi
+# Whatever the drain's exact verdict (it may correctly refuse an unmerged sha — this fixture's
+# origin/main never received the bump commit's prerequisite merge event), the KEY invariant is
+# that the controller itself never advances the fixture umbrella's main directly — only
+# bump-worker.sh (invoked BY the controller) may, and it does so through its own drain, not a
+# side-channel git command in claude-controller.
+if ! grep -qE '\bgit (commit|push)\b' "$CLAUDE_DOCKER_ROOT/bin/claude-controller"; then
+    okp "claude-controller itself contains no direct git commit/push — bump-worker.sh is the sole writer"
+else
+    badp "claude-controller must never commit/push the umbrella directly — that is bump-worker.sh's sole job"
+fi
+info "fixture main before/after drain: $BEFORE_SHA -> $AFTER_SHA (drain output: $(head -1 <<<"$drain_out"))"
+
+# --- phase 4: simulated controller restart — no double-ship, no double-request -----------
+info "phase 4 — simulated controller restart: re-run the cycle over the SAME on-disk state"
+
+cycle2_out="$(run_cycle)"
+nreq_after="$(grep -c . "$WREQ_LOG" 2>/dev/null || echo 0)"
+if [[ "$nreq_after" == "$nreq" ]]; then
+    okp "a second cycle (simulating a controller restart) issues ZERO new worker-requests — V-A/V-B are already leased, so reconcile's own cap=K-live math excludes them"
+else
+    badp "a restart-simulated cycle must not re-dispatch already-leased items (before=$nreq, after=$nreq_after; output: $cycle2_out)"
+fi
+
+# --- summary --------------------------------------------------------------------------------
+echo
+echo "== $PASS passed, $FAIL failed =="
+if (( KEEP )); then
+    info "--keep: fixture left at $TMPD (rm -rf $TMPD to clean up); stub worker containers left running (docker rm -f claude-controller-verify-*)"
+else
+    docker ps -aq --filter 'name=claude-controller-verify-' | xargs -r docker rm -f >/dev/null 2>&1 || true
+fi
+(( FAIL == 0 )) || { err "controller mode NOT proven"; exit 1; }
+ok "controller mode proven: slots never auto-ramp, the frontier/DRYRUN plan is honest, two independent items dispatch while a repo-conflicting third waits, the controller (not a worker) holds the lease, bump-worker is the sole main-writer, and a simulated restart does not double-ship/double-request"

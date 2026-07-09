@@ -178,6 +178,20 @@ fi
 # /proc/self/uid_map AND a host-attested, CVE-patched Sysbox version in
 # CLAUDE_SYSBOX_ATTESTED_VERSION (the host launch path runs preflight_sysbox and
 # passes SYSBOX_VERSION in). See bin/claude-worker-broker for the template.
+#
+# CLAUDE_CONTROLLER=1 (CC-6) NEEDS the broker — the controller dispatches workers
+# via claude-worker-request, which talks to nothing without a live broker — so it
+# implies CLAUDE_WORKER_BROKER=1 here rather than silently no-op'ing later. An
+# operator who explicitly set CLAUDE_WORKER_BROKER=0 alongside CLAUDE_CONTROLLER=1
+# gets a loud refusal instead of a controller that starts and can never dispatch.
+if [[ "${CLAUDE_CONTROLLER:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    case "${CLAUDE_WORKER_BROKER:-}" in
+        0|false|no|off)
+            die "CLAUDE_CONTROLLER=1 requires the worker broker, but CLAUDE_WORKER_BROKER was explicitly set to '${CLAUDE_WORKER_BROKER}'. Unset it (or set CLAUDE_WORKER_BROKER=1) to run controller mode." ;;
+        *) CLAUDE_WORKER_BROKER=1 ;;
+    esac
+    log "Controller mode      : CLAUDE_CONTROLLER=1 — implying CLAUDE_WORKER_BROKER=1 (the controller dispatches workers through the broker)"
+fi
 if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
     # Best-effort early lock: keep the agent off an already-present inner socket
     # even before the broker's own lockdown (the broker re-asserts at startup).
@@ -203,6 +217,45 @@ if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
     # under pressure, this reclaims space so future launches don't have to.
     /usr/local/bin/claude-disk-gc --loop >> /var/log/claude-disk-gc.log 2>&1 &
     log "Disk GC             : starting as root, looping every ${CLAUDE_DISK_GC_INTERVAL:-3600}s (docker system + builder prune -f — see /var/log/claude-disk-gc.log)"
+fi
+
+# --- 5c. Controller mode: socket lockdown MUST be authoritative before the agent starts ---
+# CC-6 fix (CC-2-discovered gap): the broker above is BACKGROUNDED, so there is a boot
+# window between the inner dockerd creating /var/run/docker.sock (root:docker 660 — group-
+# reachable) and the broker's own broker_check_socket locking it to root:root 600. The
+# best-effort chown/chmod a few lines up covers a socket that already existed at that
+# instant, but NOT one the inner dockerd creates a moment later while the broker is still
+# waiting on it in the background — and §12 below starts the unprivileged agent tmux
+# session with no dependency on the broker's progress, so without this the agent could run
+# for some window with a group-reachable inner socket (a compromised/injected agent could
+# then reach the inner daemon directly, bypassing the broker's request/lease discipline
+# entirely — the exact hole this substrate exists to close).
+#
+# In controller mode (CLAUDE_CONTROLLER=1, which implies the broker above), block HERE —
+# authoritatively, before §12 launches the agent — until the socket exists AND is already
+# root:root 600, polling with a bounded timeout. This is the SAME check the broker itself
+# performs at startup (broker_check_socket); waiting for its result rather than re-doing the
+# lockdown ourselves keeps exactly one writer of that socket's ownership.
+if [[ "${CLAUDE_CONTROLLER:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    SOCK=/var/run/docker.sock
+    SOCK_WAIT="${CLAUDE_CONTROLLER_SOCKET_WAIT:-90}"
+    [[ "$SOCK_WAIT" =~ ^[0-9]+$ ]] || die "CLAUDE_CONTROLLER_SOCKET_WAIT '$SOCK_WAIT' is not a non-negative integer"
+    waited=0
+    sock_locked() {
+        [[ -S "$SOCK" ]] || return 1
+        local owner group perm
+        owner="$(stat -c '%U' "$SOCK" 2>/dev/null || true)"
+        group="$(stat -c '%G' "$SOCK" 2>/dev/null || true)"
+        perm="$(stat -c '%a' "$SOCK" 2>/dev/null || true)"
+        [[ "$owner" == root && "$group" == root && "$perm" == 600 ]]
+    }
+    until sock_locked; do
+        if (( waited >= SOCK_WAIT )); then
+            die "controller mode: $SOCK was not locked to root:root 600 within ${SOCK_WAIT}s — refusing to start the agent session over a possibly-group-reachable inner socket (check /var/log/claude-worker-broker.log)"
+        fi
+        sleep 1; waited=$((waited + 1))
+    done
+    log "Controller mode      : inner docker socket confirmed root:root 600 before the agent session starts (waited ${waited}s)"
 fi
 
 # --- 6. Credentials reconcile (shared auth volume) ---------------------------
@@ -552,15 +605,29 @@ export CLAUDE_PROJECT_NAME CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}" \
 export CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
 log "Model               : $CLAUDE_MODEL (override with CLAUDE_MODEL; 'default' = Claude Code's pick)"
 
-# Two modes, selected by CLAUDE_AUTOPILOT:
-#   interactive (default) — main pane is claude-session (Remote Control + SSH).
-#   autopilot             — main pane is claude-autopilot, a headless Claude loop
-#                           (default `/next`) for unattended continuous build-out;
+# Three modes:
+#   interactive (default)      — main pane is claude-session (Remote Control + SSH).
+#   autopilot (CLAUDE_AUTOPILOT=1) — main pane is claude-autopilot, a headless Claude
+#                           loop (default `/next`) for unattended continuous build-out;
 #                           there is no Remote Control link, so the RC watchdog is
-#                           skipped. Either way SSH attaches to the live tmux pane.
-case "${CLAUDE_AUTOPILOT:-0}" in
-    1|true|yes|on) CLAUDE_MODE=autopilot;   MAIN_PANE_CMD=/usr/local/bin/claude-autopilot ;;
-    *)             CLAUDE_MODE=interactive; MAIN_PANE_CMD=/usr/local/bin/claude-session ;;
+#                           skipped.
+#   controller (CLAUDE_CONTROLLER=1, CC-6) — main pane is claude-controller, which wires
+#                           this substrate to the umbrella PAR-* lease/scheduler/
+#                           bump-worker. With effective worker-slots==1 (the operative
+#                           default — see bin/claude-controller) it COLLAPSES to exactly
+#                           the autopilot launch above, byte-identical; slots>1 is the
+#                           built-but-gated K>1 loop. CLAUDE_CONTROLLER takes priority
+#                           over CLAUDE_AUTOPILOT if both are set. No Remote Control
+#                           link, same as autopilot (the RC watchdog is skipped).
+# Either way SSH attaches to the live tmux pane.
+case "${CLAUDE_CONTROLLER:-0}" in
+    1|true|yes|on) CLAUDE_MODE=controller;  MAIN_PANE_CMD=/usr/local/bin/claude-controller ;;
+    *)
+        case "${CLAUDE_AUTOPILOT:-0}" in
+            1|true|yes|on) CLAUDE_MODE=autopilot;   MAIN_PANE_CMD=/usr/local/bin/claude-autopilot ;;
+            *)             CLAUDE_MODE=interactive; MAIN_PANE_CMD=/usr/local/bin/claude-session ;;
+        esac
+        ;;
 esac
 export CLAUDE_MODE \
        CLAUDE_AUTOPILOT_CMD="${CLAUDE_AUTOPILOT_CMD:-}" \
@@ -655,8 +722,8 @@ fi
 # watchdog detects that terminal state from the RC debug log and respawns the
 # session with --continue once the pane is idle.
 RC_WATCHDOG_PID=""
-if [[ "$CLAUDE_MODE" == "autopilot" ]]; then
-    log "Remote Control watchdog skipped (autopilot mode — no Remote Control session)"
+if [[ "$CLAUDE_MODE" == "autopilot" || "$CLAUDE_MODE" == "controller" ]]; then
+    log "Remote Control watchdog skipped ($CLAUDE_MODE mode — no Remote Control session)"
 elif [[ "${CLAUDE_RC_WATCHDOG:-1}" != "0" ]]; then
     asclaude /usr/local/bin/claude-rc-watchdog &
     RC_WATCHDOG_PID=$!
@@ -666,7 +733,9 @@ else
 fi
 
 echo
-if [[ "$CLAUDE_MODE" == "autopilot" ]]; then
+if [[ "$CLAUDE_MODE" == "controller" ]]; then
+    log "Controller          : wired to the umbrella PAR-* lease/scheduler/bump-worker in tmux window 'main' (see docs/substrate.md 'Controller mode (CC-6)')"
+elif [[ "$CLAUDE_MODE" == "autopilot" ]]; then
     log "Autopilot           : headless loop running '${CLAUDE_AUTOPILOT_CMD:-/next}' in tmux window 'main'"
 else
     log "Remote Control name : $CLAUDE_PROJECT_NAME  (look for it in the Claude app Code tab)"
