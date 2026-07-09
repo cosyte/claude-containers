@@ -44,23 +44,33 @@
 #
 # Lease discipline: at most one live worker per item (a second request for the same
 # item is refused while its worker runs) and at most CLAUDE_BROKER_MAX_WORKERS live
-# workers total (default 2 = the founder-called K; CC-3 single-sources this from
-# umbrella operations/parallel.config.json — do not fork K here).
+# workers total. The cap defaults to K resolved from the umbrella
+# operations/parallel.config.json (resolve_parallel_k, CC-3 — ONE source of truth,
+# never forked here; the host launch path passes CLAUDE_BROKER_MAX_WORKERS in when
+# the umbrella config isn't visible from inside the controller).
+#
+# Capacity fail-safe (CC-3): startup refusal 5 — the broker computes the envelope
+# its worker cap implies (Σ cap · worker profile + controller overhead,
+# controller_envelope) and compares it against the controller's OWN cgroup budget
+# (memory.max / pids.max / cpu.max; "max" falls back to /proc/meminfo / nproc).
+# An undersized controller REFUSES to serve — never silently overcommit.
 #
 # Env (all read at startup as ROOT — nothing here is settable via a request):
 #   CLAUDE_SYSBOX_ATTESTED_VERSION  host-attested Sysbox version (REQUIRED)
 #   CLAUDE_BROKER_DIR               spool root        (default /run/claude/broker)
 #   CLAUDE_BROKER_CLIENT_USER       unprivileged requester (default claude)
-#   CLAUDE_BROKER_MAX_WORKERS       live-worker cap   (default 2)
+#   CLAUDE_BROKER_MAX_WORKERS       live-worker cap   (default: K from
+#                                   resolve_parallel_k — umbrella config or its
+#                                   documented default 2)
 #   CLAUDE_BROKER_SOCKET_WAIT       secs to wait for the inner socket (default 60)
 #   CLAUDE_BROKER_POLL              spool poll seconds (default 1)
 #   CLAUDE_WORKER_IMAGE             worker image      (default claude-code-box:latest)
 #   CLAUDE_BROKER_WORKER_CMD        worker command    (default `sleep infinity` —
 #                                   the CC-4 seam; claude-worker-run replaces it)
 #   CLAUDE_WORKER_MEM / _MEM_RESERVATION / _CPUS / _PIDS / _SHM
-#                                   per-worker resource profile (defaults 4g / 3g /
-#                                   2 / 2048 / 2g — roadmap §5 starting numbers;
-#                                   CC-3 derives them from K + config)
+#                                   per-worker resource profile — single-sourced
+#                                   from bin/_common.sh (defaults 4g / 3g / 2 /
+#                                   2048 / 2g, roadmap §5 starting numbers)
 #   CLAUDE_SECRET_GUARD / CLAUDE_EGRESS_LOCKDOWN / CLAUDE_EGRESS_EXTRA_HOSTS
 #                                   inherited INTO every worker (secret-guard on by
 #                                   default; egress lockdown mirrored + NET_ADMIN
@@ -70,6 +80,7 @@
 #   CLAUDE_BROKER_FAKE_UID_MAP      overrides the /proc/self/uid_map line
 #   CLAUDE_BROKER_SKIP_ROOT=1       skips the uid-0 check
 #   CLAUDE_BROKER_DRYRUN=1          prints the launch argv instead of running it
+#   CLAUDE_BROKER_FAKE_CGROUP_DIR   overrides /sys/fs/cgroup for the capacity check
 #
 # Sourcing this file defines the broker_* functions and returns (the unit-test
 # seam); executing it runs the daemon.
@@ -78,16 +89,20 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 BROKER_DIR="${CLAUDE_BROKER_DIR:-/run/claude/broker}"
 BROKER_CLIENT_USER="${CLAUDE_BROKER_CLIENT_USER:-claude}"
-BROKER_MAX_WORKERS="${CLAUDE_BROKER_MAX_WORKERS:-2}"
+# The worker cap defaults to K from the umbrella config (one source of truth —
+# resolve_parallel_k warns + uses the documented default 2 when no umbrella is
+# visible, and DIES on a config it finds but cannot parse).
+BROKER_MAX_WORKERS="${CLAUDE_BROKER_MAX_WORKERS:-$(resolve_parallel_k)}"
 BROKER_SOCKET_WAIT="${CLAUDE_BROKER_SOCKET_WAIT:-60}"
 BROKER_POLL="${CLAUDE_BROKER_POLL:-1}"
 WORKER_IMAGE="${CLAUDE_WORKER_IMAGE:-claude-code-box:latest}"
 WORKER_CMD="${CLAUDE_BROKER_WORKER_CMD:-sleep infinity}"
-WORKER_MEM="${CLAUDE_WORKER_MEM:-4g}"
-WORKER_MEM_RESERVATION="${CLAUDE_WORKER_MEM_RESERVATION:-3g}"
-WORKER_CPUS="${CLAUDE_WORKER_CPUS:-2}"
-WORKER_PIDS="${CLAUDE_WORKER_PIDS:-2048}"
-WORKER_SHM="${CLAUDE_WORKER_SHM:-2g}"
+# Per-worker resource profile: the single definition in bin/_common.sh (CC-3).
+WORKER_MEM="$CLAUDE_WORKER_MEM"
+WORKER_MEM_RESERVATION="$CLAUDE_WORKER_MEM_RESERVATION"
+WORKER_CPUS="$CLAUDE_WORKER_CPUS"
+WORKER_PIDS="$CLAUDE_WORKER_PIDS"
+WORKER_SHM="$CLAUDE_WORKER_SHM"
 
 # One value pattern for both request keys: starts alphanumeric (can never read as a
 # flag), then a tight middle set — no space, slash, or quote survives, so a value
@@ -153,6 +168,59 @@ broker_check_socket() {
         || die "could not lock $sock to root:root 600 — refusing to serve over a reachable socket"
     broker_docker info >/dev/null 2>&1 || die "cannot talk to the inner dockerd on $sock"
     blog "inner docker socket locked to root:root 600"
+}
+
+# Startup refusal 5 (CC-3): the controller's own cgroup budget must carry
+# Σ(cap · worker profile) + controller overhead. The parent cgroup caps the sum
+# of its nested children, so admitting BROKER_MAX_WORKERS workers into an
+# undersized controller would not "just be slow" — it would let any one worker's
+# burst OOM a peer or the inner daemon. Refuse to serve instead; the operator
+# resizes the controller (bin/claude-controller-size) or lowers the cap.
+# Budget sources (cgroup v2, the controller's own limits as Sysbox presents
+# them): memory.max / pids.max / cpu.max; a "max" (unlimited) value falls back
+# to /proc/meminfo MemTotal / no pids bound / nproc.
+broker_check_capacity() {
+    local cg="${CLAUDE_BROKER_FAKE_CGROUP_DIR:-/sys/fs/cgroup}"
+    [[ -n "${CLAUDE_BROKER_FAKE_CGROUP_DIR:-}" ]] \
+        && warn "TEST SEAM ACTIVE: CLAUDE_BROKER_FAKE_CGROUP_DIR='$cg' — the real cgroup limits are NOT being read"
+    [[ "$BROKER_MAX_WORKERS" =~ ^[0-9]+$ ]] && (( BROKER_MAX_WORKERS >= 1 )) \
+        || die "CLAUDE_BROKER_MAX_WORKERS '$BROKER_MAX_WORKERS' is not a positive integer — refusing (fail closed)"
+    controller_envelope "$BROKER_MAX_WORKERS"   # exports CTRL_MEM_MIB/CTRL_PIDS/CTRL_CPUS
+
+    # Memory budget (MiB). Unreadable everywhere → refuse: sizing blind is overcommit.
+    local raw budget_mib=""
+    raw="$(cat "$cg/memory.max" 2>/dev/null || true)"
+    if [[ "$raw" =~ ^[0-9]+$ ]]; then
+        budget_mib=$(( raw / 1048576 ))
+    else
+        raw="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || true)"
+        [[ "$raw" =~ ^[0-9]+$ ]] && budget_mib=$(( raw / 1024 ))
+    fi
+    [[ -n "$budget_mib" ]] \
+        || die "cannot determine the controller memory budget (no cgroup memory.max, no /proc/meminfo) — refusing (fail closed)"
+    (( CTRL_MEM_MIB <= budget_mib )) \
+        || die "controller UNDERSIZED for cap=$BROKER_MAX_WORKERS workers: needs ${CTRL_MEM_MIB} MiB (Σ cap·worker + overhead) but the controller budget is ${budget_mib} MiB — resize it (bin/claude-controller-size) or lower the cap; refusing to overcommit"
+
+    # Pids budget: only enforceable when the controller actually has one.
+    raw="$(cat "$cg/pids.max" 2>/dev/null || true)"
+    if [[ "$raw" =~ ^[0-9]+$ ]]; then
+        (( CTRL_PIDS <= raw )) \
+            || die "controller UNDERSIZED for cap=$BROKER_MAX_WORKERS workers: needs $CTRL_PIDS pids but the controller pids budget is $raw — refusing to overcommit"
+    fi
+
+    # CPU budget: cpu.max "quota period" → quota/period; "max" → nproc.
+    local q p cpu_budget=""
+    read -r q p <<<"$(cat "$cg/cpu.max" 2>/dev/null || true)"
+    if [[ "$q" =~ ^[0-9]+$ && "$p" =~ ^[0-9]+$ && "$p" != 0 ]]; then
+        cpu_budget="$(awk -v q="$q" -v p="$p" 'BEGIN{printf "%.2f", q/p}')"
+    else
+        cpu_budget="$(nproc 2>/dev/null || true)"
+    fi
+    if [[ -n "$cpu_budget" ]]; then
+        awk -v need="$CTRL_CPUS" -v have="$cpu_budget" 'BEGIN{exit !(need <= have)}' \
+            || die "controller UNDERSIZED for cap=$BROKER_MAX_WORKERS workers: needs $CTRL_CPUS cpus but the controller cpu budget is $cpu_budget — refusing to overcommit"
+    fi
+    blog "capacity ok: cap=$BROKER_MAX_WORKERS needs ${CTRL_MEM_MIB} MiB / $CTRL_CPUS cpus / $CTRL_PIDS pids; controller budget ${budget_mib} MiB mem"
 }
 
 # --- request validation (deny by default) ---------------------------------------
@@ -377,6 +445,7 @@ broker_process_request() {
 
 broker_serve() {
     broker_check_substrate
+    broker_check_capacity
     broker_check_socket
     broker_setup_spool
 

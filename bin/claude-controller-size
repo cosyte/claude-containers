@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# claude-controller-size — derive the K-aware Sysbox controller envelope (CC-3).
+#
+# The controller is a Sysbox container whose cgroup caps the SUM of its nested
+# children, so it must be sized for Σ(K workers) + its own overhead (inner
+# dockerd + broker). K comes from the umbrella operations/parallel.config.json
+# (resolve_parallel_k — ONE source of truth, never forked here); the per-worker
+# profile is CLAUDE_WORKER_* (bin/_common.sh). Defaults: K=2 → 5 CPUs /
+# 10240 MiB / 5120 pids (roadmap operations/roadmaps/claude-containers.md §5;
+# the K=4 ceiling is deferred to the umbrella PAR-7.1 founder ramp).
+#
+#   claude-controller-size             # human summary + host capacity check
+#   claude-controller-size --flags     # docker-run flags, one token per line
+#                                      # (for mapfile -t into a launch argv)
+#   claude-controller-size --k <n>     # explicit K (overrides the config —
+#                                      # for drills/tests; capacity still binds)
+#   claude-controller-size --no-check  # skip the host capacity check
+#
+# Capacity fail-safe: if the envelope exceeds this host's CPUs or MemTotal, the
+# command REFUSES (exit 1) and reports the deficit — never silently overcommit.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+K="" MODE=summary CHECK=1
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --k)        [[ $# -ge 2 ]] || die "--k needs a value"; K="$2"; shift 2 ;;
+        --flags)    MODE=flags; shift ;;
+        --no-check) CHECK=0; shift ;;
+        -h|--help)  usage 0 ;;
+        *)          die "unknown option: $1 (try --help)" ;;
+    esac
+done
+
+K_SOURCE="--k"
+if [[ -z "$K" ]]; then
+    K="$(resolve_parallel_k)"
+    K_SOURCE="umbrella parallel.config.json (or its documented default)"
+fi
+controller_envelope "$K"
+
+# --- host capacity: refuse + report the deficit, never silently overcommit ----
+capacity_check() {
+    local host_cpus host_mem_kib host_mem_mib deficit=0
+    host_cpus="$(nproc 2>/dev/null || true)"
+    host_mem_kib="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || true)"
+    [[ "$host_cpus" =~ ^[0-9]+$ && "$host_mem_kib" =~ ^[0-9]+$ ]] \
+        || die "cannot read host capacity (nproc / /proc/meminfo) — refusing to size blind (fail closed)"
+    host_mem_mib=$(( host_mem_kib / 1024 ))
+    if ! awk -v need="$CTRL_CPUS" -v have="$host_cpus" 'BEGIN{exit !(need <= have)}'; then
+        err "K=$K needs $CTRL_CPUS CPUs (K·worker + overhead) but this host has $host_cpus"
+        deficit=1
+    fi
+    if (( CTRL_MEM_MIB > host_mem_mib )); then
+        err "K=$K needs ${CTRL_MEM_MIB} MiB (K·worker + overhead) but this host has ${host_mem_mib} MiB"
+        deficit=1
+    fi
+    if (( deficit )); then
+        die "K=$K does not fit on this host — REFUSING (never silently overcommit). Lower K in the umbrella operations/parallel.config.json, shrink the CLAUDE_WORKER_* profile, or use a bigger host."
+    fi
+    echo "$host_cpus $host_mem_mib"
+}
+
+HOST_LINE=""
+(( CHECK )) && HOST_LINE="$(capacity_check)"
+
+case "$MODE" in
+    flags)
+        printf '%s\n' \
+            --runtime=sysbox-runc \
+            --cpus "$CTRL_CPUS" \
+            --memory "${CTRL_MEM_MIB}m" \
+            --memory-reservation "${CTRL_MEM_RESERVATION_MIB}m" \
+            --pids-limit "$CTRL_PIDS"
+        ;;
+    summary)
+        info "K = $K  (from $K_SOURCE)"
+        echo "  per-worker profile : cpus $CLAUDE_WORKER_CPUS · mem $CLAUDE_WORKER_MEM (reservation $CLAUDE_WORKER_MEM_RESERVATION) · pids $CLAUDE_WORKER_PIDS · shm $CLAUDE_WORKER_SHM"
+        echo "  controller envelope: cpus $CTRL_CPUS · mem ${CTRL_MEM_MIB}m (reservation ${CTRL_MEM_RESERVATION_MIB}m) · pids $CTRL_PIDS"
+        echo "                       (Σ K·worker + overhead: ${CLAUDE_CTRL_CPU_OVERHEAD} cpu / ${CLAUDE_CTRL_MEM_OVERHEAD_MIB} MiB / ${CLAUDE_CTRL_PIDS_OVERHEAD} pids;"
+        echo "                        worker shm is tmpfs inside each worker's own --memory cap)"
+        if [[ -n "$HOST_LINE" ]]; then
+            read -r hc hm <<<"$HOST_LINE"
+            ok "fits this host: $hc CPUs / ${hm} MiB (headroom: $(awk -v a="$hc" -v b="$CTRL_CPUS" 'BEGIN{printf "%g", a-b}') CPUs / $(( hm - CTRL_MEM_MIB )) MiB)"
+        else
+            warn "host capacity check skipped (--no-check)"
+        fi
+        ;;
+esac

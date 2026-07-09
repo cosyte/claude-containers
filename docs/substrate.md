@@ -140,7 +140,63 @@ proof. The full run stands up a small Sysbox controller (`docker:28-dind`, 1 CPU
 
 It prints an evidence block formatted for ADR 0011's pending-verification checklist and
 exits non-zero if any proof fails. The exhaustive resource-isolation matrix (per-worker
-OOM/fork-bomb/disk budgets at K) is **CC-3**'s scope, not this proof's.
+OOM/fork-bomb budgets at K) is `bin/claude-sizing-verify` (CC-3, below); disk budgets are
+**CC-5**'s scope.
+
+## K-aware resource sizing (CC-3)
+
+The controller's cgroup caps the **sum** of its nested children, so it must be sized for
+**Σ(K workers) + its own overhead** (inner dockerd + broker). Everything is derived from
+two inputs, each with one home:
+
+- **K** — read from the umbrella `operations/parallel.config.json` by
+  `resolve_parallel_k` (`bin/_common.sh`), looked up via `$CLAUDE_PARALLEL_CONFIG`, the
+  umbrella-submodule layout (`../operations/…`), or the in-container workspace
+  (`/workspace/operations/…`). **One source of truth — K is never defined in this repo.**
+  No config found → the documented umbrella default K=2, loudly; a config that is found
+  but unparseable **refuses** (a garbage K silently becoming 2 could under-size a
+  controller that then overcommits).
+- **The per-worker profile** — `CLAUDE_WORKER_MEM/…_MEM_RESERVATION/…_CPUS/…_PIDS/…_SHM`
+  (defaults `4g / 3g / 2 / 2048 / 2g`), single-sourced in `bin/_common.sh` and consumed
+  by the broker's fixed template, the envelope math, and the verify scripts alike.
+
+`bin/claude-controller-size` prints the derived envelope (`--flags` emits the docker-run
+argv). With the defaults, **K=2 → 5 CPUs / 10240 MiB (reservation 8192 MiB) / 5120 pids**
+(the roadmap §5 table; the K=4 ceiling — 9 CPUs / 18 GiB — is deferred to the umbrella
+`PAR-7.1` founder ramp). Worker `shm` needs no separate controller term: it is tmpfs
+charged to each worker's own memory cgroup, i.e. it rides inside the per-worker
+`--memory` cap.
+
+**Overcommit is a refusal, not a warning**, at both ends:
+
+- `claude-controller-size` refuses (with the deficit) when the envelope exceeds the
+  host's CPUs/MemTotal;
+- the broker refuses to **serve** (startup refusal 5, `broker_check_capacity`) when
+  Σ(its worker cap · profile) + overhead exceeds the controller's **own** cgroup budget —
+  read from `memory.max` / `pids.max` / `cpu.max` as Sysbox presents them, falling back
+  to `/proc/meminfo` / `nproc` when unlimited. An undersized controller never quietly
+  admits workers whose bursts could OOM a peer or the inner daemon.
+
+The flat K=1 session path inherits the same guards: `claude-launch` and the generated
+compose services carry `--memory-reservation` **derived at 75 % of the effective limit**
+(so a per-repo `--mem` / per-host limit override can never invert reservation > limit —
+dockerd rejects that) and `--pids-limit`. The static `docker-compose.yml` also carries
+`pids_limit`, but raw `docker compose` cannot run the derivation, so its reservation is
+**opt-in** (`CLAUDE_MEM_RESERVATION`, default `0` = disabled) — if you set it alongside a
+lowered `CLAUDE_MEM_LIMIT`, keep it below the limit.
+
+### Verification — `bin/claude-sizing-verify`
+
+The on-host proof (needs Sysbox; run `claude-sysbox-verify` first): generated flags match
+the K-derived budget and an impossible K refuses with the deficit; controller **and**
+worker limits read back exactly as set *inside* the Sysbox container (the shadowing
+caveat — verified, not assumed); a worker driven over `--memory` is OOM-killed **in
+isolation** (peer worker, controller, and inner daemon all survive); a fork-bomb hits
+`--pids-limit` and harms no peer; a broker whose cap needs more than its controller's
+budget refuses to serve. The docker-free math/refusal matrix runs in CI
+(`test/sizing-unit.sh`). **Run `claude-sizing-verify` green on the fleet host before
+CC-6 wires controller mode — it is the K>1 precondition this doc's limits table points
+at.**
 
 ### ZFS note (this fleet)
 
@@ -160,11 +216,14 @@ incompatibility fails the proof rather than surfacing later in a worker.
   founder-gated umbrella-side (`PAR-7.1`).
 - The flat, unprivileged K=1 leaf-container path is completely unchanged — `sysbox-runc`
   is used only where a controller must run nested workers.
-- The K-aware sizing (CC-3), worker lifecycle (CC-4), and disk safety (CC-5) still
-  build **on top of** this floor; a green `claude-sysbox-verify` is their
-  precondition, not their proof. The **root-owned worker broker (CC-2) is built**:
-  `bin/claude-worker-broker` owns worker creation on the inner daemon (fixed
-  hardened template, deny-by-default requests, lease discipline; the agent never
-  touches the inner socket) and fails closed without userns containment + a
-  host-attested CVE-patched Sysbox — its own on-host proof is
-  `bin/claude-broker-verify`.
+- The worker lifecycle (CC-4) and disk safety (CC-5) still build **on top of** this
+  floor; a green `claude-sysbox-verify` is their precondition, not their proof. The
+  **root-owned worker broker (CC-2) is built**: `bin/claude-worker-broker` owns worker
+  creation on the inner daemon (fixed hardened template, deny-by-default requests,
+  lease discipline; the agent never touches the inner socket) and fails closed without
+  userns containment + a host-attested CVE-patched Sysbox — its own on-host proof is
+  `bin/claude-broker-verify`. The **K-aware sizing (CC-3) is built** (section above),
+  with one open proof: `bin/claude-sizing-verify` has **not yet run on the fleet host**
+  (it was built on a box without Sysbox) — run it green there before CC-6 turns
+  controller mode on. The sizing numbers themselves are §5 *starting* values,
+  re-measured under CC-7/`PAR-6.1` before any K-ramp.

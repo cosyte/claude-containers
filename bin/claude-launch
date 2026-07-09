@@ -211,6 +211,8 @@ docker run -d \
     --shm-size "$CLAUDE_SHM_SIZE" \
     --cpus "$CLAUDE_CPU_LIMIT" \
     --memory "$CLAUDE_MEM_LIMIT" \
+    --memory-reservation "$CLAUDE_MEM_RESERVATION" \
+    --pids-limit "$CLAUDE_PIDS_LIMIT" \
     --tmpfs /tmp:rw,nosuid,nodev,exec,size=1g \
     -p "$SSH_PUBLISH" \
     "${EXPOSE_ARGS[@]}" \

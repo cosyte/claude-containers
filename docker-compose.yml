@@ -35,6 +35,13 @@ services:
     shm_size: ${CLAUDE_SHM_SIZE:-2g}
     cpus: ${CLAUDE_CPU_LIMIT:-2}
     mem_limit: ${CLAUDE_MEM_LIMIT:-4g}
+    # Raw compose cannot derive the 75%-of-limit soft floor the script paths
+    # compute (claude-launch / claude-compose-gen), so the reservation is
+    # OPT-IN here: 0 = disabled. If you set it alongside a lowered
+    # CLAUDE_MEM_LIMIT, keep reservation < limit or dockerd rejects the
+    # container.
+    mem_reservation: ${CLAUDE_MEM_RESERVATION:-0}
+    pids_limit: ${CLAUDE_PIDS_LIMIT:-2048}
     stop_grace_period: ${CLAUDE_STOP_TIMEOUT:-20}s
     tmpfs:
       - /tmp:rw,nosuid,nodev,exec,size=1g

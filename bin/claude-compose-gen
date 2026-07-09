@@ -350,6 +350,12 @@ for row in "${FINAL[@]}"; do
     port="${SVCPORT[$svc]}"
     svc_cpu="${CPU[$svc]:-$CLAUDE_CPU_LIMIT}"
     svc_mem="${MEM[$svc]:-$CLAUDE_MEM_LIMIT}"
+    # Soft memory floor rides the effective limit: the global reservation for the
+    # global limit, a derived 75% for a per-repo --mem override — so an override
+    # can never invert reservation > limit (the daemon rejects that).
+    if [[ "$svc_mem" == "$CLAUDE_MEM_LIMIT" ]]; then svc_res="$CLAUDE_MEM_RESERVATION"
+    else svc_res="$(mem_reservation_for "$svc_mem")" \
+        || die "--mem '$svc_mem' for $svc is unparseable (want e.g. 4g)"; fi
     # Per-repo --model override emits a literal; otherwise emit a compose
     # interpolation so a fleet-wide CLAUDE_MODEL (env/.env) wins, defaulting to
     # opus — the best available model — when nothing is set.
@@ -377,6 +383,8 @@ for row in "${FINAL[@]}"; do
     shm_size: ${CLAUDE_SHM_SIZE}
     cpus: ${svc_cpu}
     mem_limit: ${svc_mem}
+    mem_reservation: ${svc_res}
+    pids_limit: ${CLAUDE_PIDS_LIMIT}
     stop_grace_period: ${CLAUDE_STOP_TIMEOUT}s
     tmpfs:
       - /tmp:rw,nosuid,nodev,exec,size=1g

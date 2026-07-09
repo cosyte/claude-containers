@@ -22,3 +22,5 @@ jobs:
         run: test/unit.sh
       - name: broker unit tests (deny-by-default validator + fixed template + substrate refusals)
         run: test/broker-unit.sh
+      - name: sizing unit tests (K resolution + controller envelope + capacity refusals)
+        run: test/sizing-unit.sh

@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# claude-sizing-verify — prove the K-aware resource sizing on a real Sysbox host (CC-3).
+#
+# Complements bin/claude-sysbox-verify (CC-1, substrate floor) and
+# bin/claude-broker-verify (CC-2, broker) with CC-3's resource-isolation matrix
+# (roadmap operations/roadmaps/claude-containers.md §8 CC-3):
+#
+#   1. generated controller flags match the K-derived budget (golden, K=2:
+#      5 CPUs / 10240m / reservation 8192m / 5120 pids), and an impossible K is
+#      REFUSED with the deficit reported — never silently overcommitted;
+#   2. cgroup limits actually ENFORCE inside the Sysbox controller and inside
+#      each nested worker (the nested-cgroup "shadowing" caveat) — read back
+#      exactly as set, not assumed;
+#   3. a worker driven over --memory is OOM-killed IN ISOLATION: the peer
+#      worker, the controller, and the inner daemon all survive;
+#   4. a fork-bomb in a worker hits --pids-limit (forks fail, cap holds) and
+#      again harms no peer;
+#   5. a broker whose worker cap needs more than the controller's own cgroup
+#      budget REFUSES to serve (the CC-3 capacity fail-safe, on the real path).
+#
+# Needs Sysbox on the host (run bin/claude-sysbox-verify first). The docker-free
+# sizing-math tests live in test/sizing-unit.sh (CI); this is the on-host gate.
+#
+#   bin/claude-sizing-verify           # full stand-up + proofs
+#   bin/claude-sizing-verify --keep    # leave the controller running for inspection
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+# This script PROVES the gate — no ambient/leftover seam may neutralize it.
+unset CLAUDE_SYSBOX_FAKE_VERSION CLAUDE_SYSBOX_SKIP_DOCKER \
+      CLAUDE_BROKER_FAKE_UID_MAP CLAUDE_BROKER_SKIP_ROOT CLAUDE_BROKER_DRYRUN \
+      CLAUDE_BROKER_FAKE_CGROUP_DIR
+
+KEEP=0
+for a in "$@"; do
+    case "$a" in
+        --keep) KEEP=1 ;;
+        *) die "unknown flag '$a' (usage: claude-sizing-verify [--keep])" ;;
+    esac
+done
+
+CTR="claude-sizing-verify"
+IMAGE="${CLAUDE_SYSBOX_VERIFY_IMAGE:-docker:28-dind}"
+WORKER_IMG="alpine:3.20"
+AGENT=agent
+
+PASS=0 FAIL=0
+okp()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
+badp() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
+
+cleanup() { (( KEEP )) || docker rm -f "$CTR" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+as_root()  { docker exec "$CTR" "$@"; }
+# Exec as the agent by NUMERIC uid:gid (the host dockerd can't resolve names
+# through the Sysbox uid-shifted rootfs); resolved in phase 2.
+as_agent() { docker exec -u "$AGENT_UID:$AGENT_GID" "$CTR" "$@"; }
+# Exec inside a nested worker, via the inner daemon.
+in_worker() { local w="$1"; shift; as_root docker exec "$w" "$@"; }
+
+# The exact profile the proof is sized against — pinned so a .env override can't
+# skew the goldens (the mechanism, not the local tuning, is what's being proven).
+PROFILE_ENV=(CLAUDE_WORKER_MEM=4g CLAUDE_WORKER_MEM_RESERVATION=3g CLAUDE_WORKER_CPUS=2
+             CLAUDE_WORKER_PIDS=2048 CLAUDE_WORKER_SHM=2g
+             CLAUDE_CTRL_CPU_OVERHEAD=1 CLAUDE_CTRL_MEM_OVERHEAD_MIB=2048
+             CLAUDE_CTRL_PIDS_OVERHEAD=1024)
+
+# --- phase 0: host prerequisites --------------------------------------------------------
+info "phase 0 — host prerequisites"
+need_docker
+preflight_sysbox
+okp "Sysbox $SYSBOX_VERSION installed, registered, and at/above the CVE floor"
+
+# --- phase 1: generated flags match the K-derived budget + impossible-K refusal ---------
+info "phase 1 — claude-controller-size: K-derived flags + overcommit refusal"
+
+golden="$(cat <<'EOF'
+--runtime=sysbox-runc
+--cpus
+5
+--memory
+10240m
+--memory-reservation
+8192m
+--pids-limit
+5120
+EOF
+)"
+got="$(env "${PROFILE_ENV[@]}" "$CLAUDE_DOCKER_ROOT/bin/claude-controller-size" --k 2 --flags --no-check)"
+if [[ "$got" == "$golden" ]]; then
+    okp "K=2 flags match the derived budget exactly (5 CPUs / 10240m / 8192m reservation / 5120 pids)"
+else
+    badp "K=2 flags drifted from the derived budget:"
+    diff <(echo "$golden") <(echo "$got") | sed 's/^/        /'
+fi
+
+if out="$(env "${PROFILE_ENV[@]}" "$CLAUDE_DOCKER_ROOT/bin/claude-controller-size" --k 9999 2>&1)"; then
+    badp "an impossible K (9999) must be REFUSED, not sized (got: $out)"
+else
+    if grep -q "REFUSING" <<<"$out" && grep -q "needs" <<<"$out"; then
+        okp "K=9999 is refused with the deficit reported (never silently overcommit)"
+    else
+        badp "K=9999 refusal must report the deficit (got: $(head -2 <<<"$out"))"
+    fi
+fi
+
+# --- phase 2: controller at the envelope; limits enforce INSIDE (shadowing caveat) ------
+info "phase 2 — envelope-sized controller; cgroup limits enforce inside"
+docker rm -f "$CTR" >/dev/null 2>&1 || true
+mapfile -t CTR_FLAGS < <(env "${PROFILE_ENV[@]}" "$CLAUDE_DOCKER_ROOT/bin/claude-controller-size" --k 2 --flags)
+# A refused sizing dies inside the process substitution (errexit can't see it);
+# an empty argv would silently launch an unlimited, non-sysbox container.
+(( ${#CTR_FLAGS[@]} )) || die "claude-controller-size refused or failed — no controller flags (does the K=2 envelope fit this host?)"
+docker run -d --name "$CTR" \
+    "${CTR_FLAGS[@]}" \
+    --label claude.sizing-verify=1 \
+    -e DOCKER_TLS_CERTDIR="" \
+    "$IMAGE" >/dev/null
+
+inner_ready=0
+for _ in $(seq 1 60); do
+    if as_root docker info >/dev/null 2>&1; then inner_ready=1; break; fi
+    sleep 1
+done
+(( inner_ready )) || { docker logs --tail 15 "$CTR" >&2 || true; die "inner dockerd did not come up within 60s"; }
+okp "inner dockerd is up inside the envelope-sized Sysbox controller"
+
+ctr_mem="$(as_root cat /sys/fs/cgroup/memory.max)"
+if [[ "$ctr_mem" == 10737418240 ]]; then
+    okp "controller memory.max reads back exactly 10240m INSIDE the Sysbox container"
+else
+    badp "controller memory.max is '$ctr_mem' (want 10737418240) — nested limit shadowed?"
+fi
+ctr_pids="$(as_root cat /sys/fs/cgroup/pids.max)"
+if [[ "$ctr_pids" == 5120 ]]; then
+    okp "controller pids.max reads back exactly 5120 INSIDE the Sysbox container"
+else
+    badp "controller pids.max is '$ctr_pids' (want 5120)"
+fi
+
+as_root apk add --no-cache bash procps >/dev/null 2>&1 || die "could not install bash+procps in the controller"
+as_root adduser -D "$AGENT" >/dev/null 2>&1 || true
+AGENT_UID="$(as_root id -u "$AGENT")" && [[ "$AGENT_UID" =~ ^[0-9]+$ ]] \
+    || die "unprivileged user '$AGENT' was not created in the controller"
+AGENT_GID="$(as_root id -g "$AGENT")"
+install_file() { docker exec -i "$CTR" sh -c "cat > '$2' && chmod 755 '$2'" < "$1"; }
+install_file "$CLAUDE_DOCKER_ROOT/bin/_common.sh"            /usr/local/bin/_common.sh
+install_file "$CLAUDE_DOCKER_ROOT/bin/claude-worker-broker"  /usr/local/bin/claude-worker-broker
+install_file "$CLAUDE_DOCKER_ROOT/bin/claude-worker-request" /usr/local/bin/claude-worker-request
+as_root docker pull "$WORKER_IMG" >/dev/null 2>&1 || die "inner daemon could not pull $WORKER_IMG"
+
+docker exec -d \
+    -e CLAUDE_SYSBOX_ATTESTED_VERSION="$SYSBOX_VERSION" \
+    -e CLAUDE_BROKER_CLIENT_USER="$AGENT" \
+    -e CLAUDE_BROKER_MAX_WORKERS=2 \
+    -e CLAUDE_BROKER_POLL=0.2 \
+    -e CLAUDE_WORKER_IMAGE="$WORKER_IMG" \
+    "$CTR" bash -c '/usr/local/bin/claude-worker-broker >/var/log/claude-worker-broker.log 2>&1'
+broker_up=0
+for _ in $(seq 1 30); do
+    if as_root test -d /run/claude/broker/requests; then broker_up=1; break; fi
+    sleep 0.5
+done
+(( broker_up )) || { as_root cat /var/log/claude-worker-broker.log >&2 || true; die "broker did not come up (no spool)"; }
+if as_root grep -q "capacity ok" /var/log/claude-worker-broker.log; then
+    okp "broker capacity check passed inside the envelope-sized controller (cap=2 fits)"
+else
+    badp "broker log has no 'capacity ok' line inside an envelope-sized controller"
+fi
+
+WA=claude-worker-cc3-a WB=claude-worker-cc3-b
+resp="$(as_agent claude-worker-request hl7 CC3-A --timeout 30 || true)"
+[[ "$resp" == "ok $WA" ]] || die "worker A launch failed (got '$resp')"
+resp="$(as_agent claude-worker-request mllp CC3-B --timeout 30 || true)"
+[[ "$resp" == "ok $WB" ]] || die "worker B launch failed (got '$resp')"
+okp "two workers leased and running (K=2)"
+
+wa_mem="$(in_worker "$WA" cat /sys/fs/cgroup/memory.max)"
+wa_pids="$(in_worker "$WA" cat /sys/fs/cgroup/pids.max)"
+if [[ "$wa_mem" == 4294967296 && "$wa_pids" == 2048 ]]; then
+    okp "worker limits read back exactly as set INSIDE the nested worker (memory.max=4g, pids.max=2048)"
+else
+    badp "worker A limits are mem='$wa_mem' pids='$wa_pids' (want 4294967296 / 2048)"
+fi
+
+# --- phase 3: over---memory worker is OOM-killed IN ISOLATION ---------------------------
+info "phase 3 — worker over --memory → OOM-killed in isolation (peer + controller survive)"
+
+# `tail /dev/zero` accumulates one endless line in memory — the classic bounded-
+# cgroup OOM probe. The kernel kills the offending process inside worker A's
+# cgroup; nothing outside it may die.
+oom_rc=0
+in_worker "$WA" timeout 120 tail /dev/zero >/dev/null 2>&1 || oom_rc=$?
+oom_kills="$(in_worker "$WA" sh -c 'grep -w oom_kill /sys/fs/cgroup/memory.events | awk "{print \$2}"' 2>/dev/null || echo 0)"
+if (( oom_rc != 0 )) && [[ "$oom_kills" =~ ^[0-9]+$ ]] && (( oom_kills >= 1 )); then
+    okp "over-memory process was OOM-killed inside worker A (exit $oom_rc, memory.events oom_kill=$oom_kills)"
+else
+    badp "expected an OOM kill in worker A (exit=$oom_rc, oom_kill='$oom_kills')"
+fi
+wa_state="$(as_root docker inspect -f '{{.State.Status}}' "$WA" 2>/dev/null || echo missing)"
+wb_state="$(as_root docker inspect -f '{{.State.Status}}' "$WB" 2>/dev/null || echo missing)"
+if [[ "$wa_state" == running && "$wb_state" == running ]]; then
+    okp "isolation held: worker A ($wa_state) and peer worker B ($wb_state) both survive the OOM"
+else
+    badp "OOM was not isolated (worker A=$wa_state, worker B=$wb_state)"
+fi
+if as_root docker info >/dev/null 2>&1 && [[ "$(docker inspect -f '{{.State.Status}}' "$CTR")" == running ]]; then
+    okp "controller + inner daemon survive the worker OOM"
+else
+    badp "controller or inner daemon died with the worker OOM — blast radius escaped the worker"
+fi
+
+# --- phase 4: fork-bomb hits --pids-limit ------------------------------------------------
+info "phase 4 — fork-bomb in worker B hits --pids-limit"
+
+forks_out="$(in_worker "$WB" sh -c 'i=0; while [ $i -lt 4000 ]; do sleep 15 & i=$((i+1)); done; echo DONE' 2>&1 || true)"
+if grep -qi "can't fork\|Resource temporarily unavailable" <<<"$forks_out"; then
+    okp "fork-bomb hit the pids limit (forks refused by the kernel)"
+else
+    badp "expected fork failures under --pids-limit 2048 (got: $(tail -1 <<<"$forks_out"))"
+fi
+wb_state="$(as_root docker inspect -f '{{.State.Status}}' "$WB" 2>/dev/null || echo missing)"
+wa_state="$(as_root docker inspect -f '{{.State.Status}}' "$WA" 2>/dev/null || echo missing)"
+if [[ "$wb_state" == running && "$wa_state" == running ]] && as_root docker info >/dev/null 2>&1; then
+    okp "isolation held: both workers + controller + inner daemon survive the fork-bomb"
+else
+    badp "fork-bomb was not isolated (worker A=$wa_state, worker B=$wb_state)"
+fi
+
+# --- phase 5: undersized controller → broker REFUSES (real path) ------------------------
+info "phase 5 — a worker cap the controller can't carry → broker refuses to serve"
+
+# cap=4 in this 10240 MiB controller needs 4·4096+2048 = 18432 MiB → refusal.
+refusal_out="$(docker exec \
+    -e CLAUDE_SYSBOX_ATTESTED_VERSION="$SYSBOX_VERSION" \
+    -e CLAUDE_BROKER_MAX_WORKERS=4 \
+    -e CLAUDE_BROKER_DIR=/run/claude/broker-capacity-drill \
+    "$CTR" bash /usr/local/bin/claude-worker-broker 2>&1)" && refusal_rc=0 || refusal_rc=$?
+if (( refusal_rc != 0 )) && grep -q "refusing to overcommit" <<<"$refusal_out"; then
+    okp "broker refuses to serve when Σ(cap·profile)+overhead exceeds its controller budget (exit $refusal_rc)"
+else
+    badp "broker must refuse an overcommitting cap (rc=$refusal_rc, out=$(grep -i size <<<"$refusal_out" | head -1))"
+fi
+
+# --- summary ------------------------------------------------------------------------------
+echo
+echo "== $PASS passed, $FAIL failed =="
+(( KEEP )) && info "--keep: controller '$CTR' left running (docker rm -f $CTR to clean up)"
+(( FAIL == 0 )) || { err "sizing NOT proven — do not raise K / do not build CC-6 controller mode on this"; exit 1; }
+ok "sizing proven: flags match the K-derived budget, limits enforce inside, OOM + fork-bomb stay isolated, overcommit refuses"

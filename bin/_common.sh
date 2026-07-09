@@ -206,6 +206,125 @@ preflight_sysbox() {
     # SYSBOX_VERSION was normalized + exported by sysbox_version_check above.
 }
 
+# --- K-aware resource sizing (CC-3) -------------------------------------------
+# THE per-worker resource profile — the single definition the broker template,
+# the controller-envelope math, and the verify scripts all read (roadmap §5
+# starting numbers; re-measured under CC-7/PAR-6.1 before any K-ramp). .env /
+# environment overrides win (sourced above), but the K VALUE itself is never
+# defined here — it comes from the umbrella operations/parallel.config.json via
+# resolve_parallel_k below (one source of truth, never forked into this repo).
+CLAUDE_WORKER_MEM="${CLAUDE_WORKER_MEM:-4g}"
+CLAUDE_WORKER_MEM_RESERVATION="${CLAUDE_WORKER_MEM_RESERVATION:-3g}"
+CLAUDE_WORKER_CPUS="${CLAUDE_WORKER_CPUS:-2}"
+CLAUDE_WORKER_PIDS="${CLAUDE_WORKER_PIDS:-2048}"
+CLAUDE_WORKER_SHM="${CLAUDE_WORKER_SHM:-2g}"
+# Flat-session fork-bomb guard (claude-launch / compose services). Same default
+# as the worker profile — one session ≈ one worker's workload.
+CLAUDE_PIDS_LIMIT="${CLAUDE_PIDS_LIMIT:-2048}"
+# Controller overheads: what the controller itself (inner dockerd + broker +
+# slack) needs ON TOP of Σ(K workers) — roadmap §5 table (~1 CPU / ~2 GB).
+CLAUDE_CTRL_CPU_OVERHEAD="${CLAUDE_CTRL_CPU_OVERHEAD:-1}"
+CLAUDE_CTRL_MEM_OVERHEAD_MIB="${CLAUDE_CTRL_MEM_OVERHEAD_MIB:-2048}"
+CLAUDE_CTRL_PIDS_OVERHEAD="${CLAUDE_CTRL_PIDS_OVERHEAD:-1024}"
+
+# size_to_mib <docker-size> — print a docker size string (4g / 3072m / 512k /
+# plain bytes) as integer MiB, rounded UP so a requirement is never
+# under-counted. Fails (return 2) on anything unparseable — sizing is a safety
+# calculation, so garbage must refuse, never read as 0.
+size_to_mib() {
+    local n u
+    [[ "$1" =~ ^([0-9]+)([bkmgBKMG]?)$ ]] || return 2
+    n="${BASH_REMATCH[1]}"; u="$(tr '[:upper:]' '[:lower:]' <<<"${BASH_REMATCH[2]}")"
+    case "$u" in
+        g)   echo $(( n * 1024 )) ;;
+        m)   echo "$n" ;;
+        k)   echo $(( (n + 1023) / 1024 )) ;;
+        b|"") echo $(( (n + 1048575) / 1048576 )) ;;
+    esac
+}
+
+# mem_reservation_for <limit> — the derived soft floor for a hard memory limit:
+# 75% (4g → 3072m, the same ratio as the worker profile). Keeps a per-repo /
+# per-host limit override from ever inverting reservation > limit, which the
+# daemon rejects. Fails (return 2) on an unparseable limit.
+mem_reservation_for() {
+    local mib; mib="$(size_to_mib "$1")" || return 2
+    echo "$(( mib * 3 / 4 ))m"
+}
+
+# Flat-session soft memory floor: an explicit CLAUDE_MEM_RESERVATION wins; else
+# derive 75% of the (possibly .env-overridden) CLAUDE_MEM_LIMIT.
+if [[ -z "${CLAUDE_MEM_RESERVATION:-}" ]]; then
+    CLAUDE_MEM_RESERVATION="$(mem_reservation_for "$CLAUDE_MEM_LIMIT")" \
+        || die "unparseable CLAUDE_MEM_LIMIT '$CLAUDE_MEM_LIMIT' — cannot derive a memory reservation (fail closed)"
+fi
+
+# resolve_parallel_k — print K, the fleet parallelism, read from the umbrella's
+# operations/parallel.config.json (the ONE source of truth — this repo never
+# defines its own K). Lookup order:
+#   1. $CLAUDE_PARALLEL_CONFIG — an explicit path; missing or unparseable DIES
+#      (an explicitly-named config is never silently ignored);
+#   2. the umbrella-submodule layout ($CLAUDE_DOCKER_ROOT/../operations/…);
+#   3. the in-container umbrella workspace (/workspace/operations/…).
+# No file found → the documented umbrella default K=2, with a warning. A file
+# that IS found but yields garbage DIES (fail closed): a garbage K silently
+# becoming 2 could under-size a controller that then overcommits.
+resolve_parallel_k() {
+    local cfg="" c k=""
+    if [[ -n "${CLAUDE_PARALLEL_CONFIG:-}" ]]; then
+        cfg="$CLAUDE_PARALLEL_CONFIG"
+        [[ -f "$cfg" ]] || die "CLAUDE_PARALLEL_CONFIG='$cfg' does not exist — refusing to guess K"
+    else
+        for c in "$CLAUDE_DOCKER_ROOT/../operations/parallel.config.json" \
+                 /workspace/operations/parallel.config.json; do
+            [[ -f "$c" ]] && { cfg="$c"; break; }
+        done
+    fi
+    if [[ -z "$cfg" ]]; then
+        warn "no umbrella operations/parallel.config.json found — using the documented umbrella default K=2"
+        echo 2; return 0
+    fi
+    if command -v jq >/dev/null 2>&1; then
+        k="$(jq -er '.K' "$cfg" 2>/dev/null)" || k=""
+    else
+        # No jq: capture the WHOLE value token (up to , } or whitespace) so a
+        # fractional/garbage K reaches the integer validation below and refuses
+        # — never truncates to its integer part.
+        k="$(grep -oE '"K"[[:space:]]*:[[:space:]]*[^,}[:space:]]+' "$cfg" 2>/dev/null | head -1 | sed 's/^"K"[[:space:]]*:[[:space:]]*//')" || k=""
+    fi
+    [[ "$k" =~ ^[0-9]+$ ]] && (( k >= 1 && k <= 16 )) \
+        || die "could not parse a sane K from $cfg (got '${k:-nothing}') — refusing (fail closed)"
+    echo "$k"
+}
+
+# controller_envelope <K> — the Sysbox controller envelope for K nested workers.
+# The parent cgroup caps the SUM of its children (workers + inner dockerd +
+# broker), so the controller must carry Σ(K · worker profile) + overhead.
+# Exports CTRL_CPUS, CTRL_MEM_MIB, CTRL_MEM_RESERVATION_MIB, CTRL_PIDS.
+# Worker shm is tmpfs charged to each worker's own memory cgroup, so it rides
+# inside the per-worker --memory cap — no separate controller shm term.
+controller_envelope() {
+    local k="$1" wm wr
+    [[ "$k" =~ ^[0-9]+$ ]] && (( k >= 1 )) || die "controller_envelope: K must be a positive integer (got '$k')"
+    wm="$(size_to_mib "$CLAUDE_WORKER_MEM")" \
+        || die "unparseable CLAUDE_WORKER_MEM '$CLAUDE_WORKER_MEM' — refusing (fail closed)"
+    wr="$(size_to_mib "$CLAUDE_WORKER_MEM_RESERVATION")" \
+        || die "unparseable CLAUDE_WORKER_MEM_RESERVATION '$CLAUDE_WORKER_MEM_RESERVATION' — refusing (fail closed)"
+    [[ "$CLAUDE_WORKER_PIDS" =~ ^[0-9]+$ ]] \
+        || die "CLAUDE_WORKER_PIDS '$CLAUDE_WORKER_PIDS' is not an integer — refusing (fail closed)"
+    [[ "$CLAUDE_WORKER_CPUS" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+        || die "CLAUDE_WORKER_CPUS '$CLAUDE_WORKER_CPUS' is not a number — refusing (fail closed)"
+    [[ "$CLAUDE_CTRL_MEM_OVERHEAD_MIB" =~ ^[0-9]+$ && "$CLAUDE_CTRL_PIDS_OVERHEAD" =~ ^[0-9]+$ \
+       && "$CLAUDE_CTRL_CPU_OVERHEAD" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+        || die "controller overhead settings are not numeric — refusing (fail closed)"
+    CTRL_MEM_MIB=$(( k * wm + CLAUDE_CTRL_MEM_OVERHEAD_MIB ))
+    CTRL_MEM_RESERVATION_MIB=$(( k * wr + CLAUDE_CTRL_MEM_OVERHEAD_MIB ))
+    CTRL_PIDS=$(( k * CLAUDE_WORKER_PIDS + CLAUDE_CTRL_PIDS_OVERHEAD ))
+    CTRL_CPUS="$(awk -v k="$k" -v w="$CLAUDE_WORKER_CPUS" -v o="$CLAUDE_CTRL_CPU_OVERHEAD" \
+        'BEGIN{ c = k*w + o; if (c == int(c)) printf "%d", c; else printf "%.2f", c }')"
+    export CTRL_CPUS CTRL_MEM_MIB CTRL_MEM_RESERVATION_MIB CTRL_PIDS
+}
+
 # Container/volume-safe name: lowercase, only [a-z0-9._-].
 sanitize() {
     local n
