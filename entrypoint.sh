@@ -433,43 +433,82 @@ if [[ -d "$BAKE_DIR/mcp" ]]; then
     done
 fi
 
-# --- 10b. Optional: register chrome-devtools-mcp (frontend debugging) --------
-# When CLAUDE_BROWSER=1 (set by `claude-launch --browser` or the env), register
-# the Chrome DevTools MCP server so Claude can navigate, evaluate, inspect
-# console/network, take screenshots, run Lighthouse, etc. against any frontend
-# the agent spins up in /workspace. The image must be built with
-# WITH_BROWSER=1 — we check by probing the baked binaries and warn-skip if
-# absent (rather than silently failing inside Claude). Headless, isolated
-# profile (clean per session), --no-sandbox is required in unprivileged Docker.
-case "${CLAUDE_BROWSER:-0}" in
+# --- 10b. Register chrome-devtools-mcp (frontend debugging) ------------------
+# Registers the Chrome DevTools MCP server so Claude can navigate, evaluate,
+# inspect console/network, take screenshots, run Lighthouse, etc. against any
+# frontend the agent spins up in /workspace.
+#
+# CLAUDE_BROWSER is TRI-STATE — the browser image is meant to "just work", so a
+# baked variant auto-enables the MCP with no second flag:
+#   • unset / empty / other  → AUTO: register iff the browser variant is baked
+#     (both chrome-devtools-mcp AND chromium on PATH — the functional signal a
+#     registration actually needs; the image also carries a `claude.browser`
+#     LABEL the launcher pre-flight reads). A lean image stays silent.
+#   • 1|true|yes|on          → FORCE ON: register; if the binaries are NOT baked,
+#     fail LOUD + actionable (rebuild hint) — never a silent no-op.
+#   • 0|false|no|off         → OPT OUT: skip even on a browser image.
+# Registration is idempotent (the `claude mcp get` guard below), so re-runs and
+# a resumed session never double-register. Headless, isolated profile (clean per
+# session); --no-sandbox is required in unprivileged Docker.
+_browser_baked() {
+    command -v chrome-devtools-mcp >/dev/null 2>&1 && command -v chromium >/dev/null 2>&1
+}
+_register_chrome_devtools_mcp() {
+    if asclaude claude mcp get chrome-devtools >/dev/null 2>&1; then
+        log "MCP 'chrome-devtools' already configured, skipping"
+        return 0
+    fi
+    # Resolve the SAME chromium the detection probe found, rather than hardcoding
+    # /usr/bin/chromium — so a variant that installs chromium elsewhere (or as a
+    # differently-named binary on PATH) can't auto-register a config that then
+    # points at a missing executable. Fall back to /usr/bin/chromium if unresolved.
+    local chromium_path cdt_json
+    chromium_path="$(command -v chromium 2>/dev/null || echo /usr/bin/chromium)"
+    cdt_json="$(jq -n --arg exe "$chromium_path" '{
+        type: "stdio",
+        command: "chrome-devtools-mcp",
+        args: [
+            "--executablePath", $exe,
+            "--headless",
+            "--isolated",
+            "--chromeArg=--no-sandbox",
+            "--chromeArg=--disable-dev-shm-usage",
+            "--chromeArg=--disable-gpu"
+        ],
+        env: { CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "1" }
+    }')"
+    if asclaude claude mcp add-json --scope user chrome-devtools "$cdt_json" >/dev/null 2>&1; then
+        log "Registered MCP server 'chrome-devtools' (headless Chromium)"
+    else
+        log "WARNING: failed to register chrome-devtools MCP"
+    fi
+}
+# Normalize: strip surrounding whitespace / a trailing CR (a CRLF-authored .env
+# yields `1\r`, which must still match "1" — not silently fall through to auto)
+# and lowercase, so the tri-state match is robust to how the value was set.
+_cb="$(printf '%s' "${CLAUDE_BROWSER:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+case "$_cb" in
     1|true|yes|on)
-        if command -v chrome-devtools-mcp >/dev/null 2>&1 \
-           && command -v chromium >/dev/null 2>&1; then
-            if asclaude claude mcp get chrome-devtools >/dev/null 2>&1; then
-                log "MCP 'chrome-devtools' already configured, skipping"
-            else
-                cdt_json="$(jq -n '{
-                    type: "stdio",
-                    command: "chrome-devtools-mcp",
-                    args: [
-                        "--executablePath", "/usr/bin/chromium",
-                        "--headless",
-                        "--isolated",
-                        "--chromeArg=--no-sandbox",
-                        "--chromeArg=--disable-dev-shm-usage",
-                        "--chromeArg=--disable-gpu"
-                    ],
-                    env: { CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "1" }
-                }')"
-                if asclaude claude mcp add-json --scope user chrome-devtools "$cdt_json" >/dev/null 2>&1; then
-                    log "Registered MCP server 'chrome-devtools' (headless Chromium)"
-                else
-                    log "WARNING: failed to register chrome-devtools MCP"
-                fi
-            fi
+        # Explicit request — must be satisfiable, else fail loud (never silent).
+        if _browser_baked; then
+            _register_chrome_devtools_mcp
         else
-            log "WARNING: CLAUDE_BROWSER=1 but chrome-devtools-mcp / chromium not in image."
-            log "         Rebuild with: make build-browser   (or --build-arg WITH_BROWSER=1)"
+            log "ERROR: CLAUDE_BROWSER=1 (or --browser) requested, but this image has no"
+            log "       chrome-devtools-mcp / chromium baked in — the MCP cannot be enabled."
+            log "       Rebuild the browser variant:  make build-browser"
+            log "       (or:  make build WITH_BROWSER=1 CLAUDE_IMAGE=<tag>)."
+            log "       Frontend debugging is UNAVAILABLE in this container until you do."
+        fi
+        ;;
+    0|false|no|off)
+        # Explicit opt-out — honored even on a browser image.
+        _browser_baked && log "chrome-devtools MCP disabled (CLAUDE_BROWSER=off); skipping"
+        ;;
+    *)
+        # Auto: a browser image enables the MCP by itself; a lean image is silent.
+        if _browser_baked; then
+            log "Browser image detected (chromium + chrome-devtools-mcp present) — auto-registering chrome-devtools MCP"
+            _register_chrome_devtools_mcp
         fi
         ;;
 esac

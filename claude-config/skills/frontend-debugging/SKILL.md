@@ -11,11 +11,14 @@ layout problem, or a slow page — instead of guessing from source alone.
 
 ## First: confirm you have the tools
 
-This works only in a **browser image variant** (built `WITH_BROWSER=1`, launched
-`--browser` / `CLAUDE_BROWSER=1`) — those register the `chrome-devtools` MCP.
-If no `chrome-devtools` / browser tools are available, this is the lean image:
-say so plainly instead of guessing — the session needs relaunching with
-`--browser` against a `make build-browser` image.
+This works only in a **browser image variant** (built `WITH_BROWSER=1`, e.g.
+`make build-browser`). On that image the `chrome-devtools` MCP is registered
+**automatically** — no `--browser` flag needed (the entrypoint auto-detects the
+baked Chromium; `--browser` / `CLAUDE_BROWSER=1` only *forces* it, and
+`--no-browser` / `CLAUDE_BROWSER=0` opts out). If no `chrome-devtools` / browser
+tools are available, this is the lean image or someone opted out: say so plainly
+instead of guessing — the session needs relaunching on a `make build-browser`
+image.
 
 ## Mental model
 

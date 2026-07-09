@@ -10,9 +10,11 @@
 #                              haiku, opusplan, default) or a full id like
 #                              claude-opus-4-8. 'default' = Claude Code's own pick.
 #   --mcp <name>               enable only these baked-in MCP servers (repeatable)
-#   --browser                  enable the chrome-devtools MCP for frontend debugging
-#                              (requires an image built with WITH_BROWSER=1, i.e.
-#                              `make build-browser`)
+#   --browser                  force-enable the chrome-devtools MCP for frontend
+#                              debugging (requires a browser image built with
+#                              WITH_BROWSER=1, i.e. `make build-browser`; a browser
+#                              image auto-enables it even without this flag)
+#   --no-browser               opt out of the chrome-devtools MCP on a browser image
 #   --extra-args "<args>"      extra args passed to claude via CLAUDE_EXTRA_ARGS
 #   --expose <h:c>             publish an extra host:container port (repeatable)
 #   --dev-cmd <command>        auto-start a dev server on boot in a tmux 'dev' window
@@ -23,7 +25,7 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
 # EXTRA/MCP_LIST/DEVCMD/MKTS/PLUGINS default from .env (sourced by _common.sh);
@@ -34,7 +36,12 @@ MKTS="${CLAUDE_EXTRA_MARKETPLACES:-}" PLUGINS="${CLAUDE_EXTRA_PLUGINS:-}"
 # Empty here means "unset" — the container's entrypoint then defaults it to opus
 # (best available). A value from .env/env seeds the default; --model overrides.
 MODEL="${CLAUDE_MODEL:-}"
-EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER=0
+# BROWSER is TRI-STATE: "" = auto (a browser image auto-enables the MCP; a lean
+# image stays off), 1 = force on, 0 = explicit opt-out. Left empty here, the `-e
+# CLAUDE_BROWSER` flag is omitted below so a browser image can self-detect.
+# BROWSER_EXPLICIT tracks a per-launch --browser/--no-browser CLI flag (vs an
+# ambient .env default) so only an explicit --browser hard-fails on a lean image.
+EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER="" BROWSER_EXPLICIT=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --repo)        REPO="$2"; OPTS_GIVEN=1; shift 2 ;;
@@ -44,7 +51,8 @@ while [[ $# -gt 0 ]]; do
         --port)        PORT="$2"; OPTS_GIVEN=1; shift 2 ;;
         --model)       MODEL="$2"; OPTS_GIVEN=1; shift 2 ;;
         --mcp)         MCP_LIST="${MCP_LIST:+$MCP_LIST,}$2"; OPTS_GIVEN=1; shift 2 ;;
-        --browser)     BROWSER=1; OPTS_GIVEN=1; shift ;;
+        --browser)     BROWSER=1; BROWSER_EXPLICIT=1; OPTS_GIVEN=1; shift ;;
+        --no-browser)  BROWSER=0; BROWSER_EXPLICIT=1; OPTS_GIVEN=1; shift ;;
         --extra-args)  EXTRA="$2"; OPTS_GIVEN=1; shift 2 ;;
         --expose)      EXPOSE_RAW+=("$2"); OPTS_GIVEN=1; shift 2 ;;
         --dev-cmd)     DEVCMD="$2"; OPTS_GIVEN=1; shift 2 ;;
@@ -56,8 +64,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# --browser is also settable via CLAUDE_BROWSER=1 in .env / the host env.
-case "${CLAUDE_BROWSER:-0}" in 1|true|yes|on) BROWSER=1 ;; esac
+# --browser / --no-browser can also be set via CLAUDE_BROWSER in .env / the host
+# env — a CLI flag wins; env is the fallback; unset leaves auto-detect to the
+# image's entrypoint (a browser image self-enables the MCP). Normalize the env
+# value (strip whitespace / a CRLF `\r`, lowercase) so a Windows-authored .env
+# still matches.
+if [[ -z "$BROWSER" ]]; then
+    case "$(printf '%s' "${CLAUDE_BROWSER:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on)  BROWSER=1 ;;
+        0|false|no|off) BROWSER=0 ;;
+    esac
+fi
 [[ -n "$PROJECT" ]] || usage 1
 [[ -n "$REPO" && -n "$WS_PATH" ]] && die "--repo and --workspace are mutually exclusive"
 
@@ -100,15 +117,28 @@ fi
 
 # Absent -> create it.
 ensure_image
-# Pre-flight: --browser only works against an image baked with WITH_BROWSER=1
-# (label set by the Dockerfile). Warn early so the failure shows here, not 30s
-# later inside the container with a vague "MCP not registered" line.
+# Pre-flight: force-on (BROWSER=1) needs an image baked with WITH_BROWSER=1 (the
+# Dockerfile's `claude.browser` label). An EXPLICIT per-launch --browser against a
+# lean image fails LOUD and early — a requested-but-impossible browser session is
+# an error, not a silent no-op that surfaces 30s later as a buried log line. An
+# AMBIENT default (CLAUDE_BROWSER=1 in .env) must NOT brick ordinary lean launches:
+# warn and fall back to auto so browser images still self-force while lean ones
+# come up clean. (Auto — BROWSER="" — never trips this: the lean image is normal.)
 if [[ "$BROWSER" == "1" ]]; then
     img_browser="$(docker image inspect -f '{{ index .Config.Labels "claude.browser" }}' "$CLAUDE_IMAGE" 2>/dev/null || true)"
     if [[ "$img_browser" != "1" ]]; then
-        warn "--browser was requested but image '$CLAUDE_IMAGE' was not built with WITH_BROWSER=1."
-        warn "  Rebuild the browser variant:  make build-browser   (or set WITH_BROWSER=1)"
-        warn "  Continuing — chrome-devtools MCP will not register in this container."
+        if [[ "$BROWSER_EXPLICIT" == "1" ]]; then
+            die "--browser was requested, but image '$CLAUDE_IMAGE' was not built with
+       WITH_BROWSER=1 — the chrome-devtools MCP cannot be enabled.
+       Rebuild the browser variant:  make build-browser
+         (or:  make build WITH_BROWSER=1 CLAUDE_IMAGE=<tag>, then set CLAUDE_IMAGE)
+       Or drop --browser to launch the lean image."
+        else
+            warn "CLAUDE_BROWSER=1 is set but image '$CLAUDE_IMAGE' is lean (no WITH_BROWSER=1)."
+            warn "  Launching without the chrome-devtools MCP. Build the browser variant"
+            warn "  (make build-browser) for frontend debugging, or pass --no-browser to silence this."
+            BROWSER=""   # fall back to auto — don't force the entrypoint to error
+        fi
     fi
 fi
 [[ -n "$PORT" ]] || PORT="$(alloc_port)"
@@ -165,6 +195,12 @@ ENV_FILE_ARG=()
 preflight_runc
 read -r -a HARDEN_ARGS <<<"$(harden_run_args)"
 
+# Only pin CLAUDE_BROWSER when the user forced it on/off; in auto mode leave it
+# unset so a browser image self-enables the MCP (and any .env value flows through
+# --env-file rather than being clobbered with an empty -e).
+BROWSER_ENV=()
+[[ -n "$BROWSER" ]] && BROWSER_ENV=(-e CLAUDE_BROWSER="$BROWSER")
+
 info "Creating container '$CN' (SSH host port $PORT)…"
 docker run -d \
     --name "$CN" \
@@ -184,7 +220,7 @@ docker run -d \
     -e CLAUDE_EXTRA_ARGS="$EXTRA" \
     -e CLAUDE_MCP_ENABLED="$MCP_LIST" \
     -e CLAUDE_DEV_CMD="$DEVCMD" \
-    -e CLAUDE_BROWSER="$BROWSER" \
+    "${BROWSER_ENV[@]}" \
     -e CLAUDE_EXTRA_MARKETPLACES="$MKTS" \
     -e CLAUDE_EXTRA_PLUGINS="$PLUGINS" \
     -e CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}" \
@@ -231,5 +267,9 @@ fi
 info "Model: ${MODEL:-opus (best available — container default)}"
 [[ -n "$DEVCMD" ]] && \
     info "Dev server auto-starts on boot in tmux window 'dev' (claude-attach, then: tmux select-window -t claude:dev)"
-[[ "$BROWSER" == "1" ]] && \
-    info "Frontend debug: chrome-devtools MCP enabled (headless Chromium in-container)"
+# Only announce an explicit choice; in auto mode the entrypoint decides by image
+# (a browser image auto-registers, a lean image stays silent) — no noise here.
+case "$BROWSER" in
+    1) info "Frontend debug: chrome-devtools MCP force-enabled (headless Chromium in-container)" ;;
+    0) info "Frontend debug: chrome-devtools MCP opted out (--no-browser)" ;;
+esac

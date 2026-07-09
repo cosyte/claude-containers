@@ -174,23 +174,38 @@ the dialog, the per-container config volume didn't mount (check
 isn't the path Claude opened. As a one-off, accept it once — it persists in the
 config volume.
 
-## Frontend debugging (`--browser` / `CLAUDE_BROWSER=1`)
+## Frontend debugging (`--browser` / `CLAUDE_BROWSER`)
 
-The `--browser` flag registers the official
+Launching on the **browser image is enough** — the entrypoint auto-detects the
+baked Chromium + `chrome-devtools-mcp` and registers the official
 [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)
-server inside the container, so Claude can navigate, evaluate, screenshot,
-inspect console/network, run Lighthouse, and capture perf/heap traces against
-any frontend the agent runs.
+server inside the container with no second flag, so Claude can navigate,
+evaluate, screenshot, inspect console/network, run Lighthouse, and capture
+perf/heap traces against any frontend the agent runs. `CLAUDE_BROWSER` is
+tri-state: unset = auto (browser image self-enables), `1`/`--browser` = force on,
+`0`/`--no-browser` = opt out.
 
-- **`--browser` warns "image not built with WITH_BROWSER=1".** The default
-  image is lean — Chromium and the MCP are only baked when you opt in. Build
-  the variant:
+- **The MCP isn't registered on a browser image.** Confirm you're actually on
+  the browser variant and that you didn't opt out:
+  ```
+  claude-logs <name> | grep -i "chrome-devtools\|Browser image detected"
+  ssh -p <port> claude@host 'command -v chromium && command -v chrome-devtools-mcp'
+  ```
+  A plain browser-image launch logs `Browser image detected … auto-registering`
+  then `Registered MCP server 'chrome-devtools'`. If you see
+  `chrome-devtools MCP disabled`, something set `CLAUDE_BROWSER=0`/`--no-browser`
+  (check your `.env`). If neither binary is on `PATH`, the image is lean.
+- **`--browser` fails: "image not built with WITH_BROWSER=1".** An explicit
+  `--browser`/`CLAUDE_BROWSER=1` against a lean image now **fails loud** (the
+  launcher refuses before creating the container; the entrypoint logs an `ERROR`)
+  rather than silently doing nothing. Build the variant:
   ```
   make build-browser            # tags claude-code-box:browser
-  CLAUDE_IMAGE=claude-code-box:browser ./bin/claude-launch myproj --browser …
+  CLAUDE_IMAGE=claude-code-box:browser ./bin/claude-launch myproj …
   ```
   Or `make build WITH_BROWSER=1 CLAUDE_IMAGE=mytag` for a custom tag. Set
-  `CLAUDE_IMAGE` in `.env` so every launch uses the browser variant by default.
+  `CLAUDE_IMAGE` in `.env` so every launch uses the browser variant by default
+  (it then auto-enables the MCP on every launch — no `--browser` needed).
 - **The MCP is registered but Chrome won't start in Claude.** Verify the
   binary chain inside the container:
   ```

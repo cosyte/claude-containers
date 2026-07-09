@@ -87,9 +87,12 @@ The default image stays lean. A `WITH_BROWSER=1` build arg
 (`make build-browser`, tag `claude-code-box:browser`) bakes Debian's headless
 **Chromium** (multi-arch) and the official
 [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)
-server — adding ~200 MB. At runtime, `claude-launch --browser` (or
-`CLAUDE_BROWSER=1`, or `claude-compose-gen --browser REPO`) registers the MCP
-in that session, so Claude gets the full Chrome DevTools Protocol surface
+server — adding ~200 MB. At runtime, **launching on the browser image is
+sufficient**: the entrypoint auto-detects the baked binaries and registers the
+MCP by default (`CLAUDE_BROWSER` is tri-state — unset = auto, `1`/`--browser` =
+force on and fail loud on a lean image, `0`/`--no-browser` = opt out;
+`claude-compose-gen --browser REPO` selects the image and forces it on). So
+Claude gets the full Chrome DevTools Protocol surface
 (navigate / evaluate / console / network / Lighthouse / perf trace / heap
 snapshots / screenshots — 55+ tools) against any frontend the agent runs in
 `/workspace`. Headless-only inside the container; the agent reads pages back
@@ -101,8 +104,10 @@ wrapper: it composes with the stack's existing MCP discipline — declarative,
 secret-free (the MCP needs none), removable per session. Why Chromium over
 `@puppeteer/browsers install chrome` at build time: Debian's package is
 multi-arch with one apt line, vs Puppeteer's per-arch binary download +
-runtime-managed cache. The launcher checks the image's `claude.browser`
-LABEL and warns early if `--browser` is requested against the lean image.
+runtime-managed cache. The launcher reads the image's `claude.browser` LABEL to
+fail loud + early if `--browser` is requested against the lean image; the
+in-container entrypoint can't read its own image labels, so it auto-detects the
+variant by probing the baked binaries on `PATH`.
 Chrome is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
 (required in unprivileged Docker; Chrome's user-namespace sandbox conflicts
 with the default seccomp).

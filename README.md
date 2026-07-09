@@ -180,7 +180,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_EXTRA_ARGS` | — | Extra args to `claude` (or `--extra-args`) |
 | `CLAUDE_MCP_ENABLED` | — | CSV of baked MCP servers to load (empty = all) |
 | `WITH_BROWSER` | `0` | Build arg: 1 bakes Chromium + chrome-devtools-mcp (+~200 MB). `make build-browser` flips it. |
-| `CLAUDE_BROWSER` | `0` | Enable the chrome-devtools MCP for frontend debugging in this container (also `--browser`). Requires a browser-built image. |
+| `CLAUDE_BROWSER` | auto | Tri-state for the chrome-devtools MCP: unset = auto (a browser image self-enables it), `1`/`--browser` = force on (fails loud on a lean image), `0`/`--no-browser` = opt out. |
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` | — | Clone source (or use `--repo`/`--branch`/`--depth`) |
 | `GIT_AUTHOR_NAME`/`_EMAIL` (+`COMMITTER`) | host git config | Commit identity |
 | `GIT_SSH_KEY` | `~/.ssh/claude-git-key` | Host SSH key for git, mounted read-only |
@@ -224,7 +224,7 @@ holds `CLAUDE.md`, `mcp/`, `plugins/`, `commands/`, `skills/`. MCP secrets are
 
 ```
 claude-launch <name> [--repo URL | --workspace PATH] [--branch B] [--depth N]
-                      [--port N] [--model NAME] [--mcp NAME ...] [--browser]
+                      [--port N] [--model NAME] [--mcp NAME ...] [--browser|--no-browser]
                       [--extra-args "…"] [--expose H:C ...] [--dev-cmd "…"]
 claude-list                       table of all sessions
 claude-attach <name>              attach to its live tmux session (local host)
@@ -335,16 +335,22 @@ so a repo keeps its port whether active or dormant.
 ## Frontend debugging (optional)
 
 Off by default. When you want Claude to *see and drive* a frontend the agent
-is building, build the image with the browser variant and launch with
-`--browser`:
+is building, build the browser variant — **launching on it is enough**, the
+`chrome-devtools` MCP auto-enables itself with no second flag:
 
 ```bash
 make build-browser                            # tags claude-code-box:browser
 CLAUDE_IMAGE=claude-code-box:browser \
-  ./bin/claude-launch site --workspace ./site --browser
+  ./bin/claude-launch site --workspace ./site
 ```
 
-That registers the official
+The entrypoint detects the baked Chromium + `chrome-devtools-mcp` on startup and
+registers the MCP automatically. `--browser` (or `CLAUDE_BROWSER=1`) still works
+and now *forces* it — on a non-browser image it **fails loud** with a rebuild
+hint instead of silently doing nothing. To run the browser image but keep the
+MCP off, pass `--no-browser` (or `CLAUDE_BROWSER=0`).
+
+Either way you get the official
 [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp)
 inside the container — headless Chromium driven via the Chrome DevTools
 Protocol. The agent now has tools to:
@@ -356,8 +362,9 @@ Protocol. The agent now has tools to:
 - **lighthouse_audit / performance_start_trace** — full perf + a11y audits
 - **take_heapsnapshot** + retainer queries — chase memory leaks
 
-Pair `--browser` with `--dev-cmd` and `--expose` from the compose generator so
-Claude both starts the dev server and debugs against it:
+Pair the browser variant with `--dev-cmd` and `--expose` from the compose
+generator so Claude both starts the dev server and debugs against it (the
+generator's `--browser` selects the browser image and enables the MCP):
 
 ```bash
 ./bin/claude-compose-gen --org ORG --out FILE \
@@ -371,7 +378,7 @@ Cost: ~200 MB image-size delta for the baked Chromium when WITH_BROWSER=1; the
 lean default image is unchanged. Headless-only inside the container; the agent
 reads pages back via screenshots and DOM queries. Full design rationale:
 [docs/architecture.md](docs/architecture.md#decision-frontend-debugging-is-an-opt-in-image-variant);
-runbook: [docs/troubleshooting.md](docs/troubleshooting.md#frontend-debugging-browser--claude_browser1).
+runbook: [docs/troubleshooting.md](docs/troubleshooting.md#frontend-debugging---browser--claude_browser).
 
 ## Troubleshooting (summary)
 
