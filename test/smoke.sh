@@ -19,12 +19,15 @@ CN="claude-smoke-$$"
 OTELCN="claude-smoke-otel-$$"
 EGCN="claude-smoke-egress-$$"
 BRKCN="claude-smoke-broker-$$"
+BRWACN="claude-smoke-browser-auto-$$"
+BRWOCN="claude-smoke-browser-off-$$"
+BRWFCN="claude-smoke-browser-force-$$"
 AUTHVOL="claude-smoke-auth-$$"
 WSVOL="claude-smoke-ws-$$"
 PASS=0 FAIL=0
 
 cleanup() {
-    docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" >/dev/null 2>&1 || true
+    docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" "$BRWACN" "$BRWOCN" "$BRWFCN" >/dev/null 2>&1 || true
     docker volume rm "$AUTHVOL" "$WSVOL" >/dev/null 2>&1 || true
     rm -rf "$TMP"
 }
@@ -324,6 +327,89 @@ check "real ssh-agent socket is root-only (claude cannot reach it directly)" \
 check "shared /auth credential master is locked to root (agent cannot list it)" \
     '[ "$(docker exec "$BRKCN" stat -c "%A %U" /auth)" = "drwx------ root" ] && ! brk "ls /auth" 2>/dev/null'
 docker rm -f "$BRKCN" >/dev/null 2>&1 || true
+
+echo
+echo "== 16. browser variant: MCP auto-enables, opt-out honored, loud on lean =="
+# The real browser variant (make build-browser) bakes chromium + chrome-devtools-mcp.
+# We don't need the ~200 MB image here: the entrypoint's §10b detection is purely
+# "both binaries on PATH", so mounting two stub executables onto the LEAN image
+# faithfully simulates the baked variant and exercises the auto-register logic in
+# CI. (mcp add-json/get are local-config ops — no OAuth/network — so a stub that
+# is never executed is sufficient; registration stores the config, it never spawns
+# the server here.)
+mkdir -p "$TMP/browserbin"
+printf '#!/bin/sh\necho "Chromium 999.0 (smoke stub)"\n' > "$TMP/browserbin/chromium"
+printf '#!/bin/sh\necho "chrome-devtools-mcp (smoke stub)"\n'  > "$TMP/browserbin/chrome-devtools-mcp"
+chmod +x "$TMP/browserbin/chromium" "$TMP/browserbin/chrome-devtools-mcp"
+STUB_MOUNTS=(
+    -v "$TMP/browserbin/chromium:/usr/local/bin/chromium:ro"
+    -v "$TMP/browserbin/chrome-devtools-mcp:/usr/local/bin/chrome-devtools-mcp:ro"
+)
+mcp_get() { docker exec "$1" gosu claude env CLAUDE_CONFIG_DIR=/home/claude/.claude HOME=/home/claude claude mcp get chrome-devtools >/dev/null 2>&1; }
+wait_tmux() { for _ in $(seq 1 60); do docker logs "$1" 2>&1 | grep -q "started in tmux" && return 0; sleep 1; done; return 1; }
+# Is $IMAGE itself the browser variant? (make build-browser sets claude.browser=1.)
+# 16c/16d assert LEAN-image behavior, so they're skipped on a real browser image
+# where the baked binaries would legitimately change the outcome.
+IMG_IS_BROWSER="$(docker image inspect -f '{{ index .Config.Labels "claude.browser" }}' "$IMAGE" 2>/dev/null || echo 0)"
+
+# --- 16a. AUTO: browser image, no CLAUDE_BROWSER flag -> self-registers -------
+docker run -d --name "$BRWACN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=browserauto \
+    "${STUB_MOUNTS[@]}" -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+wait_tmux "$BRWACN" || true
+check "browser image auto-detected (no second flag needed)" \
+    'docker logs "$BRWACN" 2>&1 | grep -qi "Browser image detected.*auto-registering"'
+check "chrome-devtools MCP registered on a plain browser-image launch" \
+    'docker logs "$BRWACN" 2>&1 | grep -q "Registered MCP server .chrome-devtools."'
+# Proves the MCP is REGISTERED + discoverable in config (what frontend-debugging
+# reads to see the tools) — not that the server spawns. The stub is never
+# executed and the config's --executablePath (/usr/bin/chromium) only exists on
+# the real make-build-browser image; a live-server check belongs to the manual
+# on-host run, not this stubbed CI simulation.
+check "claude mcp get chrome-devtools succeeds (registered + discoverable in config)" \
+    'mcp_get "$BRWACN"'
+docker rm -f "$BRWACN" >/dev/null 2>&1 || true
+
+# --- 16b. OPT-OUT: browser image + CLAUDE_BROWSER=0 -> not registered ---------
+docker run -d --name "$BRWOCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=browseroff \
+    -e CLAUDE_BROWSER=0 "${STUB_MOUNTS[@]}" -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+wait_tmux "$BRWOCN" || true
+check "explicit opt-out (CLAUDE_BROWSER=0) is honored on a browser image" \
+    'docker logs "$BRWOCN" 2>&1 | grep -qi "chrome-devtools MCP disabled"'
+check "opt-out leaves the chrome-devtools MCP unregistered" \
+    '! mcp_get "$BRWOCN"'
+docker rm -f "$BRWOCN" >/dev/null 2>&1 || true
+
+# --- 16c. FORCE on a LEAN image (no stubs) -> loud, actionable, no silent op --
+# Only meaningful on a lean image: on the real browser variant the baked binaries
+# make the force succeed (correctly), so skip rather than false-fail.
+if [ "$IMG_IS_BROWSER" = "1" ]; then
+    echo "  SKIP  16c force-on-lean checks (\$IMAGE is the browser variant, not lean)"
+else
+    docker run -d --name "$BRWFCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=browserforce \
+        -e CLAUDE_BROWSER=1 -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+    wait_tmux "$BRWFCN" || true
+    check "CLAUDE_BROWSER=1 on a non-browser image fails LOUD (ERROR, not a buried warn)" \
+        'docker logs "$BRWFCN" 2>&1 | grep -q "ERROR: CLAUDE_BROWSER=1"'
+    check "the loud failure is actionable (names the rebuild command)" \
+        'docker logs "$BRWFCN" 2>&1 | grep -q "make build-browser"'
+    check "no MCP is registered when the request cannot be satisfied (no silent op)" \
+        '! mcp_get "$BRWFCN"'
+    docker rm -f "$BRWFCN" >/dev/null 2>&1 || true
+fi
+
+# --- 16d. DEFAULT path: LEAN image, CLAUDE_BROWSER unset -> silent, no register
+# The most common real-world launch. Reuse the §4 lean container ($CN): no stubs,
+# no CLAUDE_BROWSER -> §10b's auto branch must find no binaries and do nothing
+# (no registration, no "Browser image detected" log). Skip on a browser image,
+# where unset correctly auto-registers.
+if [ "$IMG_IS_BROWSER" = "1" ]; then
+    echo "  SKIP  16d lean-default checks (\$IMAGE is the browser variant, not lean)"
+else
+    check "lean image + unset CLAUDE_BROWSER registers nothing (silent default)" \
+        '! mcp_get "$CN"'
+    check "lean image emits no false 'Browser image detected' log" \
+        '! docker logs "$CN" 2>&1 | grep -qi "Browser image detected"'
+fi
 
 echo
 echo "==============================================="

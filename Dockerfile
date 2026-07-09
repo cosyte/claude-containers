@@ -82,11 +82,14 @@ ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
 
 # --- Optional: headless Chromium + chrome-devtools-mcp (frontend debugging) --
 # Build with `--build-arg WITH_BROWSER=1` (or `make build-browser`) to bake a
-# headless Chromium and the official Chrome DevTools MCP server, so a session
-# launched with `--browser` / `CLAUDE_BROWSER=1` can drive, inspect, and debug
-# any frontend (navigate, evaluate, console, network, Lighthouse, screenshots,
-# perf traces, heap snapshots — 55+ tools). Default is OFF: the lean image is
-# unchanged unless you opt in. ~200 MB delta when on.
+# headless Chromium and the official Chrome DevTools MCP server. A session on
+# this variant AUTO-ENABLES the chrome-devtools MCP — no second flag needed:
+# the entrypoint (§10b) detects the baked binaries on PATH and registers it, so
+# the agent can drive, inspect, and debug any frontend (navigate, evaluate,
+# console, network, Lighthouse, screenshots, perf traces, heap snapshots — 55+
+# tools). `CLAUDE_BROWSER=1`/`--browser` still force it (and fail loud on a lean
+# image); `CLAUDE_BROWSER=0`/`--no-browser` opts out. Default is OFF: the lean
+# image is unchanged unless you opt in. ~200 MB delta when on.
 ARG WITH_BROWSER=0
 # Pin to the latest verified release. Bump via the build arg.
 ARG CHROME_DEVTOOLS_MCP_VERSION=0.7.0
@@ -107,8 +110,10 @@ RUN set -eux; \
     else \
         echo "WITH_BROWSER=0 — skipping Chromium + chrome-devtools-mcp"; \
     fi
-# Image-capability label: bin/claude-launch checks this to warn early if
-# --browser is requested against a non-browser image.
+# Image-capability label: bin/claude-launch reads this to fail early (loud,
+# actionable) if --browser is requested against a non-browser image. (The
+# in-container entrypoint can't read its own image labels, so it auto-detects
+# the variant by probing the baked binaries on PATH instead.)
 LABEL claude.browser="${WITH_BROWSER}"
 
 # --- Non-root user ------------------------------------------------------------
