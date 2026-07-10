@@ -1,5 +1,8 @@
 # Local config / secrets — never commit
 .env
+# Real scenario files live with the deployed compose (outside this repo); if one
+# is dropped here, keep it out of git. The tracked template is *.conf.example.
+scenarios/*.conf
 
 # Build / runtime artifacts
 *.log

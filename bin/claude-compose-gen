@@ -8,6 +8,19 @@
 #                       are passed as arguments)
 #     --out <file>      output compose path (required; must be OUTSIDE this
 #                       repo — e.g. a deploy dir like /srv/claude/compose.yml)
+#     --scenario <file> read generator flags from a scenario .conf: one
+#                       "--flag value" per line, # comments and blank lines
+#                       skipped; the value is the literal rest-of-line (no
+#                       quoting, even for spaces/;/$). Its flags apply first;
+#                       CLI flags after --scenario override/append. A bare name
+#                       resolves under CLAUDE_SCENARIOS_DIR; otherwise pass a
+#                       path. Keep .conf files with your compose (deployment
+#                       config), outside this repo.
+#     --env-file <file> source this env ON TOP of the repo .env at generation
+#                       time (SSH_PORT_RANGE, image, resources...). Point it at
+#                       the SAME .env that sits beside --out so docker compose
+#                       auto-loads it at `up` too — that is how each stack gets
+#                       its own GH_TOKEN. A CLI --env-file beats a .conf's.
 #     --port-base <n>   first SSH host port (default: SSH_PORT_RANGE_START)
 #     --include <glob>  only repos whose name matches (repeatable)
 #     --exclude <glob>  skip repos whose name matches (repeatable)
@@ -15,6 +28,10 @@
 #                       lists ok). All OTHER repos are still defined but put
 #                       behind a Compose profile so a plain `up -d` does not
 #                       start them (zero resources until asked). Default: all.
+#     --all-dormant     put EVERY service behind the dormant profile (a plain
+#                       `up -d` starts nothing; bring services up on demand).
+#                       The opposite pole of the default; mutually exclusive
+#                       with naming --active repos.
 #     --dormant-profile <name>  profile name for non-active repos (default:
 #                       dormant)
 #     --expose <map>    publish an extra container port for a repo, e.g. a dev
@@ -58,17 +75,89 @@
 # With explicit repo args, gh is not called (use NAME or NAME:BRANCH).
 # Otherwise `gh repo list <org>` is used and must be authenticated.
 set -euo pipefail
+
+# --- Pre-scan for --scenario / --env-file (BEFORE sourcing _common.sh) --------
+# _common.sh sources the base .env and (if CLAUDE_ENV_FILE is set) layers a
+# scenario env on top — so we must resolve the scenario .conf and the effective
+# env file HERE, before that source. die()/colours aren't defined yet, so any
+# error fails inline. The real "$@" is only READ (never shifted); the scenario
+# flags are prepended to it after _common.sh is loaded.
+_prescan_fail() { printf 'claude-compose-gen: %s\n' "$1" >&2; exit 1; }
+SCENARIO_ARGS=()
+_scenario="" _cli_env_file="" _conf_env_file="" _want=""
+for _a in "$@"; do
+    case "$_want" in
+        scenario) _scenario="$_a"; _want=""; continue ;;
+        envfile)  _cli_env_file="$_a"; _want=""; continue ;;
+    esac
+    case "$_a" in
+        --scenario) _want="scenario" ;;
+        --env-file) _want="envfile"  ;;
+    esac
+done
+[[ "$_want" == scenario ]] && _prescan_fail "--scenario requires a file (name or path)"
+[[ "$_want" == envfile  ]] && _prescan_fail "--env-file requires a path"
+
+if [[ -n "$_scenario" ]]; then
+    # A path (has a /, ends in .conf, or exists as given) is used verbatim; a
+    # bare name resolves under CLAUDE_SCENARIOS_DIR. No host path is baked into
+    # this shared tool, so a bare name with no CLAUDE_SCENARIOS_DIR is an error.
+    if [[ "$_scenario" == */* || "$_scenario" == *.conf || -f "$_scenario" ]]; then
+        _conf="$_scenario"
+    elif [[ -n "${CLAUDE_SCENARIOS_DIR:-}" ]]; then
+        _conf="${CLAUDE_SCENARIOS_DIR%/}/${_scenario}.conf"
+    else
+        _prescan_fail "--scenario '$_scenario' is a bare name but CLAUDE_SCENARIOS_DIR is unset — pass a path to the .conf, or export CLAUDE_SCENARIOS_DIR"
+    fi
+    [[ -f "$_conf" ]] || _prescan_fail "scenario file not found: $_conf"
+    # Expand the .conf into SCENARIO_ARGS: one "--flag [value]" per line. The
+    # value is the LITERAL rest-of-line after the first whitespace token, so a
+    # value with spaces / ; / $ / = needs no quoting. Full-line # comments and
+    # blank lines are skipped; an inline # is NEVER stripped (URLs contain it).
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+        [[ "$_line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${_line//[[:space:]]/}" ]] && continue
+        _flag="${_line%%[[:space:]]*}"
+        _rest="${_line#"$_flag"}"
+        _rest="${_rest#"${_rest%%[![:space:]]*}"}"   # left-trim spaces AND tabs
+        SCENARIO_ARGS+=("$_flag")
+        [[ -n "$_rest" ]] && SCENARIO_ARGS+=("$_rest")
+    done < "$_conf"
+    # An --env-file inside the .conf sets the scenario env (a CLI --env-file
+    # overrides it, resolved below).
+    if ((${#SCENARIO_ARGS[@]})); then
+        _want=""
+        for _a in "${SCENARIO_ARGS[@]}"; do
+            case "$_want" in envfile) _conf_env_file="$_a"; _want=""; continue ;; esac
+            [[ "$_a" == --env-file ]] && _want="envfile"
+        done
+    fi
+fi
+
+# Effective env file: a CLI --env-file wins over the .conf's. Export it so
+# _common.sh layers it on top of the base .env.
+_env_file="${_cli_env_file:-$_conf_env_file}"
+if [[ -n "$_env_file" ]]; then
+    [[ -f "$_env_file" ]] || _prescan_fail "--env-file '$_env_file' does not exist"
+    export CLAUDE_ENV_FILE="$_env_file"
+fi
+
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,76p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG=""
 OUT=""
 PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
-WANT_FORKS=0 WANT_ARCHIVED=0
+WANT_FORKS=0 WANT_ARCHIVED=0 ALL_DORMANT=0
 DORMANT_PROFILE="dormant"
 INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=()
+# Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
+# follow so they override scalars (--out/--org/--port-base) and append to
+# repeatables (--active/--expose/…). --scenario/--env-file were consumed in the
+# pre-scan but stay in the stream; the loop treats them as no-ops.
+if ((${#SCENARIO_ARGS[@]})); then set -- "${SCENARIO_ARGS[@]}" "$@"; fi
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --org)             ORG="$2"; shift 2 ;;
@@ -88,7 +177,10 @@ while [[ $# -gt 0 ]]; do
         --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
         --forks)           WANT_FORKS=1; shift ;;
         --archived)        WANT_ARCHIVED=1; shift ;;
+        --all-dormant)     ALL_DORMANT=1; shift ;;
         --limit)           LIMIT="$2"; shift 2 ;;
+        --scenario)        shift 2 ;;   # consumed in the pre-scan above
+        --env-file)        shift 2 ;;   # consumed in the pre-scan above
         -h|--help)         usage 0 ;;
         -*)                die "unknown option: $1 (try --help)" ;;
         *)                 REPO_ARGS+=("$1"); shift ;;
@@ -104,9 +196,13 @@ if [[ ${#REPO_ARGS[@]} -eq 0 && -z "$ORG" ]]; then
 fi
 
 # Active set: sanitized service names that start by default. Empty = all
-# active (no profiles emitted — backward compatible).
+# active (no profiles emitted — backward compatible). --all-dormant forces
+# the opposite pole: EVERY service behind the dormant profile (so a plain
+# `up -d` starts nothing and you bring services up on demand) — the faithful
+# default for a stack whose services are all dormant today.
 declare -A ACTIVE=()
 HAVE_ACTIVE=0
+[[ "$ALL_DORMANT" == 1 ]] && HAVE_ACTIVE=1
 for tok in "${ACTIVE_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
     for one in $(echo "$tok" | tr ',' ' '); do
@@ -292,6 +388,14 @@ if [[ -f "$OUT" ]]; then
             p=$0; gsub(/[^0-9]/,"",p); if(s!=""){print s"\t"p; s=""} }
     ' "$OUT")
 fi
+# Also reserve ports already bound by ANY claude.managed container host-wide
+# (other stacks + standalone launches like `super`), so a new repo in THIS
+# stack never collides across stacks. Additive to the same-file readback above;
+# SVCPORT (stable per-repo ports) is untouched. Fails safe if docker is
+# unreachable — ports_used_by_claude ends in `|| true` and prints nothing.
+while IFS= read -r pport; do
+    [[ "$pport" =~ ^[0-9]+$ ]] && USEDPORT[$pport]=1
+done < <(ports_used_by_claude)
 # next_port marks USEDPORT and reports the chosen port in the global NEXT_PORT.
 # It must NOT be called via $(...) — a command-substitution subshell would
 # discard the USEDPORT updates, so every new repo would get the same port.
@@ -383,6 +487,11 @@ for row in "${FINAL[@]}"; do
     shm_size: ${CLAUDE_SHM_SIZE}
     cpus: ${svc_cpu}
     mem_limit: ${svc_mem}
+    # memswap_limit == mem_limit disables container swap (cgroup memory.swap.max=0):
+    # a runaway session OOM-kills inside its OWN cgroup instead of thrashing host
+    # swap. Host swap lives on a ZFS zvol (rpool/swap) on an HDD mirror; letting a
+    # container swap there deadlocked the whole box on 2026-07-09. Keep these equal.
+    memswap_limit: ${svc_mem}
     mem_reservation: ${svc_res}
     pids_limit: ${CLAUDE_PIDS_LIMIT}
     stop_grace_period: ${CLAUDE_STOP_TIMEOUT}s
@@ -391,6 +500,15 @@ for row in "${FINAL[@]}"; do
     ports:
       - "${BIND_PREFIX}${port}:22"
 EOF
+    # Extra published ports (dev servers) belong to the ports: list — emit them
+    # HERE, right after the SSH port. Emitting them after cap_add (as an earlier
+    # version did) made YAML attach them to the cap_add list, so the mapping was
+    # silently parsed as a bogus capability instead of a published port.
+    if [[ -n "${EXPOSE[$svc]:-}" ]]; then
+        while IFS= read -r m; do
+            [[ -n "$m" ]] && echo "      - \"${m}\""
+        done <<<"${EXPOSE[$svc]}"
+    fi
     # Escape hardening (mirrors claude-launch via _common.sh): no-new-privileges
     # always; drop ALL caps + re-add the minimal set unless CLAUDE_HARDEN_CAPS=0;
     # add NET_ADMIN when the egress firewall is enabled.
@@ -406,11 +524,6 @@ EOF
     if [[ -n "${_caps// }" ]]; then
         echo "    cap_add:"
         for c in $_caps; do echo "      - $c"; done
-    fi
-    if [[ -n "${EXPOSE[$svc]:-}" ]]; then
-        while IFS= read -r m; do
-            [[ -n "$m" ]] && echo "      - \"${m}\""
-        done <<<"${EXPOSE[$svc]}"
     fi
     cat <<EOF
     environment:
@@ -501,6 +614,7 @@ else
     n_active=${#FINAL[@]}
 fi
 ok "Wrote $OUT  (${#FINAL[@]} services, ${n_active} start by default)"
+[[ -n "${CLAUDE_ENV_FILE:-}" ]] && info "env layered from: $CLAUDE_ENV_FILE (on top of the base .env)"
 for r in "${FINAL[@]}"; do
     IFS=$'\t' read -r s nm _ <<<"$r"
     if [[ $HAVE_ACTIVE -eq 1 && -z "${ACTIVE[$s]:-}" ]]; then mark="dormant (${DORMANT_PROFILE})"; else mark="ACTIVE"; fi

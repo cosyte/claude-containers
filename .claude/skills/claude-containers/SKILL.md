@@ -86,7 +86,8 @@ small descriptive commits as you change things.
 | `bin/_common.sh` | Shared lib: `.env` load, defaults, `sanitize`, volume names, `alloc_port` (2200–2299, skips used), state checks, `print_connect`. |
 | `bin/claude-launch` | Create/start a container; auto port; labels carry metadata; surfaces a fast-failing entrypoint. `--expose H:C` / `--dev-cmd` publish + auto-start a dev server; `--browser` enables the chrome-devtools MCP for frontend debugging (needs a WITH_BROWSER=1 image). |
 | `bin/claude-list/attach/stop/rm/logs` | Manage containers. `claude-attach` opens the live tmux session via `docker exec` (local, no SSH key). `claude-rm --purge` also deletes the per-project volumes. |
-| `bin/claude-compose-gen` | Generate a multi-service `docker-compose.yml` (one session per repo in a GitHub org via `gh`, or explicit `repo[:branch]` args). Stable ports, shared+per-repo volumes, `claude.managed` labels so `claude-list` sees them. |
+| `bin/claude-compose-gen` | Generate a multi-service `docker-compose.yml` (one session per repo in a GitHub org via `gh`, or explicit `repo[:branch]` args). Stable ports (reserves ports used by any `claude.managed` container host-wide), shared+per-repo volumes, `claude.managed` labels so `claude-list` sees them. `--scenario <file>` reads a persisted `.conf` of flags; `--env-file <file>` layers a per-stack env for multi-stack hosts. |
+| `scenarios/example.conf.example` | Documented template for a `--scenario` `.conf` (persisted generator flags). Real scenario files live with the compose, outside this repo. |
 | `bash_profile` | Interactive SSH → `exec tmux attach -t claude`; non-interactive SSH untouched. |
 | `sshd_config` | Pubkey-only, no root, `AllowUsers claude`, persistent host keys. |
 | `claude-config/` | Bake-in template: `CLAUDE.md`, `mcp/` (`.json.example` = inactive), `plugins/plugins.json`, `commands/*.md`, `skills/<name>/SKILL.md`. |
@@ -150,6 +151,7 @@ name (= project name; green dot when online). `bin/` on `PATH` drops `./bin/`.
 ./bin/claude-compose-gen --org ORG --out FILE --active repo-a --active repo-b,repo-c
 ./bin/claude-compose-gen --out FILE repo-a repo-b:branch    # explicit, no gh
 ./bin/claude-compose-gen --org ORG --out FILE --active site --expose site:4321:4321
+./bin/claude-compose-gen --scenario /path/stack.conf        # persisted flags (see below)
 docker compose -f FILE up -d                       # active only
 docker compose -f FILE --profile dormant up -d     # all
 docker compose -f FILE up -d <repo>                # one on demand / add a new repo
@@ -183,6 +185,40 @@ or an org-scoped one). Containers still clone over the mounted SSH git key at
 runtime, so API access is only needed for *enumeration*. Prerequisites the
 generator warns about: `make build`, `make login`, `~/.ssh/authorized_keys`,
 `~/.ssh/claude-git-key` (deploy key with org access).
+
+**Scenarios + multiple stacks (per-stack env files)**
+```
+./bin/claude-compose-gen --scenario /opt/homelab/claude/cosyte/cosyte.conf
+./bin/claude-compose-gen --scenario /opt/homelab/claude/personal/personal.conf
+```
+A **scenario `.conf`** is the generator's own flags PERSISTED — one
+`--flag [value]` per line, `#` comments, blank lines skipped; the value is the
+literal rest-of-line so spaces/`;`/`$`/`=` need no quoting (see
+`scenarios/example.conf.example`). This fixes the old foot-gun that per-repo
+flags lived only on the CLI and got silently dropped on regen. Flags in the file
+apply first; CLI flags after `--scenario` override a scalar or append to a
+repeatable (`--scenario cosyte.conf --active newrepo`). `--scenario` takes a
+path; a bare name resolves under `CLAUDE_SCENARIOS_DIR`. Scenario files are
+deployment config — keep them **with the compose, outside this repo**.
+
+To run **two independent stacks on one host** (e.g. a `cosyte/*` org stack and a
+`NSchatz/*` personal stack), give each its own dir + `.conf` + `.env`:
+```
+/opt/homelab/claude/cosyte/{cosyte.conf,.env,docker-compose.yml}    # ports 2200-2249
+/opt/homelab/claude/personal/{personal.conf,.env,docker-compose.yml} # ports 2250-2299
+docker compose -f /opt/homelab/claude/cosyte/docker-compose.yml up -d
+docker compose -f /opt/homelab/claude/personal/docker-compose.yml up -d
+```
+`--env-file <path>` (usually set inside the `.conf`) is sourced ON TOP of the
+repo `.env` at generation time (SSH port range, image, resources), and — because
+it sits **beside `--out`** — `docker compose` auto-loads the SAME file at `up`,
+which is how each stack gets its own `GH_TOKEN`. Keep the base `.env` for shared
+settings; the per-stack `.env` holds only what differs (`GH_TOKEN`, a disjoint
+`SSH_PORT_RANGE_*`, optional image/model/resource overrides). Precedence:
+ambient env < base `.env` < `CLAUDE_ENV_FILE` < CLI. The generator also reserves
+ports held by **any** `claude.managed` container host-wide (other stacks + a
+standalone `super`), so a new repo never collides across stacks; disjoint ranges
+are still the primary guard.
 
 **Multi-arch / publish:** `make build-all` (no local load) or
 `make push` (set `CLAUDE_IMAGE` to a registry ref first).

@@ -8,11 +8,31 @@ while [[ -h "$_src" ]]; do _src="$(readlink "$_src")"; done
 CLAUDE_DOCKER_ROOT="$(cd "$(dirname "$_src")/.." && pwd)"
 export CLAUDE_DOCKER_ROOT
 
-# --- Load .env defaults (real env still wins) --------------------------------
+# --- Load env: base .env, then an optional scenario override layer -----------
+# Precedence (weakest first): ambient env < base .env < CLAUDE_ENV_FILE < CLI.
+# (`set -a; source` means a bare VAR= in .env overrides the ambient env, so the
+# old "real env still wins" comment was inaccurate — ambient is the weakest.)
+# The scenario override is loaded HERE, before the defaults/derivations below,
+# so a scenario that overrides e.g. CLAUDE_MEM_LIMIT also drives the derived
+# CLAUDE_MEM_RESERVATION. die() isn't defined yet, so this fails closed inline.
 if [[ -f "$CLAUDE_DOCKER_ROOT/.env" ]]; then
     set -a
     # shellcheck disable=SC1091
     source "$CLAUDE_DOCKER_ROOT/.env"
+    set +a
+fi
+# CLAUDE_ENV_FILE points at a per-scenario/per-stack env file (set by
+# claude-compose-gen's --scenario/--env-file). Values here win over the base
+# .env. A set-but-missing path is a hard error (fail closed) — an explicitly
+# named env file must never be silently ignored.
+if [[ -n "${CLAUDE_ENV_FILE:-}" ]]; then
+    [[ -f "$CLAUDE_ENV_FILE" ]] || {
+        echo "claude: CLAUDE_ENV_FILE='$CLAUDE_ENV_FILE' does not exist — refusing (fail closed)" >&2
+        exit 1
+    }
+    set -a
+    # shellcheck disable=SC1091
+    source "$CLAUDE_ENV_FILE"
     set +a
 fi
 
@@ -417,6 +437,14 @@ host_port_free() {  # 1 if free, 0 if taken
 }
 
 ports_used_by_claude() {
+    # Test seam — UNIT TESTS ONLY: CLAUDE_PORTS_USED_OVERRIDE forces the list
+    # (space/newline-separated; may be empty = "none in use") so cross-stack
+    # port reservation is testable without a live docker. Triggers when SET,
+    # even to empty; inert (real docker) when unset.
+    if [[ -n "${CLAUDE_PORTS_USED_OVERRIDE+set}" ]]; then
+        printf '%s\n' ${CLAUDE_PORTS_USED_OVERRIDE:-} | grep -E '^[0-9]+$' || true
+        return 0
+    fi
     docker ps -a --filter 'label=claude.managed=1' \
         --format '{{.Label "claude.ssh_port"}}' 2>/dev/null | grep -E '^[0-9]+$' || true
 }

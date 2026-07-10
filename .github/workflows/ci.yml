@@ -34,3 +34,5 @@ jobs:
         run: test/controller-unit.sh
       - name: fleet-view unit tests (per-worker spend attribution + host headroom + secret-free fail-safe)
         run: test/fleet-view-unit.sh
+      - name: compose-gen unit tests (scenario .conf expansion + env layering + cross-stack port reservation)
+        run: test/compose-gen-unit.sh
