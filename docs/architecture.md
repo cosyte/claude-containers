@@ -188,6 +188,59 @@ keeps the two floors identical). Verify: `test/broker-unit.sh` (docker-free, CI)
 + `bin/claude-broker-verify` (on-host, 28 checks). The CC-4 worker lifecycle
 replaces the placeholder worker command; the template is the contract it inherits.
 
+## Decision: per-worker observability is read-only + fail-safe (CC-7)
+
+The umbrella's K-ramp decision (raising `CLAUDE_CONTROLLER_MAX_SLOTS` past 1) needs
+real cost/capacity data, not guesses. Three additions, none of which change worker
+behavior on the happy path:
+
+- **OTEL item tag.** `claude-worker-run` prepends `claude.item=<item>,claude.repo=<repo>`
+  to `OTEL_RESOURCE_ATTRIBUTES` before the one `claude -p` call it makes, so any
+  OTEL cost/token telemetry the `claude` binary already emits is attributable to a
+  specific backlog item — an operator-supplied `OTEL_RESOURCE_ATTRIBUTES` is
+  preserved (appended after), never clobbered.
+- **Secret-free spend sidecar.** Alongside the existing `run-<item>-<ts>.json` claude
+  log, `claude-worker-run` now writes `run-<item>-<ts>.meta.json`: exactly
+  `item`/`repo`/`ts`/`total_cost_usd`/`is_error`, nothing else — never the claude JSON
+  body itself (which can carry prompt/PHI-shaped content), never env or credentials.
+  This is the filename-independent source `claude-fleet-view` reads.
+- **`bin/claude-fleet-view`** is the read-only aggregator: it lists active
+  `claude.worker=1` containers (reusing the `claude.item`/`claude.repo` labels the
+  CC-2 broker already sets), joins each to its newest spend sidecar, and reports host
+  cpu/mem/disk headroom against the K-derived `controller_envelope` budget
+  (`bin/_common.sh` — reused, not reinvented). `--json` feeds the umbrella's
+  `scripts/run-log-report.sh --concurrent`.
+
+Fail-safe by construction: every reading (docker, a meta file, `/proc/meminfo`, the
+parallel config) degrades independently to `"unknown"` (`null` in `--json`) rather
+than blocking or erroring the view — a worker's real run is never gated on
+telemetry. One sharp edge worth naming for future maintainers: `bin/_common.sh`'s
+`resolve_parallel_k`/`controller_envelope` fail CLOSED with a hard `exit` (not
+`return`) on a garbage config/profile, which trips a classic bash `-e` gotcha —
+`x="$(cmd || true)"` does **not** absorb an `exit` inside the substitution, only a
+nonzero `return`; the `|| true`/`|| k=""` must sit **outside** the `$(...)` to
+actually degrade that field instead of tearing down the whole view. See
+`fleet_host_headroom` in `bin/claude-fleet-view` for the pattern. The same `exit`
+also fires at **source time**: `_common.sh` derives the memory reservations when it
+is sourced and `die`s on an unparseable `CLAUDE_MEM_LIMIT`/`CLAUDE_WORKER_MEM`
+(e.g. a `4gb` typo) — before any call-site guard runs. `claude-fleet-view` closes this
+two ways before it sources `_common.sh`: (a) it scrubs a malformed size-shaped var from
+the **process environment** (with a stderr note), and (b) because `_common.sh` also
+sources the repo-root **`.env`** internally — which the process scrub can't reach — it
+**pre-seeds the two reservation vars**, and `_common.sh` skips its source-time
+derivation (the only die) whenever the reservation is already set. So a `4gb` typo in
+`.env` degrades instead of exiting too. The launcher/broker source `_common.sh` in their
+OWN process without the seed, so they keep deriving reservations correctly and stay
+fail-closed; this read-only view never launches a container, so a seeded reservation is
+inert here.
+
+One more sharp edge in spend attribution: the sidecar glob `run-<item>-*.meta.json`
+also matches a **dash-suffixed sibling** id (querying `CC-4` matches
+`run-CC-4-RESIDUAL-<ts>.meta.json` — both are real backlog ids). `fleet_worker_spend`
+therefore decomposes each candidate name and accepts it only when the part before the
+final dash-segment equals `<item>` exactly **and** the final segment is a real
+`%Y%m%dT%H%M%SZ` stamp — so a sibling's cost can never be mis-attributed.
+
 ## Acceptance
 
 | # | Criterion | How it's met / verify |

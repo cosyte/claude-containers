@@ -32,3 +32,5 @@ jobs:
         run: test/disk-unit.sh
       - name: controller unit tests (K=1 byte-identical autopilot collapse + K>1 dispatch/lease/drain wiring)
         run: test/controller-unit.sh
+      - name: fleet-view unit tests (per-worker spend attribution + host headroom + secret-free fail-safe)
+        run: test/fleet-view-unit.sh
