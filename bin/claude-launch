@@ -4,6 +4,9 @@
 #   --branch <branch>          branch to check out
 #   --depth <n>                shallow-clone depth
 #   --workspace <path>         bind-mount a local checkout instead of cloning
+#   --image <ref>              container image to run (overrides CLAUDE_IMAGE/.env;
+#                              default claude-code-box:latest). Must exist locally
+#                              — only the default image auto-builds. e.g. …:browser
 #   --port <ssh-port>          explicit host SSH port (default: auto 2200-2299)
 #   --model <name>             model the session uses (default: opus = best
 #                              available). Any Claude Code alias (opus, sonnet,
@@ -25,7 +28,7 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
 # EXTRA/MCP_LIST/DEVCMD/MKTS/PLUGINS default from .env (sourced by _common.sh);
@@ -41,13 +44,14 @@ MODEL="${CLAUDE_MODEL:-}"
 # CLAUDE_BROWSER` flag is omitted below so a browser image can self-detect.
 # BROWSER_EXPLICIT tracks a per-launch --browser/--no-browser CLI flag (vs an
 # ambient .env default) so only an explicit --browser hard-fails on a lean image.
-EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER="" BROWSER_EXPLICIT=0
+EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER="" BROWSER_EXPLICIT=0 IMAGE_EXPLICIT=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --repo)        REPO="$2"; OPTS_GIVEN=1; shift 2 ;;
         --branch)      BRANCH="$2"; OPTS_GIVEN=1; shift 2 ;;
         --depth)       DEPTH="$2"; OPTS_GIVEN=1; shift 2 ;;
         --workspace)   WS_PATH="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --image)       CLAUDE_IMAGE="$2"; IMAGE_EXPLICIT=1; OPTS_GIVEN=1; shift 2 ;;
         --port)        PORT="$2"; OPTS_GIVEN=1; shift 2 ;;
         --model)       MODEL="$2"; OPTS_GIVEN=1; shift 2 ;;
         --mcp)         MCP_LIST="${MCP_LIST:+$MCP_LIST,}$2"; OPTS_GIVEN=1; shift 2 ;;
@@ -115,8 +119,18 @@ if [[ "$state" == "stopped" ]]; then
     exit 0
 fi
 
-# Absent -> create it.
-ensure_image
+# Absent -> create it. An explicit --image must already exist locally: only the
+# default image is auto-built from the local Dockerfile — auto-building an
+# arbitrary ref (a registry image, or a :browser variant) would silently tag the
+# lean build with the wrong name.
+if [[ "$IMAGE_EXPLICIT" == "1" ]]; then
+    info "Image: $CLAUDE_IMAGE (from --image)"
+    docker image inspect "$CLAUDE_IMAGE" >/dev/null 2>&1 || \
+        die "--image '$CLAUDE_IMAGE' not found locally. Build it (e.g. \`make build-browser\`)
+       or \`docker pull\` it first — claude-launch only auto-builds the default image."
+else
+    ensure_image
+fi
 # Pre-flight: force-on (BROWSER=1) needs an image baked with WITH_BROWSER=1 (the
 # Dockerfile's `claude.browser` label). An EXPLICIT per-launch --browser against a
 # lean image fails LOUD and early — a requested-but-impossible browser session is
