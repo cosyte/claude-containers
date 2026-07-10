@@ -171,6 +171,15 @@ worker_run_exec_once() {
     model="$(worker_run_model_flags)"
     local extra="${CLAUDE_EXTRA_ARGS:-}"
 
+    # --- CC-7: OTEL item/repo tag ---------------------------------------------------------
+    # Tags every OTEL resource emitted by this call with the backlog item + repo so
+    # per-call cost/token telemetry (already emitted by the claude binary when OTEL is
+    # configured) is attributable to a specific worker's unit of work. Prepended so an
+    # operator-supplied OTEL_RESOURCE_ATTRIBUTES is preserved, never clobbered.
+    local _ra="claude.item=$item,claude.repo=$repo"
+    [[ -n "${OTEL_RESOURCE_ATTRIBUTES:-}" ]] && _ra="${_ra},${OTEL_RESOURCE_ATTRIBUTES}"
+    export OTEL_RESOURCE_ATTRIBUTES="$_ra"
+
     info "worker-run: item=$item repo=$repo — running EXACTLY ONE /work-on"
     local rc=0
     # shellcheck disable=SC2086  # flag vars are intentionally word-split, mirrors claude-autopilot
@@ -187,6 +196,22 @@ worker_run_exec_once() {
         err "worker-run: item=$item repo=$repo — /work-on FAILED (exit $rc, is_error=$is_error, cost \$$cost). Log: $out"
         [[ "$rc" == 0 ]] && rc=1
     fi
+
+    # --- CC-7: secret-free sidecar meta file -----------------------------------------------
+    # A small, filename-independent, machine-readable record next to $out — the source
+    # bin/claude-fleet-view reads for per-item spend. Only ever item/repo/ts/cost/bool —
+    # never env, tokens, or the claude JSON body itself (which may carry prompt/PHI-shaped
+    # content). Best-effort: a write failure here must never fail the worker's real result.
+    # Harden the numeric/bool fields: claude normally emits a numeric cost + boolean is_error,
+    # but never trust the shape — a non-numeric cost or non-bool is_error would make the sidecar
+    # invalid JSON. Default to a safe 0 / false so the record is always parseable.
+    [[ "$cost" =~ ^[0-9]+(\.[0-9]+)?$ ]] || cost=0
+    case "$is_error" in true|false) ;; *) is_error=false ;; esac
+    local meta="$log_dir/run-$item-$ts.meta.json"
+    printf '{"item":"%s","repo":"%s","ts":"%s","total_cost_usd":%s,"is_error":%s}\n' \
+        "$item" "$repo" "$ts" "$cost" "$is_error" >"$meta" 2>/dev/null \
+        || warn "worker-run: could not write meta sidecar $meta (best-effort, continuing)"
+
     return "$rc"
 }
 
@@ -206,6 +231,10 @@ worker_run_dryrun() {
     model="$(worker_run_model_flags)"
     echo "claude: ${CLAUDE_WORKER_CLAUDE_BIN:-claude} -p \"/work-on $repo $item\" $perm $model --output-format json ${CLAUDE_EXTRA_ARGS:-}"
     echo "run-count: 1 (exactly once, never a loop)"
+    # CC-7: show the resolved OTEL resource-attribute tag without running claude.
+    local _ra="claude.item=$item,claude.repo=$repo"
+    [[ -n "${OTEL_RESOURCE_ATTRIBUTES:-}" ]] && _ra="${_ra},${OTEL_RESOURCE_ATTRIBUTES}"
+    echo "otel: OTEL_RESOURCE_ATTRIBUTES=$_ra"
 }
 
 # --- main -------------------------------------------------------------------------------------------

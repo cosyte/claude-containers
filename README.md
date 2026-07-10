@@ -216,6 +216,9 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_CONTROLLER_UMBRELLA` | `/workspace` (if it looks right) | Umbrella root override for `claude-controller` — must have both `.gitmodules` and `scripts/reconcile.sh`; refuses (fail closed) otherwise |
 | `CLAUDE_CONTROLLER_INTERVAL` | `60` | Seconds between controller dispatch cycles (the slots>1 loop) |
 | `CLAUDE_CONTROLLER_SOCKET_WAIT` | `90` | Seconds the entrypoint blocks, in controller mode, for the inner docker socket to be confirmed `root:root 600` before starting the agent's tmux session |
+| `CLAUDE_WORKER_RUN_LOG_DIR` | `$HOME/.claude/worker-run-logs` | Where `claude-worker-run` writes its per-run JSON log + the secret-free `run-<item>-<ts>.meta.json` sidecar `claude-fleet-view` reads for spend |
+| `CLAUDE_FLEET_HOST_CPUS` / `CLAUDE_FLEET_HOST_MEM_MIB` | `nproc` / `/proc/meminfo` | Host capacity override for `claude-fleet-view`'s headroom line (test/drill seam) |
+| `CLAUDE_FLEET_DOCKER` | `docker` | The docker binary `claude-fleet-view` queries for active `claude.worker=1` containers (test seam) |
 | `CLAUDE_STOP_TIMEOUT` | `20` | Graceful stop timeout (s) |
 | `AUTH_VOLUME`/`SSHKEYS_VOLUME` | `claude-auth`/`claude-sshkeys` | Shared volume names |
 | `ANTHROPIC_API_KEY` | unset | **Must stay unset** — entrypoint hard-fails otherwise |
@@ -265,6 +268,7 @@ claude-disk-gc [--loop]           GC the inner daemon's image/build-cache layers
 claude-disk-verify [--check] [--keep]   prove the disk-space floor + gc + image reuse (CC-5)
 claude-controller                 wire the substrate to the umbrella PAR-* lease/scheduler/bump-worker (CC-6)
 claude-controller-verify [--check] [--keep]   prove controller-mode dispatch + non-double-ship (CC-6)
+claude-fleet-view [--json]        per-worker item/repo/spend + host cpu/mem/disk headroom vs the K budget (CC-7)
 ```
 
 Inside a controller (`CLAUDE_WORKER_BROKER=1`), the unprivileged agent asks the

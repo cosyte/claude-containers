@@ -196,6 +196,26 @@ rc2=$( { unset CLAUDE_WORKER_UMBRELLA; CLAUDE_WORKER_RUN_DRYRUN=1 \
 [[ "$rc2" == 0 ]] && ok "DRYRUN short-circuits before umbrella/submodule checks (exits 0 even with no real umbrella)" \
     || bad "DRYRUN must short-circuit before real checks (got rc=$rc2)"
 
+# --- CC-7: DRYRUN shows the resolved per-item OTEL resource-attribute tag -------------------
+echo
+echo "== CLAUDE_WORKER_RUN_DRYRUN: OTEL item/repo tag is visible without running claude =="
+
+if grep -q "otel: OTEL_RESOURCE_ATTRIBUTES=claude.item=CC-4-DRY,claude.repo=hl7" <<<"$dry"; then
+    ok "DRYRUN plan names the resolved claude.item=<item>,claude.repo=<repo> OTEL tag"
+else
+    bad "DRYRUN plan must show 'otel: OTEL_RESOURCE_ATTRIBUTES=claude.item=CC-4-DRY,claude.repo=hl7' (got: $dry)"
+fi
+
+# An operator-supplied OTEL_RESOURCE_ATTRIBUTES must be preserved (appended), never clobbered.
+dry_with_existing="$(CLAUDE_WORKER_UMBRELLA="$UMBRELLA" CLAUDE_WORKER_RUN_DRYRUN=1 \
+    OTEL_RESOURCE_ATTRIBUTES="service.name=cosyte-worker" \
+    bash "$REPO_ROOT/bin/claude-worker-run" mllp CC-9-DRY 2>/dev/null)"
+if grep -q "otel: OTEL_RESOURCE_ATTRIBUTES=claude.item=CC-9-DRY,claude.repo=mllp,service.name=cosyte-worker" <<<"$dry_with_existing"; then
+    ok "DRYRUN preserves a pre-existing OTEL_RESOURCE_ATTRIBUTES, prepending the item/repo tag"
+else
+    bad "DRYRUN must preserve an existing OTEL_RESOURCE_ATTRIBUTES (got: $dry_with_existing)"
+fi
+
 echo
 echo "== $PASS passed, $FAIL failed =="
 exit $(( FAIL > 0 ? 1 : 0 ))
