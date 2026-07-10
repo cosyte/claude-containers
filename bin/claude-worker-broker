@@ -344,6 +344,7 @@ broker_template_args() {
     local name; name="claude-worker-$(echo "$item" | tr '[:upper:]' '[:lower:]')"
     printf '%s\n' \
         run -d \
+        --rm \
         --name "$name" \
         --label claude.worker=1 \
         --label "claude.item=$item" \

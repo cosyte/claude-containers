@@ -190,6 +190,7 @@ echo "== broker_template_args: the template is FIXED =="
 golden="$(cat <<'EOF'
 run
 -d
+--rm
 --name
 claude-worker-hl7-q
 --label
