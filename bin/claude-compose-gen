@@ -34,6 +34,12 @@
 #                       with naming --active repos.
 #     --dormant-profile <name>  profile name for non-active repos (default:
 #                       dormant)
+#     --network <name>  attach every service to a pre-existing EXTERNAL docker
+#                       network instead of this project's own "<project>_default".
+#                       Lets multiple stacks on one host share ONE network (so a
+#                       stack split costs zero extra networks — matters when the
+#                       daemon address pool is nearly full). Create it first:
+#                       docker network create <name>.
 #     --expose <map>    publish an extra container port for a repo, e.g. a dev
 #                       server. Format REPO:HOSTPORT:CONTAINERPORT (repeatable).
 #                       e.g. --expose bridgelink-website:4321:4321
@@ -144,13 +150,14 @@ fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,76p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,82p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG=""
 OUT=""
 PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
 WANT_FORKS=0 WANT_ARCHIVED=0 ALL_DORMANT=0
+NETWORK=""
 DORMANT_PROFILE="dormant"
 INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=()
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
@@ -178,6 +185,7 @@ while [[ $# -gt 0 ]]; do
         --forks)           WANT_FORKS=1; shift ;;
         --archived)        WANT_ARCHIVED=1; shift ;;
         --all-dormant)     ALL_DORMANT=1; shift ;;
+        --network)         NETWORK="$2"; shift 2 ;;
         --limit)           LIMIT="$2"; shift 2 ;;
         --scenario)        shift 2 ;;   # consumed in the pre-scan above
         --env-file)        shift 2 ;;   # consumed in the pre-scan above
@@ -601,6 +609,21 @@ for row in "${FINAL[@]}"; do
     printf '  claude-config-%s:\n    name: claude-config-%s\n' "$svc" "$svc"
     printf '  claude-ws-%s:\n    name: claude-ws-%s\n' "$svc" "$svc"
 done
+
+# Shared external network: point this stack's default network at a pre-existing
+# external network instead of a per-project "<project>_default". Lets several
+# stacks on one host share ONE Docker network, so splitting a stack in two costs
+# ZERO extra networks — critical where the daemon's address pool is nearly full.
+# Create it once (docker network create ${NETWORK}) before `up`.
+if [[ -n "$NETWORK" ]]; then
+    cat <<EOF
+
+networks:
+  default:
+    name: ${NETWORK}
+    external: true
+EOF
+fi
 } > "$TMP"
 
 mv -f "$TMP" "$OUT"
