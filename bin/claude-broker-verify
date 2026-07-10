@@ -109,8 +109,13 @@ docker exec -d \
     -e CLAUDE_BROKER_MAX_WORKERS=2 \
     -e CLAUDE_BROKER_POLL=0.2 \
     -e CLAUDE_WORKER_IMAGE="$WORKER_IMG" \
-    -e CLAUDE_BROKER_WORKER_CMD="sleep 373573" \
+    -e CLAUDE_BROKER_WORKER_CMD="tail -f /dev/null" \
     "$CTR" bash -c '/usr/local/bin/claude-worker-broker >/var/log/claude-worker-broker.log 2>&1'
+# ^ the stub must stay ALIVE for the lease/cap tests below (a live worker holds its
+# item's lease and counts toward the K cap): the broker appends the request's <repo>
+# <item> as trailing argv, and busybox `sleep 373573 hl7 CC2-T1` rejects the non-numeric
+# args and exits (then --rm removes it) — never live. `tail -f /dev/null` ignores the
+# extra file args and blocks, so the worker stays live until the controller is torn down.
 
 broker_up=0
 for _ in $(seq 1 30); do

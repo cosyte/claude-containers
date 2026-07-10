@@ -151,7 +151,7 @@ done
 (( inner_ready )) || { docker logs --tail 15 "$CTR" >&2 || true; die "inner dockerd did not come up within 60s"; }
 okp "inner dockerd is up inside the Sysbox controller"
 
-as_root apk add --no-cache bash procps >/dev/null 2>&1 || die "could not install bash+procps in the controller"
+as_root apk add --no-cache bash procps coreutils >/dev/null 2>&1 || die "could not install bash+procps+coreutils in the controller"
 as_root adduser -D "$AGENT" >/dev/null 2>&1 || true
 AGENT_UID="$(as_root id -u "$AGENT")" && [[ "$AGENT_UID" =~ ^[0-9]+$ ]] \
     || die "unprivileged user '$AGENT' was not created in the controller"

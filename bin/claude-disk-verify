@@ -203,7 +203,11 @@ N=3
 disk_before="$(as_root df -P -B1M /var/lib/docker 2>/dev/null | awk 'NR==2{print $4}')"
 for i in $(seq 1 "$N"); do
     item="CC5-CYCLE-$i"
-    resp="$(as_agent claude-worker-request "$WORKER_IMG" "$item" --timeout 30 || true)"
+    # repo is just a label here (the worker image comes from CLAUDE_WORKER_IMAGE, and the
+    # worker name derives from <item>); it must match the broker's plain-name charset
+    # ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ — an image ref like "alpine:3.20" has a ':' and is
+    # refused client-side before the broker is ever reached.
+    resp="$(as_agent claude-worker-request disk "$item" --timeout 30 || true)"
     [[ "$resp" == ok* ]] || die "cycle $i: worker launch failed (got '$resp')"
     name="$(awk '{print $2}' <<<"$resp")"
     # This drives a trivial one-shot command (CLAUDE_BROKER_WORKER_CMD="sh -c" above),
@@ -239,7 +243,7 @@ docker exec -d \
     -e CLAUDE_DISK_FLOOR_MIB=999999999 \
     "$CTR" bash -c '/usr/local/bin/claude-worker-broker >/var/log/claude-worker-broker-floor.log 2>&1'
 sleep 3
-resp="$(as_agent claude-worker-request "$WORKER_IMG" CC5-FLOOR --timeout 15 || true)"
+resp="$(as_agent claude-worker-request disk CC5-FLOOR --timeout 15 || true)"
 if [[ "$resp" == error*"disk pressure"* ]]; then
     okp "a launch below an absurdly-high CLAUDE_DISK_FLOOR_MIB is refused with 'disk pressure' ($resp)"
 else
