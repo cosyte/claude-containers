@@ -38,3 +38,5 @@ jobs:
         run: test/compose-gen-unit.sh
       - name: egress-packages unit tests (PKG-1 opt-in package-registry allowlist — additive, opt-in, leak-free)
         run: test/egress-packages-unit.sh
+      - name: mise unit tests (PKG-2 baked toolchain provisioner — pinned install, shims on PATH, /workspace-only trust)
+        run: test/mise-unit.sh
