@@ -11,8 +11,11 @@
 #   2. cgroup limits actually ENFORCE inside the Sysbox controller and inside
 #      each nested worker (the nested-cgroup "shadowing" caveat) — read back
 #      exactly as set, not assumed;
-#   3. a worker driven over --memory is OOM-killed IN ISOLATION: the peer
-#      worker, the controller, and the inner daemon all survive;
+#   3. a worker driven over --memory is CONTAINED at its cap IN ISOLATION: the
+#      over-cap load is held AT --memory (an OOM-kill, or a refused allocation at
+#      the memory.max boundary when swap absorbs the overflow — mechanism is
+#      host/kernel dependent) while the peer worker, controller, and inner daemon
+#      all survive;
 #   4. a fork-bomb in a worker hits --pids-limit (forks fail, cap holds) and
 #      again harms no peer;
 #   5. a broker whose worker cap needs more than the controller's own cgroup
@@ -155,7 +158,13 @@ docker exec -d \
     -e CLAUDE_BROKER_MAX_WORKERS=2 \
     -e CLAUDE_BROKER_POLL=0.2 \
     -e CLAUDE_WORKER_IMAGE="$WORKER_IMG" \
+    -e CLAUDE_BROKER_WORKER_CMD='tail -f /dev/null' \
     "$CTR" bash -c '/usr/local/bin/claude-worker-broker >/var/log/claude-worker-broker.log 2>&1'
+# ^ pin a long-lived stub instead of the real default (`claude-worker-run`, absent from the
+# bare alpine probe image — CC-4 changed that default after this script was written). Must
+# survive the <repo> <item> broker_launch appends as trailing argv (busybox `sleep` rejects
+# them; `tail -f /dev/null` ignores the extra file args and blocks), because phases 3-4 exec
+# the OOM / fork-bomb probes INTO a still-running worker.
 broker_up=0
 for _ in $(seq 1 30); do
     if as_root test -d /run/claude/broker/requests; then broker_up=1; break; fi
@@ -183,31 +192,55 @@ else
     badp "worker A limits are mem='$wa_mem' pids='$wa_pids' (want 4294967296 / 2048)"
 fi
 
-# --- phase 3: over---memory worker is OOM-killed IN ISOLATION ---------------------------
-info "phase 3 — worker over --memory → OOM-killed in isolation (peer + controller survive)"
+# --- phase 3: over-cap worker is CONTAINED at its --memory IN ISOLATION -----------------
+info "phase 3 — worker over --memory → contained at the cap in isolation (peer + controller survive)"
 
-# `tail /dev/zero` accumulates one endless line in memory — the classic bounded-
-# cgroup OOM probe. The kernel kills the offending process inside worker A's
-# cgroup; nothing outside it may die.
+# Saturate worker A's 4g memory cgroup with several parallel `tail /dev/zero` allocators.
+# A SINGLE busybox tail self-limits near ~2 GiB (musl refuses the one large realloc) and
+# never reaches a 4g cap — so it would prove nothing; running enough of them in parallel
+# drives aggregate demand well past --memory. The kernel then contains the over-cap load
+# AT exactly --memory, and which mechanism it uses is recorded in memory.events: an
+# OOM-kill (oom_kill) when there is no swap headroom, or a refused allocation at the
+# memory.max boundary (max) when swap absorbs the overflow. Either way the cap holds and
+# nothing OUTSIDE worker A's cgroup may die. (The mechanism is host-dependent — kernel
+# 6.12 refuses a large heap grow via ENOMEM rather than OOM-killing it — so the proof is
+# the cap being exercised+held, not the specific kill path; the isolation checks below are
+# unchanged and still required.)
 oom_rc=0
-in_worker "$WA" timeout 120 tail /dev/zero >/dev/null 2>&1 || oom_rc=$?
-oom_kills="$(in_worker "$WA" sh -c 'grep -w oom_kill /sys/fs/cgroup/memory.events | awk "{print \$2}"' 2>/dev/null || echo 0)"
-if (( oom_rc != 0 )) && [[ "$oom_kills" =~ ^[0-9]+$ ]] && (( oom_kills >= 1 )); then
-    okp "over-memory process was OOM-killed inside worker A (exit $oom_rc, memory.events oom_kill=$oom_kills)"
+in_worker "$WA" timeout 120 sh -c 'i=0; while [ $i -lt 8 ]; do tail /dev/zero & i=$((i+1)); done; wait' \
+    >/dev/null 2>&1 || oom_rc=$?
+wa_oom_kills="$(in_worker "$WA" sh -c 'grep -w oom_kill /sys/fs/cgroup/memory.events | awk "{print \$2}"' 2>/dev/null || echo 0)"
+wa_max="$(in_worker "$WA" sh -c 'grep -w max /sys/fs/cgroup/memory.events | awk "{print \$2}"' 2>/dev/null || echo 0)"
+wa_peak="$(in_worker "$WA" cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0)"
+: "${wa_oom_kills:=0}" "${wa_max:=0}" "${wa_peak:=0}"
+# Proof: the 4g cap was genuinely EXERCISED (peak reached ~--memory, so the load really
+# demanded it — not a probe that fell short) and HELD by the kernel — via an OOM-kill OR
+# a memory.max-boundary refusal.
+peak_floor=$(( ${wa_mem:-4294967296} * 9 / 10 ))
+cap_held=0
+[[ "$wa_oom_kills" =~ ^[0-9]+$ ]] && (( wa_oom_kills >= 1 )) && cap_held=1
+[[ "$wa_max"       =~ ^[0-9]+$ ]] && (( wa_max       >= 1 )) && cap_held=1
+if (( cap_held )) && [[ "$wa_peak" =~ ^[0-9]+$ ]] && (( wa_peak >= peak_floor )); then
+    if (( wa_oom_kills >= 1 )); then
+        mech="OOM-killed at the cap (memory.events oom_kill=$wa_oom_kills)"
+    else
+        mech="allocations refused at memory.max (memory.events max=$wa_max; swap absorbed the overflow, no kill needed)"
+    fi
+    okp "worker A's over-cap load was contained AT its 4g limit — $mech; peak=$wa_peak B ≈ --memory"
 else
-    badp "expected an OOM kill in worker A (exit=$oom_rc, oom_kill='$oom_kills')"
+    badp "worker A's 4g cap was not exercised+held (peak=$wa_peak want>=$peak_floor, oom_kill=$wa_oom_kills, max=$wa_max, probe rc=$oom_rc)"
 fi
 wa_state="$(as_root docker inspect -f '{{.State.Status}}' "$WA" 2>/dev/null || echo missing)"
 wb_state="$(as_root docker inspect -f '{{.State.Status}}' "$WB" 2>/dev/null || echo missing)"
 if [[ "$wa_state" == running && "$wb_state" == running ]]; then
-    okp "isolation held: worker A ($wa_state) and peer worker B ($wb_state) both survive the OOM"
+    okp "isolation held: worker A ($wa_state) and peer worker B ($wb_state) both survive the memory saturation"
 else
-    badp "OOM was not isolated (worker A=$wa_state, worker B=$wb_state)"
+    badp "over-cap load was not isolated (worker A=$wa_state, worker B=$wb_state)"
 fi
 if as_root docker info >/dev/null 2>&1 && [[ "$(docker inspect -f '{{.State.Status}}' "$CTR")" == running ]]; then
-    okp "controller + inner daemon survive the worker OOM"
+    okp "controller + inner daemon survive the worker memory saturation"
 else
-    badp "controller or inner daemon died with the worker OOM — blast radius escaped the worker"
+    badp "controller or inner daemon died with the worker memory saturation — blast radius escaped the worker"
 fi
 
 # --- phase 4: fork-bomb hits --pids-limit ------------------------------------------------

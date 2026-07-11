@@ -334,8 +334,11 @@ broker_validate_request() {
 # only as label/name VALUES; every flag below is broker-owned:
 #   - cap-drop ALL + re-add CLAUDE_MIN_CAPS (drops the Docker-default NET_RAW,
 #     MKNOD, SETFCAP a compromised agent would reach for) + no-new-privileges
-#   - per-worker resource caps: memory (hard) + reservation (soft) + cpus +
-#     pids-limit (fork-bomb guard) + shm-size
+#   - per-worker resource caps: memory (hard) + memory-swap (== memory, so swap
+#     is disabled and --memory is a HARD ceiling — a worker over budget is
+#     OOM-killed, never silently given 2x via swap; matches the fleet's leaf
+#     containers and the CC-3 sizing math's no-swap assumption) + reservation
+#     (soft) + cpus + pids-limit (fork-bomb guard) + shm-size
 #   - fleet controls inherited INTO the worker: secret guard (default on) and
 #     egress lockdown (mirrored; NET_ADMIN added only when the firewall needs it)
 #   - labels so claude-list / the CC-4 reaper can see and manage workers
@@ -344,6 +347,7 @@ broker_template_args() {
     local name; name="claude-worker-$(echo "$item" | tr '[:upper:]' '[:lower:]')"
     printf '%s\n' \
         run -d \
+        --rm \
         --name "$name" \
         --label claude.worker=1 \
         --label "claude.item=$item" \
@@ -357,6 +361,7 @@ broker_template_args() {
     fi
     printf '%s\n' \
         --memory "$WORKER_MEM" \
+        --memory-swap "$WORKER_MEM" \
         --memory-reservation "$WORKER_MEM_RESERVATION" \
         --cpus "$WORKER_CPUS" \
         --pids-limit "$WORKER_PIDS" \

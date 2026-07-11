@@ -190,6 +190,7 @@ echo "== broker_template_args: the template is FIXED =="
 golden="$(cat <<'EOF'
 run
 -d
+--rm
 --name
 claude-worker-hl7-q
 --label
@@ -227,6 +228,8 @@ SYS_CHROOT
 --cap-add
 AUDIT_WRITE
 --memory
+4g
+--memory-swap
 4g
 --memory-reservation
 3072m
