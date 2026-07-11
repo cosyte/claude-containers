@@ -46,3 +46,5 @@ jobs:
         run: test/manifest-hardening-unit.sh
       - name: apt provision unit tests (PKG-4 — brokered curated worker apt; tier gate, curated-not-open, install-then-relock, empty/missing-manifest fail-safe)
         run: test/apt-provision-unit.sh
+      - name: cache proxy unit tests (PKG-6 — controller-side pull-through cache; fail-closed ready gate, single-choke-point egress, broker/worker wiring, client-apply refusal)
+        run: test/cache-proxy-unit.sh

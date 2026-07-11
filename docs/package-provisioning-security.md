@@ -222,6 +222,37 @@ Sysbox host and is the on-host gate. The provisioner's logic — tier gate, vali
 and the open→install→relock order — is proven in CI via seams (`test/apt-provision-unit.sh`) with no
 root, apt, or iptables.
 
+### 3.8 Controller-side caching proxy — the single audited choke point — **shipped (PKG-6, demand-gated)**
+
+The heaviest containment tier, and the only one that collapses **all** package egress to **one** audited
+host. A **pull-through cache** (default Nexus OSS) runs on the controller's inner dockerd, root-owned
+like the CC-2 broker (`bin/claude-cache-proxy`). With `CLAUDE_CACHE_PROXY=1` under egress lockdown:
+
+- **Single choke point.** Each worker points `npm`/`pip`/`go`/`apt` at the proxy and its egress firewall
+  is **narrowed to just the proxy** — the public npm registry is dropped from the base allowlist and the
+  curated `CLAUDE_EGRESS_PACKAGES` (§3.1) / `CLAUDE_EGRESS_APT` (§3.7) public registries are **not**
+  added (the proxy fronts them). The proxy is then the **only** external fetcher for packages, so every
+  install is one auditable hop, not N direct-to-registry connections. This is the durable fix for the
+  §4 apt-CDN-pinning reliability limit (a cache hit needs no live CDN fetch).
+- **Fail-closed (§3.4 taken to its limit).** "Proxy down → provision refused, never a silent fallback to
+  open/public-registry egress." `claude-cache-proxy ready` accepts **only** a 2xx health response —
+  an unreachable proxy (`000`), a 3xx (up but not yet serving), a 5xx, or a bad timeout config all fail.
+  The controller **refuses to
+  start** if the proxy can't become ready; a worker's `client-apply` runs the ready gate **first** and
+  **dies** (no agent, no config written) if it can't reach the proxy. There is no half-applied state a
+  fallback could exploit.
+- **Opt-in / additive / no widened surface.** Nothing changes unless `CLAUDE_CACHE_PROXY` /
+  `CLAUDE_CACHE_PROXY_HOST` is set — the egress-firewall OFF path is byte-identical (§3.5). The proxy is
+  reached over a shared docker network by name; **no host port is published**. It is labelled
+  `claude.cacheproxy=1` (not `claude.worker=1`), so the CC-4 reaper never touches it.
+
+Full operator guide + the on-host live gate (real Nexus, install through it, second-worker cache hit,
+proxy-down refusal): **[caching-proxy.md](caching-proxy.md)**. The logic — the fail-closed ready gate,
+the `client-apply` refusal, the single-choke-point egress composition, and the broker/worker wiring — is
+proven in CI via seams (`test/cache-proxy-unit.sh`) with no docker, curl, or root. It stays **demand-
+gated**: build a proxy only when one auditable egress path, reproducibility under K, or air-gapped
+workers is the goal — the curated allowlist (§3.1–3.7) is the default.
+
 ## 4. What this does NOT cover (honest non-goals)
 
 - **System libraries (`apt`) are not a leaf-container capability.** The agent runs as non-root UID 1000
@@ -273,8 +304,9 @@ root, apt, or iptables.
   included — is **not** a security boundary against a fully-weaponized agent; multi-tenant / hostile-
   tenant use stays a permanent non-goal (`docs/substrate.md`, README, roadmap §II.9).
 - **Not "install anything from the open internet."** Egress stays default-deny plus a curated
-  allowlist; a full artifact-proxy tier (Nexus/Verdaccio/Athens, PKG-6) is demand-gated, not built by
-  default.
+  allowlist; the full pull-through-proxy tier (Nexus/Verdaccio/Athens, **PKG-6, §3.8**) is now built but
+  stays **demand-gated** — it is the durable single-choke-point / air-gap path, off unless
+  `CLAUDE_CACHE_PROXY=1`, never the default posture.
 
 ## 5. Decision & status
 
