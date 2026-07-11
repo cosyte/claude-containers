@@ -417,6 +417,40 @@ reads pages back via screenshots and DOM queries. Full design rationale:
 [docs/architecture.md](docs/architecture.md#decision-frontend-debugging-is-an-opt-in-image-variant);
 runbook: [docs/troubleshooting.md](docs/troubleshooting.md#frontend-debugging---browser--claude_browser).
 
+## Toolchains on demand (`mise`)
+
+The image bakes [`mise`](https://mise.jdx.dev) so a session can provision language
+toolchains and prebuilt CLIs **as the unprivileged `claude` user, with no `sudo`
+and no image rebuild**:
+
+```bash
+mise use node@22            # languages: node / python / go / rust / …
+mise use python@3.12
+mise use aqua:BurntSushi/ripgrep   # arbitrary prebuilt CLIs (aqua registry)
+mise use github:cli/cli            # …or straight from a GitHub release
+```
+
+Installed tools land under the `claude` user's `~/.local/share/mise` and are on
+`PATH` for the agent immediately (via mise's shims dir, baked onto `PATH` for
+non-interactive shells; interactive SSH/tmux shells get full `mise activate`).
+mise is **pinned + SHA256-verified in the Dockerfile** at build — the release
+binary is downloaded from GitHub and checked against a hardcoded digest, no
+`curl | sh` (bump `MISE_VERSION` + the two digests together). `pipx:` installs
+reuse the baked `uv` automatically.
+
+- **Egress lockdown is opt-in** (`CLAUDE_EGRESS_LOCKDOWN=1`); **off by default,
+  where every `mise use …` just works.** Under lockdown: `github:`/`aqua:` and
+  `python@` work on the **base** allowlist; `pip`/`cargo`/`go` registry backends
+  need `CLAUDE_EGRESS_PACKAGES=1`; and the `node@`/`go@`/`rust` toolchains pull
+  their runtime from vendor hosts (nodejs.org, go.dev, static.rust-lang.org) not
+  yet on the allowlist, so they need those hosts via `CLAUDE_EGRESS_EXTRA_HOSTS`.
+- **System libraries (`apt`) are not available** in a leaf container by design —
+  it's rootless. Those are the Sysbox-worker apt tier, not here.
+- The image sets `trusted_config_paths` to **`/workspace` only** — a deliberately
+  scoped supply-chain trade so a repo's own `mise.toml` auto-applies while a config
+  anywhere else stays untrusted (never a blanket `/`). Full design + verification:
+  [docs/toolchain-provisioning.md](docs/toolchain-provisioning.md).
+
 ## Troubleshooting (summary)
 
 Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
@@ -554,6 +588,9 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   rootful Sysbox-worker `apt` tier, not a leaf container. The threat model (the
   Nx-class weaponized-agent exfil) and the containment rules are in
   [docs/package-provisioning-security.md](docs/package-provisioning-security.md).
+  The baked `mise` toolchain provisioner (rootless language/CLI installs) rides on
+  this containment — see [Toolchains on demand](#toolchains-on-demand-mise) and
+  [docs/toolchain-provisioning.md](docs/toolchain-provisioning.md).
 - **`claude-auth` volume** holds your live OAuth credentials
   (`.credentials.json`) — effectively your Claude session. Anyone who can read
   this Docker volume can act as you. Rotate by `docker volume rm claude-auth`

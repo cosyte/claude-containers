@@ -13,6 +13,14 @@ Keep this short. Project-specific guidance belongs in the repo's own
 - You are running in a disposable Docker container. The host is isolated from
   you; the repo under `/workspace` is the thing that matters and is persisted.
 - `git`, `gh`, `rg`, `fzf`, `jq`, `python3`, `uv`, and `node` are available.
+- Need a different toolchain version or a CLI that isn't baked in? Use `mise`,
+  rootless, no `sudo`: `mise use node@22` / `python@3.12` / `go@1.23` / `rust`
+  for languages, or `mise use aqua:owner/tool` / `github:owner/tool` for prebuilt
+  CLIs. With the default (no egress lockdown) it all just works. Under
+  `CLAUDE_EGRESS_LOCKDOWN=1`: `github:`/`aqua:`/`python@` work as-is; `pip`/`cargo`/`go`
+  registry backends need `CLAUDE_EGRESS_PACKAGES=1`; and `node@`/`go@`/`rust`
+  toolchains need their vendor hosts added via `CLAUDE_EGRESS_EXTRA_HOSTS`. System
+  libraries (`apt`) are not available here — this is a rootless container by design.
 - Permissions are bypassed (`--dangerously-skip-permissions`). There is no
   human to approve tool calls in real time — be deliberate with destructive
   commands, and never run anything that targets paths outside `/workspace`.

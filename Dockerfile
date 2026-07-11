@@ -80,6 +80,41 @@ RUN npm install -g pnpm@${PNPM_VERSION} \
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     npm_config_manage_package_manager_versions=false
 
+# --- mise: rootless polyglot toolchain + CLI-binary provisioning (PKG-2) -------
+# Bake `mise` so a session can provision language toolchains and prebuilt CLIs
+# as UID 1000 with NO root:
+#   mise use node@22 / python@3.12 / go@1.23 / rust      (language toolchains)
+#   mise use aqua:owner/tool | github:owner/tool         (arbitrary prebuilt CLIs)
+# `pipx:` CLIs reuse the baked `uv` automatically — mise's `pipx.uvx` defaults
+# true whenever `uv` is on PATH (it is, baked above). System `.so` libraries are
+# NOT in scope for mise — those are the Sysbox-worker apt tier (PKG-4).
+#
+# Pinned + checksummed IN-REPO: this repo's whole thesis is supply-chain
+# containment, so mise is NOT installed by piping a remotely-served `mise.run`
+# script into a shell. Instead we download the pinned release binary straight
+# from GitHub releases (github.com is already on the egress allowlist) and
+# verify its SHA256 against a digest hardcoded here BEFORE installing — a
+# tampered/served-wrong binary fails the build. Reproducible, not "latest".
+# Bump: change MISE_VERSION and BOTH digests together, from the release's
+# published SHASUMS256.txt (the `-linux-x64` / `-linux-arm64` raw-binary rows).
+ARG MISE_VERSION=v2026.7.5
+ARG MISE_SHA256_AMD64=5f7ab76afdf0780d12edeaa67e908094e9ccf7924cfe203e415c1cfb87bbf778
+ARG MISE_SHA256_ARM64=41fcf744050bfa27f9871e2151ac6f44b5ce2741424b3d5282b92becc71e6bc4
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) misearch=x64;   sha="${MISE_SHA256_AMD64}" ;; \
+      arm64) misearch=arm64; sha="${MISE_SHA256_ARM64}" ;; \
+      *) echo "mise: unsupported arch '$arch'" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+      "https://github.com/jdx/mise/releases/download/${MISE_VERSION}/mise-${MISE_VERSION}-linux-${misearch}" \
+      -o /tmp/mise; \
+    echo "${sha}  /tmp/mise" | sha256sum -c -; \
+    install -m 0755 /tmp/mise /usr/local/bin/mise; \
+    rm -f /tmp/mise; \
+    mise --version
+
 # --- Optional: headless Chromium + chrome-devtools-mcp (frontend debugging) --
 # Build with `--build-arg WITH_BROWSER=1` (or `make build-browser`) to bake a
 # headless Chromium and the official Chrome DevTools MCP server. A session on
@@ -189,6 +224,24 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
 
+# mise interactive activation (PKG-2): APPEND to the user's stock ~/.bashrc
+# (from /etc/skel via `useradd -m`) rather than overwriting it, so Debian's
+# interactive aliases / history control / colored prompt survive for humans who
+# SSH in to debug. A non-interactive shell already `return`s early in the stock
+# file, and the guard below makes the snippet a no-op on its own too. Agent /
+# non-interactive shells never source this — they resolve mise tools via the
+# shims dir baked onto PATH (see the ENV block). bash_profile sources ~/.bashrc,
+# so login shells reach it. `>>` create-or-append is correct whether or not the
+# base image shipped a stock ~/.bashrc.
+RUN printf '%s\n' \
+      '' \
+      '# mise (PKG-2): activate for INTERACTIVE shells only. Agent / non-interactive' \
+      '# shells use the shims dir baked onto PATH (see the Dockerfile ENV), not this.' \
+      '[[ $- == *i* ]] || return' \
+      'command -v mise >/dev/null 2>&1 && eval "$(mise activate bash)"' \
+      >> /home/${CLAUDE_USER}/.bashrc \
+    && chown ${CLAUDE_UID}:${CLAUDE_GID} /home/${CLAUDE_USER}/.bashrc
+
 # --- Environment --------------------------------------------------------------
 # Do NOT set DISABLE_TELEMETRY / DO_NOT_TRACK / CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:
 # they short-circuit Claude Code's GrowthBook feature-flag fetch, so the
@@ -196,11 +249,25 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
 # reports "not yet enabled for your account" — even on an eligible account.
 # Remote Control is the whole point of this image, so telemetry stays on.
 # DISABLE_AUTOUPDATER is unrelated to the flag fetch and is kept (pinned version).
+#
+# mise (PKG-2):
+#  - PATH: prepend the mise shims dir so NON-interactive / agent shells
+#    (`bash -c "…"`, the Claude Code process) resolve mise-installed tools with
+#    no shell activation. Interactive shells get full `mise activate` via
+#    ~/.bashrc; this covers everything else. The dir need not exist yet — mise
+#    creates + populates it (as UID 1000) on the first `mise use`.
+#  - MISE_TRUSTED_CONFIG_PATHS: auto-trust a `mise.toml` ONLY under /workspace
+#    (the repo the agent is working on), a DELIBERATE, scoped supply-chain trade
+#    — NOT a blanket "/" — so the agent's own repo toolchain auto-applies while
+#    any config outside /workspace still refuses to auto-run. See
+#    docs/toolchain-provisioning.md.
 ENV CLAUDE_USER=${CLAUDE_USER} \
     CLAUDE_CONFIG_DIR=/home/${CLAUDE_USER}/.claude \
     CLAUDE_RC_DEBUG_LOG=/tmp/claude-rc-debug.log \
     DISABLE_AUTOUPDATER=1 \
-    NODE_NO_WARNINGS=1
+    NODE_NO_WARNINGS=1 \
+    MISE_TRUSTED_CONFIG_PATHS=/workspace \
+    PATH=/home/${CLAUDE_USER}/.local/share/mise/shims:${PATH}
 
 EXPOSE 22
 
