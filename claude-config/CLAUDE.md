@@ -21,6 +21,11 @@ Keep this short. Project-specific guidance belongs in the repo's own
   registry backends need `CLAUDE_EGRESS_PACKAGES=1`; and `node@`/`go@`/`rust`
   toolchains need their vendor hosts added via `CLAUDE_EGRESS_EXTRA_HOSTS`. System
   libraries (`apt`) are not available here — this is a rootless container by design.
+- Installs are supply-chain-hardened: `npm`/`pnpm` run with `ignore-scripts=true`
+  by default, so a dependency's post-install scripts do NOT execute. If a repo
+  legitimately needs them (e.g. a native build), commit a `/workspace/.npmrc` with
+  `ignore-scripts=false` to opt that repo back in. Prefer pinned, lockfiled manifests
+  (`mise.lock` is honored); `claude-deps-check` flags `latest`/unpinned specs.
 - Permissions are bypassed (`--dangerously-skip-permissions`). There is no
   human to approve tool calls in real time — be deliberate with destructive
   commands, and never run anything that targets paths outside `/workspace`.

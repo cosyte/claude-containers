@@ -123,6 +123,19 @@ additionally need their vendor hosts via `CLAUDE_EGRESS_EXTRA_HOSTS`.
 All three must hold: the language install and the CLI install both succeed with no `sudo`, and the
 out-of-workspace config does not silently provision.
 
+## Reproducible manifests — lockfile determinism (PKG-5)
+
+The image bakes `lockfile = true` into the **global** mise config (`~/.config/mise/config.toml`), so a
+repo's committed `/workspace/mise.lock` is authoritative: `mise install`/`use` records and reuses the
+exact locked tool versions, and a pinned lock reinstalls **identical** versions — offline, from the
+PKG-3 shared `/cache` store, with no registry round-trip. The global config is always trusted (it is
+mise's own, not a repo `mise.toml`), so this does **not** widen the `/workspace`-only config-trust
+decision above. A committed `mise.toml` + `mise.lock` is the reproducible way to pin a repo's toolchain;
+`claude-deps-check` (advisory; `--strict` refuses) flags any `latest`/unpinned spec that would defeat
+that. The install-script side of PKG-5 (baked `ignore-scripts=true` in the agent's `~/.npmrc`, with a
+per-repo `/workspace/.npmrc` opt-out) is documented in
+[`docs/package-provisioning-security.md`](package-provisioning-security.md) §3.2/§3.6.
+
 ## Non-goals (inherited + new)
 
 - **No system `.so` libraries.** mise provisions binaries and language toolchains, not arbitrary
