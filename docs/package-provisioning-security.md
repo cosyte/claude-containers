@@ -94,17 +94,30 @@ the curated set.
 container refuses; a missing registry is an inconvenience, an open channel is a breach. (Debian/apt
 mirrors — `deb.debian.org`/`security.debian.org` — are **deliberately not here**; see §4.)
 
-### 3.2 Install-time scripts OFF by default
+### 3.2 Install-time scripts OFF by default — **shipped (PKG-5)**
 
-Agent-initiated installs run with install hooks disabled — `npm install --ignore-scripts` /
-`ignore-scripts=true` in the baked npm config, and the equivalent for other managers. This lands in
-**PKG-5**; PKG-1 records it as a required rule so the threat model is complete.
+Agent-initiated installs run with lifecycle hooks disabled. **PKG-5 bakes `ignore-scripts=true` into
+the `claude` user's `~/.npmrc`** — npm, pnpm, and yarn(1.x) all read it, so an agent-run `npm i` /
+`pnpm i` in `/workspace` does not execute a dependency's pre/post-install scripts. It is scoped to the
+**user** config on purpose: the image's own pinned `npm install -g` layers run **as root, before** this,
+so a build-time dependency's hook can't fire during the image build either, and the runtime hardening
+doesn't have to weaken the build. An escape hatch stays npm-native: a repo that genuinely needs install
+scripts commits its own `/workspace/.npmrc` with `ignore-scripts=false` — a project-level `.npmrc`
+overrides the user one, an explicit per-repo opt-in.
 
 This directly targets §1 step 2: if the hook never runs, it never reads secrets or phones home. But it
-is **one layer, not a guarantee** — documented bypasses exist: a native `binding.gyp` build step can
-execute code without a `scripts` entry, and CVE-2025-69263 shows a malicious `.npmrc` overriding the
-git binary to regain execution.⁸ So `--ignore-scripts` is treated as defence-in-depth *underneath* the
-egress and credential layers, never as the thing that makes provisioning safe on its own.
+is **one layer, not a guarantee** — documented bypasses remain, so it is defence-in-depth *underneath*
+the egress and credential layers, never the thing that makes provisioning safe on its own:⁸
+- **Native builds.** A `binding.gyp` / node-gyp native compile still runs — `ignore-scripts` governs
+  lifecycle scripts, not gyp builds.
+- **Git-dependency `.npmrc` override (PackageGate, GHSA-wr8v-3jqh-9x36).** When npm installs a git
+  dependency, a malicious `.npmrc` inside it can override the git binary path and gain execution **even
+  with `ignore-scripts=true`**; npm declined to fix it (deemed a vetting responsibility). Under our
+  curated egress (§3.1) a git dep can't reach an arbitrary host, which is what actually contains this.
+- **Lockfile integrity gaps (CVE-2025-69263).** pnpm (≤10.26.2) stored HTTP-tarball / git-tarball deps
+  in the lockfile **without** integrity hashes, so a committed lock did not prevent a remote from
+  serving different bytes per install. Prefer registry deps (which carry integrity hashes) and keep
+  pnpm patched; a lock alone is not tamper-proof for those dep types (see §3.6).
 
 ### 3.3 Credentials unreachable during the fetch window
 
@@ -150,6 +163,31 @@ The dry-run seam (`CLAUDE_EGRESS_PRINT_HOSTS=1`) prints the composed allowlist a
 touching iptables, so the host-selection change the profile makes is verifiable in CI with no
 `NET_ADMIN` and no live firewall.
 
+### 3.6 Reproducible, pinned manifests — **shipped (PKG-5)**
+
+Non-reproducible installs are their own supply-chain risk: an unpinned `latest` resolves to whatever
+the registry serves *now* (possibly a freshly-compromised release), and a manifest without a lockfile
+can drift between the agent's install and a later one. PKG-5 adds two reproducibility controls:
+
+- **mise lockfile determinism.** The image bakes `lockfile = true` into the **global** mise config
+  (`~/.config/mise/config.toml`), so a committed `/workspace/mise.lock` is authoritative: `mise
+  install`/`use` records and reuses the exact locked tool versions, and a pinned lock reinstalls
+  identical versions — offline, from the PKG-3 shared cache, with no registry round-trip. Global config
+  is always trusted (it is mise's own, not a repo `mise.toml`), so this does **not** widen the
+  `/workspace`-only config-trust decision from PKG-2.
+- **`claude-deps-check` — an advisory pin linter.** Scans a repo's `mise.toml` (`[tools]`) and
+  `package.json` dependency maps for unpinned / `latest` / wildcard / mutable-tag-alias specs (a
+  prerelease pin like `1.2.3-rc.0` is correctly treated as pinned). Advisory by default (warns, exit 0 —
+  never blocks a session); `--strict` additionally treats npm caret/tilde ranges as unpinned and
+  **refuses** (exit 1), the form a pre-commit / CI gate calls. It reads manifests only — no install, no
+  network, no mutation — and is fail-safe: a missing or unparseable manifest is a clean no-op. It
+  classifies **semver** specs; it does **not** resolve git-dependency (`github:org/repo`,
+  `git+https://…`) or raw-tarball-URL forms — those can still float on a branch/mutable URL, so pin a
+  `#<sha>` or prefer an integrity-hashed registry dep (the CVE-2025-69263 caveat in §3.2).
+
+Neither is tamper-proof on its own (see the CVE-2025-69263 lockfile-integrity caveat in §3.2); they
+reduce the *drift* and *unpinned-resolution* surface, and compose with the egress + scripts-off layers.
+
 ## 4. What this does NOT cover (honest non-goals)
 
 - **System libraries (`apt`) are not a leaf-container capability.** The agent runs as non-root UID 1000
@@ -163,9 +201,15 @@ touching iptables, so the host-selection change the profile makes is verifiable 
   layers can be served from a separate CDN host; if aqua/OCI pulls fail on a blob fetch, the specific
   CDN host is a follow-up allowlist addition — this profile does not claim to have enumerated every
   ghcr backend host up front.
-- **`--ignore-scripts` is not a standalone guarantee.** As in §3.2, native `binding.gyp` and
-  CVE-2025-69263 bypass it.⁸ It is one layer under the egress + credential layers, not a boundary by
+- **`--ignore-scripts` is not a standalone guarantee.** As in §3.2, native `binding.gyp` builds run
+  regardless, a git-dependency `.npmrc` can override the git binary to execute under it (PackageGate,
+  GHSA-wr8v-3jqh-9x36), and pnpm lockfile-integrity gaps (CVE-2025-69263) mean a lock isn't tamper-proof
+  for HTTP/git tarball deps.⁸ It is one layer under the egress + credential layers, not a boundary by
   itself.
+- **No registry min-release-age / age-gating.** `claude-deps-check` flags *unpinned* specs, but PKG-5
+  does **not** query registries to reject too-new releases (a "wait N days before trusting a version"
+  control). That needs live registry egress on every check, which cuts against the offline/locked
+  posture; it stays a possible future control, deliberately not built here.
 - **Sysbox is weaker isolation than a VM / gVisor / Kata.** The worker tier that carries `apt` is
   host-*contained* by a Linux user namespace, not a hostile-tenant boundary. A container — Sysbox
   included — is **not** a security boundary against a fully-weaponized agent; multi-tenant / hostile-
@@ -201,11 +245,11 @@ Cited by the roadmap's footnote numbering (`operations/roadmaps/claude-container
 
 - **⁷** Nx malicious-package incident — npm postinstall scripts weaponized local AI coding agents
   (Claude Code, Gemini, Amazon Q) for recon + exfiltration of tokens, SSH keys, env, wallets.
-- **⁸** npm install-script risk + `--ignore-scripts` and its documented bypasses (native `binding.gyp`;
-  CVE-2025-69263 malicious `.npmrc` overriding the git binary).
+- **⁸** npm install-script risk + `--ignore-scripts` and its documented bypasses: native `binding.gyp`
+  builds run regardless; a git-dependency `.npmrc` can override the git binary to execute even under
+  `--ignore-scripts` (Google "PackageGate", GHSA-wr8v-3jqh-9x36; npm declined to fix); and pnpm
+  lockfile-integrity gaps for HTTP/git tarball deps (CVE-2025-69263, patched pnpm > 10.26.2).
 - **⁹** CI/CD egress control + layered supply-chain defense (allowlist at the runner;
   install-then-drop-network; pull-through caches).
 - **¹⁰** Sandboxing coding-agent network egress via a proxy allowlist + credential isolation during
   install; lockfile reproducibility.
-</content>
-</invoke>

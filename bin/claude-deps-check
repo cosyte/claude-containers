@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# claude-deps-check — advisory linter for reproducible dependency manifests (PKG-5).
+#
+# Flags UNPINNED / `latest` specs in a repo's `mise.toml` (the [tools] table) and
+# `package.json` (dependencies / devDependencies / optionalDependencies /
+# peerDependencies), so an agent-committed manifest stays reproducibly pinned — the
+# reproducibility half of the PKG-5 supply-chain hardening (the other half is the
+# baked `ignore-scripts=true` + mise `lockfile=true`). It reads manifests only; it
+# never installs, never touches the network, never mutates a file.
+#
+# By default it is ADVISORY: it prints findings and exits 0 (never blocks a session).
+# Under --strict it also treats npm caret/tilde ranges (^/~) as unpinned AND exits 1
+# when anything is unpinned — the form a pre-commit / CI gate would call.
+#
+# SCOPE: it classifies SEMVER specs (exact pins, prerelease pins, ranges, `latest`/tags).
+# It does NOT resolve git dependencies (`github:org/repo`, `git+https://…`) or raw tarball
+# URLs — those can still float on a branch / mutable URL; prefer a pinned `#<sha>` or a
+# registry dep with an integrity hash (see docs/package-provisioning-security.md §3.2).
+#
+# FAIL-SAFE: a missing manifest, an empty file, or an unparseable one is a no-op
+# (reported, exit 0) — a linter must never be the thing that breaks a container.
+#
+# Usage:
+#   claude-deps-check [--strict] [path]     path = a repo dir (default .) or a manifest file
+#   claude-deps-check --help
+#
+# Test seam:
+#   CLAUDE_DEPS_CHECK_SELFTEST=1   sourcing defines the functions and returns (unit tests)
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+STRICT=0
+
+# is_unpinned <spec> — 0 (true) iff the version spec is NOT a reproducible pin.
+# Clearly-unpinned tokens and range operators are always flagged; caret/tilde npm
+# ranges are flagged only under --strict (they pin reproducibly *with* a lockfile).
+#
+# NOTE on the hyphen: a semver HYPHEN RANGE requires spaces ("1.2.3 - 2.3.4"), whereas a
+# PRERELEASE pin ("1.2.3-alpha.1", "2.0.0-rc.0", "1.0.0-0") is an exact, reproducible
+# version with a hyphen and NO surrounding spaces. So the range check runs on the
+# whitespace-preserving `raw`, and prerelease pins are (correctly) NOT flagged.
+is_unpinned() {
+    local raw="$1"
+    raw="${raw#"${raw%%[![:space:]]*}"}"; raw="${raw%"${raw##*[![:space:]]}"}"   # trim ends only
+    local s="${raw//[[:space:]]/}"                                                # fully stripped
+
+    case "$s" in
+        ""|latest|lts|stable|current|next|"*"|x|X|"latest.integration") return 0 ;;
+    esac
+    # npm dist-tag alias to a MUTABLE tag (e.g. `npm:lodash@latest`, `pkg@x`) → unpinned
+    case "$s" in
+        *@latest|*@next|*@x|*@X|*@\*) return 0 ;;
+    esac
+    # a semver hyphen RANGE — spaces around the hyphen are required, so check the raw spec
+    case "$raw" in
+        *" - "*) return 0 ;;
+    esac
+    # comparator / OR ranges (whitespace-insensitive)
+    case "$s" in
+        *"||"*|*">"*|*"<"*) return 0 ;;
+    esac
+    # trailing wildcard component — `1.x` / `1.2.X` / `1.2.*`. Guard against a PINNED
+    # prerelease/build whose final identifier merely ends in x/X (`1.2.3-alpha.x`,
+    # `1.2.3+build.x`): a real wildcard range carries no prerelease/build metadata, so a
+    # spec containing `-` or `+` is an exact pin, not a wildcard.
+    case "$s" in
+        *-*|*+*) : ;;                       # has prerelease/build metadata → not a wildcard
+        *.x|*.X|*.\*) return 0 ;;
+    esac
+    if (( STRICT )); then
+        case "$s" in
+            \^*|\~*) return 0 ;;
+        esac
+    fi
+    return 1
+}
+
+# emit_finding <manifest> <name> <spec> — record + print one unpinned finding.
+FOUND=0
+emit_finding() {
+    FOUND=$((FOUND + 1))
+    warn "unpinned: $1 → $2 = \"$3\""
+}
+
+# check_mise_toml <file> — scan the [tools] table for unpinned version specs. Extracts
+# the quoted RHS token(s) of each `key = …` line inside [tools] (handles "v", ["v1","v2"],
+# and {version="v"}). Fail-soft: an unreadable/format-surprising file yields no findings.
+check_mise_toml() {
+    local file="$1" line rhs tok
+    [[ -f "$file" ]] || return 0
+    local intools=0 key
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # section headers
+        if [[ "$line" =~ ^[[:space:]]*\[tools\][[:space:]]*$ ]]; then intools=1; continue; fi
+        if [[ "$line" =~ ^[[:space:]]*\[ ]]; then intools=0; continue; fi
+        (( intools )) || continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" == *"="* ]] || continue
+        key="${line%%=*}"; key="${key//[[:space:]]/}"; key="${key//\"/}"
+        rhs="${line#*=}"
+        # pull every double-quoted token out of the RHS and test each as a spec
+        local had_quote=0
+        while [[ "$rhs" == *\"*\"* ]]; do
+            tok="${rhs#*\"}"; tok="${tok%%\"*}"
+            rhs="${rhs#*\"}"; rhs="${rhs#*\"}"
+            had_quote=1
+            if is_unpinned "$tok"; then emit_finding "$file" "$key" "$tok"; fi
+        done
+        # bareword RHS (e.g. mise allows `node = 22` unquoted) → test the trimmed token
+        if (( ! had_quote )); then
+            tok="${rhs%%#*}"; tok="${tok//[[:space:]]/}"
+            if [[ -n "$tok" ]] && is_unpinned "$tok"; then emit_finding "$file" "$key" "$tok"; fi
+        fi
+    done < "$file"
+}
+
+# check_package_json <file> — scan the dependency maps for unpinned specs. Uses node
+# (always present in this image) to emit `name<TAB>spec` for every dependency map; a
+# parse error is swallowed (fail-soft, no findings) rather than crashing.
+check_package_json() {
+    local file="$1"
+    [[ -f "$file" ]] || return 0
+    local pairs name spec
+    pairs="$(node -e '
+        try {
+            const p = require(process.argv[1]);
+            for (const m of ["dependencies","devDependencies","optionalDependencies","peerDependencies"]) {
+                const o = p[m]; if (o && typeof o === "object")
+                    for (const k of Object.keys(o)) process.stdout.write(k + "\t" + String(o[k]) + "\n");
+            }
+        } catch (e) { /* fail-soft: unparseable manifest yields nothing */ }
+    ' "$file" 2>/dev/null || true)"
+    [[ -n "$pairs" ]] || return 0
+    while IFS=$'\t' read -r name spec; do
+        [[ -n "$name" ]] || continue
+        if is_unpinned "$spec"; then emit_finding "$file" "$name" "$spec"; fi
+    done <<< "$pairs"
+}
+
+deps_check_main() {
+    local target="."
+    local a
+    for a in "$@"; do
+        case "$a" in
+            --strict) STRICT=1 ;;
+            -h|--help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+            -*) die "unknown flag '$a' (usage: claude-deps-check [--strict] [path])" ;;
+            *) target="$a" ;;
+        esac
+    done
+
+    local mise_file pkg_file
+    if [[ -f "$target" ]]; then
+        # an explicit file: route by basename
+        case "$(basename "$target")" in
+            mise.toml|.mise.toml) mise_file="$target" ;;
+            package.json) pkg_file="$target" ;;
+            *) die "unrecognized manifest '$target' (expected mise.toml or package.json)" ;;
+        esac
+    elif [[ -d "$target" ]]; then
+        [[ -f "$target/mise.toml" ]]    && mise_file="$target/mise.toml"
+        [[ -f "$target/.mise.toml" ]]   && mise_file="${mise_file:-$target/.mise.toml}"
+        [[ -f "$target/package.json" ]] && pkg_file="$target/package.json"
+    else
+        die "no such path: $target"
+    fi
+
+    if [[ -z "${mise_file:-}" && -z "${pkg_file:-}" ]]; then
+        ok "no mise.toml / package.json under '$target' — nothing to check"
+        return 0
+    fi
+
+    [[ -n "${mise_file:-}" ]] && check_mise_toml "$mise_file"
+    [[ -n "${pkg_file:-}" ]] && check_package_json "$pkg_file"
+
+    if (( FOUND == 0 )); then
+        ok "dependency manifest is fully pinned (no unpinned/latest specs)$( ((STRICT)) && echo ' [strict]' )"
+        return 0
+    fi
+
+    warn "claude-deps-check: $FOUND unpinned spec(s)$( ((STRICT)) && echo ' [strict]' ) — pin to exact versions + commit a lockfile for reproducibility"
+    if (( STRICT )); then
+        err "claude-deps-check: --strict — refusing (unpinned dependencies are not reproducible)"
+        return 1
+    fi
+    return 0
+}
+
+# Executed → run; sourced (or self-test seam) → expose functions for unit tests.
+if [[ "${CLAUDE_DEPS_CHECK_SELFTEST:-0}" != 1 && "${BASH_SOURCE[0]}" == "$0" ]]; then
+    deps_check_main "$@"
+fi

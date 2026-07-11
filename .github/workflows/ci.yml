@@ -42,3 +42,5 @@ jobs:
         run: test/mise-unit.sh
       - name: cache unit tests (PKG-3 shared tool cache — /cache relocation, fail-safe, idle-only re-fetchable trim, launch/compose mounts)
         run: test/cache-unit.sh
+      - name: manifest hardening unit tests (PKG-5 — user-scoped ignore-scripts + mise lockfile baked into build; claude-deps-check pin linter)
+        run: test/manifest-hardening-unit.sh

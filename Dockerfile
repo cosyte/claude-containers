@@ -229,6 +229,10 @@ COPY bin/claude-reaper /usr/local/bin/claude-reaper
 # controller mode (entrypoint.sh §5b), scheduled GC of the inner daemon's image/
 # container/build-cache layers so nested workers don't fill the host.
 COPY bin/claude-disk-gc /usr/local/bin/claude-disk-gc
+# Dependency manifest linter (PKG-5): warns on unpinned/`latest` specs in a repo's
+# mise.toml / package.json (or refuses under --strict), so an agent-committed manifest
+# stays reproducibly pinned. Advisory by default; never blocks a session.
+COPY bin/claude-deps-check /usr/local/bin/claude-deps-check
 # Controller mode (CC-6): wires this substrate to the umbrella PAR-* lease/scheduler/
 # bump-worker. slots==1 collapses to claude-autopilot (byte-identical); slots>1 is the
 # built-but-gated K>1 loop (CLAUDE_CONTROLLER_MAX_SLOTS defaults to 1 — never auto-ramps).
@@ -246,6 +250,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-worker-run \
         /usr/local/bin/claude-reaper \
         /usr/local/bin/claude-disk-gc \
+        /usr/local/bin/claude-deps-check \
         /usr/local/bin/claude-controller \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
@@ -278,6 +283,36 @@ RUN printf '%s\n' \
       'command -v mise >/dev/null 2>&1 && eval "$(mise activate bash)"' \
       >> /home/${CLAUDE_USER}/.bashrc \
     && chown ${CLAUDE_UID}:${CLAUDE_GID} /home/${CLAUDE_USER}/.bashrc
+
+# --- Reproducible manifest + install-script hardening (PKG-5) ------------------
+# Two supply-chain hardenings for AGENT-initiated installs, both baked into the
+# `claude` USER's config so the BUILD (root, above) is untouched — the pinned
+# `npm install -g` layers ran before this and as root, so a tampered dependency's
+# lifecycle script can't fire during image build either way.
+#
+# 1. ignore-scripts=true in ~/.npmrc — npm/pnpm/yarn(1.x) all read it, so an
+#    agent-run `npm i` / `pnpm i` in /workspace does NOT execute a dependency's
+#    pre/post-install lifecycle scripts (the Nx/Shai-Hulud weaponized-package
+#    vector). This is NECESSARY BUT NOT SUFFICIENT — documented bypasses remain
+#    (git-dependency `.npmrc` git-binary override runs even under ignore-scripts —
+#    PackageGate GHSA-wr8v-3jqh-9x36; native `binding.gyp`/node-gyp builds still
+#    compile; pnpm lockfile-integrity gaps for HTTP/git tarball deps — CVE-2025-69263).
+#    The residual is contained by PKG-1 (curated egress + creds-unreachable-during-
+#    fetch), not by this flag alone. See docs/package-provisioning-security.md.
+#    ESCAPE HATCH (npm-native, no flag): a repo that genuinely needs install
+#    scripts commits its own /workspace/.npmrc with `ignore-scripts=false` — a
+#    project-level .npmrc overrides the user one, an explicit per-repo opt-in.
+# 2. mise lockfile=true in the global mise config — makes a committed
+#    /workspace/mise.lock authoritative: `mise install`/`use` records + reuses the
+#    exact locked tool versions, so a pinned lock reinstalls identical versions
+#    (from the PKG-3 shared cache) deterministically. Global config is always
+#    trusted (it is mise's own, not a repo config), so it does not widen the
+#    /workspace-only config-trust decision from PKG-2.
+RUN set -eux; \
+    printf 'ignore-scripts=true\n' > /home/${CLAUDE_USER}/.npmrc; \
+    mkdir -p /home/${CLAUDE_USER}/.config/mise; \
+    printf '[settings]\nlockfile = true\n' > /home/${CLAUDE_USER}/.config/mise/config.toml; \
+    chown -R ${CLAUDE_UID}:${CLAUDE_GID} /home/${CLAUDE_USER}/.npmrc /home/${CLAUDE_USER}/.config
 
 # --- Environment --------------------------------------------------------------
 # Do NOT set DISABLE_TELEMETRY / DO_NOT_TRACK / CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:

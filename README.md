@@ -462,6 +462,13 @@ Full design + verification: [docs/shared-tool-cache.md](docs/shared-tool-cache.m
   scoped supply-chain trade so a repo's own `mise.toml` auto-applies while a config
   anywhere else stays untrusted (never a blanket `/`). Full design + verification:
   [docs/toolchain-provisioning.md](docs/toolchain-provisioning.md).
+- **Reproducible + script-hardened installs (PKG-5).** Agent-initiated `npm`/`pnpm`
+  installs run with **`ignore-scripts=true`** (baked into the `claude` user's
+  `~/.npmrc`, so build-time root installs are untouched; a repo opts back in with its
+  own `/workspace/.npmrc`). mise **`lockfile=true`** makes a committed
+  `mise.lock` reinstall identical versions offline from the shared cache. `claude-deps-check`
+  flags `latest`/unpinned specs in `mise.toml`/`package.json` (advisory; `--strict`
+  refuses). Threat model + bypasses: [docs/package-provisioning-security.md](docs/package-provisioning-security.md).
 
 ## Troubleshooting (summary)
 
