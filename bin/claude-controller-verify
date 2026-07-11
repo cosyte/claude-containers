@@ -63,6 +63,14 @@ TMPD="$(mktemp -d)"
 cleanup() { (( KEEP )) || rm -rf "$TMPD"; }
 trap cleanup EXIT
 
+# The ambient .env (sourced by _common.sh) may export EMPTY GIT_AUTHOR_NAME /
+# GIT_COMMITTER_NAME / …_EMAIL (container-runtime placeholders); git prefers those
+# env vars over any repo-local `git config`, so every fixture commit here — AND
+# bump-worker.sh's own commits under drain — would fail with "empty ident name",
+# leaving phase 3 to drain an empty queue vacuously. Pin a valid ident for the run.
+export GIT_AUTHOR_NAME=controller-verify   GIT_AUTHOR_EMAIL=verify@cosyte.test
+export GIT_COMMITTER_NAME=controller-verify GIT_COMMITTER_EMAIL=verify@cosyte.test
+
 # --- phase 0: --check-safe — slots math + frontier parse + DRYRUN plan --------------------
 info "phase 0 — slots math + frontier parse + DRYRUN dispatch plan (--check-safe, no docker)"
 
@@ -143,7 +151,10 @@ chmod +x "$FIXTURE"/scripts/*.sh
 # cosyte repos. lease.sh's ship-evidence check and bump-worker.sh's ancestry check both
 # read real git state, so these must be REAL repos, not directories.
 mk_fake_submodule() {
-    local name="$1" dir="$FIXTURE/$name"
+    # Two statements, not one: under `set -u`, `local name="$1" dir="$FIXTURE/$name"`
+    # expands $name (for dir) BEFORE the name= assignment takes effect → unbound-variable.
+    local name="$1"
+    local dir="$FIXTURE/$name"
     mkdir -p "$dir"
     git -C "$dir" init -q -b main
     git -C "$dir" config user.email "verify@cosyte.test"
