@@ -1,0 +1,29 @@
+# claude-containers — curated apt manifest (PKG-4)
+#
+# The DECLARATIVE, curated, pinned list of Debian system packages the CC-2 root
+# broker installs in a Sysbox *worker* at start, BEFORE dropping to the agent —
+# the syslib gap `mise` (rootless language/CLI toolchains) can't fill. It is
+# applied by `claude-apt-provision`, which opens `deb.debian.org` /
+# `security.debian.org` egress for the install window then RE-LOCKS it
+# (install-then-relock). See docs/package-provisioning-security.md §4.
+#
+# WHY curated-not-open: the supply-chain exfil path this container refuses is
+# *arbitrary* agent-driven `apt` of untrusted repos. Only packages listed here
+# install; anything else is REFUSED. A leaf container (no host-safe root) is
+# refused outright — use `mise` / static binaries or rebuild the base image.
+#
+# FORMAT: one entry per line, `#` starts a comment. Each entry is a Debian
+# package name, optionally pinned to an exact version for reproducibility:
+#
+#     libpq5                       # unpinned (tracks the bookworm mirror)
+#     libpq5=15.10-0+deb12u1       # pinned to an exact version (reproducible)
+#
+# Package names are validated (lowercase alnum + `+ . -`); a malformed entry
+# fails the whole apply closed (all-or-refuse), never a half-provisioned worker.
+#
+# DEFAULT: empty. Curation is a deliberate human act — add a line here (in a PR,
+# reviewed) only when a concrete worker workload needs a system library that
+# `mise` cannot provide rootlessly. Keep this list SMALL and justified.
+#
+# ---------------------------------------------------------------------------
+# (no packages curated yet — add pinned entries above the ruler as needed)

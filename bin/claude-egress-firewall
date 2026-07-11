@@ -64,7 +64,22 @@ if [[ "${CLAUDE_EGRESS_PACKAGES:-0}" =~ ^(1|true|yes|on)$ ]]; then
     log "package-registry egress profile ON (PyPI, crates, Go proxy, mise, ghcr; curated + IP-pinned)"
 fi
 
-HOSTS="$DEFAULT_HOSTS $EXTRA $PACKAGES_HOSTS"
+# Opt-in Debian-mirror profile (PKG-4). ADDITIVE + IP-pinned exactly like the package profile, but
+# scoped to the rootful Sysbox-worker apt tier: `claude-apt-provision` sets CLAUDE_EGRESS_APT=1 and
+# re-applies this firewall to OPEN the install window, then re-applies it WITHOUT the flag to RE-LOCK
+# (install-then-relock). Deliberately NOT in the default or package profile — a leaf container never
+# reaches the Debian mirrors; only the brokered, curated worker apt path opens them, and only for the
+# window. Nothing broadens unless CLAUDE_EGRESS_APT is explicitly on. See
+# docs/package-provisioning-security.md §4.
+APT_HOSTS=""
+if [[ "${CLAUDE_EGRESS_APT:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    APT_HOSTS="
+    deb.debian.org security.debian.org
+    "
+    log "Debian-mirror egress profile ON (deb.debian.org, security.debian.org; apt install window, IP-pinned)"
+fi
+
+HOSTS="$DEFAULT_HOSTS $EXTRA $PACKAGES_HOSTS $APT_HOSTS"
 
 # Dry-run seam for CI/tests (CLAUDE_EGRESS_PRINT_HOSTS accepts the same 1|true|yes|on spellings as the
 # package flag): print the composed allowlist hosts — one per line, IN THE ORDER the resolution loop

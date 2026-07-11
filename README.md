@@ -204,6 +204,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_HARDEN_CAPS` | `1` | `1` = `--cap-drop ALL` + minimal `--cap-add` (drops NET_RAW/MKNOD/SETFCAP); `0` = Docker defaults. `no-new-privileges` is always set. Override the set with `CLAUDE_MIN_CAPS` |
 | `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts. Extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. Fail-open on error |
 | `CLAUDE_EGRESS_PACKAGES` | `0` | `1` = additively allowlist the curated **package registries** (PyPI, crates.io, Go proxy, `mise.run`, `ghcr.io`) so agent-driven `pip`/`cargo`/`go`/`mise` installs work under lockdown. Opt-in and curated (not open); nothing else broadens. Debian/apt system libs are **not** here (they need the rootful worker tier). See [docs/package-provisioning-security.md](docs/package-provisioning-security.md) |
+| `CLAUDE_APT_PROVISION` | `0` | `1` = in a **Sysbox worker**, install the curated pinned `claude-config/apt-manifest.txt` (system `.so` libs `mise` can't provide rootless) as root before the agent — curated-not-open, install-then-relock. Self-gates to worker root; a leaf gets a documented refusal. Override the path with `CLAUDE_APT_MANIFEST_FILE`. See [docs/package-provisioning-security.md](docs/package-provisioning-security.md) §3.7 |
 | `CLAUDE_BROKER_GIT_KEY` | `0` | `1` = hold the SSH deploy key in a root ssh-agent (agent signs/pushes but can't read the key bytes) instead of a readable `~/.ssh/id_ed25519` |
 | `CLAUDE_WORKER_UMBRELLA` | `/workspace` (if it looks right) | Umbrella root override for `claude-worker-run` — must have both `.gitmodules` and `scripts/isolate.sh`; refuses (fail closed) otherwise |
 | `CLAUDE_WORKER_HEARTBEAT_SECS` | `60` | Seconds between `claude-worker-run`'s best-effort `scripts/lease.sh renew` calls |
@@ -457,7 +458,7 @@ Full design + verification: [docs/shared-tool-cache.md](docs/shared-tool-cache.m
   their runtime from vendor hosts (nodejs.org, go.dev, static.rust-lang.org) not
   yet on the allowlist, so they need those hosts via `CLAUDE_EGRESS_EXTRA_HOSTS`.
 - **System libraries (`apt`) are not available** in a leaf container by design —
-  it's rootless. Those are the Sysbox-worker apt tier, not here.
+  it's rootless. Those are the Sysbox-worker apt tier (**PKG-4**, below), not here.
 - The image sets `trusted_config_paths` to **`/workspace` only** — a deliberately
   scoped supply-chain trade so a repo's own `mise.toml` auto-applies while a config
   anywhere else stays untrusted (never a blanket `/`). Full design + verification:
@@ -469,6 +470,14 @@ Full design + verification: [docs/shared-tool-cache.md](docs/shared-tool-cache.m
   `mise.lock` reinstall identical versions offline from the shared cache. `claude-deps-check`
   flags `latest`/unpinned specs in `mise.toml`/`package.json` (advisory; `--strict`
   refuses). Threat model + bypasses: [docs/package-provisioning-security.md](docs/package-provisioning-security.md).
+- **System libraries — brokered worker `apt` (PKG-4).** The syslib (`.so`) gap `mise`
+  can't fill is closed in the **Sysbox worker tier only**: with `CLAUDE_APT_PROVISION=1`,
+  the worker installs the curated, pinned `claude-config/apt-manifest.txt` as root
+  *before* the agent, opening `deb.debian.org` for the window then **re-locking**
+  (install-then-relock). Curated-not-open — only manifest packages install, arbitrary
+  agent `apt` is refused; a **leaf** container gets a documented refusal (*use `mise` /
+  static binaries, or rebuild the base*), never a silent partial. Default manifest is
+  empty. Design: [docs/package-provisioning-security.md](docs/package-provisioning-security.md) §3.7.
 
 ## Troubleshooting (summary)
 

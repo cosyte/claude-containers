@@ -677,6 +677,34 @@ if [[ "${CLAUDE_OTEL_ENABLED:-0}" =~ ^(1|true|yes|on)$ || -n "${OTEL_EXPORTER_OT
         log "OpenTelemetry        : WARNING — enabled but OTEL_EXPORTER_OTLP_ENDPOINT is empty; nothing will be exported"
 fi
 
+# Curated apt provisioning (PKG-4): in a Sysbox WORKER, install the declarative,
+# curated apt manifest as root BEFORE dropping to the agent — the syslib gap `mise`
+# can't fill. claude-apt-provision self-gates: it refuses unless we are root mapped
+# to a non-root host uid (the worker userns), so setting this flag on a leaf is a
+# logged no-op, never a partial. It opens the deb.debian.org window then RE-LOCKS
+# it; the general egress lockdown just below is the authoritative final seal, so the
+# worker is sealed even if the relock could not confirm. All-or-refuse, fail-safe.
+if [[ "${CLAUDE_APT_PROVISION:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    if [[ ! "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]]; then
+        log "Apt provisioning     : WARNING — CLAUDE_APT_PROVISION=1 without CLAUDE_EGRESS_LOCKDOWN=1: apt runs over OPEN egress with no scoped deb.debian.org window and no relock. Set CLAUDE_EGRESS_LOCKDOWN=1 for the contained install window."
+    fi
+    apt_rc=0; /usr/local/bin/claude-apt-provision || apt_rc=$?
+    # Distinguish the outcomes: a leaf no-op (rc 3) is EXPECTED and benign; a real
+    # install/egress failure (rc >=4) is NOT — surface it loudly so an operator
+    # never reads a syslib that silently didn't install as a clean boot.
+    if (( apt_rc == 0 )); then
+        if [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]]; then
+            log "Apt provisioning     : curated manifest applied (worker tier); egress re-locked"
+        else
+            log "Apt provisioning     : curated manifest applied (worker tier); egress NOT re-locked (lockdown off)"
+        fi
+    elif (( apt_rc == 3 )); then
+        log "Apt provisioning     : not a worker (leaf / no host-safe root) — nothing installed (expected on a leaf container)"
+    else
+        log "Apt provisioning     : FAILED (rc=$apt_rc) — a REAL install/egress error, not a benign leaf no-op; the worker may be missing a requested syslib (see [apt-provision] lines)"
+    fi
+fi
+
 # Egress lockdown (opt-in): apply a default-deny firewall NOW — after the
 # entrypoint's own setup (clone, plugin install) has finished with open egress,
 # and as root (we still hold NET_ADMIN) before the unprivileged agent starts, so

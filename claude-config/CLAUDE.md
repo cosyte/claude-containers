@@ -20,7 +20,10 @@ Keep this short. Project-specific guidance belongs in the repo's own
   `CLAUDE_EGRESS_LOCKDOWN=1`: `github:`/`aqua:`/`python@` work as-is; `pip`/`cargo`/`go`
   registry backends need `CLAUDE_EGRESS_PACKAGES=1`; and `node@`/`go@`/`rust`
   toolchains need their vendor hosts added via `CLAUDE_EGRESS_EXTRA_HOSTS`. System
-  libraries (`apt`) are not available here — this is a rootless container by design.
+  libraries (`apt`) are not available in a plain leaf container — it's rootless by
+  design; in a **Sysbox worker** with `CLAUDE_APT_PROVISION=1` they come from the
+  curated, pinned `apt-manifest.txt` (installed as root before you start), never
+  from ad-hoc `apt` (which stays unavailable to you as UID 1000).
 - Installs are supply-chain-hardened: `npm`/`pnpm` run with `ignore-scripts=true`
   by default, so a dependency's post-install scripts do NOT execute. If a repo
   legitimately needs them (e.g. a native build), commit a `/workspace/.npmrc` with
