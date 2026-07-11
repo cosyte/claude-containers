@@ -177,6 +177,43 @@ RUN set -eux; \
 # the variant by probing the baked binaries on PATH instead.)
 LABEL claude.browser="${WITH_BROWSER}"
 
+# --- Optional: Docker engine for CONTROLLER mode (CC-6 / --broker) -------------
+# Build with `--build-arg WITH_DOCKER=1` (or `make build-controller`) to bake the
+# Docker Engine (dockerd + CLI + containerd) into the image. This turns the image
+# into a *controller*: run it under `--runtime=sysbox-runc` with
+# CLAUDE_WORKER_BROKER=1 and the entrypoint (§5a) starts an INNER dockerd on which
+# the root-owned worker broker (CC-2) launches nested workers — so one interactive
+# session can spawn autonomous `/work-on` workers via claude-worker-request. Sysbox
+# contains the inner daemon in a user namespace (root → an unprivileged host uid),
+# so this needs NO `--privileged` and NO host-docker-socket mount — both are
+# FORBIDDEN (umbrella ADR 0011); the whole point is to keep the agent off the host
+# daemon. Default OFF: the lean image ships no docker engine (a plain session or a
+# leaf worker never needs one). ~400 MB delta when on.
+ARG WITH_DOCKER=0
+RUN set -eux; \
+    if [ "$WITH_DOCKER" = "1" ]; then \
+        install -m 0755 -d /etc/apt/keyrings; \
+        curl -fsSL https://download.docker.com/linux/debian/gpg \
+            -o /etc/apt/keyrings/docker.asc; \
+        chmod a+r /etc/apt/keyrings/docker.asc; \
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+            > /etc/apt/sources.list.d/docker.list; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends \
+            docker-ce docker-ce-cli containerd.io; \
+        apt-get clean; \
+        rm -rf /var/lib/apt/lists/*; \
+        # Prove the engine + CLI are present; the entrypoint (§5a) starts dockerd.
+        dockerd --version; docker --version; containerd --version; \
+    else \
+        echo "WITH_DOCKER=0 — skipping the Docker engine (lean session/worker image)"; \
+    fi
+# Image-capability label: bin/claude-launch reads this to (a) auto-select the
+# controller image for --broker and (b) fail early (loud, actionable) if --broker
+# targets an image with no inner dockerd. The in-container entrypoint can't read
+# its own image labels, so §5a probes for the dockerd binary on PATH instead.
+LABEL claude.controller="${WITH_DOCKER}"
+
 # --- Non-root user ------------------------------------------------------------
 # The entrypoint starts as root (sshd, volume chown) then drops to this user
 # for the Claude Code process via gosu.

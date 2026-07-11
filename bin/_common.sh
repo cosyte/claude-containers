@@ -38,6 +38,10 @@ fi
 
 # --- Defaults ----------------------------------------------------------------
 CLAUDE_IMAGE="${CLAUDE_IMAGE:-claude-code-box:latest}"
+# Controller image (CC-6): the WITH_DOCKER=1 variant that bakes the Docker engine,
+# so it can run an inner dockerd + spawn nested workers under Sysbox. claude-launch
+# auto-selects it for --broker (unless --image is given). Build: make build-controller.
+CLAUDE_IMAGE_CONTROLLER="${CLAUDE_IMAGE_CONTROLLER:-claude-code-box:controller}"
 AUTH_VOLUME="${AUTH_VOLUME:-claude-auth}"
 SSHKEYS_VOLUME="${SSHKEYS_VOLUME:-claude-sshkeys}"
 # Shared tool cache (PKG-3): ONE volume shared across every managed container,

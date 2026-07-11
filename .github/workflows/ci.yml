@@ -48,3 +48,5 @@ jobs:
         run: test/apt-provision-unit.sh
       - name: cache proxy unit tests (PKG-6 — controller-side pull-through cache; fail-closed ready gate, single-choke-point egress, broker/worker wiring, client-apply refusal)
         run: test/cache-proxy-unit.sh
+      - name: broker-interactive unit tests (CC-6 — interactive session spawns nested workers; broker-gated socket lockdown, §5a inner dockerd, claude-launch --sysbox/--broker, controller image plumbing)
+        run: test/broker-interactive-unit.sh
