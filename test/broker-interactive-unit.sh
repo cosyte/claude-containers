@@ -41,19 +41,35 @@ if hasE "$ENTRY" 'if \[\[ "\$\{CLAUDE_WORKER_BROKER:-0\}" =~ .* \]\]; then'; the
 else
     bad "expected an 'if CLAUDE_WORKER_BROKER' guard on the socket-lockdown barrier"
 fi
-# Regression: the die message that IS the barrier must no longer be reachable only via a
-# CLAUDE_CONTROLLER guard. Assert the barrier's die text exists and the nearest preceding
-# guard is the broker one (structurally: WORKER_BROKER guard appears before the die).
-if awk '/CLAUDE_WORKER_BROKER:-0.*=~/{seen=1} /was not locked to root:root 600/{print (seen?"ok":"no"); exit}' "$ENTRY" | grep -q ok; then
-    ok "the 'was not locked' barrier follows the CLAUDE_WORKER_BROKER guard"
+# Regression, SCOPED to the §5c block (so §5a's earlier WORKER_BROKER guard can't mask a
+# revert): the §5c barrier must be guarded by CLAUDE_WORKER_BROKER and NOT reintroduce a
+# CLAUDE_CONTROLLER guard. Extract §5c (header → its final serving-confirmed log).
+SEC5C="$(sed -n '/# --- 5c\./,/broker serving before the agent session starts/p' "$ENTRY")"
+if grep -qF 'CLAUDE_WORKER_BROKER:-0' <<<"$SEC5C" && ! grep -qF 'if [[ "${CLAUDE_CONTROLLER:-0}"' <<<"$SEC5C"; then
+    ok "§5c barrier is guarded by CLAUDE_WORKER_BROKER, not CLAUDE_CONTROLLER (scoped, revert-proof)"
 else
-    bad "the socket-lockdown barrier is not reached under the CLAUDE_WORKER_BROKER guard"
+    bad "§5c barrier guard is wrong (broker gate missing, or a CLAUDE_CONTROLLER guard reappeared)"
+fi
+# §5c must verify the broker is actually SERVING (its spool), not just socket perms (which
+# §5a's pre-lock already sets), and fail fast if the backgrounded broker PID died.
+if grep -qF 'broker_serving()' <<<"$SEC5C" && grep -qF 'BROKER_SPOOL' <<<"$SEC5C" \
+   && grep -qF 'kill -0 "$BROKER_PID"' <<<"$SEC5C"; then
+    ok "§5c waits for the broker to be SERVING (spool dir) + fails fast on a dead broker PID"
+else
+    bad "§5c does not check broker liveness (spool dir + BROKER_PID) — socket perms alone are insufficient"
 fi
 # The wait var is the mode-neutral name, with the legacy controller name as a fallback.
 if hasE "$ENTRY" 'CLAUDE_BROKER_SOCKET_LOCKDOWN_WAIT:-\$\{CLAUDE_CONTROLLER_SOCKET_WAIT:-90\}'; then
     ok "wait knob is CLAUDE_BROKER_SOCKET_LOCKDOWN_WAIT with the legacy alias fallback"
 else
     bad "expected CLAUDE_BROKER_SOCKET_LOCKDOWN_WAIT (legacy: CLAUDE_CONTROLLER_SOCKET_WAIT)"
+fi
+# Both wait knobs must be validated as POSITIVE integers with no leading zero — a `(( … ))`
+# compare parses 090 as octal (infinite spin) and WAIT=0 would time out before dockerd boots.
+if [[ "$(grep -cF '=~ ^[1-9][0-9]*$' "$ENTRY")" -ge 2 ]]; then
+    ok "CLAUDE_INNER_DOCKERD_WAIT + the socket wait are validated positive/no-leading-zero (octal-safe)"
+else
+    bad "expected both wait knobs validated with ^[1-9][0-9]*$ (octal/WAIT=0 safe)"
 fi
 
 echo "== A2. entrypoint §5a: inner dockerd starts before the broker, fail-closed if absent =="
@@ -69,7 +85,15 @@ if has "$ENTRY" 'dockerd >> /var/log/inner-dockerd.log'; then
 else
     bad "§5a does not start dockerd"
 fi
-# §5a (dockerd start) must sit BEFORE §5b (broker start) so the broker's socket is present.
+# A stale pidfile from an ungracefully-killed prior daemon must be cleared so a container
+# restart (--restart unless-stopped) doesn't boot-loop on 'pidfile already exists'.
+if has "$ENTRY" 'rm -f /run/docker.pid /var/run/docker.pid'; then
+    ok "§5a clears a stale dockerd pidfile before starting (restart-safe)"
+else
+    bad "§5a does not clear a stale pidfile — a controller restart can boot-loop"
+fi
+# Inner dockerd (§5a) must start BEFORE the broker (§5b) — they share one guard now, so the
+# dockerd 'starting' log must precede the broker 'starting' log within the block.
 a_line="$(grep -n 'starting as root (Sysbox-contained' "$ENTRY" | head -1 | cut -d: -f1)"
 b_line="$(grep -n 'Worker broker       : starting as root (agent requests' "$ENTRY" | head -1 | cut -d: -f1)"
 if [[ -n "$a_line" && -n "$b_line" ]] && (( a_line < b_line )); then
@@ -126,11 +150,21 @@ has "$LAUNCH" 'preflight_sysbox' && has "$LAUNCH" 'CLAUDE_SYSBOX_ATTESTED_VERSIO
     && ok "--sysbox runs preflight_sysbox and passes CLAUDE_SYSBOX_ATTESTED_VERSION" \
     || bad "--sysbox is missing the preflight_sysbox / attestation wiring"
 
-# The flat runc HARDEN_ARGS must be cleared for a Sysbox controller (the inner dockerd
-# needs its caps; userns is the boundary).
-hasE "$LAUNCH" 'HARDEN_ARGS=\(\)' \
-    && ok "sysbox mode clears HARDEN_ARGS (no cap-drop that would starve the inner dockerd)" \
-    || bad "sysbox mode does not clear HARDEN_ARGS"
+# The flat runc HARDEN_ARGS / preflight_runc must NOT apply on the Sysbox path (the inner
+# dockerd needs its caps; userns is the boundary). They live in the non-sysbox (else) branch;
+# assert preflight_runc sits AFTER the `if [[ "$SYSBOX" == 1 ]]` split (i.e. only in else).
+pf_line="$(grep -n '^    preflight_runc' "$LAUNCH" | head -1 | cut -d: -f1)"
+sb_line="$(grep -nF 'if [[ "$SYSBOX" == 1 ]]' "$LAUNCH" | head -1 | cut -d: -f1)"
+if [[ -n "$pf_line" && -n "$sb_line" ]] && (( pf_line > sb_line )); then
+    ok "preflight_runc + flat hardening run ONLY on the non-sysbox path"
+else
+    bad "preflight_runc must sit inside the non-sysbox branch (irrelevant under sysbox-runc)"
+fi
+# Egress firewall is fail-open, so --sysbox + CLAUDE_EGRESS_LOCKDOWN re-adds NET_ADMIN
+# explicitly rather than relying on Sysbox's implicit cap set.
+has "$LAUNCH" 'HARDEN_ARGS=(--cap-add NET_ADMIN)' \
+    && ok "--sysbox + egress lockdown re-adds NET_ADMIN explicitly" \
+    || bad "--sysbox + egress lockdown does not re-add NET_ADMIN"
 
 # Broker path: controller sizing + the broker env + controller-image auto-select.
 has "$LAUNCH" 'claude-controller-size" --flags' \
@@ -148,13 +182,19 @@ has "$LAUNCH" '"${SIZING_ARGS[@]}"'     && ok "docker run uses SIZING_ARGS"     
 has "$LAUNCH" '"${ATTEST_ARGS[@]}"'     && ok "docker run uses ATTEST_ARGS"      || bad "docker run does not use ATTEST_ARGS"
 has "$LAUNCH" '"${BROKER_ENV_ARGS[@]}"' && ok "docker run uses BROKER_ENV_ARGS"  || bad "docker run does not use BROKER_ENV_ARGS"
 
-# Regression: a PLAIN launch (no --sysbox/--broker) must keep the flat single-session
-# profile and NOT inject a runtime — the SIZING_ARGS else-branch.
-if awk '/^else$/{e=1} e&&/--cpus "\$CLAUDE_CPU_LIMIT"/{print "ok"; exit}' "$LAUNCH" | grep -q ok; then
-    ok "a plain launch keeps the flat --cpus/--memory profile (no sysbox runtime)"
-else
-    bad "the non-sysbox SIZING_ARGS branch (flat profile) is missing"
-fi
+# Regression: the single-session profile is factored into FLAT_PROFILE (one source of truth).
+# A PLAIN launch uses it as-is (NO runtime); sysbox-no-broker prepends --runtime=sysbox-runc.
+# These are unique fixed strings, so breaking the non-sysbox branch fails the check (unlike the
+# old positional awk, which matched the sysbox branch's --cpus and passed regardless).
+has "$LAUNCH" 'FLAT_PROFILE=(--cpus "$CLAUDE_CPU_LIMIT"' \
+    && ok "the single-session profile is factored into FLAT_PROFILE" \
+    || bad "FLAT_PROFILE (shared flat profile) is missing"
+has "$LAUNCH" 'SIZING_ARGS=("${FLAT_PROFILE[@]}")' \
+    && ok "a plain launch uses FLAT_PROFILE as-is (no sysbox runtime)" \
+    || bad "the non-sysbox SIZING_ARGS branch (flat profile, no runtime) is missing"
+has "$LAUNCH" 'SIZING_ARGS=(--runtime=sysbox-runc "${FLAT_PROFILE[@]}")' \
+    && ok "sysbox (no broker) prepends --runtime=sysbox-runc to the flat profile" \
+    || bad "the sysbox-non-broker SIZING_ARGS branch is missing"
 
 # ============================================================================================
 echo "== C. image plumbing: Dockerfile WITH_DOCKER + label, Makefile, _common defaults =="

@@ -410,10 +410,11 @@ the flat runc cap-drop hardening (the inner dockerd needs its caps; the userns i
 boundary), auto-selects the controller image, and sizes the container for the CC-3 controller
 envelope (Σ K workers + overhead) so the broker's own capacity fail-safe passes.
 
-Clearing the flat hardening does **not** weaken the egress firewall: Sysbox grants container-root
-a broad capability set inside the userns (verified `CapEff 0x1ffffffffff` on this fleet — `NET_ADMIN`
-included), so `CLAUDE_EGRESS_LOCKDOWN=1` on a `--broker` controller still has the `NET_ADMIN` it needs
-to apply its iptables rules even though `claude-launch` no longer adds an explicit `--cap-add`.
+Clearing the flat hardening does **not** weaken the egress firewall: when `CLAUDE_EGRESS_LOCKDOWN=1`,
+`claude-launch` re-adds an explicit `--cap-add NET_ADMIN` on the Sysbox path so the (fail-open)
+firewall always has the capability it needs to apply its iptables rules — rather than depending on
+Sysbox's implicit cap set (which does grant it — verified `CapEff 0x1ffffffffff` on this fleet — but
+is not a contract we rely on).
 
 ### Effective slots stay at 1 until PAR-4.1 + PAR-7.1 land
 

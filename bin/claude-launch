@@ -255,26 +255,31 @@ GH_MAIL="$(git config --global user.email 2>/dev/null || true)"
 ENV_FILE_ARG=()
 [[ -f "$CLAUDE_DOCKER_ROOT/.env" ]] && ENV_FILE_ARG=(--env-file "$CLAUDE_DOCKER_ROOT/.env")
 
-# Warn if the host runtime is escape-vulnerable, and assemble the per-container
-# escape-hardening flags (no-new-privileges + minimal capabilities).
-preflight_runc
-read -r -a HARDEN_ARGS <<<"$(harden_run_args)"
-
-# Sysbox controller (--sysbox, implied by --broker): validate + attest a
-# CVE-patched, Docker-registered Sysbox (preflight_sysbox exports SYSBOX_VERSION),
-# run under --runtime=sysbox-runc, and pass the attested version in (sysbox-runc is a
-# host binary the in-container broker cannot probe). Do NOT apply the flat runc
-# HARDEN_ARGS (--cap-drop ALL / no-new-privileges) to a Sysbox controller: the inner
-# dockerd needs its capabilities, and Sysbox's user namespace IS the isolation
-# boundary — the proven controller launch (bin/claude-*-verify) applies neither.
+# Per-container resource profile + escape hardening. Two runtimes:
+#   • Plain (runc): the flat single-session profile + the runc escape-hardening flags
+#     (no-new-privileges + minimal caps, harden_run_args), and preflight_runc's runc-escape
+#     warning (relevant only to the flat runc runtime).
+#   • Sysbox (--sysbox, implied by --broker): validate + attest a CVE-patched, registered
+#     Sysbox (preflight_sysbox exports SYSBOX_VERSION), run under --runtime=sysbox-runc, and
+#     pass the attested version in (sysbox-runc is a host binary the in-container broker
+#     cannot probe). The flat runc HARDEN_ARGS are NOT applied — the inner dockerd needs its
+#     caps and Sysbox's userns IS the isolation boundary (the proven controller launch,
+#     bin/claude-*-verify, applies neither) — so preflight_runc + harden_run_args are skipped
+#     as irrelevant. The ONE cap a Sysbox controller still needs explicitly is NET_ADMIN, and
+#     only when the egress firewall is on: it is fail-open, so we don't depend on Sysbox's
+#     implicit cap set to grant it.
 #
 # SIZING_ARGS carries the runtime + cpu/mem/pids budget. A --broker session is ALSO a
 # controller hosting K nested workers, so size it for Σ(K workers)+overhead via
-# claude-controller-size (which also REFUSES if this host can't fit K) instead of the
-# flat single-session profile — else the broker's own capacity fail-safe refuses.
-SIZING_ARGS=() ATTEST_ARGS=() BROKER_ENV_ARGS=()
+# claude-controller-size (which also REFUSES if this host can't fit K) instead of the flat
+# single-session profile — else the broker's own capacity fail-safe refuses.
+FLAT_PROFILE=(--cpus "$CLAUDE_CPU_LIMIT" --memory "$CLAUDE_MEM_LIMIT" \
+              --memory-reservation "$CLAUDE_MEM_RESERVATION" --pids-limit "$CLAUDE_PIDS_LIMIT")
+SIZING_ARGS=() ATTEST_ARGS=() BROKER_ENV_ARGS=() HARDEN_ARGS=()
 if [[ "$SYSBOX" == 1 ]]; then
-    HARDEN_ARGS=()                 # userns is the boundary; cap-drop would starve the inner dockerd
+    # Egress firewall (fail-open) still needs NET_ADMIN — grant it explicitly, don't rely on
+    # Sysbox's default cap set (verified present on this fleet, but not a contract).
+    [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]] && HARDEN_ARGS=(--cap-add NET_ADMIN)
     preflight_sysbox               # dies unless a registered Sysbox >= the CVE floor; exports SYSBOX_VERSION
     ATTEST_ARGS=(-e CLAUDE_SYSBOX_ATTESTED_VERSION="$SYSBOX_VERSION")
     if [[ "$BROKER" == 1 ]]; then
@@ -286,18 +291,14 @@ if [[ "$SYSBOX" == 1 ]]; then
         BROKER_ENV_ARGS=(-e CLAUDE_WORKER_BROKER=1)
         info "Worker broker: ON — this session can spawn nested autonomous workers via claude-worker-request (WIP-capped at K; sized for the controller envelope)"
     else
-        SIZING_ARGS=(--runtime=sysbox-runc \
-                     --cpus "$CLAUDE_CPU_LIMIT" \
-                     --memory "$CLAUDE_MEM_LIMIT" \
-                     --memory-reservation "$CLAUDE_MEM_RESERVATION" \
-                     --pids-limit "$CLAUDE_PIDS_LIMIT")
+        SIZING_ARGS=(--runtime=sysbox-runc "${FLAT_PROFILE[@]}")
         info "Sysbox isolation: ON — session runs under --runtime=sysbox-runc (userns-remapped)"
     fi
 else
-    SIZING_ARGS=(--cpus "$CLAUDE_CPU_LIMIT" \
-                 --memory "$CLAUDE_MEM_LIMIT" \
-                 --memory-reservation "$CLAUDE_MEM_RESERVATION" \
-                 --pids-limit "$CLAUDE_PIDS_LIMIT")
+    # Plain runc: warn on an escape-vulnerable host + apply the flat escape-hardening flags.
+    preflight_runc
+    read -r -a HARDEN_ARGS <<<"$(harden_run_args)"
+    SIZING_ARGS=("${FLAT_PROFILE[@]}")
 fi
 
 # Only pin CLAUDE_BROWSER when the user forced it on/off; in auto mode leave it
