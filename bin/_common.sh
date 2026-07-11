@@ -40,6 +40,12 @@ fi
 CLAUDE_IMAGE="${CLAUDE_IMAGE:-claude-code-box:latest}"
 AUTH_VOLUME="${AUTH_VOLUME:-claude-auth}"
 SSHKEYS_VOLUME="${SSHKEYS_VOLUME:-claude-sshkeys}"
+# Shared tool cache (PKG-3): ONE volume shared across every managed container,
+# mounted at /cache, holding mise's install store + the language package-manager
+# caches. Empty string ("" / "off"/"none" from a launcher flag) disables it —
+# the container then provisions per-container into its own layer (fail-safe).
+CACHE_VOLUME="${CLAUDE_CACHE_VOLUME:-claude-cache}"
+CACHE_MOUNT="/cache"
 SSH_PORT_RANGE_START="${SSH_PORT_RANGE_START:-2200}"
 SSH_PORT_RANGE_END="${SSH_PORT_RANGE_END:-2299}"
 GIT_SSH_KEY="${GIT_SSH_KEY:-$HOME/.ssh/claude-git-key}"
@@ -409,6 +415,40 @@ sanitize() {
 cname()      { echo "claude-$1"; }
 ws_volume()  { echo "claude-ws-$1"; }
 cfg_volume() { echo "claude-config-$1"; }
+
+# --- Shared tool cache (PKG-3) -----------------------------------------------
+# cache_name — the shared cache volume name, or "" when disabled. A launcher may
+# pass an override (its --cache value); "", "off", "none", "0", "false" all disable.
+cache_name() {
+    local v="${1-$CACHE_VOLUME}"
+    case "$v" in ""|off|none|0|false|no) echo ""; return 0 ;; esac
+    echo "$v"
+}
+
+# cache_mount_args <volname-or-override> — echo the `-v <vol>:/cache` docker arg
+# for the shared cache, or nothing when disabled. Docker auto-creates the named
+# volume on first use (seeded from the image's /cache), so this NEVER errors a
+# launch — a missing cache degrades to per-container installs, it does not fail.
+cache_mount_args() {
+    local n; n="$(cache_name "${1-$CACHE_VOLUME}")"
+    [[ -n "$n" ]] && printf -- '-v\n%s\n' "$n:$CACHE_MOUNT"
+}
+
+# dir_size_mib <path> — integer MiB used by a directory subtree, or "" if it
+# cannot be determined (fail-soft: callers treat unknown as "do not trim").
+# `du -s -B1M` gives 1-MiB-block totals; the TEST SEAM forces the value.
+dir_size_mib() {
+    local path="$1" line
+    if [[ -n "${CLAUDE_CACHE_SIZE_MIB_OVERRIDE:-}" ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_CACHE_SIZE_MIB_OVERRIDE='${CLAUDE_CACHE_SIZE_MIB_OVERRIDE}' — real cache size is NOT being measured"
+        [[ "$CLAUDE_CACHE_SIZE_MIB_OVERRIDE" =~ ^[0-9]+$ ]] || return 1
+        echo "$CLAUDE_CACHE_SIZE_MIB_OVERRIDE"; return 0
+    fi
+    [[ -d "$path" ]] || return 1
+    line="$(du -s -B1M "$path" 2>/dev/null | awk '{print $1}' || true)"
+    [[ "$line" =~ ^[0-9]+$ ]] || return 1
+    echo "$line"
+}
 
 container_state() {  # prints: running | stopped | absent
     local c="$1" s

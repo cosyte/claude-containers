@@ -430,13 +430,25 @@ mise use aqua:BurntSushi/ripgrep   # arbitrary prebuilt CLIs (aqua registry)
 mise use github:cli/cli            # …or straight from a GitHub release
 ```
 
-Installed tools land under the `claude` user's `~/.local/share/mise` and are on
+Installed tools land in the shared **`/cache`** tree (see below) and are on
 `PATH` for the agent immediately (via mise's shims dir, baked onto `PATH` for
 non-interactive shells; interactive SSH/tmux shells get full `mise activate`).
 mise is **pinned + SHA256-verified in the Dockerfile** at build — the release
 binary is downloaded from GitHub and checked against a hardcoded digest, no
 `curl | sh` (bump `MISE_VERSION` + the two digests together). `pipx:` installs
 reuse the baked `uv` automatically.
+
+**Shared, persistent tool cache (PKG-3).** mise's install store **and** the
+`cargo`/`go`/`npm`/`uv`/`pip` caches live on **one shared docker volume**
+(`claude-cache`) mounted at `/cache`, so a toolchain or CLI provisioned by one
+container is a **cache hit** for the next launch of that project and for every
+parallel worker — no re-download. It's **on by default**; `claude-launch --no-cache`
+(or `claude-compose-gen --no-cache`) opts out, and a **missing cache never errors a
+launch** — it degrades to per-container installs (fail-safe). The volume is bounded
+by `claude-disk-gc`: over `CLAUDE_CACHE_MAX_MIB` it trims only the re-fetchable
+download caches (installed toolchains kept), idle-only and fail-safe, and the
+broker's free-space floor already covers it since it sits on the docker data root.
+Full design + verification: [docs/shared-tool-cache.md](docs/shared-tool-cache.md).
 
 - **Egress lockdown is opt-in** (`CLAUDE_EGRESS_LOCKDOWN=1`); **off by default,
   where every `mise use …` just works.** Under lockdown: `github:`/`aqua:` and

@@ -25,10 +25,14 @@
 #                              e.g. --marketplace claude-skills=git@github.com:org/repo.git
 #   --plugin <name@mkt>        enable a plugin at runtime (repeatable)
 #                              e.g. --plugin software-engineering@claude-skills
+#   --cache <volume>           shared tool cache volume mounted at /cache
+#                              (PKG-3; default: claude-cache). Reused across restarts
+#                              and parallel workers for mise/cargo/go/npm/uv installs.
+#   --no-cache                 disable the shared cache (per-container installs)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
 # EXTRA/MCP_LIST/DEVCMD/MKTS/PLUGINS default from .env (sourced by _common.sh);
@@ -44,7 +48,10 @@ MODEL="${CLAUDE_MODEL:-}"
 # CLAUDE_BROWSER` flag is omitted below so a browser image can self-detect.
 # BROWSER_EXPLICIT tracks a per-launch --browser/--no-browser CLI flag (vs an
 # ambient .env default) so only an explicit --browser hard-fails on a lean image.
-EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER="" BROWSER_EXPLICIT=0 IMAGE_EXPLICIT=0
+# CACHE_ARG: the shared tool cache (PKG-3). Empty = the CACHE_VOLUME default
+# (claude-cache) is mounted at /cache; --cache <vol> overrides the name;
+# --cache off / --no-cache disables it (per-container installs).
+EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER="" BROWSER_EXPLICIT=0 IMAGE_EXPLICIT=0 CACHE_ARG=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --repo)        REPO="$2"; OPTS_GIVEN=1; shift 2 ;;
@@ -62,6 +69,8 @@ while [[ $# -gt 0 ]]; do
         --dev-cmd)     DEVCMD="$2"; OPTS_GIVEN=1; shift 2 ;;
         --marketplace) MKTS="${MKTS:+$MKTS,}$2"; OPTS_GIVEN=1; shift 2 ;;
         --plugin)      PLUGINS="${PLUGINS:+$PLUGINS,}$2"; OPTS_GIVEN=1; shift 2 ;;
+        --cache)       CACHE_ARG="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --no-cache)    CACHE_ARG="off"; OPTS_GIVEN=1; shift ;;
         -h|--help)     usage 0 ;;
         -*)            die "unknown option: $1 (try --help)" ;;
         *)             [[ -z "$PROJECT" ]] && PROJECT="$1" || die "unexpected arg: $1"; shift ;;
@@ -184,6 +193,17 @@ fi
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 \
     || die "auth volume '$AUTH_VOLUME' missing. Run 'make login' once first."
 
+# Shared tool cache (PKG-3): mount the shared cache volume at /cache unless disabled.
+# Docker auto-creates the named volume (seeded from the image's /cache) on first use,
+# so this never blocks a launch; --no-cache / --cache off drops the mount entirely.
+CACHE_MOUNT_ARGS=()
+mapfile -t CACHE_MOUNT_ARGS < <(cache_mount_args "${CACHE_ARG:-$CACHE_VOLUME}")
+if (( ${#CACHE_MOUNT_ARGS[@]} )); then
+    info "Shared tool cache: ${CACHE_MOUNT_ARGS[1]} (mise/cargo/go/npm/uv reused across restarts + workers)"
+else
+    info "Shared tool cache: disabled (per-container installs)"
+fi
+
 # Read-only host mounts (skip with a warning if absent).
 RO_MOUNTS=()
 if [[ -f "$SSH_AUTHORIZED_KEYS" ]]; then
@@ -255,6 +275,7 @@ docker run -d \
     -v "$SSHKEYS_VOLUME:/etc/ssh/host-keys" \
     -v "$CFG_VOL:/home/claude/.claude" \
     "${WS_MOUNT[@]}" \
+    "${CACHE_MOUNT_ARGS[@]}" \
     "${RO_MOUNTS[@]}" \
     --label claude.managed=1 \
     --label claude.project="$PROJECT" \
