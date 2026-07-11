@@ -229,6 +229,8 @@ SYS_CHROOT
 AUDIT_WRITE
 --memory
 4g
+--memory-swap
+4g
 --memory-reservation
 3072m
 --cpus
