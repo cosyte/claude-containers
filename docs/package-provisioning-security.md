@@ -188,6 +188,40 @@ can drift between the agent's install and a later one. PKG-5 adds two reproducib
 Neither is tamper-proof on its own (see the CVE-2025-69263 lockfile-integrity caveat in §3.2); they
 reduce the *drift* and *unpinned-resolution* surface, and compose with the egress + scripts-off layers.
 
+### 3.7 Worker-tier curated `apt` — **shipped (PKG-4)**
+
+The syslib gap `mise` can't fill: some worker workloads need a Debian **system** library (a `.so`) that
+rootless `mise` toolchains cannot provide. PKG-4 fills it in the **Sysbox worker tier only**, with the
+same containment posture as the rest of this document — `bin/claude-apt-provision`, invoked by the
+worker entrypoint as root *before* the agent starts (`CLAUDE_APT_PROVISION=1`, passed in by the CC-2
+broker):
+
+- **Worker-only (host-safe root).** It installs **only** when it is root mapped to a **non-root host
+  uid** — the Sysbox userns worker (root inside → unprivileged on host⁴), exactly what
+  `claude-sysbox-verify` §3a proves. A plain **leaf** container (agent runs unprivileged; or a runc-root
+  container whose root maps to host root) gets the **documented refusal** — *"no root — use `mise` /
+  static binaries, or rebuild the base image"* — never a silent partial. The same self-gate means
+  setting the flag on a leaf is a logged no-op, not a half-install.
+- **Curated, not open.** Only packages in the committed, declarative
+  `claude-config/apt-manifest.txt` install; the default manifest is **empty** (curation is a deliberate,
+  reviewed act). Package specs are strictly validated (lowercase alnum + `+ . -`, optional exact-version
+  pin) — a malformed entry fails the **whole** apply closed. Arbitrary agent-driven `apt` of untrusted
+  repos is **refused**; a request for a package *not* in the manifest is refused, and a request for one
+  that *is* resolves to the manifest's **own** pinned spec (a request can't smuggle a different version).
+- **Install-then-relock (§3.4), all-or-refuse.** The provisioner opens `deb.debian.org` /
+  `security.debian.org` for the install window via the firewall's opt-in `CLAUDE_EGRESS_APT` profile
+  (additive + IP-pinned like `CLAUDE_EGRESS_PACKAGES`, off by default, absent from the leaf/base
+  allowlist), runs `apt-get install --no-install-recommends`, then **re-locks** to the default-deny base.
+  The relock runs on **every** exit path — including a failed or refused install — so no path leaves a
+  half-provisioned *or* egress-open worker. As a final backstop the entrypoint re-runs the general egress
+  lockdown *after* provisioning, so the seal never depends on the relock alone.
+
+The live proof (a manifest package installs in a real Sysbox worker **and** `id` shows root→non-root
+host uid; a leaf refuses; an out-of-manifest request refuses; egress re-locked after the window) needs a
+Sysbox host and is the on-host gate. The provisioner's logic — tier gate, validator, curated resolution,
+and the open→install→relock order — is proven in CI via seams (`test/apt-provision-unit.sh`) with no
+root, apt, or iptables.
+
 ## 4. What this does NOT cover (honest non-goals)
 
 - **System libraries (`apt`) are not a leaf-container capability.** The agent runs as non-root UID 1000
@@ -210,6 +244,30 @@ reduce the *drift* and *unpinned-resolution* surface, and compose with the egres
   does **not** query registries to reject too-new releases (a "wait N days before trusting a version"
   control). That needs live registry egress on every check, which cuts against the offline/locked
   posture; it stays a possible future control, deliberately not built here.
+- **The apt window pins Debian's CDN to point-in-time IPs (PKG-4).** `deb.debian.org` /
+  `security.debian.org` are Fastly-backed and rotate; the firewall pins the IPs resolved when the window
+  opens, so an `apt` connection that reconnects to a *different* CDN IP mid-install can be dropped by
+  default-deny and fail the install (rc 5, the worker boots without the package). This is the same
+  IP-pinning tradeoff the whole firewall makes for every CDN-backed host (npm, ghcr); the window is
+  short so fresh IPs usually hold, but a rotation-timing failure is a known reliability limit, not a
+  containment hole (a dropped connection fails *closed*). A pull-through apt proxy (PKG-6) is the durable
+  fix; it is demand-gated, not built here.
+- **PKG-4 relock inherits the firewall's fail-**open**.** If the relock's `iptables` apply fails, the
+  firewall fails **open** (egress unrestricted) exactly as its base contract says — the provisioner logs
+  an ERROR and returns non-zero, and the entrypoint's general lockdown re-seals afterward, so the worker
+  is not left open on the entrypoint path. A **standalone** `claude-apt-provision` invocation (not via
+  the entrypoint) has no such final seal and must re-lock egress itself. PKG-4 does not change the
+  fail-open contract; a fail-*closed* firewall is a separate, deliberate non-decision (it would let a
+  misconfig brick a homelab's connectivity).
+- **`CLAUDE_APT_PROVISION=1` with egress lockdown OFF runs `apt` over open egress.** With no
+  `CLAUDE_EGRESS_LOCKDOWN=1` there is no scoped `deb.debian.org` window and no relock — `apt` fetches
+  over the container's default (open) egress. The entrypoint **warns** on this incoherent combination;
+  it is a config choice, not silent. The contained install window exists only under egress lockdown.
+- **Under lockdown, provisioning re-applies the firewall up to three times at boot** (open-with-apt →
+  relock → the entrypoint's general lockdown), each a full re-resolution of the allowlist — tens of
+  seconds on a worker with both flags on. The redundancy is deliberate (the general lockdown is the
+  authoritative final seal, and the provisioner's own relock covers standalone use); an incremental
+  "add two hosts to the live ruleset" fast path is a possible future optimization, not built here.
 - **Sysbox is weaker isolation than a VM / gVisor / Kata.** The worker tier that carries `apt` is
   host-*contained* by a Linux user namespace, not a hostile-tenant boundary. A container — Sysbox
   included — is **not** a security boundary against a fully-weaponized agent; multi-tenant / hostile-

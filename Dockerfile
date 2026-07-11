@@ -212,6 +212,11 @@ COPY bin/claude-autopilot /usr/local/bin/claude-autopilot
 COPY bin/claude-enqueue /usr/local/bin/claude-enqueue
 COPY bin/claude-scm-observer /usr/local/bin/claude-scm-observer
 COPY bin/claude-egress-firewall /usr/local/bin/claude-egress-firewall
+# Curated worker apt (PKG-4): the entrypoint runs this as root in a Sysbox worker
+# (self-refuses on a leaf) to install the curated /opt/claude-config/apt-manifest.txt
+# with a scoped deb.debian.org egress window, then re-locks. Pairs with the firewall's
+# CLAUDE_EGRESS_APT profile above.
+COPY bin/claude-apt-provision /usr/local/bin/claude-apt-provision
 COPY bin/claude-secret-guard /usr/local/bin/claude-secret-guard
 COPY bin/claude-rc-watchdog /usr/local/bin/claude-rc-watchdog
 COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
@@ -242,6 +247,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-dev /usr/local/bin/claude-autopilot \
         /usr/local/bin/claude-enqueue /usr/local/bin/claude-scm-observer \
         /usr/local/bin/claude-egress-firewall \
+        /usr/local/bin/claude-apt-provision \
         /usr/local/bin/claude-secret-guard \
         /usr/local/bin/claude-rc-watchdog \
         /usr/local/bin/claude-healthcheck \

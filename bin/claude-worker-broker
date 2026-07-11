@@ -371,6 +371,18 @@ broker_template_args() {
     if [[ -n "${CLAUDE_EGRESS_EXTRA_HOSTS:-}" ]]; then
         printf '%s\n' -e "CLAUDE_EGRESS_EXTRA_HOSTS=${CLAUDE_EGRESS_EXTRA_HOSTS}"
     fi
+    # PKG-4: brokered curated apt for the worker tier. Passed INTO the worker so its
+    # entrypoint runs claude-apt-provision (curated manifest, install-then-relock)
+    # as root before dropping to the agent. Off by default; the provisioner itself
+    # self-refuses on a non-worker, so this only ever acts inside the Sysbox userns.
+    if [[ "${CLAUDE_APT_PROVISION:-0}" =~ ^(1|true|yes|on)$ ]]; then
+        printf '%s\n' -e "CLAUDE_APT_PROVISION=${CLAUDE_APT_PROVISION}"
+    fi
+    # NB: CLAUDE_APT_MANIFEST_FILE is deliberately NOT forwarded — it is a path
+    # INSIDE the worker, and a broker-host path would not resolve there (silently
+    # degrading to an empty manifest). The worker uses its baked
+    # /opt/claude-config/apt-manifest.txt; customize by baking the manifest into
+    # the worker image, not by pointing at a host path.
 }
 
 # --- lease discipline -------------------------------------------------------------
