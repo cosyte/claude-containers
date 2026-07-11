@@ -192,7 +192,48 @@ if [[ "${CLAUDE_CONTROLLER:-0}" =~ ^(1|true|yes|on)$ ]]; then
     esac
     log "Controller mode      : CLAUDE_CONTROLLER=1 — implying CLAUDE_WORKER_BROKER=1 (the controller dispatches workers through the broker)"
 fi
+
+# --- 5a. Inner dockerd + worker broker (controller / --broker) ----------------
+# The worker broker (CC-2) and the nested workers it launches (CC-4) run on an
+# INNER dockerd that lives INSIDE this container — never the host daemon (a host
+# socket mount or --privileged DinD are both FORBIDDEN: umbrella ADR 0011). Under
+# Sysbox (--runtime=sysbox-runc) that inner daemon is contained by a user namespace
+# (root here → an unprivileged host uid), so it needs no privilege. Order matters:
+# start the inner dockerd FIRST (a missing/dead daemon must fail fast+clear here, not
+# as an opaque downstream timeout), then the broker, then §5c blocks the agent until
+# the broker is actually SERVING. Only the CONTROLLER image bakes dockerd
+# (WITH_DOCKER=1); a plain session or a leaf worker never sets CLAUDE_WORKER_BROKER
+# and so never reaches this block. (§5a + §5b share one guard on purpose.)
 if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    # --- inner dockerd ---
+    if docker info >/dev/null 2>&1; then
+        log "Inner dockerd        : already reachable — reusing it (not starting a second daemon)"
+    else
+        command -v dockerd >/dev/null 2>&1 \
+            || die "CLAUDE_WORKER_BROKER=1 needs an inner Docker daemon, but 'dockerd' is not in this image. Rebuild the CONTROLLER image (make build-controller, or --build-arg WITH_DOCKER=1) and run it under --runtime=sysbox-runc — see docs/substrate.md."
+        DOCKERD_WAIT="${CLAUDE_INNER_DOCKERD_WAIT:-60}"
+        # A POSITIVE integer with no leading zero: `(( … ))` parses a leading-zero value
+        # as octal (090 → error, spins forever), and 0 would time out before dockerd can
+        # even create its socket — both are refused up front (fail closed with a clear msg).
+        [[ "$DOCKERD_WAIT" =~ ^[1-9][0-9]*$ ]] || die "CLAUDE_INNER_DOCKERD_WAIT '$DOCKERD_WAIT' is not a positive integer (no leading zero)"
+        # Clear a stale pidfile a prior, ungracefully-killed daemon left behind, so a
+        # container restart (--restart unless-stopped) doesn't boot-loop on 'pidfile exists'.
+        rm -f /run/docker.pid /var/run/docker.pid 2>/dev/null || true
+        log "Inner dockerd        : starting as root (Sysbox-contained; log at /var/log/inner-dockerd.log)"
+        dockerd >> /var/log/inner-dockerd.log 2>&1 &
+        dwaited=0
+        until docker info >/dev/null 2>&1; do
+            if (( dwaited >= DOCKERD_WAIT )); then
+                log "inner dockerd did not become ready within ${DOCKERD_WAIT}s — last log lines:"
+                tail -n 20 /var/log/inner-dockerd.log 2>/dev/null | sed 's/^/    /' >&2 || true
+                die "inner dockerd failed to start. On Sysbox this is usually a missing --runtime=sysbox-runc (the daemon needs the user namespace the runtime provides). See docs/substrate.md."
+            fi
+            sleep 1; dwaited=$((dwaited + 1))
+        done
+        log "Inner dockerd        : ready after ${dwaited}s"
+    fi
+
+    # --- worker broker (CC-2) ---
     # Best-effort early lock: keep the agent off an already-present inner socket
     # even before the broker's own lockdown (the broker re-asserts at startup).
     if [[ -S /var/run/docker.sock ]]; then
@@ -201,12 +242,13 @@ if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
     fi
     CLAUDE_BROKER_CLIENT_USER="${CLAUDE_BROKER_CLIENT_USER:-$CLAUDE_USER}" \
         /usr/local/bin/claude-worker-broker >> /var/log/claude-worker-broker.log 2>&1 &
+    BROKER_PID=$!   # §5c watches this to fail FAST if the broker dies at startup
     log "Worker broker       : starting as root (agent requests via claude-worker-request; refuses if the substrate checks fail — see /var/log/claude-worker-broker.log)"
 
     # Worker lifecycle reaper (CC-4): removes exited/dead/created claude.worker=1
     # containers a `--rm` worker's unclean exit missed (freeing the name for a
-    # re-request) and prunes aged broker-spool files. Controller-mode only,
-    # alongside the broker above.
+    # re-request) and prunes aged broker-spool files. Worker-broker mode only
+    # (controller mode implies it), alongside the broker above.
     /usr/local/bin/claude-reaper --loop >> /var/log/claude-reaper.log 2>&1 &
     log "Worker reaper       : starting as root, looping every ${CLAUDE_REAPER_INTERVAL:-300}s (removes dead worker residue + prunes the spool — see /var/log/claude-reaper.log)"
 
@@ -219,27 +261,34 @@ if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
     log "Disk GC             : starting as root, looping every ${CLAUDE_DISK_GC_INTERVAL:-3600}s (docker system + builder prune -f — see /var/log/claude-disk-gc.log)"
 fi
 
-# --- 5c. Controller mode: socket lockdown MUST be authoritative before the agent starts ---
-# CC-6 fix (CC-2-discovered gap): the broker above is BACKGROUNDED, so there is a boot
-# window between the inner dockerd creating /var/run/docker.sock (root:docker 660 — group-
-# reachable) and the broker's own broker_check_socket locking it to root:root 600. The
-# best-effort chown/chmod a few lines up covers a socket that already existed at that
-# instant, but NOT one the inner dockerd creates a moment later while the broker is still
-# waiting on it in the background — and §12 below starts the unprivileged agent tmux
-# session with no dependency on the broker's progress, so without this the agent could run
-# for some window with a group-reachable inner socket (a compromised/injected agent could
-# then reach the inner daemon directly, bypassing the broker's request/lease discipline
-# entirely — the exact hole this substrate exists to close).
+# --- 5c. Worker-broker mode: the broker MUST be SERVING before the agent starts ---
+# CC-2-discovered gap: the broker above is BACKGROUNDED, so §12 below would otherwise start
+# the unprivileged agent tmux session with no dependency on the broker's progress — and a
+# compromised/injected agent could reach the inner daemon directly during the boot window,
+# bypassing the broker's request/lease discipline entirely (the exact hole this closes).
 #
-# In controller mode (CLAUDE_CONTROLLER=1, which implies the broker above), block HERE —
-# authoritatively, before §12 launches the agent — until the socket exists AND is already
-# root:root 600, polling with a bounded timeout. This is the SAME check the broker itself
-# performs at startup (broker_check_socket); waiting for its result rather than re-doing the
-# lockdown ourselves keeps exactly one writer of that socket's ownership.
-if [[ "${CLAUDE_CONTROLLER:-0}" =~ ^(1|true|yes|on)$ ]]; then
+# Block HERE — authoritatively, before §12 launches the agent — until the broker is up and
+# serving. Note we wait for the broker to be *serving*, not merely for the socket perms:
+# §5a guarantees the socket exists and the best-effort pre-lock already sets it root:root
+# 600 the instant it does, so socket perms alone no longer prove the broker came up. The
+# broker creates its request SPOOL only after passing every fail-closed startup check
+# (userns + attestation + capacity + disk + socket-lock; see broker_serve's order), so the
+# spool dir is the authoritative "broker is alive and serving" signal.
+#
+# Gate this on CLAUDE_WORKER_BROKER (what actually backgrounds the broker), NOT on
+# CLAUDE_CONTROLLER: an interactive (or autopilot) session with CLAUDE_WORKER_BROKER=1 —
+# e.g. `claude-launch --broker`, a conversational lead that spawns nested workers via
+# claude-worker-request — shares the exact same boot race but is not a controller. Since
+# controller mode IMPLIES CLAUDE_WORKER_BROKER=1 (§5a), this still covers controller mode; it
+# just no longer LEAVES OUT the broker-only interactive path.
+if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
     SOCK=/var/run/docker.sock
-    SOCK_WAIT="${CLAUDE_CONTROLLER_SOCKET_WAIT:-90}"
-    [[ "$SOCK_WAIT" =~ ^[0-9]+$ ]] || die "CLAUDE_CONTROLLER_SOCKET_WAIT '$SOCK_WAIT' is not a non-negative integer"
+    BROKER_SPOOL="${CLAUDE_BROKER_DIR:-/run/claude/broker}/requests"
+    # CLAUDE_BROKER_SOCKET_LOCKDOWN_WAIT is the mode-neutral knob; the legacy
+    # CLAUDE_CONTROLLER_SOCKET_WAIT name is still honored for back-compat. Positive integer,
+    # no leading zero (octal-safe in the `(( … ))` compare below).
+    SOCK_WAIT="${CLAUDE_BROKER_SOCKET_LOCKDOWN_WAIT:-${CLAUDE_CONTROLLER_SOCKET_WAIT:-90}}"
+    [[ "$SOCK_WAIT" =~ ^[1-9][0-9]*$ ]] || die "CLAUDE_BROKER_SOCKET_LOCKDOWN_WAIT '$SOCK_WAIT' is not a positive integer (no leading zero)"
     waited=0
     sock_locked() {
         [[ -S "$SOCK" ]] || return 1
@@ -249,13 +298,22 @@ if [[ "${CLAUDE_CONTROLLER:-0}" =~ ^(1|true|yes|on)$ ]]; then
         perm="$(stat -c '%a' "$SOCK" 2>/dev/null || true)"
         [[ "$owner" == root && "$group" == root && "$perm" == 600 ]]
     }
-    until sock_locked; do
+    # Broker is serving iff it locked the socket AND created its spool (post-checks).
+    broker_serving() { sock_locked && [[ -d "$BROKER_SPOOL" ]]; }
+    until broker_serving; do
+        # Fail FAST if the backgrounded broker already exited (a failed startup check) —
+        # don't make the operator wait out the full timeout for a diagnosis.
+        if [[ -n "${BROKER_PID:-}" ]] && ! kill -0 "$BROKER_PID" 2>/dev/null; then
+            log "worker broker exited during startup — last log lines:"
+            tail -n 20 /var/log/claude-worker-broker.log 2>/dev/null | sed 's/^/    /' >&2 || true
+            die "worker broker failed to start (see /var/log/claude-worker-broker.log) — refusing to start the agent session over an unbrokered inner socket."
+        fi
         if (( waited >= SOCK_WAIT )); then
-            die "controller mode: $SOCK was not locked to root:root 600 within ${SOCK_WAIT}s — refusing to start the agent session over a possibly-group-reachable inner socket (check /var/log/claude-worker-broker.log)"
+            die "worker-broker mode: the broker did not lock $SOCK to root:root 600 and begin serving within ${SOCK_WAIT}s — refusing to start the agent session (check /var/log/claude-worker-broker.log)."
         fi
         sleep 1; waited=$((waited + 1))
     done
-    log "Controller mode      : inner docker socket confirmed root:root 600 before the agent session starts (waited ${waited}s)"
+    log "Worker broker       : inner socket root:root 600 and broker serving before the agent session starts (waited ${waited}s)"
 fi
 
 # --- 5d. Cache proxy: START it on the controller (PKG-6) ---------------------

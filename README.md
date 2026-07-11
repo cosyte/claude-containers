@@ -162,6 +162,30 @@ an explicit `CLAUDE_CONTROLLER_MAX_SLOTS` override once the umbrella's `PAR-4.1`
 and `PAR-7.1` land. See `docs/substrate.md`'s "Controller mode (CC-6)" section for
 the full design; most containers should keep using plain `CLAUDE_AUTOPILOT=1`.
 
+## An interactive session that spawns autonomous workers
+
+Controller mode above is *headless*. For a **conversational lead** that spawns
+workers on demand, use `--broker` — an interactive Remote-Control/SSH session that
+*also* runs the worker broker, so it can launch nested one-shot `/work-on` workers:
+
+```bash
+make build-controller                 # one-time: bakes the Docker engine (~400 MB)
+./bin/claude-launch cockpit --broker --repo git@github.com:you/cockpit.git
+```
+
+Needs [Sysbox](docs/substrate.md) on the host. `--broker` implies `--sysbox`,
+auto-selects the controller image, and sizes the container for `K` nested workers.
+SSH in (or use the app), then from the session — you, **or Claude itself** —
+dispatch autonomous workers, WIP-capped at `K`:
+
+```bash
+claude-worker-request hl7 HL7-3.2     # broker spawns a nested worker: one /work-on, then --rm
+```
+
+Each worker is a true Sysbox-nested child; the agent never touches the inner Docker
+socket (it only drops a two-value request in a root-owned spool). See
+`docs/substrate.md` → "Interactive lead that spawns workers".
+
 ## Environment variables
 
 Set in `.env` (auto-loaded by the scripts and passed into containers). Real env
@@ -218,7 +242,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_CONTROLLER_MAX_SLOTS` | `1` | Ceiling on worker slots the controller may use: effective slots = `min(K, this)`. **Defaults to 1 regardless of K** — the controller never auto-ramps; raising it is a deliberate operator action gated by the umbrella's `PAR-7.1` founder ramp (and needs `PAR-4.1` first). `1` collapses to today's autopilot, byte-identical |
 | `CLAUDE_CONTROLLER_UMBRELLA` | `/workspace` (if it looks right) | Umbrella root override for `claude-controller` — must have both `.gitmodules` and `scripts/reconcile.sh`; refuses (fail closed) otherwise |
 | `CLAUDE_CONTROLLER_INTERVAL` | `60` | Seconds between controller dispatch cycles (the slots>1 loop) |
-| `CLAUDE_CONTROLLER_SOCKET_WAIT` | `90` | Seconds the entrypoint blocks, in controller mode, for the inner docker socket to be confirmed `root:root 600` before starting the agent's tmux session |
+| `CLAUDE_BROKER_SOCKET_LOCKDOWN_WAIT` | `90` | Seconds the entrypoint blocks, whenever the broker is backgrounded (`CLAUDE_WORKER_BROKER=1` — which controller mode implies, and which `claude-launch --broker` sets on an interactive session), for the inner docker socket to be confirmed `root:root 600` before starting the agent's tmux session. Legacy alias: `CLAUDE_CONTROLLER_SOCKET_WAIT` |
 | `CLAUDE_WORKER_RUN_LOG_DIR` | `$HOME/.claude/worker-run-logs` | Where `claude-worker-run` writes its per-run JSON log + the secret-free `run-<item>-<ts>.meta.json` sidecar `claude-fleet-view` reads for spend |
 | `CLAUDE_FLEET_HOST_CPUS` / `CLAUDE_FLEET_HOST_MEM_MIB` | `nproc` / `/proc/meminfo` | Host capacity override for `claude-fleet-view`'s headroom line (test/drill seam) |
 | `CLAUDE_FLEET_DOCKER` | `docker` | The docker binary `claude-fleet-view` queries for active `claude.worker=1` containers (test seam) |

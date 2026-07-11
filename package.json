@@ -5,6 +5,6 @@
   "description": "Task-runner shim only — this repo is bash + Make + Docker, ships no package, and has zero dependencies. The scripts below exist so the umbrella's scripts/verify.sh and CI drive the same gates.",
   "scripts": {
     "lint": "make lint",
-    "test": "test/unit.sh && test/broker-unit.sh && test/sizing-unit.sh && test/worker-run-unit.sh && test/reaper-unit.sh && test/disk-unit.sh && test/controller-unit.sh && test/fleet-view-unit.sh && test/compose-gen-unit.sh && test/egress-packages-unit.sh && test/mise-unit.sh && test/cache-unit.sh && test/manifest-hardening-unit.sh && test/apt-provision-unit.sh && test/cache-proxy-unit.sh"
+    "test": "test/unit.sh && test/broker-unit.sh && test/sizing-unit.sh && test/worker-run-unit.sh && test/reaper-unit.sh && test/disk-unit.sh && test/controller-unit.sh && test/fleet-view-unit.sh && test/compose-gen-unit.sh && test/egress-packages-unit.sh && test/mise-unit.sh && test/cache-unit.sh && test/manifest-hardening-unit.sh && test/apt-provision-unit.sh && test/cache-proxy-unit.sh && test/broker-interactive-unit.sh"
   }
 }

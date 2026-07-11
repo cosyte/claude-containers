@@ -29,10 +29,21 @@
 #                              (PKG-3; default: claude-cache). Reused across restarts
 #                              and parallel workers for mise/cargo/go/npm/uv installs.
 #   --no-cache                 disable the shared cache (per-container installs)
+#   --sysbox                   run under --runtime=sysbox-runc (userns-remapped
+#                              isolation; refuses unless a CVE-patched Sysbox is
+#                              installed + registered). Implied by --broker.
+#   --broker                   an interactive session that can SPAWN AUTONOMOUS
+#                              WORKERS: starts the root-owned worker broker (CC-2) on
+#                              an inner dockerd, so `claude-worker-request <repo>
+#                              <item>` launches a nested one-shot /work-on worker
+#                              (WIP-capped at K). Implies --sysbox, auto-selects the
+#                              controller image (make build-controller), and sizes the
+#                              container for Σ(K workers)+overhead. Needs Sysbox.
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+LAUNCH_BIN_DIR="$(dirname "${BASH_SOURCE[0]}")"
+source "$LAUNCH_BIN_DIR/_common.sh"
 
-usage() { sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
 # EXTRA/MCP_LIST/DEVCMD/MKTS/PLUGINS default from .env (sourced by _common.sh);
@@ -52,6 +63,9 @@ MODEL="${CLAUDE_MODEL:-}"
 # (claude-cache) is mounted at /cache; --cache <vol> overrides the name;
 # --cache off / --no-cache disables it (per-container installs).
 EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER="" BROWSER_EXPLICIT=0 IMAGE_EXPLICIT=0 CACHE_ARG=""
+# SYSBOX/BROKER: run under Sysbox and (for --broker) start the worker broker so the
+# session can spawn nested autonomous workers. --broker implies --sysbox (below).
+SYSBOX=0 BROKER=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --repo)        REPO="$2"; OPTS_GIVEN=1; shift 2 ;;
@@ -71,6 +85,8 @@ while [[ $# -gt 0 ]]; do
         --plugin)      PLUGINS="${PLUGINS:+$PLUGINS,}$2"; OPTS_GIVEN=1; shift 2 ;;
         --cache)       CACHE_ARG="$2"; OPTS_GIVEN=1; shift 2 ;;
         --no-cache)    CACHE_ARG="off"; OPTS_GIVEN=1; shift ;;
+        --sysbox)      SYSBOX=1; OPTS_GIVEN=1; shift ;;
+        --broker)      BROKER=1; OPTS_GIVEN=1; shift ;;
         -h|--help)     usage 0 ;;
         -*)            die "unknown option: $1 (try --help)" ;;
         *)             [[ -z "$PROJECT" ]] && PROJECT="$1" || die "unexpected arg: $1"; shift ;;
@@ -90,6 +106,10 @@ if [[ -z "$BROWSER" ]]; then
 fi
 [[ -n "$PROJECT" ]] || usage 1
 [[ -n "$REPO" && -n "$WS_PATH" ]] && die "--repo and --workspace are mutually exclusive"
+# --broker (spawn nested workers) needs a real Sysbox controller: the broker refuses
+# on a daemon that isn't userns-remapped, and needs a host-attested CVE-patched Sysbox
+# version — both of which the --sysbox path provides. So --broker implies --sysbox.
+[[ "$BROKER" == 1 ]] && SYSBOX=1
 
 # Validate --expose maps (HOSTPORT:CONTAINERPORT) and build the docker -p args.
 EXPOSE_ARGS=()
@@ -132,7 +152,18 @@ fi
 # default image is auto-built from the local Dockerfile — auto-building an
 # arbitrary ref (a registry image, or a :browser variant) would silently tag the
 # lean build with the wrong name.
-if [[ "$IMAGE_EXPLICIT" == "1" ]]; then
+if [[ "$BROKER" == 1 && "$IMAGE_EXPLICIT" != 1 ]]; then
+    # --broker needs the CONTROLLER image (WITH_DOCKER=1 — bakes the inner dockerd).
+    # Auto-select it, and require it to already exist: claude-launch only ever
+    # auto-builds the default lean image, never a heavy variant.
+    CLAUDE_IMAGE="$CLAUDE_IMAGE_CONTROLLER"
+    info "Image: $CLAUDE_IMAGE (controller variant — auto-selected for --broker)"
+    docker image inspect "$CLAUDE_IMAGE" >/dev/null 2>&1 || \
+        die "--broker needs the controller image '$CLAUDE_IMAGE', which is not built locally.
+       Build it once:  make build-controller
+       (or pass --image <your-controller-image>). It bakes the Docker engine so the
+       session can run an inner dockerd and spawn nested workers."
+elif [[ "$IMAGE_EXPLICIT" == "1" ]]; then
     info "Image: $CLAUDE_IMAGE (from --image)"
     docker image inspect "$CLAUDE_IMAGE" >/dev/null 2>&1 || \
         die "--image '$CLAUDE_IMAGE' not found locally. Build it (e.g. \`make build-browser\`)
@@ -224,10 +255,51 @@ GH_MAIL="$(git config --global user.email 2>/dev/null || true)"
 ENV_FILE_ARG=()
 [[ -f "$CLAUDE_DOCKER_ROOT/.env" ]] && ENV_FILE_ARG=(--env-file "$CLAUDE_DOCKER_ROOT/.env")
 
-# Warn if the host runtime is escape-vulnerable, and assemble the per-container
-# escape-hardening flags (no-new-privileges + minimal capabilities).
-preflight_runc
-read -r -a HARDEN_ARGS <<<"$(harden_run_args)"
+# Per-container resource profile + escape hardening. Two runtimes:
+#   • Plain (runc): the flat single-session profile + the runc escape-hardening flags
+#     (no-new-privileges + minimal caps, harden_run_args), and preflight_runc's runc-escape
+#     warning (relevant only to the flat runc runtime).
+#   • Sysbox (--sysbox, implied by --broker): validate + attest a CVE-patched, registered
+#     Sysbox (preflight_sysbox exports SYSBOX_VERSION), run under --runtime=sysbox-runc, and
+#     pass the attested version in (sysbox-runc is a host binary the in-container broker
+#     cannot probe). The flat runc HARDEN_ARGS are NOT applied — the inner dockerd needs its
+#     caps and Sysbox's userns IS the isolation boundary (the proven controller launch,
+#     bin/claude-*-verify, applies neither) — so preflight_runc + harden_run_args are skipped
+#     as irrelevant. The ONE cap a Sysbox controller still needs explicitly is NET_ADMIN, and
+#     only when the egress firewall is on: it is fail-open, so we don't depend on Sysbox's
+#     implicit cap set to grant it.
+#
+# SIZING_ARGS carries the runtime + cpu/mem/pids budget. A --broker session is ALSO a
+# controller hosting K nested workers, so size it for Σ(K workers)+overhead via
+# claude-controller-size (which also REFUSES if this host can't fit K) instead of the flat
+# single-session profile — else the broker's own capacity fail-safe refuses.
+FLAT_PROFILE=(--cpus "$CLAUDE_CPU_LIMIT" --memory "$CLAUDE_MEM_LIMIT" \
+              --memory-reservation "$CLAUDE_MEM_RESERVATION" --pids-limit "$CLAUDE_PIDS_LIMIT")
+SIZING_ARGS=() ATTEST_ARGS=() BROKER_ENV_ARGS=() HARDEN_ARGS=()
+if [[ "$SYSBOX" == 1 ]]; then
+    # Egress firewall (fail-open) still needs NET_ADMIN — grant it explicitly, don't rely on
+    # Sysbox's default cap set (verified present on this fleet, but not a contract).
+    [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]] && HARDEN_ARGS=(--cap-add NET_ADMIN)
+    preflight_sysbox               # dies unless a registered Sysbox >= the CVE floor; exports SYSBOX_VERSION
+    ATTEST_ARGS=(-e CLAUDE_SYSBOX_ATTESTED_VERSION="$SYSBOX_VERSION")
+    if [[ "$BROKER" == 1 ]]; then
+        img_ctrl="$(docker image inspect -f '{{ index .Config.Labels "claude.controller" }}' "$CLAUDE_IMAGE" 2>/dev/null || true)"
+        [[ "$img_ctrl" == 1 ]] || warn "image '$CLAUDE_IMAGE' is not labelled a controller (claude.controller=1) — if it has no inner dockerd the session fails closed at boot. Build one: make build-controller"
+        SIZE_OUT="$("$LAUNCH_BIN_DIR/claude-controller-size" --flags)" \
+            || die "controller sizing (claude-controller-size --flags) failed — this host can't fit K workers (see above), or the umbrella parallel.config.json is unreadable."
+        mapfile -t SIZING_ARGS <<<"$SIZE_OUT"     # --runtime=sysbox-runc + cpu/mem/pids envelope
+        BROKER_ENV_ARGS=(-e CLAUDE_WORKER_BROKER=1)
+        info "Worker broker: ON — this session can spawn nested autonomous workers via claude-worker-request (WIP-capped at K; sized for the controller envelope)"
+    else
+        SIZING_ARGS=(--runtime=sysbox-runc "${FLAT_PROFILE[@]}")
+        info "Sysbox isolation: ON — session runs under --runtime=sysbox-runc (userns-remapped)"
+    fi
+else
+    # Plain runc: warn on an escape-vulnerable host + apply the flat escape-hardening flags.
+    preflight_runc
+    read -r -a HARDEN_ARGS <<<"$(harden_run_args)"
+    SIZING_ARGS=("${FLAT_PROFILE[@]}")
+fi
 
 # Only pin CLAUDE_BROWSER when the user forced it on/off; in auto mode leave it
 # unset so a browser image self-enables the MCP (and any .env value flows through
@@ -243,10 +315,7 @@ docker run -d \
     --init \
     "${HARDEN_ARGS[@]}" \
     --shm-size "$CLAUDE_SHM_SIZE" \
-    --cpus "$CLAUDE_CPU_LIMIT" \
-    --memory "$CLAUDE_MEM_LIMIT" \
-    --memory-reservation "$CLAUDE_MEM_RESERVATION" \
-    --pids-limit "$CLAUDE_PIDS_LIMIT" \
+    "${SIZING_ARGS[@]}" \
     --tmpfs /tmp:rw,nosuid,nodev,exec,size=1g \
     -p "$SSH_PUBLISH" \
     "${EXPOSE_ARGS[@]}" \
@@ -264,6 +333,8 @@ docker run -d \
     -e CLAUDE_BROKER_GIT_KEY="${CLAUDE_BROKER_GIT_KEY:-0}" \
     -e CLAUDE_EGRESS_LOCKDOWN="${CLAUDE_EGRESS_LOCKDOWN:-0}" \
     -e CLAUDE_EGRESS_EXTRA_HOSTS="${CLAUDE_EGRESS_EXTRA_HOSTS:-}" \
+    "${ATTEST_ARGS[@]}" \
+    "${BROKER_ENV_ARGS[@]}" \
     -e GIT_REPO_URL="$REPO" \
     -e GIT_REPO_BRANCH="$BRANCH" \
     -e GIT_REPO_DEPTH="$DEPTH" \

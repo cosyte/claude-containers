@@ -375,6 +375,47 @@ main tmux pane instead of `claude-session`/`claude-autopilot`; it implies
 an operator who explicitly set `CLAUDE_WORKER_BROKER=0` alongside `CLAUDE_CONTROLLER=1` gets
 a loud refusal at boot rather than a controller that starts and can never dispatch.
 
+### The controller image + the inner dockerd (§5a)
+
+The broker (CC-2) and the workers it launches run on an **inner `dockerd` that lives inside
+this container** — never the host daemon (a host-socket mount or `--privileged` DinD are
+both forbidden — [rejected alternatives](#rejected-alternatives-in-writing--these-are-refusals-not-preferences)).
+The lean `claude-code-box` image bakes **no** docker engine (a plain session or a leaf worker
+never needs one), so a controller runs a **separate image variant**: build it with
+`--build-arg WITH_DOCKER=1` (or `make build-controller`, tag `claude-code-box:controller`).
+That variant installs the Docker Engine (`dockerd` + CLI + `containerd`) from Docker's apt
+repo and carries a `claude.controller=1` label so `claude-launch` can auto-select it and fail
+early against a lean image.
+
+At boot, whenever `CLAUDE_WORKER_BROKER=1`, `entrypoint.sh` **§5a** starts that inner `dockerd`
+as root **before** the broker (§5b): it refuses fast and clearly (`command -v dockerd || die`)
+if the image has no engine, backgrounds `dockerd` (logging to `/var/log/inner-dockerd.log`),
+and blocks — bounded by `CLAUDE_INNER_DOCKERD_WAIT` (default 60s) — until `docker info`
+succeeds. Under Sysbox the daemon is contained by the user namespace (root here → an
+unprivileged host uid), so this needs no privilege. A missing or dead daemon fails here
+rather than surfacing later as an opaque broker/§5c socket timeout.
+
+### Interactive lead that spawns workers — `claude-launch --broker`
+
+Controller **mode** (`CLAUDE_CONTROLLER=1`) makes the main pane a *headless* dispatch loop.
+But the broker is independent of what the main pane runs, so a **conversational** session can
+also spawn workers: `claude-launch --broker` starts an **interactive** Remote-Control/SSH
+session (`claude-session`) *and* the broker, on the controller image, under Sysbox. From that
+session you — or Claude itself, via Bash — run `claude-worker-request <repo> <item>` to launch
+a nested one-shot `/work-on` worker (WIP-capped at K by the broker's lease discipline). This
+is the "one interactive lead that dispatches autonomous workers" shape, riding the exact
+CC-2…CC-5 broker/lease/reaper/disk safety model. `--broker` implies `--sysbox` (the broker
+refuses on a non-userns daemon and needs a host-attested CVE-patched Sysbox version), skips
+the flat runc cap-drop hardening (the inner dockerd needs its caps; the userns is the
+boundary), auto-selects the controller image, and sizes the container for the CC-3 controller
+envelope (Σ K workers + overhead) so the broker's own capacity fail-safe passes.
+
+Clearing the flat hardening does **not** weaken the egress firewall: when `CLAUDE_EGRESS_LOCKDOWN=1`,
+`claude-launch` re-adds an explicit `--cap-add NET_ADMIN` on the Sysbox path so the (fail-open)
+firewall always has the capability it needs to apply its iptables rules — rather than depending on
+Sysbox's implicit cap set (which does grant it — verified `CapEff 0x1ffffffffff` on this fleet — but
+is not a contract we rely on).
+
 ### Effective slots stay at 1 until PAR-4.1 + PAR-7.1 land
 
 `bin/claude-controller` computes **effective worker slots** as
@@ -441,15 +482,21 @@ best-effort early `chown`/`chmod` right before backgrounding the broker, but tha
 covers a socket that **already existed** at that instant — not one the inner daemon creates
 a moment later while the broker is still polling for it.
 
-In controller mode this is now closed **authoritatively**: right after §5b starts the
-broker/reaper/disk-gc, and before §12 launches the agent's tmux session, the entrypoint
-blocks (bounded by `CLAUDE_CONTROLLER_SOCKET_WAIT`, default 90s) until the socket exists
-**and** is already `root:root 600` — the exact same predicate the broker itself enforces at
-startup (`broker_check_socket`). Only after that check passes does §12 start the
-unprivileged agent's tmux session. A container **without** `CLAUDE_CONTROLLER=1` is
-byte-for-byte unchanged — this ordering fix is scoped to controller mode only, since that is
-the mode where the agent shares a boot sequence with a backgrounded broker whose socket
-lockdown timing actually matters to the agent's own start time.
+Whenever the broker is backgrounded this is now closed **authoritatively**: right after §5b
+starts the broker/reaper/disk-gc, and before §12 launches the agent's tmux session, the
+entrypoint blocks (bounded by `CLAUDE_BROKER_SOCKET_LOCKDOWN_WAIT`, default 90s; legacy alias
+`CLAUDE_CONTROLLER_SOCKET_WAIT`) until the socket exists **and** is already `root:root 600` —
+the exact same predicate the broker itself enforces at startup (`broker_check_socket`). Only
+after that check passes does §12 start the unprivileged agent's tmux session.
+
+The barrier is gated on **`CLAUDE_WORKER_BROKER=1`** — the flag that actually backgrounds the
+broker — not on `CLAUDE_CONTROLLER=1`. Controller mode implies `CLAUDE_WORKER_BROKER=1`, so it
+is still covered; but so is an **interactive (or autopilot) session that runs the broker**, e.g.
+`claude-launch --broker` — a conversational lead that spawns nested workers via
+`claude-worker-request`. That path shares the exact same boot race (a backgrounded broker and
+an agent tmux session coming up together), so scoping the fix to controller mode only would
+have left the interactive-broker case with the very hole this closes. A container **without**
+`CLAUDE_WORKER_BROKER=1` is byte-for-byte unchanged.
 
 ### Verification — `bin/claude-controller-verify`
 
