@@ -258,6 +258,30 @@ if [[ "${CLAUDE_CONTROLLER:-0}" =~ ^(1|true|yes|on)$ ]]; then
     log "Controller mode      : inner docker socket confirmed root:root 600 before the agent session starts (waited ${waited}s)"
 fi
 
+# --- 5d. Cache proxy: START it on the controller (PKG-6) ---------------------
+# CLAUDE_CACHE_PROXY=1 on a controller/broker host starts the ROOT-owned pull-through
+# cache on the inner dockerd (the SINGLE audited registry egress for every worker) and
+# BLOCKS until it is ready before the agent/controller loop starts dispatching workers —
+# a worker launched before the proxy answers would (correctly) fail its own fail-closed
+# client-apply. Gated on the broker being present (controller mode implies it, §5b): the
+# proxy needs the inner dockerd, which only a controller/broker host runs. A plain WORKER
+# with the same flag instead CONSUMES the proxy (§10c below). FAIL CLOSED: if the proxy
+# cannot start or become ready within CLAUDE_CACHE_PROXY_READY_TIMEOUT, refuse to start —
+# never run a proxy-mode fleet whose choke point is absent.
+if [[ "${CLAUDE_CACHE_PROXY:-0}" =~ ^(1|true|yes|on)$ ]] \
+   && [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    if /usr/local/bin/claude-cache-proxy start; then
+        log "Cache proxy          : controller-side pull-through cache starting (single audited egress choke point)"
+        if /usr/local/bin/claude-cache-proxy ready; then
+            log "Cache proxy          : ready — workers will fetch packages through it (egress narrowed to the proxy)"
+        else
+            die "Cache proxy          : started but not ready within the timeout — refusing controller startup (fail closed; dispatched workers would fail their own proxy gate). Tune CLAUDE_CACHE_PROXY_READY_TIMEOUT; see /var/log or docs/caching-proxy.md."
+        fi
+    else
+        die "Cache proxy          : CLAUDE_CACHE_PROXY=1 but the proxy could not be started on the inner dockerd — refusing controller startup (fail closed)."
+    fi
+fi
+
 # --- 6. Credentials reconcile (shared auth volume) ---------------------------
 # Credentials are shared across all containers via the claude-auth volume; the
 # rest of the config dir is per-container so sessions never collide. Claude
@@ -702,6 +726,27 @@ if [[ "${CLAUDE_APT_PROVISION:-0}" =~ ^(1|true|yes|on)$ ]]; then
         log "Apt provisioning     : not a worker (leaf / no host-safe root) — nothing installed (expected on a leaf container)"
     else
         log "Apt provisioning     : FAILED (rc=$apt_rc) — a REAL install/egress error, not a benign leaf no-op; the worker may be missing a requested syslib (see [apt-provision] lines)"
+    fi
+fi
+
+# Cache-proxy client provisioning (PKG-6): a WORKER in single-choke-point mode points its
+# package managers at the controller-side pull-through cache, BEFORE the egress lockdown below
+# narrows its egress to just the proxy (the firewall's CLAUDE_CACHE_PROXY_HOST profile). This
+# runs while egress is still open, so the health-check + config write can reach the proxy.
+# FAIL CLOSED: if the proxy is unreachable, REFUSE to start the agent — a proxy-mode worker
+# never falls back to open/public-registry egress (roadmap PART II §II.8). Gated so ONLY a
+# worker consumes it: a controller/broker host STARTS the proxy instead (§5d) and does not
+# point its own managers at it.
+if [[ "${CLAUDE_CACHE_PROXY:-0}" =~ ^(1|true|yes|on)$ ]] \
+   && [[ ! "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]] \
+   && [[ ! "${CLAUDE_CONTROLLER:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    if [[ ! "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]]; then
+        log "Cache proxy          : WARNING — CLAUDE_CACHE_PROXY=1 without CLAUDE_EGRESS_LOCKDOWN=1: package managers point at the proxy, but egress is NOT narrowed to it (the worker can still reach public registries directly). Set CLAUDE_EGRESS_LOCKDOWN=1 for the single-choke-point guarantee."
+    fi
+    if /usr/local/bin/claude-cache-proxy client-apply; then
+        log "Cache proxy          : package managers pointed at the pull-through cache (worker; egress narrows to the proxy below)"
+    else
+        die "Cache proxy          : CLAUDE_CACHE_PROXY=1 but the proxy is unreachable — REFUSING to start the agent (fail closed; a proxy-mode worker never falls back to open egress). Check the controller's claude-cache-proxy + the shared '${CLAUDE_CACHE_PROXY_NET:-claude-cache-net}' network."
     fi
 fi
 

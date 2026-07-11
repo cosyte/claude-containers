@@ -1,0 +1,439 @@
+#!/usr/bin/env bash
+# claude-cache-proxy — the controller-side PULL-THROUGH package cache (PKG-6).
+#
+# The demand-gated tier that turns the fleet's package egress into a SINGLE audited
+# choke point. A pull-through cache (default Nexus OSS all-in-one; any equivalent
+# proxy works via the endpoint overrides) runs on the CONTROLLER's inner dockerd,
+# root-owned exactly like the CC-2 worker broker. Workers point their package
+# managers at the proxy and NARROW their egress to just the proxy — so the ONLY host
+# that reaches the public registries is the proxy, and every package fetch is
+# auditable at that one hop. Second-and-later fetches are cache hits (reproducibility
+# + speed under K); a path toward air-gapped workers.
+#
+# It is DEMAND-GATED: nothing here runs unless CLAUDE_CACHE_PROXY is explicitly on.
+# The curated PKG-1 allowlist + install-then-relock (PKG-2..5) is the default posture;
+# this is built only when a single choke point / air-gapped worker egress is wanted.
+#
+# TWO ROLES, one script:
+#   controller-side (root, on the controller)  start | stop | status | ready | url
+#       — lifecycle of the proxy container on the inner dockerd.
+#   worker-side (inside a worker, from the entrypoint)  client-apply | client-env | ready
+#       — point this worker's package managers at the proxy, FAIL CLOSED if it is down.
+#
+# FAIL-CLOSED is the whole point (roadmap PART II §II.8): "proxy down → provision
+# refused, NEVER a silent fallback to open egress." So `client-apply` health-checks the
+# proxy FIRST and refuses (exit non-zero, die) if it is unreachable — it never writes a
+# config that would let a package manager fall back to a public registry, and the worker
+# entrypoint that calls it dies rather than starting the agent over open egress.
+#
+# Subcommands:
+#   start        launch the proxy container (idempotent; a running proxy is a no-op).
+#                Refuses (fail-closed) unless root and the inner dockerd is reachable.
+#                Creates the shared docker network + persistent cache volume first.
+#   stop         stop + remove the proxy container (idempotent).
+#   status       exit 0 iff the proxy container is running; prints running|stopped.
+#   ready        exit 0 iff the proxy's health endpoint answers within the timeout.
+#                The fail-closed gate — never treats "unknown" as ready.
+#   url          print the resolved proxy base URL.
+#   client-env   print the per-ecosystem registry endpoints as KEY=VALUE lines
+#                (npm/pip/go/apt) — the fixed worker-consumption contract.
+#   client-apply configure THIS container's package managers (npm/pip/go) to use the proxy.
+#                Refuses (fail-closed) if the proxy is not `ready`. apt is deployment-specific and
+#                left to the operator (see the apt note in cache_proxy_client_apply / caching-proxy.md).
+#   print-config dry-run: print the resolved launch plan + endpoints, touch nothing.
+#
+# Env (all opt-in; defaults chosen for a single-container Nexus OSS proxy):
+#   CLAUDE_CACHE_PROXY            master enable (1|true|yes|on). The flag the broker /
+#                                 controller / entrypoint gate on. Off ⇒ this script is
+#                                 never invoked in the normal flow.
+#   CLAUDE_CACHE_PROXY_IMAGE      proxy image           (default sonatype/nexus3:latest)
+#   CLAUDE_CACHE_PROXY_NAME       container name        (default claude-cache-proxy)
+#   CLAUDE_CACHE_PROXY_NET        shared docker network (default claude-cache-net) —
+#                                 the proxy + every worker join it so workers reach the
+#                                 proxy by name without publishing a host port.
+#   CLAUDE_CACHE_PROXY_VOLUME     persistent cache vol  (default claude-cache-proxy-data)
+#   CLAUDE_CACHE_PROXY_PORT       proxy port            (default 8081, Nexus default)
+#   CLAUDE_CACHE_PROXY_HOST       host workers reach the proxy at (default = the
+#                                 container name on the shared net). This is the ONE host
+#                                 the worker egress firewall pins (see claude-egress-firewall).
+#   CLAUDE_CACHE_PROXY_URL        full base URL override; else http://$HOST:$PORT
+#   CLAUDE_CACHE_PROXY_MEM/_CPUS  proxy resource caps   (default 2g / 2 — Nexus is heavy)
+#   CLAUDE_CACHE_PROXY_HEALTH_PATH  health endpoint     (default /service/rest/v1/status)
+#   CLAUDE_CACHE_PROXY_READY_TIMEOUT  secs to wait for ready (default 120)
+#   endpoint path overrides (Nexus repository paths — adjust for a per-ecosystem set):
+#     CLAUDE_CACHE_PROXY_NPM_PATH   (default /repository/npm/)
+#     CLAUDE_CACHE_PROXY_PYPI_PATH  (default /repository/pypi/simple)
+#     CLAUDE_CACHE_PROXY_GO_PATH    (default /repository/go/)
+#     CLAUDE_CACHE_PROXY_APT_PATH   (default /repository/apt/)
+#
+# Test seams — UNIT TESTS ONLY, loudly warned when active:
+#   CLAUDE_CACHE_PROXY_DRYRUN=1   print the docker/curl argv instead of running it.
+#   cache_proxy_docker / cache_proxy_curl are the ONLY external-command wrappers;
+#   the unit tests stub them (source this file, override the function, call in).
+#
+# Sourcing this file defines the cache_proxy_* functions and returns (the unit-test
+# seam); executing it runs the requested subcommand.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+CP_ENABLE="${CLAUDE_CACHE_PROXY:-0}"
+CP_IMAGE="${CLAUDE_CACHE_PROXY_IMAGE:-sonatype/nexus3:latest}"
+CP_NAME="${CLAUDE_CACHE_PROXY_NAME:-claude-cache-proxy}"
+CP_NET="${CLAUDE_CACHE_PROXY_NET:-claude-cache-net}"
+CP_VOLUME="${CLAUDE_CACHE_PROXY_VOLUME:-claude-cache-proxy-data}"
+CP_PORT="${CLAUDE_CACHE_PROXY_PORT:-8081}"
+CP_HOST="${CLAUDE_CACHE_PROXY_HOST:-$CP_NAME}"
+CP_MEM="${CLAUDE_CACHE_PROXY_MEM:-2g}"
+CP_CPUS="${CLAUDE_CACHE_PROXY_CPUS:-2}"
+CP_HEALTH_PATH="${CLAUDE_CACHE_PROXY_HEALTH_PATH:-/service/rest/v1/status}"
+CP_READY_TIMEOUT="${CLAUDE_CACHE_PROXY_READY_TIMEOUT:-120}"
+CP_NPM_PATH="${CLAUDE_CACHE_PROXY_NPM_PATH:-/repository/npm/}"
+CP_PYPI_PATH="${CLAUDE_CACHE_PROXY_PYPI_PATH:-/repository/pypi/simple}"
+CP_GO_PATH="${CLAUDE_CACHE_PROXY_GO_PATH:-/repository/go/}"
+CP_APT_PATH="${CLAUDE_CACHE_PROXY_APT_PATH:-/repository/apt/}"
+
+cplog() { echo "[cache-proxy] $*" >&2; }   # diagnostics on stderr — keeps stdout a clean data channel (url / client-env)
+
+# The ONLY external-command wrappers. Unit tests source this file and override these
+# to record/steer invocations without a real docker/curl (mirrors broker_docker).
+cache_proxy_docker() { docker "$@"; }
+cache_proxy_curl()   { curl "$@"; }
+
+# --- resolved values -------------------------------------------------------------------
+
+# cache_proxy_base_url — the proxy base URL, no trailing slash. An explicit
+# CLAUDE_CACHE_PROXY_URL wins; else compose http://$HOST:$PORT.
+cache_proxy_base_url() {
+    local url="${CLAUDE_CACHE_PROXY_URL:-http://$CP_HOST:$CP_PORT}"
+    printf '%s' "${url%/}"
+}
+
+# cache_proxy_endpoint <base> <path> — join a base URL and a path with exactly one
+# slash between them (path may or may not lead with '/').
+cache_proxy_endpoint() {
+    local base="${1%/}" path="$2"
+    [[ "$path" == /* ]] || path="/$path"
+    printf '%s%s' "$base" "$path"
+}
+
+# --- fail-closed guards ----------------------------------------------------------------
+
+# The controller-side lifecycle commands own the inner dockerd, so they must run as root
+# (the same principal as the CC-2 broker) and the daemon must actually answer. Fail closed.
+cache_proxy_require_root() {
+    if [[ "${CLAUDE_CACHE_PROXY_SKIP_ROOT:-0}" == 1 ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_CACHE_PROXY_SKIP_ROOT=1 — the root check is NOT being enforced"
+        return 0
+    fi
+    [[ "$(id -u)" == 0 ]] || die "claude-cache-proxy $1 must run as root (it owns the proxy on the inner dockerd; the agent never does)"
+}
+
+cache_proxy_require_daemon() {
+    cache_proxy_docker info >/dev/null 2>&1 \
+        || die "cannot talk to the inner dockerd — refusing (fail closed); is the controller's inner docker running?"
+}
+
+# --- container state -------------------------------------------------------------------
+
+# cache_proxy_running — 0 iff a container named $CP_NAME is running. Fail-closed on a
+# daemon error is the CALLER's concern (start/stop/status each handle it); this is a
+# pure predicate.
+cache_proxy_running() {
+    local out
+    out="$(cache_proxy_docker ps --filter "name=^/${CP_NAME}$" --filter 'status=running' --format '{{.Names}}' 2>/dev/null)" || return 1
+    [[ "$out" == "$CP_NAME" ]]
+}
+
+cache_proxy_exists() {  # exists in any state (running/exited/created)
+    local out
+    out="$(cache_proxy_docker ps -a --filter "name=^/${CP_NAME}$" --format '{{.Names}}' 2>/dev/null)" || return 1
+    [[ "$out" == "$CP_NAME" ]]
+}
+
+# --- the launch template ---------------------------------------------------------------
+
+# cache_proxy_template_args — the docker run argv, one token per line (unit tests
+# golden-compare this). Root-owned, resource-capped, joined to the shared network so
+# workers reach it by name, cache persisted on a named volume. NOT published to a host
+# port by default (the shared docker network is the reach path — no host exposure widens
+# the surface). Labelled so claude-list / the reaper can see but never reap it
+# (claude.cacheproxy=1, deliberately NOT claude.worker=1).
+cache_proxy_template_args() {
+    printf '%s\n' \
+        run -d \
+        --name "$CP_NAME" \
+        --restart unless-stopped \
+        --network "$CP_NET" \
+        --label claude.cacheproxy=1 \
+        --label claude.managed=1 \
+        --security-opt no-new-privileges \
+        --memory "$CP_MEM" \
+        --memory-swap "$CP_MEM" \
+        --cpus "$CP_CPUS" \
+        -v "$CP_VOLUME:/nexus-data" \
+        "$CP_IMAGE"
+}
+
+# --- start -----------------------------------------------------------------------------
+
+cache_proxy_start() {
+    cache_proxy_require_root start
+    if [[ "${CLAUDE_CACHE_PROXY_DRYRUN:-0}" == 1 ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_CACHE_PROXY_DRYRUN=1 — printing the launch plan, NOT launching"
+        echo "network: docker network create $CP_NET  (idempotent)"
+        echo "volume:  docker volume create $CP_VOLUME  (idempotent)"
+        printf 'launch: docker %s\n' "$(cache_proxy_template_args | tr '\n' ' ')"
+        cache_proxy_print_endpoints
+        return 0
+    fi
+    cache_proxy_require_daemon
+
+    # Idempotent: a running proxy is a no-op (a restart would drop the warm cache).
+    if cache_proxy_running; then
+        cplog "proxy '$CP_NAME' already running — no-op"
+        echo "running $CP_NAME"
+        return 0
+    fi
+    # A stale exited/created container of the same name would block `docker run --name`;
+    # remove it first (its cache lives on the named volume, not the container fs).
+    if cache_proxy_exists; then
+        cplog "removing a stale non-running '$CP_NAME' before (re)launch"
+        cache_proxy_docker rm -f "$CP_NAME" >/dev/null 2>&1 || true
+    fi
+
+    # Shared network + persistent volume — both idempotent (create-if-absent).
+    cache_proxy_docker network create "$CP_NET"  >/dev/null 2>&1 || true
+    cache_proxy_docker volume  create "$CP_VOLUME" >/dev/null 2>&1 || true
+
+    local -a args
+    mapfile -t args < <(cache_proxy_template_args)
+    # `|| return` in an if-context (errexit suspended): a failed run must not fall
+    # through to a success echo.
+    cache_proxy_docker "${args[@]}" >/dev/null || die "docker run for the cache proxy failed — refusing (fail closed)"
+    cplog "proxy '$CP_NAME' launched on network '$CP_NET' (image $CP_IMAGE, cache volume $CP_VOLUME)"
+    echo "started $CP_NAME"
+}
+
+# --- stop ------------------------------------------------------------------------------
+
+cache_proxy_stop() {
+    cache_proxy_require_root stop
+    cache_proxy_require_daemon
+    if cache_proxy_exists; then
+        cache_proxy_docker rm -f "$CP_NAME" >/dev/null 2>&1 || die "could not remove the cache proxy '$CP_NAME'"
+        cplog "proxy '$CP_NAME' stopped + removed (cache volume '$CP_VOLUME' retained)"
+        echo "stopped $CP_NAME"
+    else
+        cplog "proxy '$CP_NAME' not present — nothing to stop"
+        echo "absent $CP_NAME"
+    fi
+}
+
+# --- status ----------------------------------------------------------------------------
+
+cache_proxy_status() {
+    if cache_proxy_running; then echo "running $CP_NAME"; return 0; fi
+    echo "stopped $CP_NAME"; return 1
+}
+
+# --- ready (the fail-closed health gate) -----------------------------------------------
+
+# cache_proxy_ready — poll the proxy's health endpoint until it answers 2xx (serving) or the
+# timeout elapses. Exit 0 iff it is serving. This is the gate `client-apply` and the
+# controller/worker entrypoints consult; it NEVER treats an unreachable/unknown proxy as
+# ready (that would be the silent open-egress fallback the design forbids).
+cache_proxy_ready() {
+    local url deadline_iter=0 max_iter code
+    url="$(cache_proxy_endpoint "$(cache_proxy_base_url)" "$CP_HEALTH_PATH")"
+    [[ "$CP_READY_TIMEOUT" =~ ^[0-9]+$ ]] || die "CLAUDE_CACHE_PROXY_READY_TIMEOUT '$CP_READY_TIMEOUT' is not a non-negative integer"
+    max_iter="$CP_READY_TIMEOUT"   # ~1 probe/sec
+
+    if [[ "${CLAUDE_CACHE_PROXY_DRYRUN:-0}" == 1 ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_CACHE_PROXY_DRYRUN=1 — printing the health probe, NOT probing"
+        echo "probe: curl -fsS --max-time 5 $url  (up to ${CP_READY_TIMEOUT}s)"
+        return 0
+    fi
+
+    while :; do
+        # -o /dev/null -w '%{http_code}' gives us the status without the body; a
+        # connect failure yields 000, which never matches the 2xx accept below. Only a 2xx counts as
+        # ready: a 3xx (e.g. a mid-startup redirect-to-login on a Nexus context path) or a 5xx means the
+        # proxy is up but NOT yet serving repositories — accepting it would let client-apply proceed
+        # against a proxy that 404s real fetches, softening the fail-closed contract. If a deployment
+        # fronts the health path behind a redirect, point CLAUDE_CACHE_PROXY_HEALTH_PATH at a 200 endpoint.
+        code="$(cache_proxy_curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null || echo 000)"
+        case "$code" in
+            2??) cplog "proxy ready ($url → HTTP $code)"; return 0 ;;
+        esac
+        (( deadline_iter >= max_iter )) && break
+        deadline_iter=$((deadline_iter + 1))
+        sleep 1
+    done
+    cplog "proxy NOT ready after ${CP_READY_TIMEOUT}s ($url → last HTTP ${code:-000}) — refusing (fail closed)"
+    return 1
+}
+
+# --- url / endpoints -------------------------------------------------------------------
+
+cache_proxy_url() { cache_proxy_base_url; echo; }
+
+# cache_proxy_print_endpoints — the per-ecosystem endpoints, human-oriented (stderr-safe
+# via stdout here since it's an explicit query). Used by print-config.
+cache_proxy_print_endpoints() {
+    local base; base="$(cache_proxy_base_url)"
+    echo "npm  registry: $(cache_proxy_endpoint "$base" "$CP_NPM_PATH")"
+    echo "pip  index:    $(cache_proxy_endpoint "$base" "$CP_PYPI_PATH")"
+    echo "go   GOPROXY:  $(cache_proxy_endpoint "$base" "$CP_GO_PATH")"
+    echo "apt  mirror:   $(cache_proxy_endpoint "$base" "$CP_APT_PATH")"
+}
+
+# cache_proxy_client_env — the per-ecosystem endpoints as KEY=VALUE lines (machine-readable; one per
+# ecosystem). A documentation / manual-inspection helper: `client-apply` recomputes these directly, so
+# this is for an operator (or a deployment wiring apt itself) to read the resolved endpoints, not a
+# step in the automatic flow.
+cache_proxy_client_env() {
+    local base; base="$(cache_proxy_base_url)"
+    printf 'CLAUDE_CACHE_PROXY_URL=%s\n'         "$base"
+    printf 'CLAUDE_CACHE_PROXY_NPM_REGISTRY=%s\n' "$(cache_proxy_endpoint "$base" "$CP_NPM_PATH")"
+    printf 'CLAUDE_CACHE_PROXY_PIP_INDEX=%s\n'    "$(cache_proxy_endpoint "$base" "$CP_PYPI_PATH")"
+    printf 'CLAUDE_CACHE_PROXY_GOPROXY=%s\n'      "$(cache_proxy_endpoint "$base" "$CP_GO_PATH")"
+    printf 'CLAUDE_CACHE_PROXY_APT_MIRROR=%s\n'   "$(cache_proxy_endpoint "$base" "$CP_APT_PATH")"
+}
+
+# --- client-apply (worker-side, fail-closed) -------------------------------------------
+
+# cache_proxy_client_apply — inside a worker: point this container's package managers at
+# the proxy. FAIL CLOSED: if the proxy is not `ready`, refuse (die) — never write a
+# config that leaves a public-registry fallback reachable. Writes to the claude user's
+# HOME so the unprivileged agent's tools pick it up; apt sources need root and are
+# written only when we are root (the worker entrypoint runs this as root before dropping).
+cache_proxy_client_apply() {
+    local base npm_reg pip_index goproxy apt_mirror
+    base="$(cache_proxy_base_url)"
+    npm_reg="$(cache_proxy_endpoint "$base" "$CP_NPM_PATH")"
+    pip_index="$(cache_proxy_endpoint "$base" "$CP_PYPI_PATH")"
+    goproxy="$(cache_proxy_endpoint "$base" "$CP_GO_PATH")"
+    apt_mirror="$(cache_proxy_endpoint "$base" "$CP_APT_PATH")"
+
+    if [[ "${CLAUDE_CACHE_PROXY_DRYRUN:-0}" == 1 ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_CACHE_PROXY_DRYRUN=1 — printing the client-apply plan, NOT applying"
+        echo "ready-gate: cache_proxy_ready (refuse if the proxy is down — no open-egress fallback)"
+        echo "npm:  registry=$npm_reg"
+        echo "pip:  index-url=$pip_index"
+        echo "go:   GOPROXY=$goproxy GOSUMDB=off"
+        echo "apt:  NOT auto-configured (deployment-specific; mirror=$apt_mirror advertised for the operator)"
+        return 0
+    fi
+
+    # THE fail-closed gate: the proxy must be serving before we reconfigure anything.
+    cache_proxy_ready \
+        || die "cache proxy is not reachable — REFUSING to configure package managers (fail closed). A worker in proxy mode must reach the proxy or not provision at all; it never falls back to open/public-registry egress."
+
+    # Resolve the claude user's HOME so config lands where the unprivileged agent reads
+    # it, whether this runs as root (worker entrypoint) or as the user directly.
+    local user home
+    user="${CLAUDE_USER:-claude}"
+    # `|| true` so a getent miss (unknown user → rc 2) doesn't trip the script's set -e at the
+    # assignment, which would skip the HOME fallback below (leaving it dead code).
+    home="$(getent passwd "$user" 2>/dev/null | cut -d: -f6 || true)"
+    [[ -n "$home" ]] || home="${HOME:-/home/$user}"
+
+    # The host pip must trust is the host it actually DIALS — derive it from the effective base URL
+    # (which honours CLAUDE_CACHE_PROXY_URL), NOT $CP_HOST: with a URL override the two can differ, and
+    # trusting the wrong host would make pip reject the plain-HTTP internal endpoint. Strip scheme, then
+    # take up to the first ':' or '/'.
+    local pip_host="${base#*://}"; pip_host="${pip_host%%[:/]*}"
+
+    # npm — a user .npmrc registry line (merges with the PKG-5 ignore-scripts line).
+    cache_proxy_write_line "$home/.npmrc" "registry=$npm_reg" "$user"
+    # pip — index-url + trust the proxy host (plain-HTTP internal endpoint).
+    mkdir -p "$home/.config/pip"
+    {
+        echo "[global]"
+        echo "index-url = $pip_index"
+        echo "trusted-host = $pip_host"
+    } > "$home/.config/pip/pip.conf" 2>/dev/null || warn "cache-proxy: could not write $home/.config/pip/pip.conf"
+    cache_proxy_chown "$home/.config/pip/pip.conf" "$user"
+    cache_proxy_chown "$home/.config/pip" "$user"
+    # go — GOPROXY at the proxy; GOSUMDB=off (the sumdb is not proxied by default, and
+    # the proxy is the trust boundary here). Written to the user's env profile.
+    cache_proxy_write_line "$home/.config/claude-cache-proxy.env" "export GOPROXY=$goproxy" "$user"
+    cache_proxy_write_line "$home/.config/claude-cache-proxy.env" "export GOSUMDB=off" "$user"
+    # apt — DELIBERATELY not auto-configured. The correct apt redirection depends on the proxy TYPE and
+    # cannot be guessed: a Nexus apt *hosted-repo* (the default proxy) needs sources.list rewritten to the
+    # repo path ($apt_mirror), while an apt-cacher-ng *forward* cacher needs `Acquire::http::Proxy`. Writing
+    # one form blindly would be wrong (and silently a no-op) for the other, and would ignore HTTPS apt
+    # sources entirely. So client-apply auto-configures the three ecosystem-path managers (npm/pip/go) and
+    # leaves apt to the operator (the supported curated-apt path is PKG-4). The advertised mirror endpoint
+    # is still surfaced (client-env + the log below) for a deployment that wants to wire apt itself. See
+    # docs/caching-proxy.md "Known limitations".
+    cplog "apt NOT auto-configured (deployment-specific: Nexus mirror → rewrite sources.list to $apt_mirror; apt-cacher-ng → Acquire::http::Proxy $base). PKG-4 is the supported curated-apt path."
+
+    cplog "package managers pointed at the proxy: npm=$npm_reg pip=$pip_index go=$goproxy (apt: see above)"
+    echo "applied $base"
+}
+
+# cache_proxy_write_line <file> <line> <user> — append <line> to <file> once
+# (idempotent), creating parent dirs, chowned to <user>. Best-effort per line.
+cache_proxy_write_line() {
+    local file="$1" line="$2" user="$3"
+    mkdir -p "$(dirname "$file")" 2>/dev/null || true
+    if [[ -f "$file" ]] && grep -qxF "$line" "$file" 2>/dev/null; then
+        cache_proxy_chown "$file" "$user"; return 0
+    fi
+    printf '%s\n' "$line" >> "$file" 2>/dev/null || { warn "cache-proxy: could not write $file"; return 0; }
+    cache_proxy_chown "$file" "$user"
+}
+
+cache_proxy_chown() {  # best-effort; only meaningful as root
+    local path="$1" user="$2"
+    [[ "$(id -u)" == 0 ]] || return 0
+    chown "$user:$user" "$path" 2>/dev/null || true
+}
+
+# --- print-config (dry-run overview) ---------------------------------------------------
+
+cache_proxy_print_config() {
+    echo "cache proxy configuration:"
+    echo "  enabled:   $CP_ENABLE"
+    echo "  image:     $CP_IMAGE"
+    echo "  name:      $CP_NAME"
+    echo "  network:   $CP_NET"
+    echo "  volume:    $CP_VOLUME"
+    echo "  host:port: $CP_HOST:$CP_PORT"
+    echo "  base url:  $(cache_proxy_base_url)"
+    echo "  health:    $(cache_proxy_endpoint "$(cache_proxy_base_url)" "$CP_HEALTH_PATH")"
+    echo "endpoints:"
+    cache_proxy_print_endpoints
+    echo "launch argv:"
+    printf '  docker %s\n' "$(cache_proxy_template_args | tr '\n' ' ')"
+}
+
+# --- dispatch --------------------------------------------------------------------------
+
+cache_proxy_main() {
+    local cmd="${1:-}"; shift || true
+    case "$cmd" in
+        start)        cache_proxy_start "$@" ;;
+        stop)         cache_proxy_stop "$@" ;;
+        status)       cache_proxy_status "$@" ;;
+        ready)        cache_proxy_ready "$@" ;;
+        url)          cache_proxy_url "$@" ;;
+        client-env)   cache_proxy_client_env "$@" ;;
+        client-apply) cache_proxy_client_apply "$@" ;;
+        print-config) cache_proxy_print_config "$@" ;;
+        ""|-h|--help|help)
+            cat >&2 <<EOF
+usage: claude-cache-proxy <command>
+  start | stop | status | ready | url | client-env | client-apply | print-config
+See the header of $(basename "${BASH_SOURCE[0]}") for the env + fail-closed contract.
+EOF
+            [[ "$cmd" == "" ]] && return 2 || return 0 ;;
+        *) die "unknown command '$cmd' — see: claude-cache-proxy --help" ;;
+    esac
+}
+
+# Executed → run the requested subcommand; sourced → expose the functions for unit tests.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    cache_proxy_main "$@"
+fi

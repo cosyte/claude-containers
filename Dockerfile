@@ -242,6 +242,10 @@ COPY bin/claude-deps-check /usr/local/bin/claude-deps-check
 # bump-worker. slots==1 collapses to claude-autopilot (byte-identical); slots>1 is the
 # built-but-gated K>1 loop (CLAUDE_CONTROLLER_MAX_SLOTS defaults to 1 — never auto-ramps).
 COPY bin/claude-controller /usr/local/bin/claude-controller
+# Controller-side caching proxy (PKG-6): the entrypoint runs this as root on a controller
+# (CLAUDE_CACHE_PROXY=1, §5d) to START the pull-through cache on the inner dockerd, and inside
+# a WORKER (§10c) to POINT its package managers at the proxy + fail-closed if it is down.
+COPY bin/claude-cache-proxy /usr/local/bin/claude-cache-proxy
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-dev /usr/local/bin/claude-autopilot \
@@ -258,6 +262,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-disk-gc \
         /usr/local/bin/claude-deps-check \
         /usr/local/bin/claude-controller \
+        /usr/local/bin/claude-cache-proxy \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
 

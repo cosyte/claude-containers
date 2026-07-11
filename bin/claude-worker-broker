@@ -383,6 +383,27 @@ broker_template_args() {
     # degrading to an empty manifest). The worker uses its baked
     # /opt/claude-config/apt-manifest.txt; customize by baking the manifest into
     # the worker image, not by pointing at a host path.
+    # PKG-6: cache-proxy single-choke-point mode. When on, the worker joins the proxy's
+    # shared docker network (so it can reach the proxy by name), gets CLAUDE_CACHE_PROXY=1
+    # (its entrypoint runs claude-cache-proxy client-apply, fail-closed) and
+    # CLAUDE_CACHE_PROXY_HOST (which narrows its egress firewall to the proxy — see
+    # claude-egress-firewall). Off by default; the URL/host default to the proxy container
+    # name on the shared network, overridable for a custom proxy. Forwarding the HOST is
+    # what makes the worker's egress single-choke-point, so it is passed whenever the mode
+    # is on (never silently omitted).
+    if [[ "${CLAUDE_CACHE_PROXY:-0}" =~ ^(1|true|yes|on)$ ]]; then
+        local cp_net="${CLAUDE_CACHE_PROXY_NET:-claude-cache-net}"
+        local cp_name="${CLAUDE_CACHE_PROXY_NAME:-claude-cache-proxy}"
+        local cp_host="${CLAUDE_CACHE_PROXY_HOST:-$cp_name}"
+        printf '%s\n' \
+            --network "$cp_net" \
+            -e "CLAUDE_CACHE_PROXY=${CLAUDE_CACHE_PROXY}" \
+            -e "CLAUDE_CACHE_PROXY_HOST=${cp_host}"
+        # Full `if` blocks (not `[[ ]] && printf`): a trailing false test would make
+        # broker_template_args itself return non-zero under the broker's set -e.
+        if [[ -n "${CLAUDE_CACHE_PROXY_URL:-}" ]]; then printf '%s\n' -e "CLAUDE_CACHE_PROXY_URL=${CLAUDE_CACHE_PROXY_URL}"; fi
+        if [[ -n "${CLAUDE_CACHE_PROXY_PORT:-}" ]]; then printf '%s\n' -e "CLAUDE_CACHE_PROXY_PORT=${CLAUDE_CACHE_PROXY_PORT}"; fi
+    fi
 }
 
 # --- lease discipline -------------------------------------------------------------

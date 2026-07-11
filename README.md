@@ -205,6 +205,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts. Extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. Fail-open on error |
 | `CLAUDE_EGRESS_PACKAGES` | `0` | `1` = additively allowlist the curated **package registries** (PyPI, crates.io, Go proxy, `mise.run`, `ghcr.io`) so agent-driven `pip`/`cargo`/`go`/`mise` installs work under lockdown. Opt-in and curated (not open); nothing else broadens. Debian/apt system libs are **not** here (they need the rootful worker tier). See [docs/package-provisioning-security.md](docs/package-provisioning-security.md) |
 | `CLAUDE_APT_PROVISION` | `0` | `1` = in a **Sysbox worker**, install the curated pinned `claude-config/apt-manifest.txt` (system `.so` libs `mise` can't provide rootless) as root before the agent — curated-not-open, install-then-relock. Self-gates to worker root; a leaf gets a documented refusal. Override the path with `CLAUDE_APT_MANIFEST_FILE`. See [docs/package-provisioning-security.md](docs/package-provisioning-security.md) §3.7 |
+| `CLAUDE_CACHE_PROXY` | `0` | `1` = **demand-gated (PKG-6)** controller-side pull-through package cache — the single audited egress choke point. On a controller, starts the proxy (`claude-cache-proxy`) on the inner dockerd and blocks until ready; in a worker, points `npm`/`pip`/`go`/`apt` at it and narrows egress to just the proxy. **Fail-closed:** proxy down → provision refused (never open-egress fallback). Pair with `CLAUDE_EGRESS_LOCKDOWN=1`. Tune with `CLAUDE_CACHE_PROXY_{IMAGE,HOST,PORT,NET,VOLUME,MEM,CPUS,READY_TIMEOUT}`. See [docs/caching-proxy.md](docs/caching-proxy.md) |
 | `CLAUDE_BROKER_GIT_KEY` | `0` | `1` = hold the SSH deploy key in a root ssh-agent (agent signs/pushes but can't read the key bytes) instead of a readable `~/.ssh/id_ed25519` |
 | `CLAUDE_WORKER_UMBRELLA` | `/workspace` (if it looks right) | Umbrella root override for `claude-worker-run` — must have both `.gitmodules` and `scripts/isolate.sh`; refuses (fail closed) otherwise |
 | `CLAUDE_WORKER_HEARTBEAT_SECS` | `60` | Seconds between `claude-worker-run`'s best-effort `scripts/lease.sh renew` calls |
@@ -271,6 +272,7 @@ claude-disk-verify [--check] [--keep]   prove the disk-space floor + gc + image 
 claude-controller                 wire the substrate to the umbrella PAR-* lease/scheduler/bump-worker (CC-6)
 claude-controller-verify [--check] [--keep]   prove controller-mode dispatch + non-double-ship (CC-6)
 claude-fleet-view [--json]        per-worker item/repo/spend + host cpu/mem/disk headroom vs the K budget (CC-7)
+claude-cache-proxy <cmd>          controller-side pull-through cache: start|stop|status|ready|url|client-apply (PKG-6, demand-gated)
 ```
 
 Inside a controller (`CLAUDE_WORKER_BROKER=1`), the unprivileged agent asks the
@@ -478,6 +480,15 @@ Full design + verification: [docs/shared-tool-cache.md](docs/shared-tool-cache.m
   agent `apt` is refused; a **leaf** container gets a documented refusal (*use `mise` /
   static binaries, or rebuild the base*), never a silent partial. Default manifest is
   empty. Design: [docs/package-provisioning-security.md](docs/package-provisioning-security.md) §3.7.
+- **Single audited egress choke point — caching proxy (PKG-6, demand-gated).** With
+  `CLAUDE_CACHE_PROXY=1` a root-owned pull-through cache (default Nexus OSS) on the
+  controller's inner dockerd becomes the **only** host that reaches the public
+  registries; each worker points `npm`/`pip`/`go`/`apt` at it and has its egress
+  **narrowed to just the proxy**. **Fail-closed:** the controller refuses to start, and a
+  worker refuses to provision, if the proxy is unreachable — **never** a silent fallback to
+  open/public-registry egress. Off by default (the curated allowlist is the standard
+  posture); built for reproducibility under K + a path toward air-gapped workers. Design +
+  on-host gate: [docs/caching-proxy.md](docs/caching-proxy.md).
 
 ## Troubleshooting (summary)
 
