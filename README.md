@@ -203,6 +203,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_SHM_SIZE` | `2g` | `/dev/shm` size |
 | `CLAUDE_HARDEN_CAPS` | `1` | `1` = `--cap-drop ALL` + minimal `--cap-add` (drops NET_RAW/MKNOD/SETFCAP); `0` = Docker defaults. `no-new-privileges` is always set. Override the set with `CLAUDE_MIN_CAPS` |
 | `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts. Extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. Fail-open on error |
+| `CLAUDE_EGRESS_PACKAGES` | `0` | `1` = additively allowlist the curated **package registries** (PyPI, crates.io, Go proxy, `mise.run`, `ghcr.io`) so agent-driven `pip`/`cargo`/`go`/`mise` installs work under lockdown. Opt-in and curated (not open); nothing else broadens. Debian/apt system libs are **not** here (they need the rootful worker tier). See [docs/package-provisioning-security.md](docs/package-provisioning-security.md) |
 | `CLAUDE_BROKER_GIT_KEY` | `0` | `1` = hold the SSH deploy key in a root ssh-agent (agent signs/pushes but can't read the key bytes) instead of a readable `~/.ssh/id_ed25519` |
 | `CLAUDE_WORKER_UMBRELLA` | `/workspace` (if it looks right) | Umbrella root override for `claude-worker-run` — must have both `.gitmodules` and `scripts/isolate.sh`; refuses (fail closed) otherwise |
 | `CLAUDE_WORKER_HEARTBEAT_SECS` | `60` | Seconds between `claude-worker-run`'s best-effort `scripts/lease.sh renew` calls |
@@ -542,6 +543,17 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   egress unrestricted) rather than bricking connectivity. Caveat: an IP-pinned
   allowlist can go stale as CDNs rotate IPs, and `statsig.anthropic.com` isn't
   publicly resolvable so it can't be pinned — re-verify if RC eligibility fails.
+- **Package-registry egress (opt-in, additive).** `CLAUDE_EGRESS_PACKAGES=1`
+  adds the curated package registries — PyPI, crates.io, the Go module proxy,
+  `mise.run`, and `ghcr.io` — to the same IP-pinned allowlist, so agent-driven
+  `pip`/`cargo`/`go`/`mise` installs work while lockdown is on. It is **curated,
+  not open**: a registry that isn't listed still DROPs, because *open* egress is
+  the supply-chain exfil path the container refuses. Nothing broadens unless the
+  flag is explicitly set, and the fail-open-as-a-whole semantics are unchanged.
+  Debian/apt **system** libraries are deliberately not here — those need the
+  rootful Sysbox-worker `apt` tier, not a leaf container. The threat model (the
+  Nx-class weaponized-agent exfil) and the containment rules are in
+  [docs/package-provisioning-security.md](docs/package-provisioning-security.md).
 - **`claude-auth` volume** holds your live OAuth credentials
   (`.credentials.json`) — effectively your Claude session. Anyone who can read
   this Docker volume can act as you. Rotate by `docker volume rm claude-auth`

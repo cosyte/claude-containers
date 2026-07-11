@@ -19,15 +19,17 @@
 set -uo pipefail
 [[ "${CLAUDE_EGRESS_DEBUG:-0}" == 1 ]] && set -x
 
-log() { echo "[egress] $*"; }
+log() { echo "[egress] $*" >&2; }   # diagnostics on stderr (like fail_open) — keeps stdout a clean data channel (e.g. the CLAUDE_EGRESS_PRINT_HOSTS host list)
 fail_open() {
     log "ERROR: $* — failing OPEN (egress UNRESTRICTED). Fix and restart the container." >&2
     iptables -P OUTPUT ACCEPT 2>/dev/null || true
     exit 1
 }
 
-command -v iptables         >/dev/null 2>&1 || fail_open "iptables not installed"
-command -v iptables-restore >/dev/null 2>&1 || fail_open "iptables-restore not installed"
+# NOTE: the `iptables`/`iptables-restore` availability check is deferred until AFTER the
+# CLAUDE_EGRESS_PRINT_HOSTS dry-run seam below — the dry run is a pure host dump that needs neither
+# binary, so it stays runnable on an iptables-less CI host (the enforcement path still refuses without
+# them, see below).
 
 # Default allowlist. Wildcards can't be IP-resolved, so we list the concrete
 # hosts the CLI actually dials (the artifact viewer's *.claudeusercontent.com is
@@ -42,7 +44,42 @@ registry.npmjs.org
 github.com api.github.com codeload.github.com
 "
 EXTRA="${CLAUDE_EGRESS_EXTRA_HOSTS:-}"; EXTRA="${EXTRA//,/ }"
-HOSTS="$DEFAULT_HOSTS $EXTRA"
+
+# Opt-in package-registry profile (PKG-1). ADDITIVE to the default-deny base and IP-pinned exactly like
+# every other host below — it only ever ADDS the curated registry hosts, never broadens egress by any
+# other means, and does NOTHING unless CLAUDE_EGRESS_PACKAGES is explicitly on. This is a curated (not
+# open) allowlist by design: the supply-chain exfil path this container refuses is *open* egress, so a
+# tool whose registry isn't listed simply won't install until its host is added. Debian/apt mirrors are
+# deliberately NOT here — those need the rootful Sysbox-worker apt tier (PKG-4), not a leaf container.
+# See docs/package-provisioning-security.md for the threat model + containment rules.
+PACKAGES_HOSTS=""
+if [[ "${CLAUDE_EGRESS_PACKAGES:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    PACKAGES_HOSTS="
+    pypi.org files.pythonhosted.org
+    crates.io index.crates.io static.crates.io
+    proxy.golang.org sum.golang.org
+    mise.run
+    ghcr.io
+    "
+    log "package-registry egress profile ON (PyPI, crates, Go proxy, mise, ghcr; curated + IP-pinned)"
+fi
+
+HOSTS="$DEFAULT_HOSTS $EXTRA $PACKAGES_HOSTS"
+
+# Dry-run seam for CI/tests (CLAUDE_EGRESS_PRINT_HOSTS accepts the same 1|true|yes|on spellings as the
+# package flag): print the composed allowlist hosts — one per line, IN THE ORDER the resolution loop
+# below iterates them (a faithful witness of the enforcement input, not a sorted/deduped view) — and
+# exit 0 BEFORE requiring iptables, so the host-SELECTION logic is verifiable with no NET_ADMIN and no
+# iptables binary. Default off ⇒ behaviour byte-identical. (Unquoted $HOSTS word-splits, so blank/
+# indented lines in the heredoc never become tokens — no filtering needed.)
+if [[ "${CLAUDE_EGRESS_PRINT_HOSTS:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    printf '%s\n' $HOSTS
+    exit 0
+fi
+
+# Enforcement path only from here — now the iptables tooling is actually required.
+command -v iptables         >/dev/null 2>&1 || fail_open "iptables not installed"
+command -v iptables-restore >/dev/null 2>&1 || fail_open "iptables-restore not installed"
 
 # Collect the allowed IPv4 nets (single IPs and CIDRs) while egress is still open.
 declare -A SEEN=()
