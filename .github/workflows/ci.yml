@@ -36,3 +36,5 @@ jobs:
         run: test/fleet-view-unit.sh
       - name: compose-gen unit tests (scenario .conf expansion + env layering + cross-stack port reservation)
         run: test/compose-gen-unit.sh
+      - name: egress-packages unit tests (PKG-1 opt-in package-registry allowlist — additive, opt-in, leak-free)
+        run: test/egress-packages-unit.sh
