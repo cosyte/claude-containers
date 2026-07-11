@@ -40,6 +40,11 @@
 #                       stack split costs zero extra networks — matters when the
 #                       daemon address pool is nearly full). Create it first:
 #                       docker network create <name>.
+#     --cache <volume>  shared tool cache volume mounted at /cache on every service
+#                       (PKG-3; default: claude-cache). One volume shared stack-wide,
+#                       so a mise/cargo/go/npm/uv install by one worker is a cache hit
+#                       for the rest and survives restarts.
+#     --no-cache        do not mount a shared cache (per-container installs).
 #     --expose <map>    publish an extra container port for a repo, e.g. a dev
 #                       server. Format REPO:HOSTPORT:CONTAINERPORT (repeatable).
 #                       e.g. --expose bridgelink-website:4321:4321
@@ -150,7 +155,7 @@ fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,82p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,87p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG=""
 OUT=""
@@ -158,6 +163,9 @@ PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
 WANT_FORKS=0 WANT_ARCHIVED=0 ALL_DORMANT=0
 NETWORK=""
+# Shared tool cache (PKG-3): ONE volume shared by every service, mounted at /cache.
+# Default = the CACHE_VOLUME name (claude-cache); --no-cache / --cache off disables it.
+CACHE_VOL="$CACHE_VOLUME"
 DORMANT_PROFILE="dormant"
 INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=()
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
@@ -186,6 +194,8 @@ while [[ $# -gt 0 ]]; do
         --archived)        WANT_ARCHIVED=1; shift ;;
         --all-dormant)     ALL_DORMANT=1; shift ;;
         --network)         NETWORK="$2"; shift 2 ;;
+        --cache)           CACHE_VOL="$2"; shift 2 ;;
+        --no-cache)        CACHE_VOL=""; shift ;;
         --limit)           LIMIT="$2"; shift 2 ;;
         --scenario)        shift 2 ;;   # consumed in the pre-scan above
         --env-file)        shift 2 ;;   # consumed in the pre-scan above
@@ -194,6 +204,11 @@ while [[ $# -gt 0 ]]; do
         *)                 REPO_ARGS+=("$1"); shift ;;
     esac
 done
+
+# Shared tool cache (PKG-3): normalize the requested volume to its effective name
+# ("" / off / none disable it). One shared volume across all services = the
+# cross-worker cache hit; disabled = per-container installs.
+CACHE_NAME="$(cache_name "$CACHE_VOL")"
 
 # No host- or org-specific defaults: this is a shared tool. Caller must say
 # where to write and (for gh enumeration) which org.
@@ -579,7 +594,8 @@ EOF
       - claude-auth:/auth
       - claude-sshkeys:/etc/ssh/host-keys
       - claude-config-${svc}:/home/claude/.claude
-      - claude-ws-${svc}:/workspace
+      - claude-ws-${svc}:/workspace${CACHE_NAME:+
+      - claude-cache:/cache}
       - ${AK}:/etc/claude/authorized_keys:ro
       - ${GK}:/etc/claude/git-key:ro
     labels:
@@ -604,6 +620,12 @@ cat <<EOF
   claude-sshkeys:
     name: ${SSHKEYS_VOLUME}
 EOF
+# Shared tool cache (PKG-3): one volume for the whole stack (NOT external — docker
+# compose creates it on first `up`, seeded from the image's /cache). Every service
+# mounts it at /cache, so a mise/cargo/go/npm/uv install by one is a hit for the rest.
+if [[ -n "$CACHE_NAME" ]]; then
+    printf '  claude-cache:\n    name: %s\n' "$CACHE_NAME"
+fi
 for row in "${FINAL[@]}"; do
     IFS=$'\t' read -r svc _ _ <<<"$row"
     printf '  claude-config-%s:\n    name: claude-config-%s\n' "$svc" "$svc"

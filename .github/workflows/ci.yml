@@ -40,3 +40,5 @@ jobs:
         run: test/egress-packages-unit.sh
       - name: mise unit tests (PKG-2 baked toolchain provisioner — pinned install, shims on PATH, /workspace-only trust)
         run: test/mise-unit.sh
+      - name: cache unit tests (PKG-3 shared tool cache — /cache relocation, fail-safe, idle-only re-fetchable trim, launch/compose mounts)
+        run: test/cache-unit.sh

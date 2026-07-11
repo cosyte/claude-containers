@@ -115,6 +115,32 @@ RUN set -eux; \
     rm -f /tmp/mise; \
     mise --version
 
+# --- Shared, persistent tool cache (PKG-3) -----------------------------------
+# One shared /cache tree holds mise's install store + the language package-manager
+# caches, so a toolchain/CLI provisioned once is reused across container restarts
+# AND across parallel workers (the ENV block below points MISE_DATA_DIR + CARGO_HOME
+# + GOPATH/GOMODCACHE + the npm/uv/pip caches here). claude-launch / claude-compose-gen
+# mount a SHARED named volume (default `claude-cache`) at /cache; because every
+# container runs THIS image (same OS/arch), mise's cross-machine store caveat does not
+# apply, so the install store is safe to share.
+#
+# Baked here, owned by the claude user, so the design is FAIL-SAFE by construction:
+#   - Volume mounted  → docker seeds the fresh named volume from these dirs (ownership
+#     preserved), and all workers share it.
+#   - No volume       → /cache is just this image-layer dir: provisioning still works,
+#     writes land in the container's own layer (per-container, ephemeral) — a missing
+#     cache never errors a launch, it only forgoes the cross-container hit.
+# Version SELECTION stays per-container (mise reads /workspace/mise.toml, a per-container
+# mount), so the shared store is read-mostly: installs are content-addressed by version
+# and each tool (mise/cargo/go/npm) locks its own writes — concurrent workers append to
+# the shared store without corrupting each other. The re-fetchable download sub-caches
+# are what claude-disk-gc --cache trims when the volume exceeds CLAUDE_CACHE_MAX_MIB;
+# the installed toolchains are kept.
+RUN set -eux; \
+    mkdir -p /cache/mise /cache/cargo /cache/go/pkg/mod /cache/go/bin \
+             /cache/npm /cache/uv /cache/pip; \
+    chown -R ${CLAUDE_UID}:${CLAUDE_GID} /cache
+
 # --- Optional: headless Chromium + chrome-devtools-mcp (frontend debugging) --
 # Build with `--build-arg WITH_BROWSER=1` (or `make build-browser`) to bake a
 # headless Chromium and the official Chrome DevTools MCP server. A session on
@@ -238,6 +264,17 @@ RUN printf '%s\n' \
       '# mise (PKG-2): activate for INTERACTIVE shells only. Agent / non-interactive' \
       '# shells use the shims dir baked onto PATH (see the Dockerfile ENV), not this.' \
       '[[ $- == *i* ]] || return' \
+      '# Shared tool cache (PKG-3): re-export the cache dirs so a fresh SSH shell that' \
+      '# did NOT inherit the Dockerfile ENV (e.g. a non-tmux fallback shell) still' \
+      "# activates mise against the SHARED store, not the home default. Agent shells get" \
+      '# these from the Dockerfile ENV; this keeps interactive shells consistent.' \
+      'export MISE_DATA_DIR="${MISE_DATA_DIR:-/cache/mise}"' \
+      'export CARGO_HOME="${CARGO_HOME:-/cache/cargo}"' \
+      'export GOPATH="${GOPATH:-/cache/go}"' \
+      'export GOMODCACHE="${GOMODCACHE:-/cache/go/pkg/mod}"' \
+      'export npm_config_cache="${npm_config_cache:-/cache/npm}"' \
+      'export UV_CACHE_DIR="${UV_CACHE_DIR:-/cache/uv}"' \
+      'export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/cache/pip}"' \
       'command -v mise >/dev/null 2>&1 && eval "$(mise activate bash)"' \
       >> /home/${CLAUDE_USER}/.bashrc \
     && chown ${CLAUDE_UID}:${CLAUDE_GID} /home/${CLAUDE_USER}/.bashrc
@@ -250,24 +287,36 @@ RUN printf '%s\n' \
 # Remote Control is the whole point of this image, so telemetry stays on.
 # DISABLE_AUTOUPDATER is unrelated to the flag fetch and is kept (pinned version).
 #
-# mise (PKG-2):
-#  - PATH: prepend the mise shims dir so NON-interactive / agent shells
-#    (`bash -c "…"`, the Claude Code process) resolve mise-installed tools with
-#    no shell activation. Interactive shells get full `mise activate` via
-#    ~/.bashrc; this covers everything else. The dir need not exist yet — mise
-#    creates + populates it (as UID 1000) on the first `mise use`.
+# mise (PKG-2) + shared tool cache (PKG-3):
+#  - MISE_DATA_DIR + CARGO_HOME/GOPATH/GOMODCACHE + npm/uv/pip caches point at the
+#    shared /cache tree (PKG-3), so a toolchain/CLI installed by one container is a
+#    cache hit for the next and for parallel workers. With no cache volume mounted
+#    /cache is a plain image-layer dir → per-container installs (fail-safe).
+#  - PATH: prepend the mise shims dir (now /cache/mise/shims) so NON-interactive /
+#    agent shells (`bash -c "…"`, the Claude Code process) resolve mise-installed
+#    tools with no shell activation; also prepend cargo/go bin so `cargo install` /
+#    `go install` CLIs resolve. Interactive shells get full `mise activate` via
+#    ~/.bashrc (which re-exports these dirs — see the bashrc block). The dirs need
+#    not be populated yet — mise creates + fills them (as UID 1000) on first `mise use`.
 #  - MISE_TRUSTED_CONFIG_PATHS: auto-trust a `mise.toml` ONLY under /workspace
 #    (the repo the agent is working on), a DELIBERATE, scoped supply-chain trade
 #    — NOT a blanket "/" — so the agent's own repo toolchain auto-applies while
 #    any config outside /workspace still refuses to auto-run. See
-#    docs/toolchain-provisioning.md.
+#    docs/toolchain-provisioning.md and docs/shared-tool-cache.md.
 ENV CLAUDE_USER=${CLAUDE_USER} \
     CLAUDE_CONFIG_DIR=/home/${CLAUDE_USER}/.claude \
     CLAUDE_RC_DEBUG_LOG=/tmp/claude-rc-debug.log \
     DISABLE_AUTOUPDATER=1 \
     NODE_NO_WARNINGS=1 \
     MISE_TRUSTED_CONFIG_PATHS=/workspace \
-    PATH=/home/${CLAUDE_USER}/.local/share/mise/shims:${PATH}
+    MISE_DATA_DIR=/cache/mise \
+    CARGO_HOME=/cache/cargo \
+    GOPATH=/cache/go \
+    GOMODCACHE=/cache/go/pkg/mod \
+    npm_config_cache=/cache/npm \
+    UV_CACHE_DIR=/cache/uv \
+    PIP_CACHE_DIR=/cache/pip \
+    PATH=/cache/mise/shims:/cache/cargo/bin:/cache/go/bin:${PATH}
 
 EXPOSE 22
 

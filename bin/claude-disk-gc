@@ -15,17 +15,31 @@
 # refusal half is the broker's per-launch free-space floor (bin/claude-worker-broker,
 # broker_check_disk).
 #
+# Shared tool cache (PKG-3): the /cache volume (mise installs + cargo/go/npm/uv caches) is
+# a NAMED volume, so the prunes above deliberately never touch it — but it still needs
+# bounding under K workers. Each cycle also runs a CACHE TRIM (cache_gc_once): when the
+# cache exceeds CLAUDE_CACHE_MAX_MIB it removes only the re-fetchable download/registry
+# caches (installed toolchains are kept), and ONLY when no worker is running (an rm mid-
+# install would break it). The free-space FLOOR already covers the cache implicitly: the
+# volume lives on CLAUDE_DISK_DATA_ROOT, so a filling cache lowers the free space the
+# broker's floor guards. Both halves of CC-5 thus span the cache.
+#
 # Usage:
-#   bin/claude-disk-gc           one-shot: report free space before/after + reclaimed
-#   bin/claude-disk-gc --loop    gc every CLAUDE_DISK_GC_INTERVAL seconds, forever
+#   bin/claude-disk-gc                 one-shot: docker prune + cache trim
+#   bin/claude-disk-gc --loop          every CLAUDE_DISK_GC_INTERVAL seconds, forever
+#   bin/claude-disk-gc --no-cache-trim docker prune only (skip the PKG-3 cache trim)
 #
 # Env:
 #   CLAUDE_DISK_GC_INTERVAL     seconds between --loop cycles (default 3600)
 #   CLAUDE_DISK_DATA_ROOT       path whose free space is reported before/after (default
 #                               /var/lib/docker — same default as the broker's floor)
+#   CLAUDE_CACHE_VOLUME         shared cache volume name (default claude-cache; ""/off
+#                               disables the cache and its trim)
+#   CLAUDE_CACHE_MAX_MIB        cache-size budget over which the trim reclaims (default 20480)
 #
-# Test seam — UNIT TESTS / OPERATOR DRY-RUNS ONLY, loudly warned when active:
-#   CLAUDE_DISK_GC_DRYRUN=1     prints the prune commands it WOULD run, runs nothing
+# Test seams — UNIT TESTS / OPERATOR DRY-RUNS ONLY, loudly warned when active:
+#   CLAUDE_DISK_GC_DRYRUN=1            prints the prune + trim it WOULD run, runs nothing
+#   CLAUDE_CACHE_SIZE_MIB_OVERRIDE=N  forces the measured cache size (skips volume du)
 #
 # Sourcing this file defines the gc_* / disk_gc_* functions and returns (the unit-test
 # seam); executing it runs a one-shot or --loop GC.
@@ -91,18 +105,107 @@ disk_gc_once() {
     return 0
 }
 
+# --- the cache trim: bound the shared tool cache (PKG-3) --------------------------------
+# The shared /cache volume (mise installs + cargo/go/npm/uv caches) is a NAMED volume, so
+# `system prune`/`builder prune` above deliberately never touch it. It still needs bounding
+# under K workers — that is this trim. It reclaims ONLY the re-fetchable download/registry
+# caches; installed toolchains, shims, and cargo/go bins are KEPT, so a trim frees space
+# without un-provisioning a tool (the next use just re-downloads any evicted archive).
+#
+# cache_gc_plan — the exact absolute paths the trim removes. Golden-comparable by unit
+# tests: it MUST stay a fixed re-fetchable-only list — never an installs/ dir, never
+# /cache itself, never a shims dir.
+cache_gc_plan() {
+    printf '%s\n' \
+        /cache/mise/downloads \
+        /cache/mise/cache \
+        /cache/cargo/registry/cache \
+        /cache/cargo/registry/src \
+        /cache/go/pkg/mod/cache/download \
+        /cache/npm/_cacache \
+        /cache/uv \
+        /cache/pip
+}
+
+# cache_gc_once — trim the shared cache when it exceeds CLAUDE_CACHE_MAX_MIB. FAIL-SAFE and
+# CONCURRENCY-SAFE: a no-op when the cache is disabled, its size is unknown, it is under
+# budget, OR any worker is running (an rm of a download cache mid-install would break that
+# install — so we only trim when idle). NEVER dies. Always returns 0.
+cache_gc_once() {
+    local vol; vol="$(cache_name "$CACHE_VOLUME")"
+    [[ -n "$vol" ]] || return 0   # cache disabled — nothing to bound
+
+    local max="${CLAUDE_CACHE_MAX_MIB:-20480}"
+    [[ "$max" =~ ^[0-9]+$ ]] || { warn "claude-disk-gc: CLAUDE_CACHE_MAX_MIB '$max' is not an integer — skipping cache trim"; return 0; }
+
+    # Never trim under active use: ANY running container that MOUNTS this cache may be
+    # mid-install (an rm of a download cache mid-fetch would break it). Gate on the volume
+    # itself, not a container label — `--filter volume=<vol>` matches EVERY cache-mounting
+    # container: broker `claude.worker=1` workers AND the `claude.managed=1` containers
+    # `claude-launch`/`claude-compose-gen` start (they carry no worker label but do mount
+    # /cache). A label-only guard would be blind to the launch/compose path and trim mid-
+    # install; the volume filter also avoids deferring for unrelated containers that do not
+    # touch the cache.
+    local inuse=""
+    inuse="$(gc_docker ps -q --filter volume="$vol" 2>/dev/null || true)"
+    if [[ -n "$inuse" ]]; then
+        info "claude-disk-gc: container(s) using cache '$vol' — deferring trim (retry next cycle)"
+        return 0
+    fi
+
+    # Measure the cache (fail-soft: unknown size ⇒ do NOT trim). The TEST SEAM
+    # CLAUDE_CACHE_SIZE_MIB_OVERRIDE short-circuits the mountpoint lookup + du.
+    local mnt="" size=""
+    mnt="$(gc_docker volume inspect --format '{{.Mountpoint}}' "$vol" 2>/dev/null || true)"
+    size="$(dir_size_mib "$mnt" 2>/dev/null || true)"
+    [[ "$size" =~ ^[0-9]+$ ]] || { info "claude-disk-gc: cache '$vol' size unknown — skipping trim (fail-soft)"; return 0; }
+
+    if (( size <= max )); then
+        ok "claude-disk-gc: cache '$vol' ${size} MiB ≤ ${max} MiB budget — no trim needed"
+        return 0
+    fi
+
+    if [[ "${CLAUDE_DISK_GC_DRYRUN:-0}" == 1 ]]; then
+        warn "TEST SEAM ACTIVE: CLAUDE_DISK_GC_DRYRUN=1 — printing the cache trim, running nothing"
+        warn "claude-disk-gc: cache '$vol' ${size} MiB > ${max} MiB budget — would trim:"
+        while IFS= read -r p; do echo "would rm -rf: $p"; done < <(cache_gc_plan)
+        return 0
+    fi
+
+    warn "claude-disk-gc: cache '$vol' ${size} MiB > ${max} MiB budget — trimming re-fetchable caches (installed toolchains kept)"
+    local rmpaths; rmpaths="$(cache_gc_plan | tr '\n' ' ')"
+    # A throwaway root helper mounts ONLY the cache volume and removes the fixed
+    # re-fetchable paths; --entrypoint /bin/sh bypasses the image's own entrypoint.
+    if ! gc_docker run --rm --user 0:0 --entrypoint /bin/sh \
+            -v "$vol:/cache" "$CLAUDE_IMAGE" -c "rm -rf $rmpaths" >/dev/null 2>&1; then
+        warn "claude-disk-gc: cache trim helper failed — continuing (will retry next cycle)"
+    else
+        ok "claude-disk-gc: trimmed re-fetchable download caches in '$vol'"
+    fi
+    return 0
+}
+
+# gc_cycle — one full reclaim: docker prune, then (unless suppressed) the cache trim.
+gc_cycle() {
+    disk_gc_once || warn "claude-disk-gc: a disk gc cycle failed unexpectedly — continuing"
+    (( CACHE_TRIM )) && cache_gc_once
+    return 0
+}
+
 gc_main() {
     local loop=0
+    CACHE_TRIM=1
     local a
     for a in "$@"; do
         case "$a" in
-            --loop) loop=1 ;;
-            *) die "unknown flag '$a' (usage: claude-disk-gc [--loop])" ;;
+            --loop)          loop=1 ;;
+            --no-cache-trim) CACHE_TRIM=0 ;;
+            *) die "unknown flag '$a' (usage: claude-disk-gc [--loop] [--no-cache-trim])" ;;
         esac
     done
 
     if (( ! loop )); then
-        disk_gc_once
+        gc_cycle
         return 0
     fi
 
@@ -112,7 +215,7 @@ gc_main() {
     info "claude-disk-gc: looping every ${interval}s (Ctrl-C / SIGTERM to stop)"
     while :; do
         # A bad cycle must log and continue — never take the loop down.
-        disk_gc_once || warn "claude-disk-gc: a gc cycle failed unexpectedly — continuing the loop"
+        gc_cycle || warn "claude-disk-gc: a gc cycle failed unexpectedly — continuing the loop"
         sleep "$interval"
     done
 }

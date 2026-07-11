@@ -12,6 +12,10 @@
 #      (--check, docker-free);
 #   3. claude-disk-gc's plan is exactly `system prune -f` + `builder prune -f` — never
 #      `-a`, never `--volumes` (--check, docker-free);
+#   3b. the PKG-3 shared-cache trim is safe: cache_gc_plan reclaims only re-fetchable
+#      download/registry caches (never an installs/shims/bin dir or bare /cache), and the
+#      idle guard gates on the cache VOLUME (covers launch/compose containers, not just
+#      broker workers) (--check, docker-free);
 #   4. on a REAL controller: N sequential worker cycles don't grow disk unbounded (gc
 #      reclaims between them); a launch below an absurdly-high floor is refused; the
 #      worker image is reused across workers, never rebuilt (same image ID + created
@@ -129,11 +133,36 @@ else
     okp "the gc plan never includes -a/--all/--volumes"
 fi
 
+# --- phase 2b: docker-free — the PKG-3 shared-cache trim is safe, re-fetchable-only, idle-gated
+info "phase 2b — cache_gc_plan: re-fetchable caches only; the idle guard gates on the cache volume"
+
+# Fresh process again (same repeated-source hazard as phases 1–2).
+cplan="$(bash -c 'source "'"$CLAUDE_DOCKER_ROOT"'/bin/claude-disk-gc" 2>/dev/null; cache_gc_plan')"
+if grep -q '/cache/mise/downloads' <<<"$cplan" && grep -q '/cache/npm/_cacache' <<<"$cplan"; then
+    okp "the cache trim plan reclaims the re-fetchable download/registry caches"
+else
+    badp "the cache trim plan is missing an expected re-fetchable cache (got: $cplan)"
+fi
+# CRITICAL: the trim must NEVER remove an installed toolchain, a shims dir, a bin dir, or
+# the whole /cache — that would un-provision tools or wipe the shared store.
+if grep -qE '(^/cache$|/installs(/|$)|/shims(/|$)|/cargo/bin|/go/bin)' <<<"$cplan"; then
+    badp "the cache trim plan includes an installs/shims/bin/bare-/cache path (would un-provision tools)"
+else
+    okp "the cache trim plan never touches installs/, shims/, cargo|go/bin, or bare /cache"
+fi
+# The idle guard must gate on the CACHE VOLUME (covers workers AND launch/compose
+# containers that mount it), not a worker-only label the launch/compose path lacks.
+if grep -Eq 'ps -q --filter volume=' "$CLAUDE_DOCKER_ROOT/bin/claude-disk-gc"; then
+    okp "the cache trim defers on any container using the cache volume (not a worker-only label)"
+else
+    badp "the cache trim idle guard does not gate on --filter volume=<vol> — a launch/compose mid-install could be trimmed"
+fi
+
 if (( CHECK_ONLY )); then
     echo
     echo "== $PASS passed, $FAIL failed (--check: docker-free half only) =="
     (( FAIL == 0 )) || { err "disk-safety --check NOT proven"; exit 1; }
-    ok "disk-safety --check proven: disk_free_mib parsing + override, broker_check_disk refusal matrix, disk_gc_plan safety — run without --check on a Sysbox fleet host for the full on-host proof"
+    ok "disk-safety --check proven: disk_free_mib parsing + override, broker_check_disk refusal matrix, disk_gc_plan safety, PKG-3 cache-trim safety — run without --check on a Sysbox fleet host for the full on-host proof"
     exit 0
 fi
 

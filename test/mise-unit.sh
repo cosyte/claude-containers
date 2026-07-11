@@ -56,12 +56,12 @@ grep -Eq 'sha256sum -c' "$DOCKERFILE" \
 
 # ---- non-interactive / agent shells resolve tools via the SHIMS dir on PATH ------------------------
 # The Claude Code process + its `bash -c "…"` tool calls never source ~/.bashrc, so tool resolution
-# for the AGENT depends entirely on the shims dir being baked onto PATH.
-SHIM='/home/${CLAUDE_USER}/.local/share/mise/shims'
-if grep -Fq "PATH=${SHIM}:\${PATH}" "$DOCKERFILE"; then
-  ok "mise shims dir is PREPENDED to PATH preserving the existing PATH (non-interactive tool resolution)"
+# for the AGENT depends entirely on the shims dir being baked onto PATH. PKG-3 relocated the mise
+# data dir (and so the shims) into the shared /cache tree, so the baked PATH must point there.
+if grep -Fq 'PATH=/cache/mise/shims:' "$DOCKERFILE" && grep -Fq ':${PATH}' "$DOCKERFILE"; then
+  ok "mise shims dir (/cache/mise/shims) is PREPENDED to PATH preserving the existing PATH (non-interactive tool resolution)"
 else
-  bad "mise shims dir not prepended to PATH as '${SHIM}:\${PATH}' — agent shells would not find mise tools"
+  bad "mise shims dir not prepended to PATH as '/cache/mise/shims:…:\${PATH}' — agent shells would not find mise tools"
 fi
 
 # ---- config trust is scoped to /workspace ONLY — the load-bearing supply-chain guard ---------------
