@@ -127,6 +127,26 @@ check "workspace bind mount visible (skipped clone)" \
 check "entrypoint defaults the model to opus (best available)" \
     'grep -qE "Model[[:space:]]*: opus" <<<"$(docker logs "$CN" 2>&1)"'
 
+# --- the CLI pin, checked against the RUNNING IMAGE (CC-CLAUDE-CODE-UPGRADE) --------
+# test/cli-version-unit.sh proves the six *declarations* of the pin agree, but it is
+# pure-static — it reads repo files and never the built image. These are the live half:
+# the image you are actually about to run really ships the pinned CLI, and really is at
+# or above the Opus-4.8 floor. A stale gitignored .env silently overrides the repo's pin
+# (the Makefile's `-include .env` beats `?=` AND the Dockerfile ARG), so without a check
+# against the real image a host can keep shipping an old CLI — and `--model opus` keeps
+# silently resolving to Opus 4.7 — with every other gate green.
+PINNED_VER="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=\(.*\)$/\1/p' "$(dirname "${BASH_SOURCE[0]}")/../Dockerfile")"
+OPUS48_FLOOR=2.1.154
+check "image ships the pinned Claude Code CLI ($PINNED_VER)" \
+    '[[ "$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")" == "$PINNED_VER" ]]'
+check "the CLI in the image clears the Opus-4.8 floor ($OPUS48_FLOOR — else '--model opus' means 4.7)" \
+    'v="$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")"; [[ "$(printf "%s\n%s\n" "$OPUS48_FLOOR" "$v" | sort -V | head -1)" == "$OPUS48_FLOOR" ]]'
+check "claude binary is at /usr/local/bin/claude" \
+    'cexec "test -e /usr/local/bin/claude"'
+# The reason the CLI version is pinned at all: these two flags must combine.
+check "--dangerously-skip-permissions and --remote-control both exist in this CLI" \
+    'h="$(cexec "claude --help" 2>/dev/null)"; grep -q -- "--dangerously-skip-permissions" <<<"$h" && grep -q -- "--remote-control" <<<"$h"'
+
 echo
 echo "== 5. baked-in config merged =="
 check "settings.json defaultMode=bypassPermissions" \

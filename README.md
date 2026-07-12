@@ -180,13 +180,13 @@ vars override `.env`. Full reference: `.env.example`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `CLAUDE_IMAGE` | `claude-code-box:latest` | Image tag built/run |
-| `CLAUDE_CODE_VERSION` | `2.1.144` | Pinned Claude Code npm version (min 2.1.52) |
+| `CLAUDE_CODE_VERSION` | `2.1.207` | Pinned Claude Code npm version (min 2.1.52). `opus` resolves to Opus 4.8 from 2.1.154 |
 | `NODE_VERSION` | `24` | Base Node LTS |
 | `UV_VERSION` | `latest` | `uv` version (pin for reproducibility) |
 | `PNPM_VERSION` | `latest` | `pnpm` version baked in (pin for reproducibility) |
 | `CLAUDE_UID`/`CLAUDE_GID`/`CLAUDE_USER` | `1000`/`1000`/`claude` | Container user |
-| `CLAUDE_MODEL` | `opus` | Model the session runs. Defaults to the best available model (the `opus` alias always resolves to the latest Opus). Any Claude Code alias (`opus`/`sonnet`/`haiku`/`opusplan`/`default`) or a full id like `claude-opus-4-8`; `default` defers to Claude Code's pick. Per-container via `claude-launch --model`, per-repo via `claude-compose-gen --model REPO=MODEL`. Honored by both the interactive session and autopilot |
-| `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `default`/`acceptEdits`/`plan`/`bypassPermissions`. Honored by both the interactive session and autopilot; `acceptEdits` is the safer fleet posture (gates shell/network) |
+| `CLAUDE_MODEL` | `opus` | Model the session runs. Defaults to the best available model (the `opus` alias always resolves to the latest Opus — **Opus 4.8** on the pinned CLI). Passed through to `--model` verbatim, so use an alias the pinned CLI actually ships (`opus`/`sonnet`/`haiku`/`opusplan`/`fable`/`best`) or a full id like `claude-opus-4-8`. **`default` is not in 2.1.207's alias table** — don't rely on it to defer to Claude Code's own pick. Both launchers now default to `opus` when this is unset, so a session can never silently fall back to Claude Code's default (which is Sonnet 5 from CLI 2.1.197). Per-container via `claude-launch --model`, per-repo via `claude-compose-gen --model REPO=MODEL` |
+| `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `acceptEdits`/`auto`/`bypassPermissions`/`manual`/`dontAsk`/`plan` — the choice set the pinned CLI accepts. Honored by both the interactive session and autopilot; `acceptEdits` is the safer fleet posture (gates shell/network). **`default` was renamed `manual` upstream in CLI 2.1.200** and no longer appears in `claude --help`; it is still accepted for now (verified on 2.1.207), so existing `.env` files keep working — but prefer `manual`, since an undocumented alias can be dropped |
 | `CLAUDE_SECRET_GUARD` | `1` | `1` installs a fleet-wide git pre-commit hook that blocks committing secrets (`.env`, `*.pem`, `*.key`, `id_rsa`, PRIVATE KEY blocks). Bypass once with `git commit --no-verify`; extend via `CLAUDE_SECRET_GUARD_EXTRA` |
 | `CLAUDE_AUTOPILOT` | `0` | `1` = unattended mode: main pane runs a headless `claude -p` loop instead of Remote Control (see [Unattended autopilot](#unattended-autopilot)) |
 | `CLAUDE_AUTOPILOT_CMD` | `/next` | What the autopilot loop runs each cycle |
@@ -475,8 +475,10 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   egress isn't firewalled. The name in the app is the project name.
 - **`--dangerously-skip-permissions` vs Remote Control** — there were earlier
   reports that skip-permissions didn't fully apply under Remote Control. On the
-  pinned 2.1.144, `remote-control --permission-mode` accepts `bypassPermissions`
-  and the launch combines both, so it works. If a future version regresses, set
+  pinned **2.1.207** both flags are accepted together with no interlock, and the
+  launch (`claude --dangerously-skip-permissions --remote-control <name>`) combines
+  them, so it works. This is the reason the CLI version is pinned at all — re-verify
+  it on any bump. If a future version regresses, set
   `CLAUDE_PERMISSION_MODE=acceptEdits` (edits auto-approved, shell still
   prompts) — see troubleshooting for the verification steps.
 - **SSH connection refused** — no `authorized_keys` was mounted, or wrong port.
