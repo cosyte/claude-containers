@@ -20,7 +20,9 @@
 #   CLAUDE_AUTOPILOT_RESUME       1 = resume the prior session each  (default: 0; each run a
 #                                 run via --resume <id> instead of   fresh session, the original
 #                                 a fresh session                    /next-recovers-from-disk model)
-#   CLAUDE_PERMISSION_MODE        default/acceptEdits/plan/bypass…   (default: bypassPermissions)
+#   CLAUDE_PERMISSION_MODE        acceptEdits/auto/bypassPermissions/manual/dontAsk/plan
+#                                 (default: bypassPermissions; `default` was renamed
+#                                  `manual` upstream in CLI 2.1.200 but still parses)
 #   CLAUDE_EXTRA_ARGS             extra args appended to `claude`
 set -uo pipefail
 
@@ -34,9 +36,18 @@ EXTRA="${CLAUDE_EXTRA_ARGS:-}"
 LOG_DIR="${CLAUDE_AUTOPILOT_LOG_DIR:-$HOME/.claude/autopilot-logs}"
 RESUME="${CLAUDE_AUTOPILOT_RESUME:-0}"
 PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
-# Model: the entrypoint defaults this to the best available model (opus); pin a
-# different one with CLAUDE_MODEL (alias or full id). Empty = Claude Code default.
-MODEL="${CLAUDE_MODEL:-}"
+# Model: the entrypoint normally exports this (default `opus`). Default it HERE TOO —
+# not cosmetic since CLI 2.1.197, where "no --model" means Claude Code's own default,
+# which is now **Sonnet 5**, not Opus. This script is reachable with CLAUDE_MODEL unset
+# or empty (a `docker exec <ctr> claude-autopilot`, or any sshd-originated shell — the
+# entrypoint only bridges SSH_AUTH_SOCK into /etc/profile.d, not CLAUDE_MODEL; and
+# claude-launch passes a literal empty `-e CLAUDE_MODEL=` when it is unset). Without this
+# default those runs would silently execute on Sonnet 5 — the exact downgrade
+# CC-CLAUDE-CODE-UPGRADE exists to prevent. CLAUDE_MODEL is passed through to `--model`
+# VERBATIM: use an alias the pinned CLI actually ships (`opus`, `sonnet`, `haiku`, `opusplan`,
+# `fable`, `best`) or a full model id. NOTE: `default` is NOT in 2.1.207's alias table and is
+# not verified — do not rely on it.
+MODEL="${CLAUDE_MODEL:-opus}"
 QUEUE="${CLAUDE_AUTOPILOT_QUEUE:-0}"
 QUEUE_DIR="${CLAUDE_AUTOPILOT_QUEUE_DIR:-$HOME/.claude/autopilot-queue}"
 QUEUE_DELAY="${CLAUDE_AUTOPILOT_QUEUE_DELAY:-10}"
@@ -122,7 +133,7 @@ echo "[autopilot] interval : ${INTERVAL}s   max_runs: $([ "$MAX_RUNS" = 0 ] && e
 echo "[autopilot] workspace: $(pwd)"
 echo "[autopilot] logs     : $LOG_DIR"
 echo "[autopilot] perm     : $PERM_MODE   resume: $([ "$RESUME" = 1 ] && echo on || echo off)"
-echo "[autopilot] model    : ${MODEL:-<claude code default>}"
+echo "[autopilot] model    : $MODEL"
 [ "$QUEUE" = 1 ] && echo "[autopilot] queue    : $QUEUE_DIR ($(pending_count) pending; /next fallback when empty)"
 echo "[autopilot] auth     : Max subscription OAuth (entrypoint refuses ANTHROPIC_API_KEY)"
 echo

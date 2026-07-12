@@ -15,9 +15,36 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 FROM node:${NODE_VERSION}-bookworm-slim
 
 # --- Build-time configuration -------------------------------------------------
-# CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control;
-# 2.1.145 is verified to support `--remote-control` + bypassPermissions together.
-ARG CLAUDE_CODE_VERSION=2.1.145
+# CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control.
+#
+# 2.1.207 (npm `latest` on 2026-07-12) is verified to support the exact launch this
+# image makes — `claude --dangerously-skip-permissions --remote-control <name>`
+# (bin/claude-session) — with both flags accepted TOGETHER and no interlock between
+# them. That combination is the reason this ARG is pinned at all; re-verify it on any
+# future bump (test/cli-version-unit.sh asserts the pin is consistent; the live
+# --remote-control handshake is the on-host check, CC-CLAUDE-CODE-UPGRADE-SMOKE).
+#
+# WHY THE BUMP (CC-CLAUDE-CODE-UPGRADE): the `opus` alias resolves to the LATEST Opus,
+# and Opus 4.8 shipped in CLI 2.1.154 — so the old 2.1.145 pin silently resolved
+# `--model opus` (this image's default) to Opus 4.7, quietly downgrading every gate
+# agent below what ADR 0009 requires. 2.1.207 restores `opus` -> Opus 4.8.
+#
+# Also landed between 2.1.145 and 2.1.207, and accounted for here:
+#   - 2.1.197: Sonnet 5 became Claude Code's OWN default model. Harmless for us only
+#     because entrypoint.sh always exports CLAUDE_MODEL (default `opus`) and both
+#     claude-session and claude-autopilot pass `--model` explicitly. Do not remove
+#     that default without re-reading this note.
+#   - 2.1.200: the `default` permission mode was renamed `Manual`; `--help` on 2.1.207 now
+#     lists only acceptEdits/auto/bypassPermissions/manual/dontAsk/plan. The choice set IS
+#     enforced (a bogus value is rejected), but `--permission-mode default` was verified to
+#     still be ACCEPTED against the built 2.1.207 image — so existing .env files that set
+#     CLAUDE_PERMISSION_MODE=default keep working. It is undocumented upstream now, so the
+#     README steers operators to `manual`. Re-check this on the next bump: if `default` is
+#     ever dropped, claude-session/claude-autopilot pass it straight through and the main
+#     tmux pane would die on an invalid-choice refusal.
+#   - 2.1.198: Remote Control is disabled when ANTHROPIC_BASE_URL points at a
+#     non-Anthropic host. This image never sets it (and §1 refuses API-key auth).
+ARG CLAUDE_CODE_VERSION=2.1.207
 # PNPM_VERSION: pnpm baked into the image. "latest" works but isn't
 # reproducible — pin a real version (e.g. 10.4.1), same as UV_VERSION.
 ARG PNPM_VERSION=latest
@@ -59,9 +86,53 @@ COPY --from=uv /uv /uvx /usr/local/bin/
 # The native installer auto-updates and has historically done an aggressive
 # startup filesystem scan that OOM'd containers. The npm global package does
 # neither, so the pinned version stays pinned.
-RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
-    && npm cache clean --force \
-    && claude --version
+RUN set -eu; \
+    # --- GUARD 1: the effective version must clear the Opus-4.8 floor -------------
+    # This is NOT hygiene. `--model opus` (this image's default) resolves to the LATEST
+    # Opus, and Opus 4.8 arrived in CLI 2.1.154 — so ANY build below that floor silently
+    # serves Opus 4.7 and quietly downgrades every gate agent below what ADR 0009 requires.
+    #
+    # The floor lives HERE, in the Dockerfile, because it is the ONLY choke point every
+    # build path passes through (`make build`, `docker compose build`, a compose-gen'd
+    # stack, a raw `docker build`). In particular the Makefile does `-include .env` BEFORE
+    # `CLAUDE_CODE_VERSION ?= …`, so an operator's gitignored `.env` — which README tells
+    # them to create from .env.example, and which on an existing host still says 2.1.145 —
+    # OVERRIDES the repo's bumped default and is forwarded here as --build-arg. Without
+    # this guard that host keeps building the old CLI, keeps getting Opus 4.7, and every
+    # test stays green (the unit suite is static and never sees .env). Fail loudly instead.
+    OPUS48_FLOOR=2.1.154; \
+    # Format-check FIRST: `sort -V` ranks non-numeric strings (`latest`, `abc`, `v2.1.1`)
+    # ABOVE the floor, so it would fail OPEN on them. That is a plausible operator mistake,
+    # not a theoretical one — the same .env.example invites `latest` for UV_VERSION and
+    # PNPM_VERSION. Reject anything that is not a plain dotted-numeric version, so the
+    # failure names the real problem instead of misfiring later.
+    case "${CLAUDE_CODE_VERSION}" in \
+        ''|*[!0-9.]*|.*|*.) \
+            echo "ERROR: CLAUDE_CODE_VERSION='${CLAUDE_CODE_VERSION}' is not a dotted-numeric version." >&2; \
+            echo "       Pin an exact version (e.g. 2.1.207) — 'latest' is NOT supported here:" >&2; \
+            echo "       the image must be reproducible, and a floating tag cannot be floor-checked." >&2; \
+            exit 1 ;; \
+    esac; \
+    if [ "$(printf '%s\n%s\n' "$OPUS48_FLOOR" "${CLAUDE_CODE_VERSION}" | sort -V | head -1)" != "$OPUS48_FLOOR" ]; then \
+        echo "ERROR: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} is below the Opus-4.8 floor ($OPUS48_FLOOR)." >&2; \
+        echo "       '--model opus' would silently resolve to Opus 4.7, violating ADR 0009." >&2; \
+        echo "       Most likely cause: a stale .env pinning an old CLAUDE_CODE_VERSION." >&2; \
+        echo "       The Makefile's '-include .env' beats its own default AND the Dockerfile ARG." >&2; \
+        echo "       Fix: update (or delete) CLAUDE_CODE_VERSION in your .env, then rebuild." >&2; \
+        exit 1; \
+    fi; \
+    npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}; \
+    npm cache clean --force; \
+    # --- GUARD 2: the installed binary really IS the pinned version ---------------
+    # Without this the pin is decorative: a RUN that resolved `@latest`, or an npm that
+    # served something else, would go unnoticed (the old line ran `claude --version` but
+    # compared it to nothing).
+    installed="$(claude --version | awk '{print $1}')"; \
+    if [ "$installed" != "${CLAUDE_CODE_VERSION}" ]; then \
+        echo "ERROR: pinned CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} but the installed CLI reports '$installed'." >&2; \
+        exit 1; \
+    fi; \
+    echo "Claude Code $installed installed (>= $OPUS48_FLOOR, so '--model opus' resolves to Opus 4.8)"
 
 # Bake pnpm + yarn at build time (registry reachable here) so JS dev servers
 # never need a runtime corepack/registry fetch for the package-manager binary

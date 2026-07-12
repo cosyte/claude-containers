@@ -19,6 +19,8 @@ jobs:
         run: make lint
       - name: unit tests (version-floor helper + warn-only runc posture)
         run: test/unit.sh
+      - name: CLI-version unit tests (pin consistent across all 6 declarations — Opus 4.8 + Remote Control floors)
+        run: test/cli-version-unit.sh
       - name: sizing unit tests (size/reservation math)
         run: test/sizing-unit.sh
       - name: reaper unit tests (spool-file prune, TTL boundary, fail-safe)

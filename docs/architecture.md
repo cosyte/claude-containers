@@ -19,13 +19,21 @@
   opened in Claude Code, it teaches the model the architecture, invariants,
   and operational playbook so it can drive build/login/launch/customize/debug.
 
-## Verified facts (Claude Code 2.1.144)
+## Verified facts (Claude Code 2.1.207)
 
 Everything below was checked against the installed binary, not just docs:
 
 - `--remote-control [name]` is a real top-level flag; `-n/--name` is a separate
-  display-name flag. `claude remote-control --permission-mode` explicitly
-  accepts `bypassPermissions` in 2.1.144.
+  display-name flag. The **top-level** launch this image actually makes —
+  `claude --dangerously-skip-permissions --remote-control "<project>"` — was
+  verified to parse and start on 2.1.207 (as the unprivileged `claude` user; the
+  CLI refuses skip-permissions when running as root, by design).
+  *Not re-verified:* the `claude remote-control` **subcommand**'s own option
+  surface. On 2.1.207 that subcommand short-circuits on auth before parsing its
+  options (every flag, valid or bogus, returns "You must be logged in"), so its
+  accepted options cannot be established from inside the container. The earlier
+  "`remote-control --permission-mode` accepts `bypassPermissions`" claim was made
+  against 2.1.144 and is left unasserted here rather than silently re-dated.
 - `--dangerously-skip-permissions` ≡ `--permission-mode bypassPermissions`.
 - Setting `CLAUDE_CONFIG_DIR` relocates **everything**, including the otherwise
   HOME-level `.claude.json`, into that directory. Verified empirically — this
@@ -137,7 +145,7 @@ no `-p` — those each disable features we need.
 ## Permission mode & Remote Control
 
 Launch is `claude --dangerously-skip-permissions --remote-control "<project>"`.
-On 2.1.144 these compose correctly. Belt-and-suspenders: `settings.json` also
+On 2.1.207 these compose correctly. Belt-and-suspenders: `settings.json` also
 sets `permissions.defaultMode = bypassPermissions` and
 `skipDangerousModePermissionPrompt: true` (a real settings key). If a future
 Claude Code regresses the interaction, set `CLAUDE_PERMISSION_MODE=acceptEdits`
