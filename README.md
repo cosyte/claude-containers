@@ -186,6 +186,14 @@ Each worker is a true Sysbox-nested child; the agent never touches the inner Doc
 socket (it only drops a two-value request in a root-owned spool). See
 `docs/substrate.md` → "Interactive lead that spawns workers".
 
+The interactive session boots knowing how to dispatch. When
+`CLAUDE_WORKER_BROKER=1` and `/run/claude/broker` is present, `entrypoint.sh` §8a-bis
+installs `claude-config/CLAUDE.d/broker.md` into `~/.claude/CLAUDE.d/`, and a baked
+`SessionStart` hook (`bin/claude-md-fragments`) surfaces it to Claude so the session
+starts with the `claude-worker-request` mechanism, the WIP=K backpressure rule, and
+the "never touch the inner Docker socket" refusal already in context. Non-broker
+containers leave `CLAUDE.d/` absent and the hook is a silent no-op.
+
 ## Environment variables
 
 Set in `.env` (auto-loaded by the scripts and passed into containers). Real env

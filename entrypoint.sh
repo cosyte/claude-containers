@@ -423,6 +423,35 @@ if [[ -f "$BAKE_DIR/CLAUDE.md" && ! -e "$CLAUDE_CONFIG_DIR/CLAUDE.md" ]]; then
     log "Installed global CLAUDE.md"
 fi
 
+# 8a-bis. Per-mode CLAUDE.md fragments (CLAUDE.d/) — CC-BROKER-CLAUDE-D.
+# Modular addenda that Claude Code surfaces via the /usr/local/bin/claude-md-fragments
+# SessionStart hook (baked in settings.json §8b). Each mode-specific fragment is
+# installed here only when its guard clause holds AND the target file is absent;
+# non-matching modes leave the CLAUDE.d/ directory empty (or absent) and the hook
+# is a silent no-op. Honors §8's overall contract: "we only fill what's absent"
+# — a user-mounted CLAUDE.d/broker.md always wins over the baked one.
+#
+# broker.md — teaches an interactive/controller session that the ONLY channel for
+# spawning nested workers is `claude-worker-request`. Installed only when:
+#   1. the broker is configured (CLAUDE_WORKER_BROKER=1);
+#   2. the broker's spool directory is present (§5c already blocked on
+#      "${CLAUDE_BROKER_DIR:-/run/claude/broker}/requests" being created by the
+#      broker's post-checks, so on this path that dir exists — the check here is
+#      a redundancy check on the same signal, not a race);
+#   3. the baked fragment exists in the image; and
+#   4. the target has not already been provided by a mount (no clobber, §8's rule).
+# A guard-mismatch is a no-op, never a silent partial: either every condition
+# holds and we install, or the fragment stays as-mounted (or absent).
+if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]] \
+   && [[ -d "${CLAUDE_BROKER_DIR:-/run/claude/broker}/requests" ]] \
+   && [[ -f "$BAKE_DIR/CLAUDE.d/broker.md" ]] \
+   && [[ ! -e "$CLAUDE_CONFIG_DIR/CLAUDE.d/broker.md" ]]; then
+    install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 755 "$CLAUDE_CONFIG_DIR/CLAUDE.d"
+    install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 644 \
+        "$BAKE_DIR/CLAUDE.d/broker.md" "$CLAUDE_CONFIG_DIR/CLAUDE.d/broker.md"
+    log "Installed broker-mode CLAUDE.md addendum (CLAUDE.d/broker.md)"
+fi
+
 # 8b. settings.json — baked file is the base, existing user settings win on
 #     conflict (recursive merge). Also injects unattended-operation defaults.
 #     NOTE: env intentionally does NOT include DISABLE_TELEMETRY/DO_NOT_TRACK.

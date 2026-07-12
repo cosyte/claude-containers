@@ -283,6 +283,11 @@ COPY bin/claude-controller /usr/local/bin/claude-controller
 # (CLAUDE_CACHE_PROXY=1, §5d) to START the pull-through cache on the inner dockerd, and inside
 # a WORKER (§10c) to POINT its package managers at the proxy + fail-closed if it is down.
 COPY bin/claude-cache-proxy /usr/local/bin/claude-cache-proxy
+# CLAUDE.d/ fragment loader (CC-BROKER-CLAUDE-D): baked SessionStart hook that
+# concatenates ~/.claude/CLAUDE.d/*.md so a mode-specific fragment (e.g. broker.md
+# installed by entrypoint §8a-bis when CLAUDE_WORKER_BROKER=1) reaches the session.
+# Silent no-op when the directory is absent, so it costs nothing on a leaf container.
+COPY bin/claude-md-fragments /usr/local/bin/claude-md-fragments
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-dev /usr/local/bin/claude-autopilot \
@@ -300,6 +305,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-deps-check \
         /usr/local/bin/claude-controller \
         /usr/local/bin/claude-cache-proxy \
+        /usr/local/bin/claude-md-fragments \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
 

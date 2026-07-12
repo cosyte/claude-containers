@@ -50,3 +50,5 @@ jobs:
         run: test/cache-proxy-unit.sh
       - name: broker-interactive unit tests (CC-6 — interactive session spawns nested workers; broker-gated socket lockdown, §5a inner dockerd, claude-launch --sysbox/--broker, controller image plumbing)
         run: test/broker-interactive-unit.sh
+      - name: broker CLAUDE.d unit tests (CC-BROKER-CLAUDE-D — SessionStart-hook fragment loader teaches the interactive lead that claude-worker-request is the sole dispatch channel; broker-only install, non-broker byte-silent)
+        run: test/broker-claude-d-unit.sh

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# claude-md-fragments — SessionStart hook: emit any per-mode CLAUDE.md
+# fragments installed under ~/.claude/CLAUDE.d/ so Claude Code surfaces
+# them to the session as context.
+#
+# The container's entrypoint (§8a-bis) is the sole installer. When the
+# container is not running in a mode that installs a fragment (default
+# leaf, autopilot, etc.), CLAUDE.d/ is absent or empty and this hook is
+# byte-silent — its stdout is empty, exit 0. The hook is registered
+# unconditionally in the baked settings.json because a passive reader
+# that short-circuits on a missing directory has zero cost.
+#
+# Fragments are emitted in alphabetical order, each separated by a `---`
+# horizontal rule (matches the Markdown convention Claude Code uses to
+# join stacked context blocks). The hook never modifies fragments.
+set -uo pipefail
+
+CLAUDE_D="${HOME:-/home/claude}/.claude/CLAUDE.d"
+[[ -d "$CLAUDE_D" ]] || exit 0
+
+shopt -s nullglob
+frags=("$CLAUDE_D"/*.md)
+(( ${#frags[@]} )) || exit 0
+
+# Sort deterministically so ordering does not depend on filesystem inode order.
+IFS=$'\n' sorted=($(printf '%s\n' "${frags[@]}" | LC_ALL=C sort))
+unset IFS
+
+for f in "${sorted[@]}"; do
+    [[ -r "$f" ]] || continue
+    printf '\n---\n'
+    cat -- "$f"
+done
