@@ -87,7 +87,9 @@ ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
 #   mise use aqua:owner/tool | github:owner/tool         (arbitrary prebuilt CLIs)
 # `pipx:` CLIs reuse the baked `uv` automatically — mise's `pipx.uvx` defaults
 # true whenever `uv` is on PATH (it is, baked above). System `.so` libraries are
-# NOT in scope for mise — those are the Sysbox-worker apt tier (PKG-4).
+# NOT in scope for mise (the curated worker-apt tier that used to close that gap,
+# PKG-4, was retired in SC-5 along with the Sysbox substrate it was scoped to —
+# see docs/legacy-sysbox-broker.md).
 #
 # Pinned + checksummed IN-REPO: this repo's whole thesis is supply-chain
 # containment, so mise is NOT installed by piping a remotely-served `mise.run`
@@ -177,18 +179,15 @@ RUN set -eux; \
 # the variant by probing the baked binaries on PATH instead.)
 LABEL claude.browser="${WITH_BROWSER}"
 
-# --- Optional: Docker engine for CONTROLLER mode (CC-6 / --broker) -------------
+# --- Optional: Docker engine for the CONTROLLER image variant ------------------
 # Build with `--build-arg WITH_DOCKER=1` (or `make build-controller`) to bake the
-# Docker Engine (dockerd + CLI + containerd) into the image. This turns the image
-# into a *controller*: run it under `--runtime=sysbox-runc` with
-# CLAUDE_WORKER_BROKER=1 and the entrypoint (§5a) starts an INNER dockerd on which
-# the root-owned worker broker (CC-2) launches nested workers — so one interactive
-# session can spawn autonomous `/work-on` workers via claude-worker-request. Sysbox
-# contains the inner daemon in a user namespace (root → an unprivileged host uid),
-# so this needs NO `--privileged` and NO host-docker-socket mount — both are
-# FORBIDDEN (umbrella ADR 0011); the whole point is to keep the agent off the host
-# daemon. Default OFF: the lean image ships no docker engine (a plain session or a
-# leaf worker never needs one). ~400 MB delta when on.
+# Docker Engine (dockerd + CLI + containerd) into the image, producing the
+# "controller" variant. SC-5 retired the Sysbox nested-worker-broker substrate that
+# used to consume this variant (see docs/legacy-sysbox-broker.md) — nothing in this
+# image currently starts dockerd. Kept building (this ARG + the controller image
+# target) because SC-6 will decide whether the controller tier survives at all;
+# until then this is dormant capability, not a wired feature. Default OFF: the lean
+# image ships no docker engine. ~400 MB delta when on.
 ARG WITH_DOCKER=0
 RUN set -eux; \
     if [ "$WITH_DOCKER" = "1" ]; then \
@@ -203,15 +202,12 @@ RUN set -eux; \
             docker-ce docker-ce-cli containerd.io; \
         apt-get clean; \
         rm -rf /var/lib/apt/lists/*; \
-        # Prove the engine + CLI are present; the entrypoint (§5a) starts dockerd.
+        # Prove the engine + CLI are present (nothing in-image currently starts dockerd).
         dockerd --version; docker --version; containerd --version; \
     else \
-        echo "WITH_DOCKER=0 — skipping the Docker engine (lean session/worker image)"; \
+        echo "WITH_DOCKER=0 — skipping the Docker engine (lean session image)"; \
     fi
-# Image-capability label: bin/claude-launch reads this to (a) auto-select the
-# controller image for --broker and (b) fail early (loud, actionable) if --broker
-# targets an image with no inner dockerd. The in-container entrypoint can't read
-# its own image labels, so §5a probes for the dockerd binary on PATH instead.
+# Image-capability label: identifies the controller variant on disk.
 LABEL claude.controller="${WITH_DOCKER}"
 
 # --- Non-root user ------------------------------------------------------------
@@ -249,63 +245,38 @@ COPY bin/claude-autopilot /usr/local/bin/claude-autopilot
 COPY bin/claude-enqueue /usr/local/bin/claude-enqueue
 COPY bin/claude-scm-observer /usr/local/bin/claude-scm-observer
 COPY bin/claude-egress-firewall /usr/local/bin/claude-egress-firewall
-# Curated worker apt (PKG-4): the entrypoint runs this as root in a Sysbox worker
-# (self-refuses on a leaf) to install the curated /opt/claude-config/apt-manifest.txt
-# with a scoped deb.debian.org egress window, then re-locks. Pairs with the firewall's
-# CLAUDE_EGRESS_APT profile above.
-COPY bin/claude-apt-provision /usr/local/bin/claude-apt-provision
 COPY bin/claude-secret-guard /usr/local/bin/claude-secret-guard
 COPY bin/claude-rc-watchdog /usr/local/bin/claude-rc-watchdog
 COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
-# Worker broker (CC-2): _common.sh rides along because the broker sources it for
-# the shared Sysbox version-floor check — ONE floor definition, host and container.
+# _common.sh rides along because claude-disk-gc (and claude-controller) source it.
 COPY bin/_common.sh /usr/local/bin/_common.sh
-COPY bin/claude-worker-broker /usr/local/bin/claude-worker-broker
-COPY bin/claude-worker-request /usr/local/bin/claude-worker-request
-# Worker lifecycle (CC-4): claude-worker-run is the broker's default worker command
-# (runs INSIDE each ephemeral worker); claude-reaper runs alongside the broker in
-# controller mode (entrypoint.sh §5b) to mop up unclean-exit residue + spool litter.
-COPY bin/claude-worker-run /usr/local/bin/claude-worker-run
-COPY bin/claude-reaper /usr/local/bin/claude-reaper
-# Storage/disk safety (CC-5): claude-disk-gc runs alongside the broker + reaper in
-# controller mode (entrypoint.sh §5b), scheduled GC of the inner daemon's image/
-# container/build-cache layers so nested workers don't fill the host.
+# Storage/disk safety: claude-disk-gc is a standalone maintenance tool (docker system +
+# builder prune, plus the PKG-3 shared-cache trim) — run it manually or on your own
+# cron/timer; no entrypoint path auto-starts it.
 COPY bin/claude-disk-gc /usr/local/bin/claude-disk-gc
+# claude-reaper is likewise a standalone spool-pruning maintenance tool; no entrypoint
+# path auto-starts it (see bin/claude-reaper's own header).
+COPY bin/claude-reaper /usr/local/bin/claude-reaper
 # Dependency manifest linter (PKG-5): warns on unpinned/`latest` specs in a repo's
 # mise.toml / package.json (or refuses under --strict), so an agent-committed manifest
 # stays reproducibly pinned. Advisory by default; never blocks a session.
 COPY bin/claude-deps-check /usr/local/bin/claude-deps-check
-# Controller mode (CC-6): wires this substrate to the umbrella PAR-* lease/scheduler/
-# bump-worker. slots==1 collapses to claude-autopilot (byte-identical); slots>1 is the
-# built-but-gated K>1 loop (CLAUDE_CONTROLLER_MAX_SLOTS defaults to 1 — never auto-ramps).
+# claude-controller: the CLAUDE_CONTROLLER=1 tmux main-pane entrypoint. Since SC-5
+# retired the Sysbox nested-worker-broker dispatch tier it used to run, this is now a
+# thin pass-through to claude-autopilot (see bin/claude-controller's own header).
 COPY bin/claude-controller /usr/local/bin/claude-controller
-# Controller-side caching proxy (PKG-6): the entrypoint runs this as root on a controller
-# (CLAUDE_CACHE_PROXY=1, §5d) to START the pull-through cache on the inner dockerd, and inside
-# a WORKER (§10c) to POINT its package managers at the proxy + fail-closed if it is down.
-COPY bin/claude-cache-proxy /usr/local/bin/claude-cache-proxy
-# CLAUDE.d/ fragment loader (CC-BROKER-CLAUDE-D): baked SessionStart hook that
-# concatenates ~/.claude/CLAUDE.d/*.md so a mode-specific fragment (e.g. broker.md
-# installed by entrypoint §8a-bis when CLAUDE_WORKER_BROKER=1) reaches the session.
-# Silent no-op when the directory is absent, so it costs nothing on a leaf container.
-COPY bin/claude-md-fragments /usr/local/bin/claude-md-fragments
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-dev /usr/local/bin/claude-autopilot \
         /usr/local/bin/claude-enqueue /usr/local/bin/claude-scm-observer \
         /usr/local/bin/claude-egress-firewall \
-        /usr/local/bin/claude-apt-provision \
         /usr/local/bin/claude-secret-guard \
         /usr/local/bin/claude-rc-watchdog \
         /usr/local/bin/claude-healthcheck \
-        /usr/local/bin/claude-worker-broker \
-        /usr/local/bin/claude-worker-request \
-        /usr/local/bin/claude-worker-run \
-        /usr/local/bin/claude-reaper \
         /usr/local/bin/claude-disk-gc \
+        /usr/local/bin/claude-reaper \
         /usr/local/bin/claude-deps-check \
         /usr/local/bin/claude-controller \
-        /usr/local/bin/claude-cache-proxy \
-        /usr/local/bin/claude-md-fragments \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
 

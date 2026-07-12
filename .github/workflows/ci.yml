@@ -1,8 +1,7 @@
 name: ci
 
-# Lint + unit tests — everything provable on a hosted runner. The on-host substrate proof
-# (bin/claude-sysbox-verify) needs Sysbox on the machine and stays a fleet-host step; the
-# image smoke test (make smoke) needs a full image build and stays a local/manual gate.
+# Lint + unit tests — everything provable on a hosted runner. The image smoke test
+# (make smoke) needs a full image build and stays a local/manual gate.
 on:
   push:
     branches: [main]
@@ -18,22 +17,16 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: lint (bash -n over all shell entrypoints)
         run: make lint
-      - name: unit tests (version-floor refusal + warn-only runc posture)
+      - name: unit tests (version-floor helper + warn-only runc posture)
         run: test/unit.sh
-      - name: broker unit tests (deny-by-default validator + fixed template + substrate refusals)
-        run: test/broker-unit.sh
-      - name: sizing unit tests (K resolution + controller envelope + capacity refusals)
+      - name: sizing unit tests (size/reservation math)
         run: test/sizing-unit.sh
-      - name: worker-run unit tests (argv validation + umbrella/submodule checks + run-exactly-once)
-        run: test/worker-run-unit.sh
-      - name: reaper unit tests (exited/dead/created selection + spool-prune + fail-safe)
+      - name: reaper unit tests (spool-file prune, TTL boundary, fail-safe)
         run: test/reaper-unit.sh
-      - name: disk unit tests (free-space floor + broker refusal + gc plan safety + fail-safe)
+      - name: disk unit tests (free-space parsing + gc plan safety + fail-safe)
         run: test/disk-unit.sh
-      - name: controller unit tests (K=1 byte-identical autopilot collapse + K>1 dispatch/lease/drain wiring)
+      - name: controller unit tests (byte-identical claude-autopilot pass-through)
         run: test/controller-unit.sh
-      - name: fleet-view unit tests (per-worker spend attribution + host headroom + secret-free fail-safe)
-        run: test/fleet-view-unit.sh
       - name: compose-gen unit tests (scenario .conf expansion + env layering + cross-stack port reservation)
         run: test/compose-gen-unit.sh
       - name: egress-packages unit tests (PKG-1 opt-in package-registry allowlist — additive, opt-in, leak-free)
@@ -44,13 +37,5 @@ jobs:
         run: test/cache-unit.sh
       - name: manifest hardening unit tests (PKG-5 — user-scoped ignore-scripts + mise lockfile baked into build; claude-deps-check pin linter)
         run: test/manifest-hardening-unit.sh
-      - name: apt provision unit tests (PKG-4 — brokered curated worker apt; tier gate, curated-not-open, install-then-relock, empty/missing-manifest fail-safe)
-        run: test/apt-provision-unit.sh
-      - name: cache proxy unit tests (PKG-6 — controller-side pull-through cache; fail-closed ready gate, single-choke-point egress, broker/worker wiring, client-apply refusal)
-        run: test/cache-proxy-unit.sh
-      - name: broker-interactive unit tests (CC-6 — interactive session spawns nested workers; broker-gated socket lockdown, §5a inner dockerd, claude-launch --sysbox/--broker, controller image plumbing)
-        run: test/broker-interactive-unit.sh
-      - name: broker CLAUDE.d unit tests (CC-BROKER-CLAUDE-D — SessionStart-hook fragment loader teaches the interactive lead that claude-worker-request is the sole dispatch channel; broker-only install, non-broker byte-silent)
-        run: test/broker-claude-d-unit.sh
-      - name: pkg-install-guide unit tests (CC-PKG-INSTALL-GUIDE — content contract on the baked global CLAUDE.md — mise-first per ecosystem, PEP-668 dead-ends, PKG-3 /cache, PKG-4 apt-manifest.txt, no-sudo/no-break-system-packages refusal)
+      - name: pkg-install-guide unit tests (CC-PKG-INSTALL-GUIDE — content contract on the baked global CLAUDE.md — mise-first per ecosystem, PEP-668 dead-ends, PKG-3 /cache, no-sudo/no-break-system-packages refusal)
         run: test/pkg-install-guide-unit.sh

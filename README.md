@@ -9,15 +9,16 @@ Auth is your Claude **Max** subscription via OAuth. No API keys — the entrypoi
 hard-fails if `ANTHROPIC_API_KEY` is set so you never accidentally bill per
 token.
 
-> **Substrate change in progress (2026-07-12).** The nested-Sysbox worker-broker
-> path referenced below (`--broker`/`--sysbox`, controller mode, curated worker
-> `apt`, pull-through cache proxy — the `CC-*` and `PKG-*` work) is being
-> retired in favor of Claude Code subagents in per-worktree git worktrees. The final broker-path
-> state is frozen at branch `legacy/sysbox-broker-2026-07-12` + tag
-> `legacy-sysbox-broker-2026-07-12` — see
-> [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md). The
-> Remote-Control core, `/next` autopilot, launch/compose-gen (sans broker
-> flags), housekeeping, baked config, and the security floor all stay on `main`.
+> **Substrate change (2026-07-12).** This repo used to run a nested-Sysbox
+> worker-broker path (`--broker`/`--sysbox`, controller dispatch, curated worker
+> `apt`, a pull-through cache proxy — the `CC-*` and `PKG-4`/`PKG-6` work) so a
+> controller container could spawn autonomous nested `/work-on` workers. It was
+> retired in favor of Claude Code subagents in per-worktree git worktrees and
+> stripped from `main`. The frozen implementation is preserved at branch
+> `legacy/sysbox-broker-2026-07-12` + tag `legacy-sysbox-broker-2026-07-12` — see
+> [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md). The Remote-Control
+> core, `/next` autopilot, launch/compose-gen (sans broker flags), housekeeping,
+> baked config, and the security floor all stay on `main`.
 
 ## Quick start
 
@@ -163,60 +164,13 @@ shared across all running containers via the converged `claude-auth` volume, so
 mind the plan's 5-hour and weekly limits when choosing the interval and how many
 autopilot containers run at once — a too-tight cadence exhausts the subscription.
 
-**Controller mode** (`CLAUDE_CONTROLLER=1`, CC-6) is a third main-pane mode, for a
-Sysbox-nested controller that also dispatches nested workers via the umbrella's
-`PAR-*` lease/scheduler/bump-worker control plane instead of just running `/next`
-in-process. Its effective worker slots default to `1` — which collapses it,
-byte-identical, to exactly the autopilot loop above — and only ramp past that on
-an explicit `CLAUDE_CONTROLLER_MAX_SLOTS` override once the umbrella's `PAR-4.1`
-and `PAR-7.1` land. See `docs/substrate.md`'s "Controller mode (CC-6)" section for
-the full design; most containers should keep using plain `CLAUDE_AUTOPILOT=1`.
-
-## An interactive session that spawns autonomous workers
-
-Controller mode above is *headless*. For a **conversational lead** that spawns
-workers on demand, use `--broker` — an interactive Remote-Control/SSH session that
-*also* runs the worker broker, so it can launch nested one-shot `/work-on` workers:
-
-```bash
-make build-controller                 # one-time: bakes the Docker engine (~400 MB)
-./bin/claude-launch cockpit --broker --repo git@github.com:you/cockpit.git
-```
-
-Needs [Sysbox](docs/substrate.md) on the host. `--broker` implies `--sysbox`,
-auto-selects the controller image, and sizes the container for `K` nested workers.
-SSH in (or use the app), then from the session — you, **or Claude itself** —
-dispatch autonomous workers, WIP-capped at `K`:
-
-```bash
-claude-worker-request hl7 HL7-3.2     # broker spawns a nested worker: one /work-on, then --rm
-```
-
-Each worker is a true Sysbox-nested child; the agent never touches the inner Docker
-socket (it only drops a two-value request in a root-owned spool). See
-`docs/substrate.md` → "Interactive lead that spawns workers".
-
-The interactive session boots knowing how to dispatch. When
-`CLAUDE_WORKER_BROKER=1` and `/run/claude/broker` is present, `entrypoint.sh` §8a-bis
-installs `claude-config/CLAUDE.d/broker.md` into `~/.claude/CLAUDE.d/`, and a baked
-`SessionStart` hook (`bin/claude-md-fragments`) surfaces it to Claude so the session
-starts with the `claude-worker-request` mechanism, the WIP=K backpressure rule, and
-the "never touch the inner Docker socket" refusal already in context. Non-broker
-containers leave `CLAUDE.d/` absent and the hook is a silent no-op.
-
-**Durable worker image.** The broker launches workers from `claude-code-box:latest`,
-which must be on the *inner* daemon — and that daemon starts empty on every recreate. So
-save the worker image to a host tarball and mount it; the entrypoint loads it on boot
-(idempotent + fail-soft):
-
-```bash
-docker save claude-code-box:latest -o /opt/homelab/claude/worker-image.tar
-./bin/claude-launch cockpit --broker --worker-tarball /opt/homelab/claude/worker-image.tar --repo …
-```
-
-**Many broker sessions at once:** `claude-compose-gen --broker <repos> --worker-tarball
-<path>` emits broker-controller services (controller image + Sysbox + envelope sizing +
-the tarball), so a whole roster of brokers survives a regenerate.
+**Controller mode** (`CLAUDE_CONTROLLER=1`) is a third main-pane mode. It used to wire a
+Sysbox-nested controller to the umbrella's `PAR-*` lease/scheduler/bump-worker control
+plane and dispatch nested workers; SC-5 retired that dispatch tier (see
+[docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md)), so today it is a thin
+pass-through to exactly the autopilot loop above, byte-identical. A follow-up item
+(SC-6) will decide whether this mode is worth keeping at all; most containers should
+keep using plain `CLAUDE_AUTOPILOT=1`.
 
 ## Environment variables
 
@@ -259,25 +213,14 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_SHM_SIZE` | `2g` | `/dev/shm` size |
 | `CLAUDE_HARDEN_CAPS` | `1` | `1` = `--cap-drop ALL` + minimal `--cap-add` (drops NET_RAW/MKNOD/SETFCAP); `0` = Docker defaults. `no-new-privileges` is always set. Override the set with `CLAUDE_MIN_CAPS` |
 | `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts. Extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. Fail-open on error |
-| `CLAUDE_EGRESS_PACKAGES` | `0` | `1` = additively allowlist the curated **package registries** (PyPI, crates.io, Go proxy, `mise.run`, `ghcr.io`) so agent-driven `pip`/`cargo`/`go`/`mise` installs work under lockdown. Opt-in and curated (not open); nothing else broadens. Debian/apt system libs are **not** here (they need the rootful worker tier). See [docs/package-provisioning-security.md](docs/package-provisioning-security.md) |
-| `CLAUDE_APT_PROVISION` | `0` | `1` = in a **Sysbox worker**, install the curated pinned `claude-config/apt-manifest.txt` (system `.so` libs `mise` can't provide rootless) as root before the agent — curated-not-open, install-then-relock. Self-gates to worker root; a leaf gets a documented refusal. Override the path with `CLAUDE_APT_MANIFEST_FILE`. See [docs/package-provisioning-security.md](docs/package-provisioning-security.md) §3.7 |
-| `CLAUDE_CACHE_PROXY` | `0` | `1` = **demand-gated (PKG-6)** controller-side pull-through package cache — the single audited egress choke point. On a controller, starts the proxy (`claude-cache-proxy`) on the inner dockerd and blocks until ready; in a worker, points `npm`/`pip`/`go`/`apt` at it and narrows egress to just the proxy. **Fail-closed:** proxy down → provision refused (never open-egress fallback). Pair with `CLAUDE_EGRESS_LOCKDOWN=1`. Tune with `CLAUDE_CACHE_PROXY_{IMAGE,HOST,PORT,NET,VOLUME,MEM,CPUS,READY_TIMEOUT}`. See [docs/caching-proxy.md](docs/caching-proxy.md) |
+| `CLAUDE_EGRESS_PACKAGES` | `0` | `1` = additively allowlist the curated **package registries** (PyPI, crates.io, Go proxy, `mise.run`, `ghcr.io`) so agent-driven `pip`/`cargo`/`go`/`mise` installs work under lockdown. Opt-in and curated (not open); nothing else broadens. Debian/apt system libs have no self-service path (see [docs/package-provisioning-security.md](docs/package-provisioning-security.md)) |
 | `CLAUDE_BROKER_GIT_KEY` | `0` | `1` = hold the SSH deploy key in a root ssh-agent (agent signs/pushes but can't read the key bytes) instead of a readable `~/.ssh/id_ed25519` |
-| `CLAUDE_WORKER_UMBRELLA` | `/workspace` (if it looks right) | Umbrella root override for `claude-worker-run` — must have both `.gitmodules` and `scripts/isolate.sh`; refuses (fail closed) otherwise |
-| `CLAUDE_WORKER_HEARTBEAT_SECS` | `60` | Seconds between `claude-worker-run`'s best-effort `scripts/lease.sh renew` calls |
-| `CLAUDE_REAPER_INTERVAL` | `300` | Seconds between `claude-reaper --loop` cycles (controller mode) |
-| `CLAUDE_REAPER_SPOOL_TTL` | `3600` | Seconds before an orphaned broker-spool file (`responses/`, `requests/`, `staging/`) is pruned by `claude-reaper` |
-| `CLAUDE_DISK_FLOOR_MIB` | `10240` | Free-space floor (MiB) on `CLAUDE_DISK_DATA_ROOT`; the broker refuses a launch below it |
-| `CLAUDE_DISK_DATA_ROOT` | `/var/lib/docker` | The inner dockerd data-root nested worker layers land on — what the disk floor and `claude-disk-gc` watch |
-| `CLAUDE_DISK_GC_INTERVAL` | `3600` | Seconds between `claude-disk-gc --loop` cycles (controller mode) |
-| `CLAUDE_CONTROLLER` | `0` | `1` = controller mode (CC-6): main pane runs `claude-controller`, wiring this substrate to the umbrella `PAR-*` lease/scheduler/bump-worker. Implies `CLAUDE_WORKER_BROKER=1` (refuses at boot if that's explicitly `0`). Takes priority over `CLAUDE_AUTOPILOT` if both are set; no Remote Control link either way |
-| `CLAUDE_CONTROLLER_MAX_SLOTS` | `1` | Ceiling on worker slots the controller may use: effective slots = `min(K, this)`. **Defaults to 1 regardless of K** — the controller never auto-ramps; raising it is a deliberate operator action gated by the umbrella's `PAR-7.1` founder ramp (and needs `PAR-4.1` first). `1` collapses to today's autopilot, byte-identical |
-| `CLAUDE_CONTROLLER_UMBRELLA` | `/workspace` (if it looks right) | Umbrella root override for `claude-controller` — must have both `.gitmodules` and `scripts/reconcile.sh`; refuses (fail closed) otherwise |
-| `CLAUDE_CONTROLLER_INTERVAL` | `60` | Seconds between controller dispatch cycles (the slots>1 loop) |
-| `CLAUDE_BROKER_SOCKET_LOCKDOWN_WAIT` | `90` | Seconds the entrypoint blocks, whenever the broker is backgrounded (`CLAUDE_WORKER_BROKER=1` — which controller mode implies, and which `claude-launch --broker` sets on an interactive session), for the inner docker socket to be confirmed `root:root 600` before starting the agent's tmux session. Legacy alias: `CLAUDE_CONTROLLER_SOCKET_WAIT` |
-| `CLAUDE_WORKER_RUN_LOG_DIR` | `$HOME/.claude/worker-run-logs` | Where `claude-worker-run` writes its per-run JSON log + the secret-free `run-<item>-<ts>.meta.json` sidecar `claude-fleet-view` reads for spend |
-| `CLAUDE_FLEET_HOST_CPUS` / `CLAUDE_FLEET_HOST_MEM_MIB` | `nproc` / `/proc/meminfo` | Host capacity override for `claude-fleet-view`'s headroom line (test/drill seam) |
-| `CLAUDE_FLEET_DOCKER` | `docker` | The docker binary `claude-fleet-view` queries for active `claude.worker=1` containers (test seam) |
+| `CLAUDE_REAPER_INTERVAL` | `300` | Seconds between `claude-reaper --loop` cycles (standalone tool; nothing auto-starts it) |
+| `CLAUDE_REAPER_SPOOL_TTL` | `3600` | Seconds before an orphaned spool file (`responses/`, `requests/`, `staging/`) is prunable by `claude-reaper` |
+| `CLAUDE_REAPER_SPOOL_DIR` | `/run/claude/reaper-spool` | Spool root `claude-reaper` prunes |
+| `CLAUDE_DISK_DATA_ROOT` | `/var/lib/docker` | Path whose free space `claude-disk-gc` reports before/after each cycle |
+| `CLAUDE_DISK_GC_INTERVAL` | `3600` | Seconds between `claude-disk-gc --loop` cycles (standalone tool; nothing auto-starts it) |
+| `CLAUDE_CONTROLLER` | `0` | `1` = controller mode: main pane runs `claude-controller`, a thin pass-through to `claude-autopilot` since SC-5 retired its broker-dispatch tier. Takes priority over `CLAUDE_AUTOPILOT` if both are set; no Remote Control link either way |
 | `CLAUDE_STOP_TIMEOUT` | `20` | Graceful stop timeout (s) |
 | `AUTH_VOLUME`/`SSHKEYS_VOLUME` | `claude-auth`/`claude-sshkeys` | Shared volume names |
 | `ANTHROPIC_API_KEY` | unset | **Must stay unset** — entrypoint hard-fails otherwise |
@@ -316,24 +259,15 @@ claude-attach <name>              attach to its live tmux session (local host)
 claude-stop  <name>               graceful stop (state preserved)
 claude-rm    <name> [--yes] [--purge]   remove (+volumes with --purge)
 claude-logs  <name> [-n LINES]    tail the entrypoint/sshd log
-claude-sysbox-verify [--check]    prove the Sysbox-nested substrate (CC-1)
-claude-broker-verify [--keep]     prove the root-owned worker broker (CC-2)
-claude-controller-size [--flags]  K-derived controller envelope + capacity check (CC-3)
-claude-sizing-verify [--keep]     prove limits enforce inside + OOM/fork isolation (CC-3)
-claude-worker-run <repo> <item>   one-shot worker driver: isolate + exactly one /work-on (CC-4)
-claude-reaper [--loop]            reap dead worker containers + prune the broker spool (CC-4)
-claude-worker-lifecycle-verify [--check] [--keep]   prove one-shot-then-vanish + reaping (CC-4)
-claude-disk-gc [--loop]           GC the inner daemon's image/build-cache layers (CC-5)
-claude-disk-verify [--check] [--keep]   prove the disk-space floor + gc + image reuse (CC-5)
-claude-controller                 wire the substrate to the umbrella PAR-* lease/scheduler/bump-worker (CC-6)
-claude-controller-verify [--check] [--keep]   prove controller-mode dispatch + non-double-ship (CC-6)
-claude-fleet-view [--json]        per-worker item/repo/spend + host cpu/mem/disk headroom vs the K budget (CC-7)
-claude-cache-proxy <cmd>          controller-side pull-through cache: start|stop|status|ready|url|client-apply (PKG-6, demand-gated)
+claude-disk-gc [--loop]           GC docker image/build-cache layers + trim the shared cache
+claude-disk-verify                prove disk-hygiene logic (docker-free, safe anywhere)
+claude-reaper [--loop]            prune aged spool litter under a spool directory
+claude-controller                 CLAUDE_CONTROLLER=1 main pane; a thin pass-through to claude-autopilot
 ```
 
-Inside a controller (`CLAUDE_WORKER_BROKER=1`), the unprivileged agent asks the
-root broker for a worker with `claude-worker-request <repo> <item-id>` — see
-[Security notes](#security-notes).
+A nested-Sysbox worker-broker substrate used to run alongside `claude-launch --broker`,
+spawning autonomous nested workers via a root-owned broker. It was retired in SC-5 — see
+[docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md).
 
 Inside an autopilot container (over SSH), `claude-enqueue "<prompt>"` adds a task
 to the durable queue (`CLAUDE_AUTOPILOT_QUEUE=1`); `--priority N` orders it
@@ -501,13 +435,13 @@ reuse the baked `uv` automatically.
 `cargo`/`go`/`npm`/`uv`/`pip` caches live on **one shared docker volume**
 (`claude-cache`) mounted at `/cache`, so a toolchain or CLI provisioned by one
 container is a **cache hit** for the next launch of that project and for every
-parallel worker — no re-download. It's **on by default**; `claude-launch --no-cache`
-(or `claude-compose-gen --no-cache`) opts out, and a **missing cache never errors a
-launch** — it degrades to per-container installs (fail-safe). The volume is bounded
-by `claude-disk-gc`: over `CLAUDE_CACHE_MAX_MIB` it trims only the re-fetchable
-download caches (installed toolchains kept), idle-only and fail-safe, and the
-broker's free-space floor already covers it since it sits on the docker data root.
-Full design + verification: [docs/shared-tool-cache.md](docs/shared-tool-cache.md).
+other container sharing the volume — no re-download. It's **on by default**;
+`claude-launch --no-cache` (or `claude-compose-gen --no-cache`) opts out, and a
+**missing cache never errors a launch** — it degrades to per-container installs
+(fail-safe). The volume is bounded by `claude-disk-gc`: over `CLAUDE_CACHE_MAX_MIB`
+it trims only the re-fetchable download caches (installed toolchains kept),
+idle-only and fail-safe. Full design + verification:
+[docs/shared-tool-cache.md](docs/shared-tool-cache.md).
 
 - **Egress lockdown is opt-in** (`CLAUDE_EGRESS_LOCKDOWN=1`); **off by default,
   where every `mise use …` just works.** Under lockdown: `github:`/`aqua:` and
@@ -515,8 +449,11 @@ Full design + verification: [docs/shared-tool-cache.md](docs/shared-tool-cache.m
   need `CLAUDE_EGRESS_PACKAGES=1`; and the `node@`/`go@`/`rust` toolchains pull
   their runtime from vendor hosts (nodejs.org, go.dev, static.rust-lang.org) not
   yet on the allowlist, so they need those hosts via `CLAUDE_EGRESS_EXTRA_HOSTS`.
-- **System libraries (`apt`) are not available** in a leaf container by design —
-  it's rootless. Those are the Sysbox-worker apt tier (**PKG-4**, below), not here.
+- **System libraries (`apt`) are not available** — the agent is rootless, and the
+  worker-tier `apt` path that used to close that gap (PKG-4) was retired in SC-5
+  along with the Sysbox substrate it depended on (see
+  [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md)). A system library
+  needs a base-image rebuild today.
 - The image sets `trusted_config_paths` to **`/workspace` only** — a deliberately
   scoped supply-chain trade so a repo's own `mise.toml` auto-applies while a config
   anywhere else stays untrusted (never a blanket `/`). Full design + verification:
@@ -528,23 +465,6 @@ Full design + verification: [docs/shared-tool-cache.md](docs/shared-tool-cache.m
   `mise.lock` reinstall identical versions offline from the shared cache. `claude-deps-check`
   flags `latest`/unpinned specs in `mise.toml`/`package.json` (advisory; `--strict`
   refuses). Threat model + bypasses: [docs/package-provisioning-security.md](docs/package-provisioning-security.md).
-- **System libraries — brokered worker `apt` (PKG-4).** The syslib (`.so`) gap `mise`
-  can't fill is closed in the **Sysbox worker tier only**: with `CLAUDE_APT_PROVISION=1`,
-  the worker installs the curated, pinned `claude-config/apt-manifest.txt` as root
-  *before* the agent, opening `deb.debian.org` for the window then **re-locking**
-  (install-then-relock). Curated-not-open — only manifest packages install, arbitrary
-  agent `apt` is refused; a **leaf** container gets a documented refusal (*use `mise` /
-  static binaries, or rebuild the base*), never a silent partial. Default manifest is
-  empty. Design: [docs/package-provisioning-security.md](docs/package-provisioning-security.md) §3.7.
-- **Single audited egress choke point — caching proxy (PKG-6, demand-gated).** With
-  `CLAUDE_CACHE_PROXY=1` a root-owned pull-through cache (default Nexus OSS) on the
-  controller's inner dockerd becomes the **only** host that reaches the public
-  registries; each worker points `npm`/`pip`/`go`/`apt` at it and has its egress
-  **narrowed to just the proxy**. **Fail-closed:** the controller refuses to start, and a
-  worker refuses to provision, if the proxy is unreachable — **never** a silent fallback to
-  open/public-registry egress. Off by default (the curated allowlist is the standard
-  posture); built for reproducibility under K + a path toward air-gapped workers. Design +
-  on-host gate: [docs/caching-proxy.md](docs/caching-proxy.md).
 
 ## Troubleshooting (summary)
 
@@ -596,56 +516,18 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   the agent can reach — see secret brokering below. For an untrusted-input /
   multi-tenant threat model, also run a microVM runtime (gVisor/Kata) rather than
   relying on container isolation alone.
-- **Nested workers run Sysbox, never privileged DinD or a socket mount.** Where a
-  controller container must itself run worker containers (the umbrella's parallel
-  `/work-on` tier), the only sanctioned mechanism is **Sysbox-nested** children —
-  root-in-container maps to an unprivileged host uid, and a pre-0.7.0 Sysbox
-  (missing the Nov-2025 escape-CVE patches) is **refused**, not warned about.
-  `--privileged` Docker-in-Docker and bind-mounting `/var/run/docker.sock` into an
-  agent are rejected outright (socket access == host root). Decision, runbook, and
-  the on-host containment proof: [docs/substrate.md](docs/substrate.md) +
-  `bin/claude-sysbox-verify`.
-- **Worker launches are brokered by root — the agent never holds the inner Docker
-  socket.** On a controller, `CLAUDE_WORKER_BROKER=1` starts a **root-owned
-  broker** (`bin/claude-worker-broker`, mirroring the git-key broker pattern) that
-  is the only principal talking to the inner `dockerd` — the socket is locked to
-  `root:root 600`, because inside the controller socket access is still every peer
-  worker, its leases, and the launch template. The unprivileged agent *requests* a
-  worker via `claude-worker-request <repo> <item>`: a tiny KEY=VALUE file in a
-  write-only spool. The broker **renames each request into a root-only staging dir
-  before reading it** (closing the swap-TOCTOU on the agent-owned spool entry —
-  no FIFO can hang the loop, no symlink can leak a root file) and validates it
-  **deny-by-default** (exactly two sanitized values; an unknown key, forged
-  cap/limit, flag smuggling, duplicate, or oversize rejects the whole request). The broker applies a **fixed hardened template** — cap-drop
-  ALL + minimal re-add (`NET_RAW`/`MKNOD`/`SETFCAP` stay dropped),
-  `no-new-privileges`, per-worker memory/reservation/cpus/pids/shm caps, secret-
-  guard + egress inheritance — and enforces lease discipline (one live worker per
-  item, `CLAUDE_BROKER_MAX_WORKERS` total). It **fails closed** unless userns
-  containment is real (`/proc/self/uid_map`) *and* the host attested a CVE-patched
-  Sysbox (`CLAUDE_SYSBOX_ATTESTED_VERSION`, exported by the launch path from
-  `preflight_sysbox`). On-host proof: `bin/claude-broker-verify` (28 checks);
-  docker-free logic tests: `test/broker-unit.sh` (CI).
-- **Resources are K-aware and overcommit is a refusal.** The worker cap defaults to
-  **K from the umbrella `operations/parallel.config.json`** (one source of truth,
-  never forked here), the per-worker profile (`4g/3g/2cpu/2048pids/2g shm`) is
-  single-sourced in `bin/_common.sh`, and the Sysbox controller must carry
-  **Σ(K·profile) + overhead** — `claude-controller-size` derives it (K=2 → 5 CPUs /
-  10240 MiB / 5120 pids) and refuses an envelope the host can't fit; the broker
-  refuses to *serve* in a controller whose own cgroup budget can't carry its cap.
-  Every flat session also gets `--memory-reservation` + `--pids-limit`. On-host
-  proof (limits enforce *inside*, OOM + fork-bomb stay isolated per worker):
-  `bin/claude-sizing-verify`; math/refusal tests: `test/sizing-unit.sh` (CI).
-  See [docs/substrate.md](docs/substrate.md) § K-aware resource sizing.
-- **Disk pressure is a per-launch refusal, and layers get reclaimed.** The broker
-  checks free space on `CLAUDE_DISK_DATA_ROOT` (the inner dockerd data-root)
-  before every launch and refuses (`error disk pressure: … — retry after gc`)
-  below `CLAUDE_DISK_FLOOR_MIB` (default 10 GiB) — **fails closed** if free space
-  can't be determined at all. `claude-disk-gc --loop` runs alongside the broker +
-  reaper, pruning dangling images/containers/networks **and** the build cache
-  (`docker system prune -f` + `docker builder prune -f`) without ever touching a
-  running container or a volume. On-host proof: `bin/claude-disk-verify`;
-  docker-free logic tests: `test/disk-unit.sh` (CI). See
-  [docs/substrate.md](docs/substrate.md) § Storage/disk safety.
+- **Every flat session gets resource + disk hygiene.** `--memory-reservation` +
+  `--pids-limit` cap every session; `claude-disk-gc --loop` (a standalone tool —
+  run it by hand or on your own cron/timer) prunes dangling images/containers/
+  networks **and** the build cache (`docker system prune -f` + `docker builder
+  prune -f`) without ever touching a running container or a volume, and trims the
+  shared `/cache` volume's re-fetchable download caches when it exceeds
+  `CLAUDE_CACHE_MAX_MIB`. Docker-free logic tests: `test/disk-unit.sh`,
+  `test/sizing-unit.sh` (CI); one-command sanity pass: `bin/claude-disk-verify`.
+  (A nested-Sysbox worker-broker substrate used to run alongside this — a
+  root-owned broker spawning autonomous nested workers with a K-aware resource
+  envelope and a per-launch disk-pressure refusal. It was retired in SC-5; see
+  [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md).)
 - **Secret brokering (git key + credentials).** By default the SSH deploy key is
   copied to a `claude`-readable `~/.ssh/id_ed25519`, so a prompt-injected agent
   could exfiltrate it. `CLAUDE_BROKER_GIT_KEY=1` instead loads the key into a
@@ -679,8 +561,8 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   not open**: a registry that isn't listed still DROPs, because *open* egress is
   the supply-chain exfil path the container refuses. Nothing broadens unless the
   flag is explicitly set, and the fail-open-as-a-whole semantics are unchanged.
-  Debian/apt **system** libraries are deliberately not here — those need the
-  rootful Sysbox-worker `apt` tier, not a leaf container. The threat model (the
+  Debian/apt **system** libraries are deliberately not here — no self-service path
+  currently provisions those (see docs/legacy-sysbox-broker.md). The threat model (the
   Nx-class weaponized-agent exfil) and the containment rules are in
   [docs/package-provisioning-security.md](docs/package-provisioning-security.md).
   The baked `mise` toolchain provisioner (rootless language/CLI installs) rides on
