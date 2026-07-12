@@ -207,7 +207,6 @@ docker save claude-code-box:latest -o /opt/homelab/claude/worker-image.tar
 **Many broker sessions at once:** `claude-compose-gen --broker <repos> --worker-tarball
 <path>` emits broker-controller services (controller image + Sysbox + envelope sizing +
 the tarball), so a whole roster of brokers survives a regenerate.
->>>>>>> 6028630 (feat(controller): durable worker image + compose-gen --broker)
 
 ## Environment variables
 

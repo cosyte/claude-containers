@@ -316,11 +316,23 @@ done
 CONTROLLER_IMAGE="${CLAUDE_IMAGE_CONTROLLER:-claude-code-box:controller}"
 CONTROLLER_BROWSER_IMAGE="${CLAUDE_IMAGE_CONTROLLER_BROWSER:-claude-code-box:controller-browser}"
 if [[ ${#BROKER[@]} -gt 0 ]]; then
-    # Attest a CVE-patched Sysbox at gen time (the same host runs the compose); fall back to
-    # the immovable CVE floor if this box has no Sysbox — the broker re-validates >= floor at run.
+    # Attest a CVE-patched Sysbox at gen time. Generation may legitimately run on a box that
+    # ISN'T the deploy host (no Sysbox), so a missing/old Sysbox here is a WARN + fall back to
+    # the immovable CVE floor — never a hard stop; the broker re-validates >= floor at RUN time
+    # on the real host and refuses to serve if it isn't met.
+    #
+    # The `|| _sv=""` must sit OUTSIDE the command substitution: preflight_sysbox `die`s (exit 1)
+    # on a Sysbox-less host, and an `exit` inside `$( … )` terminates that subshell IMMEDIATELY —
+    # so an inner `|| true` never runs, the substitution returns 1, and `set -e` would kill the
+    # generator (with the reason swallowed by the redirect). Catching it in the PARENT is what
+    # actually makes this fail-soft.
     BROKER_SYSBOX_ATTEST="$SYSBOX_CVE_FLOOR"
-    _sv="$( preflight_sysbox >/dev/null 2>&1 && printf '%s' "${SYSBOX_VERSION:-}" || true )"
-    [[ -n "$_sv" ]] && BROKER_SYSBOX_ATTEST="$_sv"
+    _sv="$( preflight_sysbox >/dev/null 2>&1 && printf '%s' "${SYSBOX_VERSION:-}" )" || _sv=""
+    if [[ -n "$_sv" ]]; then
+        BROKER_SYSBOX_ATTEST="$_sv"
+    else
+        warn "no CVE-patched Sysbox detected on THIS box — attesting the CVE floor ($SYSBOX_CVE_FLOOR) in the generated compose. That is fine when generating for a different (Sysbox) host; the broker re-validates at run time and REFUSES to serve if the real Sysbox is missing or pre-patch."
+    fi
     # CC-3 controller envelope (Σ K workers + overhead) — brokers use this, not the flat profile.
     BROKER_K="$(resolve_parallel_k)" || die "cannot resolve K for broker sizing"
     controller_envelope "$BROKER_K"   # sets CTRL_CPUS / CTRL_MEM_MIB / CTRL_MEM_RESERVATION_MIB / CTRL_PIDS

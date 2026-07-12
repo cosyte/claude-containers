@@ -262,6 +262,29 @@ else
     bad "compose-gen --broker failed to generate"
 fi
 
+# REGRESSION (fail-soft attestation): on a host with NO sysbox-runc, preflight_sysbox `die`s
+# (exit 1). An `exit` inside `$( … )` kills that subshell immediately, so an INNER `|| true`
+# never runs and `set -e` would kill the generator — with the reason swallowed by the redirect.
+# The `||` must therefore live in the PARENT. Assert the generator SURVIVES a Sysbox-less host
+# (generation may legitimately target a different host) and falls back to the CVE floor.
+NOSB="$TMPD/nosysbox"; mkdir -p "$NOSB"
+for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do
+    [[ -d "$d" ]] || continue
+    for f in "$d"/*; do b="$(basename "$f")"
+        [[ "$b" == sysbox-runc ]] && continue
+        [[ -e "$NOSB/$b" ]] || ln -sf "$f" "$NOSB/$b" 2>/dev/null
+    done
+done
+GEN2="$TMPD/gen-nosysbox.yml"
+if ( PATH="$NOSB" bash "$CG" --out "$GEN2" --broker br cosyte/br >/dev/null 2>&1 ) && [[ -f "$GEN2" ]]; then
+    ok "compose-gen --broker SURVIVES a Sysbox-less host (fail-soft attestation, not a silent die)"
+    grep -qF "CLAUDE_SYSBOX_ATTESTED_VERSION: \"$(bash -c 'source '"$REPO_ROOT"'/bin/_common.sh; printf "%s" "$SYSBOX_CVE_FLOOR"')\"" "$GEN2" \
+        && ok "Sysbox-less generation attests the immovable CVE floor (broker re-validates at run)" \
+        || bad "Sysbox-less generation did not fall back to the CVE floor"
+else
+    bad "compose-gen --broker DIED on a Sysbox-less host (the exit-inside-\$() fail-open bug)"
+fi
+
 echo
 echo "broker-interactive-unit: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
