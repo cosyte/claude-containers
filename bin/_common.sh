@@ -38,9 +38,10 @@ fi
 
 # --- Defaults ----------------------------------------------------------------
 CLAUDE_IMAGE="${CLAUDE_IMAGE:-claude-code-box:latest}"
-# Controller image (CC-6): the WITH_DOCKER=1 variant that bakes the Docker engine,
-# so it can run an inner dockerd + spawn nested workers under Sysbox. claude-launch
-# auto-selects it for --broker (unless --image is given). Build: make build-controller.
+# Controller image variant: the WITH_DOCKER=1 build that bakes the Docker engine.
+# Build: make build-controller. (The legacy Sysbox-nested worker-broker path that
+# used to consume this variant was retired in SC-5 — see docs/legacy-sysbox-broker.md.
+# Whether the controller tier survives at all is SC-6's call.)
 CLAUDE_IMAGE_CONTROLLER="${CLAUDE_IMAGE_CONTROLLER:-claude-code-box:controller}"
 AUTH_VOLUME="${AUTH_VOLUME:-claude-auth}"
 SSHKEYS_VOLUME="${SSHKEYS_VOLUME:-claude-sshkeys}"
@@ -136,8 +137,8 @@ preflight_runc() {
 
 # version_ge A B — true iff dotted-numeric version A >= B (first three components).
 # Both must be numeric triples (missing parts default to 0); anything non-numeric is an
-# ERROR (return 2) so security callers can fail CLOSED instead of comparing garbage as 0.
-# Base-10 forced (10#) so a leading zero can't trip octal arithmetic.
+# ERROR (return 2) so security-minded callers can fail CLOSED instead of comparing
+# garbage as 0. Base-10 forced (10#) so a leading zero can't trip octal arithmetic.
 version_ge() {
     local aM am ap bM bm bp
     IFS=. read -r aM am ap <<<"$1"; aM=${aM:-0} am=${am:-0} ap=${ap:-0}
@@ -146,120 +147,8 @@ version_ge() {
     (( 10#$aM > 10#$bM || (10#$aM == 10#$bM && (10#$am > 10#$bm || (10#$am == 10#$bm && 10#$ap >= 10#$bp))) ))
 }
 
-# Sysbox version floor for the nested-worker substrate (CC-1, umbrella ADR 0011). Nested
-# workers run under sysbox-runc instead of runc, so the Nov-2025 runc escape-CVE floor
-# (CVE-2025-31133 / 52565 / 52881) generalizes to "a Sysbox release that ports those
-# patches" — v0.7.0 (2026-06-02) is the first. Unlike preflight_runc above (warn-only,
-# because the flat K=1 launch path predates nesting and must not change behavior), this
-# check is a REFUSAL: nothing may stand up a nested worker on a pre-patch runtime.
-#
-# SYSBOX_CVE_FLOOR is IMMOVABLE (readonly, assigned after the .env auto-source above so
-# no .env/ambient value can redefine it). SYSBOX_MIN_VERSION may RAISE the operative bar
-# fleet-wide; preflight_sysbox dies if it is set below the CVE floor — the same
-# neutralize-the-gate vector as the test seams, closed the same way.
-if ! readonly SYSBOX_CVE_FLOOR=0.7.0 2>/dev/null; then
-    # Already readonly (this file sourced twice in one shell): value must be OURS.
-    [[ "${SYSBOX_CVE_FLOOR:-}" == "0.7.0" ]] || die "SYSBOX_CVE_FLOOR is '$SYSBOX_CVE_FLOOR' (expected 0.7.0) — refusing"
-fi
-SYSBOX_MIN_VERSION="${SYSBOX_MIN_VERSION:-$SYSBOX_CVE_FLOOR}"
-
-# sysbox_version_check <raw-version-string> — the ONE floor compare, shared by
-# preflight_sysbox (host binary path) and bin/claude-worker-broker (in-container
-# attestation path, CC-2) so the two can never drift. Normalizes the string
-# (v-prefix, +build-metadata, pre-release suffix), fails CLOSED on garbage on either
-# side, refuses below the operative floor, and refuses a pre-release of exactly the
-# floor. Also re-asserts floor integrity (raise-only) so every caller binds. On
-# success exports SYSBOX_VERSION (the normalized version) for callers to report.
-sysbox_version_check() {
-    local sv="$1"
-    # The operative floor may only sit AT or ABOVE the immovable CVE floor — a lowered
-    # (or garbage) SYSBOX_MIN_VERSION from env/.env dies here, fail closed. Checked
-    # inside the function so an in-process reassignment after sourcing binds too.
-    local floor_ok=0; version_ge "$SYSBOX_MIN_VERSION" "$SYSBOX_CVE_FLOOR" || floor_ok=$?
-    (( floor_ok == 0 )) || die "SYSBOX_MIN_VERSION '$SYSBOX_MIN_VERSION' is below (or unparseable against) the immovable CVE floor $SYSBOX_CVE_FLOOR (CVE-2025-31133/52565/52881) — the floor may be raised, never lowered"
-
-    sv="${sv#v}"
-    sv="${sv%%+*}"   # build metadata (+…) carries no release semantics — off first
-    local pre=""; [[ "$sv" == *-* ]] && pre="${sv#*-}"
-    sv="${sv%%-*}"
-    # Fail CLOSED on garbage on EITHER side: an unparseable version or floor must refuse,
-    # never collapse to 0 and wave a pre-patch runtime through. (|| capture: a bare call
-    # would trip callers' errexit before the case could name the reason.)
-    local vge=0; version_ge "$sv" "$SYSBOX_MIN_VERSION" || vge=$?
-    case $vge in
-        0) ;;
-        1) die "Sysbox $sv predates the Nov-2025 escape-CVE patches (CVE-2025-31133/52565/52881, ported in $SYSBOX_MIN_VERSION) — refusing to use it for nested workers" ;;
-        *) die "unparseable Sysbox version '$sv' or floor '$SYSBOX_MIN_VERSION' — refusing (fail closed)" ;;
-    esac
-    # A pre-release of exactly the floor (e.g. 0.7.0-rc.1) cannot be proven to carry the
-    # patches — fail closed. Reachable on the real path: callers' parses keep suffixes.
-    if [[ -n "$pre" ]]; then
-        local fM fm fp
-        IFS=. read -r fM fm fp <<<"$SYSBOX_MIN_VERSION"
-        if [[ "$sv" == "${fM:-0}.${fm:-0}.${fp:-0}" ]]; then
-            die "Sysbox $sv-$pre is a pre-release of the floor $SYSBOX_MIN_VERSION — cannot prove it carries the CVE patches, refusing"
-        fi
-    fi
-    SYSBOX_VERSION="$sv${pre:+-$pre}"
-    export SYSBOX_VERSION
-}
-
-# Die unless a CVE-patched Sysbox is installed AND registered with Docker. On success,
-# exports SYSBOX_VERSION (the parsed full version) for callers to report.
-# Test seams — UNIT TESTS ONLY, loudly warned when active (bin/claude-sysbox-verify
-# unsets both up front so an ambient/leftover value can never neutralize the real gate):
-# CLAUDE_SYSBOX_FAKE_VERSION injects a version string (skips the binary);
-# CLAUDE_SYSBOX_SKIP_DOCKER=1 skips the Docker daemon + runtime-registration check.
-preflight_sysbox() {
-    local sv=""
-    if [[ -n "${CLAUDE_SYSBOX_FAKE_VERSION:-}" ]]; then
-        warn "TEST SEAM ACTIVE: CLAUDE_SYSBOX_FAKE_VERSION='${CLAUDE_SYSBOX_FAKE_VERSION}' — the real sysbox-runc is NOT being checked"
-        sv="$CLAUDE_SYSBOX_FAKE_VERSION"
-    else
-        command -v sysbox-runc >/dev/null 2>&1 \
-            || die "sysbox-runc not found — install Sysbox >= $SYSBOX_MIN_VERSION first (docs/substrate.md)"
-        # Robust to both output shapes ("sysbox-runc version X.Y.Z" and the multi-line
-        # "version: X.Y.Z" form). Keep any pre-release/build suffix — the floor logic
-        # in sysbox_version_check must SEE a suffix to refuse it. `|| true`: a no-match
-        # grep must reach the die below with its message, not be eaten by errexit.
-        sv="$(sysbox-runc --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*' | head -1 || true)"
-        [[ -n "$sv" ]] || die "could not parse a version out of 'sysbox-runc --version'"
-    fi
-    sysbox_version_check "$sv"
-    if [[ "${CLAUDE_SYSBOX_SKIP_DOCKER:-0}" != 1 ]]; then
-        need_docker
-        docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"sysbox-runc"' \
-            || die "Docker has no 'sysbox-runc' runtime registered — see docs/substrate.md (daemon.json + SIGHUP reload)"
-    else
-        warn "TEST SEAM ACTIVE: CLAUDE_SYSBOX_SKIP_DOCKER=1 — Docker runtime registration is NOT being checked"
-    fi
-    # SYSBOX_VERSION was normalized + exported by sysbox_version_check above.
-}
-
-# --- K-aware resource sizing (CC-3) -------------------------------------------
-# THE per-worker resource profile — the single definition the broker template,
-# the controller-envelope math, and the verify scripts all read (roadmap §5
-# starting numbers; re-measured under CC-7/PAR-6.1 before any K-ramp). .env /
-# environment overrides win (sourced above), but the K VALUE itself is never
-# defined here — it comes from the umbrella operations/parallel.config.json via
-# resolve_parallel_k below (one source of truth, never forked into this repo).
-CLAUDE_WORKER_MEM="${CLAUDE_WORKER_MEM:-4g}"
-# CLAUDE_WORKER_MEM_RESERVATION (the soft floor) is DERIVED from the worker mem
-# below (once mem_reservation_for is defined) when unset — 75% of the effective
-# mem, mirroring the flat-session CLAUDE_MEM_RESERVATION path. A fixed default
-# (the old `3g`) would INVERT (reservation > limit) the moment an operator lowers
-# CLAUDE_WORKER_MEM below it (e.g. a 2g worker profile), which Docker rejects.
-CLAUDE_WORKER_CPUS="${CLAUDE_WORKER_CPUS:-2}"
-CLAUDE_WORKER_PIDS="${CLAUDE_WORKER_PIDS:-2048}"
-CLAUDE_WORKER_SHM="${CLAUDE_WORKER_SHM:-2g}"
-# Flat-session fork-bomb guard (claude-launch / compose services). Same default
-# as the worker profile — one session ≈ one worker's workload.
+# Flat-session fork-bomb guard (claude-launch / compose services).
 CLAUDE_PIDS_LIMIT="${CLAUDE_PIDS_LIMIT:-2048}"
-# Controller overheads: what the controller itself (inner dockerd + broker +
-# slack) needs ON TOP of Σ(K workers) — roadmap §5 table (~1 CPU / ~2 GB).
-CLAUDE_CTRL_CPU_OVERHEAD="${CLAUDE_CTRL_CPU_OVERHEAD:-1}"
-CLAUDE_CTRL_MEM_OVERHEAD_MIB="${CLAUDE_CTRL_MEM_OVERHEAD_MIB:-2048}"
-CLAUDE_CTRL_PIDS_OVERHEAD="${CLAUDE_CTRL_PIDS_OVERHEAD:-1024}"
 
 # size_to_mib <docker-size> — print a docker size string (4g / 3072m / 512k /
 # plain bytes) as integer MiB, rounded UP so a requirement is never
@@ -293,85 +182,9 @@ if [[ -z "${CLAUDE_MEM_RESERVATION:-}" ]]; then
         || die "unparseable CLAUDE_MEM_LIMIT '$CLAUDE_MEM_LIMIT' — cannot derive a memory reservation (fail closed)"
 fi
 
-# Per-worker soft memory floor (CC-4-RESIDUAL): same rule as the flat path — an
-# explicit CLAUDE_WORKER_MEM_RESERVATION wins; else derive 75% of the worker mem
-# so it always scales with (and never inverts above) the hard --memory limit,
-# even when an operator lowers CLAUDE_WORKER_MEM below the old fixed 3g default.
-if [[ -z "${CLAUDE_WORKER_MEM_RESERVATION:-}" ]]; then
-    CLAUDE_WORKER_MEM_RESERVATION="$(mem_reservation_for "$CLAUDE_WORKER_MEM")" \
-        || die "unparseable CLAUDE_WORKER_MEM '$CLAUDE_WORKER_MEM' — cannot derive a worker memory reservation (fail closed)"
-fi
-
-# resolve_parallel_k — print K, the fleet parallelism, read from the umbrella's
-# operations/parallel.config.json (the ONE source of truth — this repo never
-# defines its own K). Lookup order:
-#   1. $CLAUDE_PARALLEL_CONFIG — an explicit path; missing or unparseable DIES
-#      (an explicitly-named config is never silently ignored);
-#   2. the umbrella-submodule layout ($CLAUDE_DOCKER_ROOT/../operations/…);
-#   3. the in-container umbrella workspace (/workspace/operations/…).
-# No file found → the documented umbrella default K=2, with a warning. A file
-# that IS found but yields garbage DIES (fail closed): a garbage K silently
-# becoming 2 could under-size a controller that then overcommits.
-resolve_parallel_k() {
-    local cfg="" c k=""
-    if [[ -n "${CLAUDE_PARALLEL_CONFIG:-}" ]]; then
-        cfg="$CLAUDE_PARALLEL_CONFIG"
-        [[ -f "$cfg" ]] || die "CLAUDE_PARALLEL_CONFIG='$cfg' does not exist — refusing to guess K"
-    else
-        for c in "$CLAUDE_DOCKER_ROOT/../operations/parallel.config.json" \
-                 /workspace/operations/parallel.config.json; do
-            [[ -f "$c" ]] && { cfg="$c"; break; }
-        done
-    fi
-    if [[ -z "$cfg" ]]; then
-        warn "no umbrella operations/parallel.config.json found — using the documented umbrella default K=2"
-        echo 2; return 0
-    fi
-    if command -v jq >/dev/null 2>&1; then
-        k="$(jq -er '.K' "$cfg" 2>/dev/null)" || k=""
-    else
-        # No jq: capture the WHOLE value token (up to , } or whitespace) so a
-        # fractional/garbage K reaches the integer validation below and refuses
-        # — never truncates to its integer part.
-        k="$(grep -oE '"K"[[:space:]]*:[[:space:]]*[^,}[:space:]]+' "$cfg" 2>/dev/null | head -1 | sed 's/^"K"[[:space:]]*:[[:space:]]*//')" || k=""
-    fi
-    [[ "$k" =~ ^[0-9]+$ ]] && (( k >= 1 && k <= 16 )) \
-        || die "could not parse a sane K from $cfg (got '${k:-nothing}') — refusing (fail closed)"
-    echo "$k"
-}
-
-# controller_envelope <K> — the Sysbox controller envelope for K nested workers.
-# The parent cgroup caps the SUM of its children (workers + inner dockerd +
-# broker), so the controller must carry Σ(K · worker profile) + overhead.
-# Exports CTRL_CPUS, CTRL_MEM_MIB, CTRL_MEM_RESERVATION_MIB, CTRL_PIDS.
-# Worker shm is tmpfs charged to each worker's own memory cgroup, so it rides
-# inside the per-worker --memory cap — no separate controller shm term.
-controller_envelope() {
-    local k="$1" wm wr
-    [[ "$k" =~ ^[0-9]+$ ]] && (( k >= 1 )) || die "controller_envelope: K must be a positive integer (got '$k')"
-    wm="$(size_to_mib "$CLAUDE_WORKER_MEM")" \
-        || die "unparseable CLAUDE_WORKER_MEM '$CLAUDE_WORKER_MEM' — refusing (fail closed)"
-    wr="$(size_to_mib "$CLAUDE_WORKER_MEM_RESERVATION")" \
-        || die "unparseable CLAUDE_WORKER_MEM_RESERVATION '$CLAUDE_WORKER_MEM_RESERVATION' — refusing (fail closed)"
-    [[ "$CLAUDE_WORKER_PIDS" =~ ^[0-9]+$ ]] \
-        || die "CLAUDE_WORKER_PIDS '$CLAUDE_WORKER_PIDS' is not an integer — refusing (fail closed)"
-    [[ "$CLAUDE_WORKER_CPUS" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
-        || die "CLAUDE_WORKER_CPUS '$CLAUDE_WORKER_CPUS' is not a number — refusing (fail closed)"
-    [[ "$CLAUDE_CTRL_MEM_OVERHEAD_MIB" =~ ^[0-9]+$ && "$CLAUDE_CTRL_PIDS_OVERHEAD" =~ ^[0-9]+$ \
-       && "$CLAUDE_CTRL_CPU_OVERHEAD" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
-        || die "controller overhead settings are not numeric — refusing (fail closed)"
-    CTRL_MEM_MIB=$(( k * wm + CLAUDE_CTRL_MEM_OVERHEAD_MIB ))
-    CTRL_MEM_RESERVATION_MIB=$(( k * wr + CLAUDE_CTRL_MEM_OVERHEAD_MIB ))
-    CTRL_PIDS=$(( k * CLAUDE_WORKER_PIDS + CLAUDE_CTRL_PIDS_OVERHEAD ))
-    CTRL_CPUS="$(awk -v k="$k" -v w="$CLAUDE_WORKER_CPUS" -v o="$CLAUDE_CTRL_CPU_OVERHEAD" \
-        'BEGIN{ c = k*w + o; if (c == int(c)) printf "%d", c; else printf "%.2f", c }')"
-    export CTRL_CPUS CTRL_MEM_MIB CTRL_MEM_RESERVATION_MIB CTRL_PIDS
-}
-
-# --- Disk-space safety (CC-5) --------------------------------------------------
+# --- Disk-space safety --------------------------------------------------------
 # disk_free_mib <path> — print the free space, in integer MiB, on the
-# filesystem holding <path>. Backs both the broker's per-launch disk-floor
-# refusal (broker_check_disk) and bin/claude-disk-gc/-verify.
+# filesystem holding <path>. Backs bin/claude-disk-gc's before/after reporting.
 #
 # `df -P -B1M <path>` gives POSIX-format, 1-MiB-block output regardless of
 # locale/column-width quirks; the "Available" column is the 4th field of the

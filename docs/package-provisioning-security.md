@@ -4,12 +4,16 @@
 **decision record** for self-service package provisioning in `claude-containers`. The repo keeps no
 formal `decisions/` directory, so this doc *is* the record (the umbrella-side roadmap
 `operations/roadmaps/claude-containers.md` §II.8 tracks it as the ADR "claude-containers package
-provisioning = curated-allowlist + contained install"). It **gates PKG-2..PKG-6** — nothing that
-lets the agent fetch packages builds until the containment described here is in place.
+provisioning = curated-allowlist + contained install"). It **gates PKG-2/PKG-3/PKG-5** — nothing
+that lets the agent fetch packages builds until the containment described here is in place.
+(§3.4 and §3.7 below are **RETIRED** — they documented PKG-4's worker-tier `apt` and PKG-6's
+pull-through cache proxy, both retired in SC-5 along with the Sysbox nested-worker-broker substrate
+they were scoped to — see [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md). Read §3.1, §3.2,
+§3.3, §3.5 and §3.6 as the live containment rules.)
 
 **Scope of what shipped in PKG-1:** the opt-in `CLAUDE_EGRESS_PACKAGES` profile in
 `bin/claude-egress-firewall` (an additive, IP-pinned registry allowlist) plus this threat model.
-Everything downstream — `mise` (PKG-2), the shared cache (PKG-3), brokered `apt` (PKG-4),
+Everything downstream — `mise` (PKG-2), the shared cache (PKG-3),
 `--ignore-scripts` + pinned manifests (PKG-5) — inherits the containment stated here.
 
 ---
@@ -53,7 +57,7 @@ attack**, not an incidental convenience. Two tempting half-measures do not close
 - **App-layer / SNI / hostname allowlists are bypassable.** A hostname- or SNI-based filter can be
   defeated (SNI can be spoofed or omitted, DNS can be abused as a covert channel, the check often
   lives in the same context the attacker already controls). The `claude-containers` egress model
-  deliberately rejected them once already for this reason — see `docs/substrate.md` and the firewall
+  deliberately rejected them once already for this reason — see `bin/claude-egress-firewall`'s own
   header.
 
 The containment therefore has to be an **IP-pinned, curated (not open) netfilter allowlist applied
@@ -136,15 +140,23 @@ provide this and provisioning **inherits, never bypasses** them:
 secrets being *committed*, not exfiltrated over the network. It is not what closes the fetch-window
 exfil path; the two controls above are.)
 
-### 3.4 Install-then-relock — a narrow provisioning window
+### 3.4 Install-then-relock — a narrow provisioning window — RETIRED (SC-5)
 
-The registry-egress window is kept **narrow**: open the package allowlist only for the provisioning
-window, then **re-lock** (or, in the leaf-session case, never broaden the base at all — `mise`'s
-`github:`/`aqua:` backends already work on the default allowlist). The exfil path must not be left
-open after the fetch completes. In the Sysbox worker tier this is explicit — PKG-4's brokered `apt`
-opens the Debian mirrors for the install window and re-locks afterward. The principle is the same
-everywhere: a bounded fetch window with registry egress, credentials unreachable throughout, egress
-re-locked when the fetch is done.⁹ᐟ¹⁰
+**This rule no longer holds and nothing on `main` implements it.** It described PKG-4's brokered
+`apt`, which opened the Debian mirrors for the install window and re-locked egress afterward
+(`bin/claude-apt-provision` + `CLAUDE_EGRESS_APT`). PKG-4 and PKG-6 were retired with the
+Sysbox/broker substrate in `SC-5` (§3.7), and with them the only code that ever opened and
+re-locked a window. `grep -rn -i 'relock\|re-lock' bin/ entrypoint.sh` now returns nothing.
+
+**The true posture on `main`:** `bin/claude-egress-firewall` is a **one-shot boot script** — it runs
+once, as root, before the privilege drop, and never re-locks. `CLAUDE_EGRESS_PACKAGES=1` therefore
+allowlists the curated **registry** hosts (§3.1) for the container's **entire lifetime**, not for a
+bounded window. Do not read this section as a live bound on exposure. What actually contains a
+poisoned package under `CLAUDE_EGRESS_PACKAGES=1` is the *curated* (never open) allowlist (§3.1),
+scripts-off-by-default (§3.2), and credential unreachability (§3.3) — not a relock.
+
+Recorded here rather than deleted because §5's decision record cites this rule; see
+[docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md) for the frozen implementation.⁹ᐟ¹⁰
 
 ### 3.5 Opt-in + additive, fail-open-as-a-whole preserved
 
@@ -188,80 +200,26 @@ can drift between the agent's install and a later one. PKG-5 adds two reproducib
 Neither is tamper-proof on its own (see the CVE-2025-69263 lockfile-integrity caveat in §3.2); they
 reduce the *drift* and *unpinned-resolution* surface, and compose with the egress + scripts-off layers.
 
-### 3.7 Worker-tier curated `apt` — **shipped (PKG-4)**
+### 3.7 Worker-tier curated `apt` and the pull-through cache proxy — RETIRED (SC-5)
 
-The syslib gap `mise` can't fill: some worker workloads need a Debian **system** library (a `.so`) that
-rootless `mise` toolchains cannot provide. PKG-4 fills it in the **Sysbox worker tier only**, with the
-same containment posture as the rest of this document — `bin/claude-apt-provision`, invoked by the
-worker entrypoint as root *before* the agent starts (`CLAUDE_APT_PROVISION=1`, passed in by the CC-2
-broker):
-
-- **Worker-only (host-safe root).** It installs **only** when it is root mapped to a **non-root host
-  uid** — the Sysbox userns worker (root inside → unprivileged on host⁴), exactly what
-  `claude-sysbox-verify` §3a proves. A plain **leaf** container (agent runs unprivileged; or a runc-root
-  container whose root maps to host root) gets the **documented refusal** — *"no root — use `mise` /
-  static binaries, or rebuild the base image"* — never a silent partial. The same self-gate means
-  setting the flag on a leaf is a logged no-op, not a half-install.
-- **Curated, not open.** Only packages in the committed, declarative
-  `claude-config/apt-manifest.txt` install; the default manifest is **empty** (curation is a deliberate,
-  reviewed act). Package specs are strictly validated (lowercase alnum + `+ . -`, optional exact-version
-  pin) — a malformed entry fails the **whole** apply closed. Arbitrary agent-driven `apt` of untrusted
-  repos is **refused**; a request for a package *not* in the manifest is refused, and a request for one
-  that *is* resolves to the manifest's **own** pinned spec (a request can't smuggle a different version).
-- **Install-then-relock (§3.4), all-or-refuse.** The provisioner opens `deb.debian.org` /
-  `security.debian.org` for the install window via the firewall's opt-in `CLAUDE_EGRESS_APT` profile
-  (additive + IP-pinned like `CLAUDE_EGRESS_PACKAGES`, off by default, absent from the leaf/base
-  allowlist), runs `apt-get install --no-install-recommends`, then **re-locks** to the default-deny base.
-  The relock runs on **every** exit path — including a failed or refused install — so no path leaves a
-  half-provisioned *or* egress-open worker. As a final backstop the entrypoint re-runs the general egress
-  lockdown *after* provisioning, so the seal never depends on the relock alone.
-
-The live proof (a manifest package installs in a real Sysbox worker **and** `id` shows root→non-root
-host uid; a leaf refuses; an out-of-manifest request refuses; egress re-locked after the window) needs a
-Sysbox host and is the on-host gate. The provisioner's logic — tier gate, validator, curated resolution,
-and the open→install→relock order — is proven in CI via seams (`test/apt-provision-unit.sh`) with no
-root, apt, or iptables.
-
-### 3.8 Controller-side caching proxy — the single audited choke point — **shipped (PKG-6, demand-gated)**
-
-The heaviest containment tier, and the only one that collapses **all** package egress to **one** audited
-host. A **pull-through cache** (default Nexus OSS) runs on the controller's inner dockerd, root-owned
-like the CC-2 broker (`bin/claude-cache-proxy`). With `CLAUDE_CACHE_PROXY=1` under egress lockdown:
-
-- **Single choke point.** Each worker points `npm`/`pip`/`go`/`apt` at the proxy and its egress firewall
-  is **narrowed to just the proxy** — the public npm registry is dropped from the base allowlist and the
-  curated `CLAUDE_EGRESS_PACKAGES` (§3.1) / `CLAUDE_EGRESS_APT` (§3.7) public registries are **not**
-  added (the proxy fronts them). The proxy is then the **only** external fetcher for packages, so every
-  install is one auditable hop, not N direct-to-registry connections. This is the durable fix for the
-  §4 apt-CDN-pinning reliability limit (a cache hit needs no live CDN fetch).
-- **Fail-closed (§3.4 taken to its limit).** "Proxy down → provision refused, never a silent fallback to
-  open/public-registry egress." `claude-cache-proxy ready` accepts **only** a 2xx health response —
-  an unreachable proxy (`000`), a 3xx (up but not yet serving), a 5xx, or a bad timeout config all fail.
-  The controller **refuses to
-  start** if the proxy can't become ready; a worker's `client-apply` runs the ready gate **first** and
-  **dies** (no agent, no config written) if it can't reach the proxy. There is no half-applied state a
-  fallback could exploit.
-- **Opt-in / additive / no widened surface.** Nothing changes unless `CLAUDE_CACHE_PROXY` /
-  `CLAUDE_CACHE_PROXY_HOST` is set — the egress-firewall OFF path is byte-identical (§3.5). The proxy is
-  reached over a shared docker network by name; **no host port is published**. It is labelled
-  `claude.cacheproxy=1` (not `claude.worker=1`), so the CC-4 reaper never touches it.
-
-Full operator guide + the on-host live gate (real Nexus, install through it, second-worker cache hit,
-proxy-down refusal): **[caching-proxy.md](caching-proxy.md)**. The logic — the fail-closed ready gate,
-the `client-apply` refusal, the single-choke-point egress composition, and the broker/worker wiring — is
-proven in CI via seams (`test/cache-proxy-unit.sh`) with no docker, curl, or root. It stays **demand-
-gated**: build a proxy only when one auditable egress path, reproducibility under K, or air-gapped
-workers is the goal — the curated allowlist (§3.1–3.7) is the default.
+Two further containment tiers used to build on top of the above: a worker-tier curated `apt`
+(PKG-4, `bin/claude-apt-provision` + `claude-config/apt-manifest.txt`) that closed the system-`.so`-library
+gap `mise` can't fill, in the Sysbox nested-worker tier only; and a controller-side pull-through
+package cache (PKG-6, `bin/claude-cache-proxy`) that collapsed all package egress to one audited
+proxy host. Both were retired in SC-5 along with the Sysbox nested-worker-broker substrate they
+were scoped to — see [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md) for the frozen
+implementation. System `.so` libraries currently have **no** self-service provisioning path in this
+repo (a documented non-goal — see §4); a plain leaf container never had `apt` access, and now
+neither does anything else.
 
 ## 4. What this does NOT cover (honest non-goals)
 
-- **System libraries (`apt`) are not a leaf-container capability.** The agent runs as non-root UID 1000
-  with no `sudo`; `apt-get install <syslib>` is impossible in a plain leaf container by design. Real
-  system `.so` libraries need the **rootful Sysbox-worker tier** (PKG-4) — userns-contained container
-  root, brokered from a curated manifest by the CC-2 root broker — **or** a base-image rebuild. The
-  Debian mirrors are intentionally absent from the PKG-1 profile for this reason; they are opened only
-  in that worker tier, for the install window, then re-locked. A leaf container gets a documented
-  refusal, never a silent half-install.
+- **System libraries (`apt`) are not a self-service capability at all.** The agent runs as non-root
+  UID 1000 with no `sudo`; `apt-get install <syslib>` is impossible in a plain container by design.
+  A worker-tier `apt` path used to close this gap (PKG-4, §3.7) but was retired in SC-5 along with the
+  Sysbox substrate it depended on. The Debian mirrors are intentionally absent from the PKG-1 profile
+  for this reason. Getting a system library today means a base-image rebuild (add it to the Dockerfile)
+  — there is no in-session provisioning path, and none is planned unless the Sysbox substrate returns.
 - **`ghcr.io`'s blob CDN may need follow-up host additions.** The profile pins `ghcr.io`, but OCI blob
   layers can be served from a separate CDN host; if aqua/OCI pulls fail on a blob fetch, the specific
   CDN host is a follow-up allowlist addition — this profile does not claim to have enumerated every
@@ -275,38 +233,8 @@ workers is the goal — the curated allowlist (§3.1–3.7) is the default.
   does **not** query registries to reject too-new releases (a "wait N days before trusting a version"
   control). That needs live registry egress on every check, which cuts against the offline/locked
   posture; it stays a possible future control, deliberately not built here.
-- **The apt window pins Debian's CDN to point-in-time IPs (PKG-4).** `deb.debian.org` /
-  `security.debian.org` are Fastly-backed and rotate; the firewall pins the IPs resolved when the window
-  opens, so an `apt` connection that reconnects to a *different* CDN IP mid-install can be dropped by
-  default-deny and fail the install (rc 5, the worker boots without the package). This is the same
-  IP-pinning tradeoff the whole firewall makes for every CDN-backed host (npm, ghcr); the window is
-  short so fresh IPs usually hold, but a rotation-timing failure is a known reliability limit, not a
-  containment hole (a dropped connection fails *closed*). A pull-through apt proxy (PKG-6) is the durable
-  fix; it is demand-gated, not built here.
-- **PKG-4 relock inherits the firewall's fail-**open**.** If the relock's `iptables` apply fails, the
-  firewall fails **open** (egress unrestricted) exactly as its base contract says — the provisioner logs
-  an ERROR and returns non-zero, and the entrypoint's general lockdown re-seals afterward, so the worker
-  is not left open on the entrypoint path. A **standalone** `claude-apt-provision` invocation (not via
-  the entrypoint) has no such final seal and must re-lock egress itself. PKG-4 does not change the
-  fail-open contract; a fail-*closed* firewall is a separate, deliberate non-decision (it would let a
-  misconfig brick a homelab's connectivity).
-- **`CLAUDE_APT_PROVISION=1` with egress lockdown OFF runs `apt` over open egress.** With no
-  `CLAUDE_EGRESS_LOCKDOWN=1` there is no scoped `deb.debian.org` window and no relock — `apt` fetches
-  over the container's default (open) egress. The entrypoint **warns** on this incoherent combination;
-  it is a config choice, not silent. The contained install window exists only under egress lockdown.
-- **Under lockdown, provisioning re-applies the firewall up to three times at boot** (open-with-apt →
-  relock → the entrypoint's general lockdown), each a full re-resolution of the allowlist — tens of
-  seconds on a worker with both flags on. The redundancy is deliberate (the general lockdown is the
-  authoritative final seal, and the provisioner's own relock covers standalone use); an incremental
-  "add two hosts to the live ruleset" fast path is a possible future optimization, not built here.
-- **Sysbox is weaker isolation than a VM / gVisor / Kata.** The worker tier that carries `apt` is
-  host-*contained* by a Linux user namespace, not a hostile-tenant boundary. A container — Sysbox
-  included — is **not** a security boundary against a fully-weaponized agent; multi-tenant / hostile-
-  tenant use stays a permanent non-goal (`docs/substrate.md`, README, roadmap §II.9).
 - **Not "install anything from the open internet."** Egress stays default-deny plus a curated
-  allowlist; the full pull-through-proxy tier (Nexus/Verdaccio/Athens, **PKG-6, §3.8**) is now built but
-  stays **demand-gated** — it is the durable single-choke-point / air-gap path, off unless
-  `CLAUDE_CACHE_PROXY=1`, never the default posture.
+  allowlist — never open, never an app-layer/SNI filter.
 
 ## 5. Decision & status
 
@@ -317,15 +245,21 @@ workers is the goal — the curated allowlist (§3.1–3.7) is the default.
   in `bin/claude-egress-firewall`), scoped to the canonical registry hosts in §3.1 — never open
   egress, never an app-layer/SNI filter, always outside the agent's reach.
 - Install-time scripts are **off by default** (PKG-5); credentials are **unreachable during the fetch
-  window** (git-key broker + egress DROP); the provisioning window is **narrow and re-locked**
-  (install-then-relock); nothing broadens egress implicitly, and the firewall's fail-open-as-a-whole
-  semantics are preserved.
-- System-library provisioning is a **Sysbox-worker-tier, brokered, curated-manifest** capability
-  (PKG-4), never available rootless in a leaf container.
+  window** (git-key broker + egress DROP); nothing broadens egress implicitly, and the firewall's
+  fail-open-as-a-whole semantics are preserved.
+- System-library provisioning has **no self-service path** (§3.7/§4) — a base-image rebuild only.
 
-This decision **gates PKG-2..PKG-6**: `mise` (rootless toolchains + CLI binaries), the shared tool
-cache, brokered worker-tier `apt`, and the pinned/`--ignore-scripts` reproducibility hardening all
-build on top of the containment recorded here and inherit it rather than re-deciding it.
+> **Amended by `SC-5` (2026-07-12).** The **install-then-relock** window (§3.4) was PKG-4's
+> mechanism: `bin/claude-apt-provision` opened `deb.debian.org` egress for the install and
+> re-locked it. PKG-4 and PKG-6 were **retired with the Sysbox/broker substrate** (§3.7), so
+> there is no longer any in-session system-package install path to contain — which is why the
+> bullet above states there is no self-service path at all. The surviving containment is the
+> curated **registry** allowlist (§3.1), scripts-off-by-default (§3.2), credential
+> unreachability (§3.3), and pinned manifests (§3.6). See `docs/legacy-sysbox-broker.md`.
+
+This decision **gates PKG-2/PKG-3/PKG-5**: `mise` (rootless toolchains + CLI binaries), the shared
+tool cache, and the pinned/`--ignore-scripts` reproducibility hardening all build on top of the
+containment recorded here and inherit it rather than re-deciding it.
 
 ---
 

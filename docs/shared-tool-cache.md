@@ -72,18 +72,17 @@ claude-compose-gen --out stack.yml --no-cache …            # per-container ins
    therefore read-mostly: the common case is a hit (read); a miss is one worker's guarded
    write that becomes every worker's next hit.
 
-## Bounding the cache (CC-5 over the shared volume)
+## Bounding the cache
 
 The `/cache` volume is a **named** volume, so `claude-disk-gc`'s `docker system prune -f` /
-`builder prune -f` deliberately never touch it. Both halves of CC-5 still span it:
+`builder prune -f` deliberately never touch it. `claude-disk-gc` is a standalone
+maintenance tool (run it by hand or on your own cron/timer) that spans it:
 
-- **Free-space floor (refusal half) — implicit.** The shared volume lives on the docker data
-  root (`CLAUDE_DISK_DATA_ROOT`, default `/var/lib/docker`), so a filling cache lowers the
-  free space the broker's per-launch floor (`CLAUDE_DISK_FLOOR_MIB`) already guards. A cache
-  that grows toward the floor makes the broker refuse **new** worker launches before the host
-  is starved — no new wiring needed.
+- **Free-space reporting.** The shared volume lives on the docker data root
+  (`CLAUDE_DISK_DATA_ROOT`, default `/var/lib/docker`), so a filling cache lowers the free
+  space `claude-disk-gc` reports before/after each cycle.
 
-- **Reclaim (prune half) — the cache trim.** Each `claude-disk-gc` cycle also runs a **cache
+- **Reclaim — the cache trim.** Each `claude-disk-gc` cycle also runs a **cache
   trim** (`cache_gc_once`). When the volume exceeds `CLAUDE_CACHE_MAX_MIB` (default 20 GiB) it
   removes **only the re-fetchable download/registry caches** — the installed toolchains,
   shims, and `cargo`/`go` bins are **kept**, so a trim frees space without un-provisioning a
@@ -100,8 +99,8 @@ The `/cache` volume is a **named** volume, so `claude-disk-gc`'s `docker system 
   The trim is **fail-safe and idle-gated**: it is a no-op when the cache is disabled, when its
   size can't be measured (fail-soft — unknown ⇒ do not trim), when it is under budget, and —
   critically — **while any container mounting the cache is running** (the guard is `docker ps
-  --filter volume=<vol>`, so it covers broker workers *and* the `claude-launch`/compose
-  containers that mount `/cache`, not just a worker label). An `rm` of a download cache
+  --filter volume=<vol>`, so it covers every `claude-launch`/compose container that mounts
+  `/cache`, gating on the volume rather than a narrower label). An `rm` of a download cache
   mid-install would break that install, so the trim only runs when the cache is idle. The
   reclaim itself is a throwaway root `/bin/sh` helper that mounts **only** the cache volume and
   `rm -rf`s the fixed list — never `-a`, never `--volumes`, never a host path.
@@ -132,14 +131,14 @@ size / disabled cache; and `claude-launch` / `claude-compose-gen` mount the shar
 honor `--no-cache`. `test/mise-unit.sh` additionally proves the relocated shims dir is still on
 `PATH` for the agent and `/workspace`-only config trust is intact.
 
-`bin/claude-disk-verify --check` re-runs the docker-free cache-trim safety (the plan is
-re-fetchable-only, and the idle guard gates on the cache **volume** so it covers
-`claude-launch`/compose containers, not just broker workers) as part of the CC-5 fleet-host
-sanity pass. The **live proof** needs a full image build and is the manual on-host procedure
-below (like `make smoke`). As UID 1000, with no `sudo`, cache **on** (the default):
+`bin/claude-disk-verify` re-runs the docker-free cache-trim safety (the plan is
+re-fetchable-only, and the idle guard gates on the cache **volume** so it covers every
+`claude-launch`/compose container) as a one-command sanity pass. The **live proof** needs
+a full image build and is the manual on-host procedure below (like `make smoke`). As UID
+1000, with no `sudo`, cache **on** (the default):
 
 ```bash
-# session A provisions; session B (or a parallel worker) is a HIT
+# session A provisions; session B is a HIT
 claude-launch a --repo … ; ssh … 'mise use node@22'          # downloads to /cache/mise
 claude-launch b --repo … ; ssh … 'time mise use node@22'     # cache hit — no refetch
 
@@ -152,12 +151,12 @@ CLAUDE_CACHE_MAX_MIB=1 claude-disk-gc         # trims re-fetchable caches; node@
 
 ## The trust boundary (inherited + new)
 
-A single cache **shared across every worker on a host** is a shared-fate surface: a package
-one worker fetches is reused by the others. This is **acceptable and bounded**, not a new
+A single cache **shared across every container on a host** is a shared-fate surface: a package
+one container fetches is reused by the others. This is **acceptable and bounded**, not a new
 hole:
 
-- The workers on a host are **one operator's fleet** — the same trust domain that already
-  shares the git-key broker, the auth volume, and the inner docker daemon.
+- The containers on a host are **one operator's fleet** — the same trust domain that already
+  shares the git-key broker and the auth volume.
 - **What can enter the cache is still governed by PKG-1**: under `CLAUDE_EGRESS_LOCKDOWN=1`
   only the curated, IP-pinned registries are reachable, and credentials are unreachable
   during a fetch. The cache holds tool binaries and **public** package archives — **no repo
@@ -172,10 +171,11 @@ hole:
   (script hardening); it does not replace them. It does not add isolation between co-tenant
   workers beyond what they already share.
 - **No cross-host sharing.** `/cache` is a per-host docker volume. Sharing a store across
-  physically different hosts is exactly mise's cross-machine caveat¹ and the (demand-gated)
-  job of the PKG-6 controller-side pull-through proxy, not this volume.
-- **No system `.so` libraries.** Inherited from PKG-2/PKG-4: the cache holds binaries and
-  language packages, never system libraries — those stay the Sysbox-worker apt tier (PKG-4).
+  physically different hosts is exactly mise's cross-machine caveat¹; a pull-through proxy
+  (PKG-6) used to offer that, but was retired in SC-5 (docs/legacy-sysbox-broker.md).
+- **No system `.so` libraries.** Inherited from PKG-2: the cache holds binaries and language
+  packages, never system libraries — no self-service path provisions those (the worker-tier apt
+  path that used to, PKG-4, was retired in SC-5; see docs/legacy-sysbox-broker.md).
 
 ---
 

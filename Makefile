@@ -19,9 +19,11 @@ BUILDX_BUILDER      ?= claude-box
 # Frontend-debugging variant: 1 bakes headless Chromium + chrome-devtools-mcp.
 # Off by default (the lean image is unchanged). `make build-browser` flips it.
 WITH_BROWSER        ?= 0
-# Controller variant: 1 bakes the Docker engine (dockerd + CLI + containerd) so
-# the image can run an inner dockerd and spawn nested workers under Sysbox
-# (CC-6 / `claude-launch --broker`). Off by default. `make build-controller` flips it.
+# Controller variant: 1 bakes the Docker engine (dockerd + CLI + containerd). Off by
+# default. `make build-controller` flips it. (The Sysbox nested-worker-broker path
+# this variant used to serve was retired in SC-5 — see docs/legacy-sysbox-broker.md;
+# the variant still builds because SC-6 will decide whether the controller tier
+# survives at all.)
 WITH_DOCKER         ?= 0
 
 BUILD_ARGS = \
@@ -63,9 +65,8 @@ build-browser: ## Build the browser-enabled variant (Chromium + chrome-devtools-
 
 build-controller: ## Build the controller variant (Docker engine baked in), tag :controller
 	@$(MAKE) build WITH_DOCKER=1 CLAUDE_IMAGE=$(or $(CLAUDE_IMAGE_CONTROLLER),claude-code-box:controller)
-	@echo "Built controller variant. Launch an interactive lead that can spawn nested workers:"
-	@echo "  ./bin/claude-launch <name> --broker --repo git@github.com:you/x.git"
-	@echo "Needs Sysbox on the host (docs/substrate.md); --broker selects this image automatically."
+	@echo "Built controller variant (docker engine baked in, dormant capability)."
+	@echo "See docs/legacy-sysbox-broker.md — SC-6 will decide whether this tier survives."
 
 push: builder ## Build+push amd64+arm64 to the registry in CLAUDE_IMAGE
 	docker buildx build $(BUILD_ARGS) --platform $(PLATFORMS) \

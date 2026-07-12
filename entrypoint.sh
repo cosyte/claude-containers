@@ -22,6 +22,49 @@ log()  { echo "[entrypoint] $*"; }
 die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
 asclaude() { gosu "$CLAUDE_USER" env CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" "$@"; }
 
+# --- 0. Refuse retired broker/Sysbox env (SC-5) -------------------------------
+# bin/claude-launch and bin/claude-compose-gen already REFUSE the removed --broker /
+# --sysbox / --worker-tarball flags. The env vars those flags used to set are now simply
+# UNREAD, and silence there is not safe: an operator running CLAUDE_CACHE_PROXY_HOST with
+# CLAUDE_EGRESS_LOCKDOWN=1 had a single audited egress choke point (public npm blocked, all
+# package traffic through their proxy). Post-SC-5 the var means nothing, the firewall
+# composes its default allowlist, and registry.npmjs.org is directly reachable again — a
+# real, silent loosening of their posture. So say so, loudly, at boot.
+#
+# WARN (not die) because these are inert leftovers in a .env, not an active request: a
+# container that refused to boot on a stale .env line would be a worse regression than the
+# one we are warning about. CLAUDE_BROKER_GIT_KEY is deliberately NOT in this list — it is
+# the git-key broker, a LIVE credential-isolation control, unrelated to the worker broker.
+RETIRED_VARS=(
+    CLAUDE_WORKER_BROKER CLAUDE_WORKER_TARBALL CLAUDE_BROKER_DIR CLAUDE_BROKER_SPOOL
+    CLAUDE_SYSBOX CLAUDE_SYSBOX_VERIFY
+    CLAUDE_CACHE_PROXY CLAUDE_CACHE_PROXY_HOST CLAUDE_CACHE_PROXY_PORT
+    CLAUDE_APT_PROVISION CLAUDE_EGRESS_APT
+    CLAUDE_CONTROLLER_MAX_SLOTS
+)
+_retired_set=()
+for _v in "${RETIRED_VARS[@]}"; do
+    [[ -n "${!_v:-}" ]] && _retired_set+=("$_v")
+done
+if (( ${#_retired_set[@]} > 0 )); then
+    log "WARNING: these env vars were RETIRED in SC-5 and are now IGNORED: ${_retired_set[*]}"
+    log "WARNING: the Sysbox worker-broker, PKG-4 curated apt, and the PKG-6 pull-through"
+    log "WARNING: cache proxy were removed — see docs/legacy-sysbox-broker.md."
+    for _v in "${_retired_set[@]}"; do
+        case "$_v" in
+            CLAUDE_CACHE_PROXY_HOST|CLAUDE_CACHE_PROXY|CLAUDE_CACHE_PROXY_PORT)
+                log "WARNING: $_v no longer routes package traffic through a proxy. If you relied"
+                log "WARNING: on it as an audited egress choke point, that is GONE: the firewall now"
+                log "WARNING: composes its default allowlist and registry.npmjs.org is reachable"
+                log "WARNING: directly. Re-establish the choke point outside this container." ;;
+            CLAUDE_EGRESS_APT|CLAUDE_APT_PROVISION)
+                log "WARNING: $_v is inert — there is no in-session system-package install path at"
+                log "WARNING: all now (a base-image rebuild is the only route to a new syslib)." ;;
+        esac
+    done
+fi
+unset _v _retired_set RETIRED_VARS
+
 # --- 1. Refuse API-key auth --------------------------------------------------
 # This image is OAuth-subscription only. An API key would silently override the
 # subscription and bill per-token, so fail fast and loud.
@@ -168,203 +211,6 @@ else
     log "No GH_TOKEN: git uses the SSH deploy key only; gh CLI is unauthenticated"
 fi
 
-# --- 5b. Worker broker (controller mode, CC-2) --------------------------------
-# CLAUDE_WORKER_BROKER=1 starts the ROOT-owned worker broker: on a controller
-# (a Sysbox container running an inner dockerd) it is the ONLY principal that
-# may launch nested workers. Mirrors the git-key broker above — root owns the
-# capability, the unprivileged agent gets a narrow request channel
-# (claude-worker-request → spool dir), never the inner Docker socket. The broker
-# FAILS CLOSED unless the substrate holds: userns containment readable from
-# /proc/self/uid_map AND a host-attested, CVE-patched Sysbox version in
-# CLAUDE_SYSBOX_ATTESTED_VERSION (the host launch path runs preflight_sysbox and
-# passes SYSBOX_VERSION in). See bin/claude-worker-broker for the template.
-#
-# CLAUDE_CONTROLLER=1 (CC-6) NEEDS the broker — the controller dispatches workers
-# via claude-worker-request, which talks to nothing without a live broker — so it
-# implies CLAUDE_WORKER_BROKER=1 here rather than silently no-op'ing later. An
-# operator who explicitly set CLAUDE_WORKER_BROKER=0 alongside CLAUDE_CONTROLLER=1
-# gets a loud refusal instead of a controller that starts and can never dispatch.
-if [[ "${CLAUDE_CONTROLLER:-0}" =~ ^(1|true|yes|on)$ ]]; then
-    case "${CLAUDE_WORKER_BROKER:-}" in
-        0|false|no|off)
-            die "CLAUDE_CONTROLLER=1 requires the worker broker, but CLAUDE_WORKER_BROKER was explicitly set to '${CLAUDE_WORKER_BROKER}'. Unset it (or set CLAUDE_WORKER_BROKER=1) to run controller mode." ;;
-        *) CLAUDE_WORKER_BROKER=1 ;;
-    esac
-    log "Controller mode      : CLAUDE_CONTROLLER=1 — implying CLAUDE_WORKER_BROKER=1 (the controller dispatches workers through the broker)"
-fi
-
-# --- 5a. Inner dockerd + worker broker (controller / --broker) ----------------
-# The worker broker (CC-2) and the nested workers it launches (CC-4) run on an
-# INNER dockerd that lives INSIDE this container — never the host daemon (a host
-# socket mount or --privileged DinD are both FORBIDDEN: umbrella ADR 0011). Under
-# Sysbox (--runtime=sysbox-runc) that inner daemon is contained by a user namespace
-# (root here → an unprivileged host uid), so it needs no privilege. Order matters:
-# start the inner dockerd FIRST (a missing/dead daemon must fail fast+clear here, not
-# as an opaque downstream timeout), then the broker, then §5c blocks the agent until
-# the broker is actually SERVING. Only the CONTROLLER image bakes dockerd
-# (WITH_DOCKER=1); a plain session or a leaf worker never sets CLAUDE_WORKER_BROKER
-# and so never reaches this block. (§5a + §5b share one guard on purpose.)
-if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
-    # --- inner dockerd ---
-    if docker info >/dev/null 2>&1; then
-        log "Inner dockerd        : already reachable — reusing it (not starting a second daemon)"
-    else
-        command -v dockerd >/dev/null 2>&1 \
-            || die "CLAUDE_WORKER_BROKER=1 needs an inner Docker daemon, but 'dockerd' is not in this image. Rebuild the CONTROLLER image (make build-controller, or --build-arg WITH_DOCKER=1) and run it under --runtime=sysbox-runc — see docs/substrate.md."
-        DOCKERD_WAIT="${CLAUDE_INNER_DOCKERD_WAIT:-60}"
-        # A POSITIVE integer with no leading zero: `(( … ))` parses a leading-zero value
-        # as octal (090 → error, spins forever), and 0 would time out before dockerd can
-        # even create its socket — both are refused up front (fail closed with a clear msg).
-        [[ "$DOCKERD_WAIT" =~ ^[1-9][0-9]*$ ]] || die "CLAUDE_INNER_DOCKERD_WAIT '$DOCKERD_WAIT' is not a positive integer (no leading zero)"
-        # Clear a stale pidfile a prior, ungracefully-killed daemon left behind, so a
-        # container restart (--restart unless-stopped) doesn't boot-loop on 'pidfile exists'.
-        rm -f /run/docker.pid /var/run/docker.pid 2>/dev/null || true
-        log "Inner dockerd        : starting as root (Sysbox-contained; log at /var/log/inner-dockerd.log)"
-        dockerd >> /var/log/inner-dockerd.log 2>&1 &
-        dwaited=0
-        until docker info >/dev/null 2>&1; do
-            if (( dwaited >= DOCKERD_WAIT )); then
-                log "inner dockerd did not become ready within ${DOCKERD_WAIT}s — last log lines:"
-                tail -n 20 /var/log/inner-dockerd.log 2>/dev/null | sed 's/^/    /' >&2 || true
-                die "inner dockerd failed to start. On Sysbox this is usually a missing --runtime=sysbox-runc (the daemon needs the user namespace the runtime provides). See docs/substrate.md."
-            fi
-            sleep 1; dwaited=$((dwaited + 1))
-        done
-        log "Inner dockerd        : ready after ${dwaited}s"
-    fi
-
-    # --- durable worker image (CC-INTERACTIVE-BROKER) ---
-    # The broker launches workers from CLAUDE_WORKER_IMAGE, which must be ON the inner
-    # daemon. That daemon starts EMPTY on every (re)create — so without this, the first
-    # worker launch after a recreate has to pull/rebuild, and a locally-built (registry-
-    # less) image can't be pulled at all. If a worker-image tarball is mounted
-    # (CLAUDE_WORKER_IMAGE_TARBALL — a HOST file that survives container recreate), load it
-    # into the inner daemon now, before the broker. Idempotent (skipped if the image is
-    # already present, e.g. after a plain restart) and FAIL-SOFT (a load failure warns but
-    # never blocks boot — the broker just refuses launches until the image is present).
-    if [[ -n "${CLAUDE_WORKER_IMAGE_TARBALL:-}" ]]; then
-        _wimg="${CLAUDE_WORKER_IMAGE:-claude-code-box:latest}"
-        if ! [[ -f "$CLAUDE_WORKER_IMAGE_TARBALL" ]]; then
-            log "Worker image        : WARNING — CLAUDE_WORKER_IMAGE_TARBALL '$CLAUDE_WORKER_IMAGE_TARBALL' not found (mount it read-only); broker will refuse launches until $_wimg is present"
-        elif docker image inspect "$_wimg" >/dev/null 2>&1; then
-            log "Worker image        : $_wimg already on the inner daemon — skipping tarball load"
-        else
-            log "Worker image        : loading $_wimg from $CLAUDE_WORKER_IMAGE_TARBALL (durable across recreate; first load may take ~1m)"
-            if docker load -i "$CLAUDE_WORKER_IMAGE_TARBALL" >>/var/log/inner-dockerd.log 2>&1; then
-                log "Worker image        : loaded"
-            else
-                log "Worker image        : WARNING — failed to load $CLAUDE_WORKER_IMAGE_TARBALL (see /var/log/inner-dockerd.log); broker will refuse launches until $_wimg is present"
-            fi
-        fi
-    fi
-
-    # --- worker broker (CC-2) ---
-    # Best-effort early lock: keep the agent off an already-present inner socket
-    # even before the broker's own lockdown (the broker re-asserts at startup).
-    if [[ -S /var/run/docker.sock ]]; then
-        chown root:root /var/run/docker.sock 2>/dev/null || true
-        chmod 600 /var/run/docker.sock 2>/dev/null || true
-    fi
-    CLAUDE_BROKER_CLIENT_USER="${CLAUDE_BROKER_CLIENT_USER:-$CLAUDE_USER}" \
-        /usr/local/bin/claude-worker-broker >> /var/log/claude-worker-broker.log 2>&1 &
-    BROKER_PID=$!   # §5c watches this to fail FAST if the broker dies at startup
-    log "Worker broker       : starting as root (agent requests via claude-worker-request; refuses if the substrate checks fail — see /var/log/claude-worker-broker.log)"
-
-    # Worker lifecycle reaper (CC-4): removes exited/dead/created claude.worker=1
-    # containers a `--rm` worker's unclean exit missed (freeing the name for a
-    # re-request) and prunes aged broker-spool files. Worker-broker mode only
-    # (controller mode implies it), alongside the broker above.
-    /usr/local/bin/claude-reaper --loop >> /var/log/claude-reaper.log 2>&1 &
-    log "Worker reaper       : starting as root, looping every ${CLAUDE_REAPER_INTERVAL:-300}s (removes dead worker residue + prunes the spool — see /var/log/claude-reaper.log)"
-
-    # Disk GC timer (CC-5): scheduled `docker system prune -f` + `docker builder
-    # prune -f` on the inner daemon so nested-worker layers + build cache don't
-    # fill the host. Runs alongside the broker's per-launch free-space floor
-    # (bin/claude-worker-broker, broker_check_disk) — the floor refuses a launch
-    # under pressure, this reclaims space so future launches don't have to.
-    /usr/local/bin/claude-disk-gc --loop >> /var/log/claude-disk-gc.log 2>&1 &
-    log "Disk GC             : starting as root, looping every ${CLAUDE_DISK_GC_INTERVAL:-3600}s (docker system + builder prune -f — see /var/log/claude-disk-gc.log)"
-fi
-
-# --- 5c. Worker-broker mode: the broker MUST be SERVING before the agent starts ---
-# CC-2-discovered gap: the broker above is BACKGROUNDED, so §12 below would otherwise start
-# the unprivileged agent tmux session with no dependency on the broker's progress — and a
-# compromised/injected agent could reach the inner daemon directly during the boot window,
-# bypassing the broker's request/lease discipline entirely (the exact hole this closes).
-#
-# Block HERE — authoritatively, before §12 launches the agent — until the broker is up and
-# serving. Note we wait for the broker to be *serving*, not merely for the socket perms:
-# §5a guarantees the socket exists and the best-effort pre-lock already sets it root:root
-# 600 the instant it does, so socket perms alone no longer prove the broker came up. The
-# broker creates its request SPOOL only after passing every fail-closed startup check
-# (userns + attestation + capacity + disk + socket-lock; see broker_serve's order), so the
-# spool dir is the authoritative "broker is alive and serving" signal.
-#
-# Gate this on CLAUDE_WORKER_BROKER (what actually backgrounds the broker), NOT on
-# CLAUDE_CONTROLLER: an interactive (or autopilot) session with CLAUDE_WORKER_BROKER=1 —
-# e.g. `claude-launch --broker`, a conversational lead that spawns nested workers via
-# claude-worker-request — shares the exact same boot race but is not a controller. Since
-# controller mode IMPLIES CLAUDE_WORKER_BROKER=1 (§5a), this still covers controller mode; it
-# just no longer LEAVES OUT the broker-only interactive path.
-if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
-    SOCK=/var/run/docker.sock
-    BROKER_SPOOL="${CLAUDE_BROKER_DIR:-/run/claude/broker}/requests"
-    # CLAUDE_BROKER_SOCKET_LOCKDOWN_WAIT is the mode-neutral knob; the legacy
-    # CLAUDE_CONTROLLER_SOCKET_WAIT name is still honored for back-compat. Positive integer,
-    # no leading zero (octal-safe in the `(( … ))` compare below).
-    SOCK_WAIT="${CLAUDE_BROKER_SOCKET_LOCKDOWN_WAIT:-${CLAUDE_CONTROLLER_SOCKET_WAIT:-90}}"
-    [[ "$SOCK_WAIT" =~ ^[1-9][0-9]*$ ]] || die "CLAUDE_BROKER_SOCKET_LOCKDOWN_WAIT '$SOCK_WAIT' is not a positive integer (no leading zero)"
-    waited=0
-    sock_locked() {
-        [[ -S "$SOCK" ]] || return 1
-        local owner group perm
-        owner="$(stat -c '%U' "$SOCK" 2>/dev/null || true)"
-        group="$(stat -c '%G' "$SOCK" 2>/dev/null || true)"
-        perm="$(stat -c '%a' "$SOCK" 2>/dev/null || true)"
-        [[ "$owner" == root && "$group" == root && "$perm" == 600 ]]
-    }
-    # Broker is serving iff it locked the socket AND created its spool (post-checks).
-    broker_serving() { sock_locked && [[ -d "$BROKER_SPOOL" ]]; }
-    until broker_serving; do
-        # Fail FAST if the backgrounded broker already exited (a failed startup check) —
-        # don't make the operator wait out the full timeout for a diagnosis.
-        if [[ -n "${BROKER_PID:-}" ]] && ! kill -0 "$BROKER_PID" 2>/dev/null; then
-            log "worker broker exited during startup — last log lines:"
-            tail -n 20 /var/log/claude-worker-broker.log 2>/dev/null | sed 's/^/    /' >&2 || true
-            die "worker broker failed to start (see /var/log/claude-worker-broker.log) — refusing to start the agent session over an unbrokered inner socket."
-        fi
-        if (( waited >= SOCK_WAIT )); then
-            die "worker-broker mode: the broker did not lock $SOCK to root:root 600 and begin serving within ${SOCK_WAIT}s — refusing to start the agent session (check /var/log/claude-worker-broker.log)."
-        fi
-        sleep 1; waited=$((waited + 1))
-    done
-    log "Worker broker       : inner socket root:root 600 and broker serving before the agent session starts (waited ${waited}s)"
-fi
-
-# --- 5d. Cache proxy: START it on the controller (PKG-6) ---------------------
-# CLAUDE_CACHE_PROXY=1 on a controller/broker host starts the ROOT-owned pull-through
-# cache on the inner dockerd (the SINGLE audited registry egress for every worker) and
-# BLOCKS until it is ready before the agent/controller loop starts dispatching workers —
-# a worker launched before the proxy answers would (correctly) fail its own fail-closed
-# client-apply. Gated on the broker being present (controller mode implies it, §5b): the
-# proxy needs the inner dockerd, which only a controller/broker host runs. A plain WORKER
-# with the same flag instead CONSUMES the proxy (§10c below). FAIL CLOSED: if the proxy
-# cannot start or become ready within CLAUDE_CACHE_PROXY_READY_TIMEOUT, refuse to start —
-# never run a proxy-mode fleet whose choke point is absent.
-if [[ "${CLAUDE_CACHE_PROXY:-0}" =~ ^(1|true|yes|on)$ ]] \
-   && [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
-    if /usr/local/bin/claude-cache-proxy start; then
-        log "Cache proxy          : controller-side pull-through cache starting (single audited egress choke point)"
-        if /usr/local/bin/claude-cache-proxy ready; then
-            log "Cache proxy          : ready — workers will fetch packages through it (egress narrowed to the proxy)"
-        else
-            die "Cache proxy          : started but not ready within the timeout — refusing controller startup (fail closed; dispatched workers would fail their own proxy gate). Tune CLAUDE_CACHE_PROXY_READY_TIMEOUT; see /var/log or docs/caching-proxy.md."
-        fi
-    else
-        die "Cache proxy          : CLAUDE_CACHE_PROXY=1 but the proxy could not be started on the inner dockerd — refusing controller startup (fail closed)."
-    fi
-fi
-
 # --- 6. Credentials reconcile (shared auth volume) ---------------------------
 # Credentials are shared across all containers via the claude-auth volume; the
 # rest of the config dir is per-container so sessions never collide. Claude
@@ -448,35 +294,6 @@ if [[ -f "$BAKE_DIR/CLAUDE.md" && ! -e "$CLAUDE_CONFIG_DIR/CLAUDE.md" ]]; then
     log "Installed global CLAUDE.md"
 fi
 
-# 8a-bis. Per-mode CLAUDE.md fragments (CLAUDE.d/) — CC-BROKER-CLAUDE-D.
-# Modular addenda that Claude Code surfaces via the /usr/local/bin/claude-md-fragments
-# SessionStart hook (baked in settings.json §8b). Each mode-specific fragment is
-# installed here only when its guard clause holds AND the target file is absent;
-# non-matching modes leave the CLAUDE.d/ directory empty (or absent) and the hook
-# is a silent no-op. Honors §8's overall contract: "we only fill what's absent"
-# — a user-mounted CLAUDE.d/broker.md always wins over the baked one.
-#
-# broker.md — teaches an interactive/controller session that the ONLY channel for
-# spawning nested workers is `claude-worker-request`. Installed only when:
-#   1. the broker is configured (CLAUDE_WORKER_BROKER=1);
-#   2. the broker's spool directory is present (§5c already blocked on
-#      "${CLAUDE_BROKER_DIR:-/run/claude/broker}/requests" being created by the
-#      broker's post-checks, so on this path that dir exists — the check here is
-#      a redundancy check on the same signal, not a race);
-#   3. the baked fragment exists in the image; and
-#   4. the target has not already been provided by a mount (no clobber, §8's rule).
-# A guard-mismatch is a no-op, never a silent partial: either every condition
-# holds and we install, or the fragment stays as-mounted (or absent).
-if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]] \
-   && [[ -d "${CLAUDE_BROKER_DIR:-/run/claude/broker}/requests" ]] \
-   && [[ -f "$BAKE_DIR/CLAUDE.d/broker.md" ]] \
-   && [[ ! -e "$CLAUDE_CONFIG_DIR/CLAUDE.d/broker.md" ]]; then
-    install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 755 "$CLAUDE_CONFIG_DIR/CLAUDE.d"
-    install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 644 \
-        "$BAKE_DIR/CLAUDE.d/broker.md" "$CLAUDE_CONFIG_DIR/CLAUDE.d/broker.md"
-    log "Installed broker-mode CLAUDE.md addendum (CLAUDE.d/broker.md)"
-fi
-
 # 8b. settings.json — baked file is the base, existing user settings win on
 #     conflict (recursive merge). Also injects unattended-operation defaults.
 #     NOTE: env intentionally does NOT include DISABLE_TELEMETRY/DO_NOT_TRACK.
@@ -496,13 +313,48 @@ BASE_SETTINGS="$(jq -n --arg pm "$PERM_MODE" '{
 EXISTING_SETTINGS='{}'
 [[ -s "$CLAUDE_CONFIG_DIR/settings.json" ]] && \
     EXISTING_SETTINGS="$(cat "$CLAUDE_CONFIG_DIR/settings.json")"
-# Self-heal: strip the Remote-Control-breaking telemetry kills from the final
+# Self-heal 1: strip the Remote-Control-breaking telemetry kills from the final
 # settings (covers per-container volumes created by an older image). If any
 # were present, drop the cached GrowthBook flags + statsig cache so the next
 # Claude run re-fetches them and RC eligibility resolves correctly.
+#
+# Self-heal 2 (SC-5): drop the stale `claude-md-fragments` SessionStart hook.
+# Images built before SC-5 baked a settings.json whose only content was a
+# SessionStart hook invoking /usr/local/bin/claude-md-fragments (the CLAUDE.d
+# per-mode fragment loader). SC-5 deleted that binary, but the hook was already
+# persisted into every per-project config VOLUME — and this merge lets existing
+# user settings win, so it would survive forever and fire an ENOENT at every
+# session start. Same class of residue, same fix, as the telemetry strip above.
+STALE_HOOK_CMD="/usr/local/bin/claude-md-fragments"
 jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") <(echo "$EXISTING_SETTINGS") \
     | jq 'if .env then .env |= (del(.DISABLE_TELEMETRY,.DO_NOT_TRACK,.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)) else . end' \
+    | jq --arg stale "$STALE_HOOK_CMD" '
+        # Type-guard every level: a hand-corrupted settings.json (.hooks a string,
+        # a SessionStart group that is not an object, ...) must pass through untouched
+        # rather than error — a jq failure here would leave the `>` redirect below
+        # having truncated settings.json to 0 bytes.
+        (if (.hooks | type) == "object" and (.hooks.SessionStart | type) == "array" then
+             .hooks.SessionStart |= (
+                 map(if type == "object" and ((.hooks | type) == "array")
+                     then .hooks |= map(select((.command? // "") != $stale))
+                     else . end)
+                 | map(select((type != "object")
+                              or ((.hooks | type) != "array")
+                              or ((.hooks | length) > 0)))
+             )
+         else . end)
+        | (if (.hooks | type) == "object" and (.hooks.SessionStart | type) == "array"
+              and ((.hooks.SessionStart | length) == 0)
+           then del(.hooks.SessionStart) else . end)
+        | (if (.hooks | type) == "object" and ((.hooks | length) == 0)
+           then del(.hooks) else . end)' \
     > "$CLAUDE_CONFIG_DIR/settings.json"
+if echo "$EXISTING_SETTINGS" \
+    | jq -e --arg stale "$STALE_HOOK_CMD" \
+        '[.hooks.SessionStart // [] | .[] | .hooks // [] | .[] | select((.command // "") == $stale)] | length > 0' \
+        >/dev/null 2>&1; then
+    log "Migrated settings.json: removed the stale '$STALE_HOOK_CMD' SessionStart hook (CLAUDE.d fragment loader, removed in SC-5)"
+fi
 chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
 if echo "$EXISTING_SETTINGS" | jq -e '.env // {} | (.DISABLE_TELEMETRY // .DO_NOT_TRACK // .CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) != null' >/dev/null 2>&1; then
     log "Migrated settings.json: removed telemetry kills that block Remote Control; clearing stale feature-flag cache"
@@ -747,14 +599,15 @@ log "Model               : $CLAUDE_MODEL (override with CLAUDE_MODEL; 'default' 
 #                           loop (default `/next`) for unattended continuous build-out;
 #                           there is no Remote Control link, so the RC watchdog is
 #                           skipped.
-#   controller (CLAUDE_CONTROLLER=1, CC-6) — main pane is claude-controller, which wires
-#                           this substrate to the umbrella PAR-* lease/scheduler/
-#                           bump-worker. With effective worker-slots==1 (the operative
-#                           default — see bin/claude-controller) it COLLAPSES to exactly
-#                           the autopilot launch above, byte-identical; slots>1 is the
-#                           built-but-gated K>1 loop. CLAUDE_CONTROLLER takes priority
-#                           over CLAUDE_AUTOPILOT if both are set. No Remote Control
-#                           link, same as autopilot (the RC watchdog is skipped).
+#   controller (CLAUDE_CONTROLLER=1) — main pane is claude-controller. SC-5 removed the
+#                           broker-dispatch tier this used to drive (the slots>1 loop that
+#                           leased backlog items and spawned nested Sysbox workers), so
+#                           what remains is exactly the slots==1 collapse it always had as
+#                           its safe default: a byte-identical pass-through to the autopilot
+#                           launch above. There are no slots any more. CLAUDE_CONTROLLER
+#                           takes priority over CLAUDE_AUTOPILOT if both are set. No Remote
+#                           Control link, same as autopilot (the RC watchdog is skipped).
+#                           SC-6 decides whether this mode still earns its place.
 # Either way SSH attaches to the live tmux pane.
 case "${CLAUDE_CONTROLLER:-0}" in
     1|true|yes|on) CLAUDE_MODE=controller;  MAIN_PANE_CMD=/usr/local/bin/claude-controller ;;
@@ -811,55 +664,6 @@ if [[ "${CLAUDE_OTEL_ENABLED:-0}" =~ ^(1|true|yes|on)$ || -n "${OTEL_EXPORTER_OT
     log "OpenTelemetry        : on → ${OTEL_EXPORTER_OTLP_ENDPOINT:-<no endpoint set!>} (${OTEL_EXPORTER_OTLP_PROTOCOL})$([[ -n "${OTEL_EXPORTER_OTLP_HEADERS:-}" ]] && echo ' +auth')"
     [[ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]] && \
         log "OpenTelemetry        : WARNING — enabled but OTEL_EXPORTER_OTLP_ENDPOINT is empty; nothing will be exported"
-fi
-
-# Curated apt provisioning (PKG-4): in a Sysbox WORKER, install the declarative,
-# curated apt manifest as root BEFORE dropping to the agent — the syslib gap `mise`
-# can't fill. claude-apt-provision self-gates: it refuses unless we are root mapped
-# to a non-root host uid (the worker userns), so setting this flag on a leaf is a
-# logged no-op, never a partial. It opens the deb.debian.org window then RE-LOCKS
-# it; the general egress lockdown just below is the authoritative final seal, so the
-# worker is sealed even if the relock could not confirm. All-or-refuse, fail-safe.
-if [[ "${CLAUDE_APT_PROVISION:-0}" =~ ^(1|true|yes|on)$ ]]; then
-    if [[ ! "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]]; then
-        log "Apt provisioning     : WARNING — CLAUDE_APT_PROVISION=1 without CLAUDE_EGRESS_LOCKDOWN=1: apt runs over OPEN egress with no scoped deb.debian.org window and no relock. Set CLAUDE_EGRESS_LOCKDOWN=1 for the contained install window."
-    fi
-    apt_rc=0; /usr/local/bin/claude-apt-provision || apt_rc=$?
-    # Distinguish the outcomes: a leaf no-op (rc 3) is EXPECTED and benign; a real
-    # install/egress failure (rc >=4) is NOT — surface it loudly so an operator
-    # never reads a syslib that silently didn't install as a clean boot.
-    if (( apt_rc == 0 )); then
-        if [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]]; then
-            log "Apt provisioning     : curated manifest applied (worker tier); egress re-locked"
-        else
-            log "Apt provisioning     : curated manifest applied (worker tier); egress NOT re-locked (lockdown off)"
-        fi
-    elif (( apt_rc == 3 )); then
-        log "Apt provisioning     : not a worker (leaf / no host-safe root) — nothing installed (expected on a leaf container)"
-    else
-        log "Apt provisioning     : FAILED (rc=$apt_rc) — a REAL install/egress error, not a benign leaf no-op; the worker may be missing a requested syslib (see [apt-provision] lines)"
-    fi
-fi
-
-# Cache-proxy client provisioning (PKG-6): a WORKER in single-choke-point mode points its
-# package managers at the controller-side pull-through cache, BEFORE the egress lockdown below
-# narrows its egress to just the proxy (the firewall's CLAUDE_CACHE_PROXY_HOST profile). This
-# runs while egress is still open, so the health-check + config write can reach the proxy.
-# FAIL CLOSED: if the proxy is unreachable, REFUSE to start the agent — a proxy-mode worker
-# never falls back to open/public-registry egress (roadmap PART II §II.8). Gated so ONLY a
-# worker consumes it: a controller/broker host STARTS the proxy instead (§5d) and does not
-# point its own managers at it.
-if [[ "${CLAUDE_CACHE_PROXY:-0}" =~ ^(1|true|yes|on)$ ]] \
-   && [[ ! "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]] \
-   && [[ ! "${CLAUDE_CONTROLLER:-0}" =~ ^(1|true|yes|on)$ ]]; then
-    if [[ ! "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]]; then
-        log "Cache proxy          : WARNING — CLAUDE_CACHE_PROXY=1 without CLAUDE_EGRESS_LOCKDOWN=1: package managers point at the proxy, but egress is NOT narrowed to it (the worker can still reach public registries directly). Set CLAUDE_EGRESS_LOCKDOWN=1 for the single-choke-point guarantee."
-    fi
-    if /usr/local/bin/claude-cache-proxy client-apply; then
-        log "Cache proxy          : package managers pointed at the pull-through cache (worker; egress narrows to the proxy below)"
-    else
-        die "Cache proxy          : CLAUDE_CACHE_PROXY=1 but the proxy is unreachable — REFUSING to start the agent (fail closed; a proxy-mode worker never falls back to open egress). Check the controller's claude-cache-proxy + the shared '${CLAUDE_CACHE_PROXY_NET:-claude-cache-net}' network."
-    fi
 fi
 
 # Egress lockdown (opt-in): apply a default-deny firewall NOW — after the
@@ -919,7 +723,7 @@ fi
 
 echo
 if [[ "$CLAUDE_MODE" == "controller" ]]; then
-    log "Controller          : wired to the umbrella PAR-* lease/scheduler/bump-worker in tmux window 'main' (see docs/substrate.md 'Controller mode (CC-6)')"
+    log "Controller          : pass-through to claude-autopilot in tmux window 'main' (see bin/claude-controller)"
 elif [[ "$CLAUDE_MODE" == "autopilot" ]]; then
     log "Autopilot           : headless loop running '${CLAUDE_AUTOPILOT_CMD:-/next}' in tmux window 'main'"
 else

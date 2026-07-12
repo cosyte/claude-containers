@@ -1,28 +1,25 @@
 #!/usr/bin/env bash
-# claude-disk-gc — scheduled Docker GC so nested-daemon layers + build cache don't fill
-# the host (CC-5).
+# claude-disk-gc — scheduled Docker GC so image/container/build-cache layers don't fill
+# the host.
 #
-# A Sysbox controller's inner dockerd accumulates image/container/build-cache layers as
-# workers come and go (CC-2/CC-4). `docker system prune -f` alone leaves the BUILD CACHE
-# behind — it only clears dangling images, stopped containers, and unused networks — so
-# this runs BOTH:
+# `docker system prune -f` alone leaves the BUILD CACHE behind — it only clears dangling
+# images, stopped containers, and unused networks — so this runs BOTH:
 #   1. `docker system prune -f`    dangling images, stopped containers, unused networks
 #   2. `docker builder prune -f`   the build cache `system prune` does not touch
 #
 # Never force-removes a running container and never touches volumes: plain `-f` (no `-a`,
-# no `--volumes`) only ever reaps stopped/dangling/unused resources, so a live worker's
-# image layers and data volumes are untouched. This is the reclaim half of CC-5; the
-# refusal half is the broker's per-launch free-space floor (bin/claude-worker-broker,
-# broker_check_disk).
+# no `--volumes`) only ever reaps stopped/dangling/unused resources, so a live session's
+# image layers and data volumes are untouched. This is a standalone maintenance tool — run
+# it manually, or on a cron/timer of your own choosing (no entrypoint path auto-starts it;
+# it previously ran only inside the now-retired Sysbox nested-worker broker/controller mode
+# — see docs/legacy-sysbox-broker.md).
 #
 # Shared tool cache (PKG-3): the /cache volume (mise installs + cargo/go/npm/uv caches) is
 # a NAMED volume, so the prunes above deliberately never touch it — but it still needs
-# bounding under K workers. Each cycle also runs a CACHE TRIM (cache_gc_once): when the
-# cache exceeds CLAUDE_CACHE_MAX_MIB it removes only the re-fetchable download/registry
-# caches (installed toolchains are kept), and ONLY when no worker is running (an rm mid-
-# install would break it). The free-space FLOOR already covers the cache implicitly: the
-# volume lives on CLAUDE_DISK_DATA_ROOT, so a filling cache lowers the free space the
-# broker's floor guards. Both halves of CC-5 thus span the cache.
+# bounding as containers come and go. Each cycle also runs a CACHE TRIM (cache_gc_once):
+# when the cache exceeds CLAUDE_CACHE_MAX_MIB it removes only the re-fetchable download/
+# registry caches (installed toolchains are kept), and ONLY when no container is using the
+# cache volume (an rm mid-install would break it).
 #
 # Usage:
 #   bin/claude-disk-gc                 one-shot: docker prune + cache trim
@@ -31,8 +28,8 @@
 #
 # Env:
 #   CLAUDE_DISK_GC_INTERVAL     seconds between --loop cycles (default 3600)
-#   CLAUDE_DISK_DATA_ROOT       path whose free space is reported before/after (default
-#                               /var/lib/docker — same default as the broker's floor)
+#   CLAUDE_DISK_DATA_ROOT       path whose free space is reported before/after
+#                               (default /var/lib/docker)
 #   CLAUDE_CACHE_VOLUME         shared cache volume name (default claude-cache; ""/off
 #                               disables the cache and its trim)
 #   CLAUDE_CACHE_MAX_MIB        cache-size budget over which the trim reclaims (default 20480)
@@ -140,12 +137,9 @@ cache_gc_once() {
 
     # Never trim under active use: ANY running container that MOUNTS this cache may be
     # mid-install (an rm of a download cache mid-fetch would break it). Gate on the volume
-    # itself, not a container label — `--filter volume=<vol>` matches EVERY cache-mounting
-    # container: broker `claude.worker=1` workers AND the `claude.managed=1` containers
-    # `claude-launch`/`claude-compose-gen` start (they carry no worker label but do mount
-    # /cache). A label-only guard would be blind to the launch/compose path and trim mid-
-    # install; the volume filter also avoids deferring for unrelated containers that do not
-    # touch the cache.
+    # itself, not a container label — `--filter volume=<vol>` matches every cache-mounting
+    # `claude.managed=1` container `claude-launch`/`claude-compose-gen` start, and avoids
+    # deferring for unrelated containers that do not touch the cache.
     local inuse=""
     inuse="$(gc_docker ps -q --filter volume="$vol" 2>/dev/null || true)"
     if [[ -n "$inuse" ]]; then

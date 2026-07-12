@@ -1,51 +1,30 @@
 #!/usr/bin/env bash
-# claude-disk-verify — prove storage/disk safety on a real controller (CC-5).
+# claude-disk-verify — prove disk-safety hygiene: docker-free, no root, no daemon needed.
 #
-# Complements bin/claude-sizing-verify (CC-3, resource isolation) and
-# bin/claude-worker-lifecycle-verify (CC-4, worker lifecycle) with CC-5's disk-safety
-# proof (roadmap operations/roadmaps/claude-containers.md §8 CC-5):
+# SC-5 removed the on-host proof this script used to run against a real Sysbox
+# nested-worker controller (the broker's per-launch disk-floor refusal, N sequential
+# worker cycles, worker-image reuse) — that whole substrate is retired; see
+# docs/legacy-sysbox-broker.md. What's left is the surviving, non-broker disk-hygiene
+# surface, all of it docker-free:
 #
 #   1. disk_free_mib parses a real `df` correctly, and CLAUDE_DISK_FREE_MIB_OVERRIDE
-#      forces the value loudly (--check, docker-free);
-#   2. the broker's per-launch disk-floor refusal logic is sound: refuses below the
-#      floor, allows above it, and fails closed when free space can't be determined
-#      (--check, docker-free);
-#   3. claude-disk-gc's plan is exactly `system prune -f` + `builder prune -f` — never
-#      `-a`, never `--volumes` (--check, docker-free);
-#   3b. the PKG-3 shared-cache trim is safe: cache_gc_plan reclaims only re-fetchable
+#      forces the value loudly;
+#   2. claude-disk-gc's plan is exactly `system prune -f` + `builder prune -f` — never
+#      `-a`, never `--volumes`;
+#   3. the PKG-3 shared-cache trim is safe: cache_gc_plan reclaims only re-fetchable
 #      download/registry caches (never an installs/shims/bin dir or bare /cache), and the
-#      idle guard gates on the cache VOLUME (covers launch/compose containers, not just
-#      broker workers) (--check, docker-free);
-#   4. on a REAL controller: N sequential worker cycles don't grow disk unbounded (gc
-#      reclaims between them); a launch below an absurdly-high floor is refused; the
-#      worker image is reused across workers, never rebuilt (same image ID + created
-#      time).
+#      idle guard gates on the cache VOLUME (covers every cache-mounting container, not
+#      just a subset).
 #
-# Needs Sysbox + the broker proven first (run bin/claude-sysbox-verify and
-# bin/claude-broker-verify before the full proof). The docker-free logic tests
-# (disk_free_mib parsing, broker_check_disk refusal matrix, disk_gc_plan) live in
-# test/disk-unit.sh (CI) AND are re-run here under --check for a one-command fleet-host
-# sanity pass.
+# The same logic is covered in CI by test/disk-unit.sh; this script re-runs it as a
+# one-command sanity pass, runnable anywhere (no Sysbox, no docker daemon needed).
 #
-#   bin/claude-disk-verify --check    docker-free half (safe anywhere, no Sysbox needed)
-#   bin/claude-disk-verify            full on-host proof (needs Sysbox + a real controller)
-#   bin/claude-disk-verify --keep     leave the controller running for inspection
+#   bin/claude-disk-verify    run all checks (docker-free, safe anywhere)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-# This script PROVES the gate — no ambient/leftover seam may neutralize it.
-unset CLAUDE_SYSBOX_FAKE_VERSION CLAUDE_SYSBOX_SKIP_DOCKER \
-      CLAUDE_BROKER_FAKE_UID_MAP CLAUDE_BROKER_SKIP_ROOT CLAUDE_BROKER_DRYRUN \
-      CLAUDE_BROKER_FAKE_CGROUP_DIR CLAUDE_DISK_FREE_MIB_OVERRIDE CLAUDE_DISK_GC_DRYRUN
-
-CHECK_ONLY=0
-KEEP=0
 for a in "$@"; do
-    case "$a" in
-        --check) CHECK_ONLY=1 ;;
-        --keep)  KEEP=1 ;;
-        *) die "unknown flag '$a' (usage: claude-disk-verify [--check] [--keep])" ;;
-    esac
+    die "unknown flag '$a' (usage: claude-disk-verify — no flags; everything here is docker-free)"
 done
 
 PASS=0 FAIL=0
@@ -53,9 +32,9 @@ okp()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
 badp() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 
 TMPD="$(mktemp -d)"
-trap '[[ -n "${CTR:-}" ]] && { (( KEEP )) || docker rm -f "$CTR" >/dev/null 2>&1 || true; }; rm -rf "$TMPD"' EXIT
+trap 'rm -rf "$TMPD"' EXIT
 
-# --- phase 0: docker-free — disk_free_mib parsing + override seam ----------------------
+# --- phase 0: disk_free_mib parsing + override seam -------------------------------------
 info "phase 0 — disk_free_mib: real df parsing + the override seam"
 
 got="$(disk_free_mib "$TMPD" 2>/dev/null || echo FAILED)"
@@ -77,50 +56,9 @@ else
     okp "disk_free_mib fails closed on a nonexistent path"
 fi
 
-# --- phase 1: docker-free — broker_check_disk refusal matrix ---------------------------
-info "phase 1 — broker_check_disk: refuse below floor, allow above, fail closed on unknown"
+# --- phase 1: disk_gc_plan is exactly the two safe prunes -------------------------------
+info "phase 1 — disk_gc_plan: exactly system+builder prune -f, never -a/--volumes"
 
-# Each call sources the REAL broker in a FRESH `bash -c` process (a new process, not a
-# `(...)` subshell of this one). This script already sourced _common.sh once above, and
-# claude-worker-broker sources it again; bash treats a repeated `readonly VAR=` (the
-# SYSBOX_CVE_FLOOR guard in _common.sh) as a fatal error under `set -e` even inside the
-# `if !` meant to catch it, and a `(...)` subshell shares that fatal-error handling with
-# its parent — so the two sources must land in genuinely separate shells (mirrors
-# bin/claude-worker-lifecycle-verify's identical fix for the same hazard).
-run_check_disk() {   # run_check_disk <override> <floor> -> prints the exit code on stdout
-    local override="$1" floor="$2"
-    # `broker_check_disk` returning nonzero (the refusal case) as the LAST statement
-    # would trip this bash -c's inherited `set -e` (from _common.sh) before `echo`
-    # ever runs — `|| true` neutralizes that so the real rc still reaches `echo`.
-    CLAUDE_DISK_FREE_MIB_OVERRIDE="$override" bash -c '
-        source "'"$CLAUDE_DOCKER_ROOT"'/bin/claude-worker-broker" 2>/dev/null
-        DISK_FLOOR_MIB="'"$floor"'"; DISK_DATA_ROOT="/does-not-matter"
-        rc=0; broker_check_disk 2>/dev/null || rc=$?
-        echo "$rc"
-    ' 2>/dev/null | tail -1
-}
-
-rc="$(run_check_disk 1000 500)"
-[[ "$rc" == 0 ]] && okp "broker_check_disk allows when free (1000 MiB) >= floor (500 MiB)" \
-    || badp "expected allow (rc 0) for free>=floor, got rc=$rc"
-
-rc="$(run_check_disk 100 99999999)"
-[[ "$rc" == 1 ]] && okp "broker_check_disk refuses when free (100 MiB) < an absurdly high floor" \
-    || badp "expected refuse (rc 1) for free<floor, got rc=$rc"
-
-rc="$(CLAUDE_DISK_FREE_MIB_OVERRIDE=garbage bash -c '
-    source "'"$CLAUDE_DOCKER_ROOT"'/bin/_common.sh" >/dev/null 2>&1
-    rc=0; disk_free_mib /tmp >/dev/null 2>&1 || rc=$?
-    echo "$rc"
-' 2>/dev/null | tail -1)"
-[[ "$rc" != 0 ]] && okp "disk_free_mib fails closed on a garbage override (never reads as 0 free = plenty)" \
-    || badp "a garbage override must not parse as success"
-
-# --- phase 2: docker-free — disk_gc_plan is exactly the two safe prunes ----------------
-info "phase 2 — disk_gc_plan: exactly system+builder prune -f, never -a/--volumes"
-
-# Fresh process again (same hazard as phase 1 — this script already sourced
-# _common.sh once, and claude-disk-gc sources it again).
 plan="$(bash -c 'source "'"$CLAUDE_DOCKER_ROOT"'/bin/claude-disk-gc" 2>/dev/null; disk_gc_plan')"
 if grep -q "system prune -f" <<<"$plan" && grep -q "builder prune -f" <<<"$plan"; then
     okp "the gc plan runs both system prune -f and builder prune -f"
@@ -133,10 +71,9 @@ else
     okp "the gc plan never includes -a/--all/--volumes"
 fi
 
-# --- phase 2b: docker-free — the PKG-3 shared-cache trim is safe, re-fetchable-only, idle-gated
-info "phase 2b — cache_gc_plan: re-fetchable caches only; the idle guard gates on the cache volume"
+# --- phase 1b: the PKG-3 shared-cache trim is safe, re-fetchable-only, idle-gated -------
+info "phase 1b — cache_gc_plan: re-fetchable caches only; the idle guard gates on the cache volume"
 
-# Fresh process again (same repeated-source hazard as phases 1–2).
 cplan="$(bash -c 'source "'"$CLAUDE_DOCKER_ROOT"'/bin/claude-disk-gc" 2>/dev/null; cache_gc_plan')"
 if grep -q '/cache/mise/downloads' <<<"$cplan" && grep -q '/cache/npm/_cacache' <<<"$cplan"; then
     okp "the cache trim plan reclaims the re-fetchable download/registry caches"
@@ -150,151 +87,16 @@ if grep -qE '(^/cache$|/installs(/|$)|/shims(/|$)|/cargo/bin|/go/bin)' <<<"$cpla
 else
     okp "the cache trim plan never touches installs/, shims/, cargo|go/bin, or bare /cache"
 fi
-# The idle guard must gate on the CACHE VOLUME (covers workers AND launch/compose
-# containers that mount it), not a worker-only label the launch/compose path lacks.
+# The idle guard must gate on the CACHE VOLUME (covers every cache-mounting container),
+# not a narrower label some containers might lack.
 if grep -Eq 'ps -q --filter volume=' "$CLAUDE_DOCKER_ROOT/bin/claude-disk-gc"; then
-    okp "the cache trim defers on any container using the cache volume (not a worker-only label)"
+    okp "the cache trim defers on any container using the cache volume"
 else
     badp "the cache trim idle guard does not gate on --filter volume=<vol> — a launch/compose mid-install could be trimmed"
 fi
 
-if (( CHECK_ONLY )); then
-    echo
-    echo "== $PASS passed, $FAIL failed (--check: docker-free half only) =="
-    (( FAIL == 0 )) || { err "disk-safety --check NOT proven"; exit 1; }
-    ok "disk-safety --check proven: disk_free_mib parsing + override, broker_check_disk refusal matrix, disk_gc_plan safety, PKG-3 cache-trim safety — run without --check on a Sysbox fleet host for the full on-host proof"
-    exit 0
-fi
-
-# --- phase 3: on-host — needs Sysbox + a real controller --------------------------------
-info "phase 3 — host prerequisites (Sysbox)"
-need_docker
-preflight_sysbox
-okp "Sysbox $SYSBOX_VERSION installed, registered, and at/above the CVE floor"
-
-info "phase 4 — stand up a controller with a small worker-image, run sequential worker cycles"
-CTR="claude-disk-verify"
-IMAGE="${CLAUDE_SYSBOX_VERIFY_IMAGE:-docker:28-dind}"
-WORKER_IMG="alpine:3.20"
-AGENT=agent
-
-as_root()  { docker exec "$CTR" "$@"; }
-as_agent() { docker exec -u "$AGENT_UID:$AGENT_GID" "$CTR" "$@"; }
-in_worker() { local w="$1"; shift; as_root docker exec "$w" "$@"; }
-
-docker rm -f "$CTR" >/dev/null 2>&1 || true
-mapfile -t CTR_FLAGS < <("$CLAUDE_DOCKER_ROOT/bin/claude-controller-size" --k 2 --flags)
-(( ${#CTR_FLAGS[@]} )) || die "claude-controller-size refused or failed — no controller flags"
-docker run -d --name "$CTR" \
-    "${CTR_FLAGS[@]}" \
-    --label claude.disk-verify=1 \
-    -e DOCKER_TLS_CERTDIR="" \
-    "$IMAGE" >/dev/null
-
-inner_ready=0
-for _ in $(seq 1 60); do
-    if as_root docker info >/dev/null 2>&1; then inner_ready=1; break; fi
-    sleep 1
-done
-(( inner_ready )) || { docker logs --tail 15 "$CTR" >&2 || true; die "inner dockerd did not come up within 60s"; }
-okp "inner dockerd is up inside the Sysbox controller"
-
-as_root apk add --no-cache bash procps coreutils >/dev/null 2>&1 || die "could not install bash+procps+coreutils in the controller"
-as_root adduser -D "$AGENT" >/dev/null 2>&1 || true
-AGENT_UID="$(as_root id -u "$AGENT")" && [[ "$AGENT_UID" =~ ^[0-9]+$ ]] \
-    || die "unprivileged user '$AGENT' was not created in the controller"
-AGENT_GID="$(as_root id -g "$AGENT")"
-install_file() { docker exec -i "$CTR" sh -c "cat > '$2' && chmod 755 '$2'" < "$1"; }
-install_file "$CLAUDE_DOCKER_ROOT/bin/_common.sh"            /usr/local/bin/_common.sh
-install_file "$CLAUDE_DOCKER_ROOT/bin/claude-worker-broker"  /usr/local/bin/claude-worker-broker
-install_file "$CLAUDE_DOCKER_ROOT/bin/claude-worker-request" /usr/local/bin/claude-worker-request
-install_file "$CLAUDE_DOCKER_ROOT/bin/claude-disk-gc"        /usr/local/bin/claude-disk-gc
-as_root docker pull "$WORKER_IMG" >/dev/null 2>&1 || die "inner daemon could not pull $WORKER_IMG"
-
-# --- 4a: N sequential worker cycles don't grow disk unbounded (gc reclaims between) ----
-docker exec -d \
-    -e CLAUDE_SYSBOX_ATTESTED_VERSION="$SYSBOX_VERSION" \
-    -e CLAUDE_BROKER_CLIENT_USER="$AGENT" \
-    -e CLAUDE_BROKER_MAX_WORKERS=2 \
-    -e CLAUDE_BROKER_POLL=0.2 \
-    -e CLAUDE_WORKER_IMAGE="$WORKER_IMG" \
-    -e CLAUDE_BROKER_WORKER_CMD="sh -c" \
-    "$CTR" bash -c '/usr/local/bin/claude-worker-broker >/var/log/claude-worker-broker.log 2>&1'
-broker_up=0
-for _ in $(seq 1 30); do
-    if as_root test -d /run/claude/broker/requests; then broker_up=1; break; fi
-    sleep 0.5
-done
-(( broker_up )) || { as_root cat /var/log/claude-worker-broker.log >&2 || true; die "broker did not come up (no spool)"; }
-okp "broker is up inside the controller"
-
-N=3
-disk_before="$(as_root df -P -B1M /var/lib/docker 2>/dev/null | awk 'NR==2{print $4}')"
-for i in $(seq 1 "$N"); do
-    item="CC5-CYCLE-$i"
-    # repo is just a label here (the worker image comes from CLAUDE_WORKER_IMAGE, and the
-    # worker name derives from <item>); it must match the broker's plain-name charset
-    # ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ — an image ref like "alpine:3.20" has a ':' and is
-    # refused client-side before the broker is ever reached.
-    resp="$(as_agent claude-worker-request disk "$item" --timeout 30 || true)"
-    [[ "$resp" == ok* ]] || die "cycle $i: worker launch failed (got '$resp')"
-    name="$(awk '{print $2}' <<<"$resp")"
-    # This drives a trivial one-shot command (CLAUDE_BROKER_WORKER_CMD="sh -c" above),
-    # so the worker exits almost immediately and (since it was launched --rm) vanishes.
-    for _ in $(seq 1 30); do as_root docker inspect "$name" >/dev/null 2>&1 || break; sleep 1; done
-    as_root "$CLAUDE_DOCKER_ROOT/bin/claude-disk-gc" >/dev/null 2>&1 || true
-done
-disk_after="$(as_root df -P -B1M /var/lib/docker 2>/dev/null | awk 'NR==2{print $4}')"
-if [[ "$disk_before" =~ ^[0-9]+$ && "$disk_after" =~ ^[0-9]+$ ]]; then
-    drift=$(( disk_before - disk_after ))
-    # A loose bound: gc'd cycles of a tiny alpine-based image should not accumulate
-    # more than ~200 MiB of net drift over N cycles on this host.
-    if (( drift < 200 )); then
-        okp "N=$N sequential worker cycles + gc between them: disk drift is bounded (${drift} MiB, before=${disk_before} after=${disk_after})"
-    else
-        badp "disk drift over $N cycles exceeded the bound (${drift} MiB) — gc may not be reclaiming"
-    fi
-else
-    badp "could not read before/after free space on the controller (before='$disk_before' after='$disk_after')"
-fi
-
-# --- 4b: a launch below the floor is refused ------------------------------------------
-info "phase 5 — a launch under an absurdly-high floor is refused"
-as_root pkill -f claude-worker-broker >/dev/null 2>&1 || true
-sleep 1
-docker exec -d \
-    -e CLAUDE_SYSBOX_ATTESTED_VERSION="$SYSBOX_VERSION" \
-    -e CLAUDE_BROKER_CLIENT_USER="$AGENT" \
-    -e CLAUDE_BROKER_MAX_WORKERS=2 \
-    -e CLAUDE_BROKER_POLL=0.2 \
-    -e CLAUDE_WORKER_IMAGE="$WORKER_IMG" \
-    -e CLAUDE_BROKER_WORKER_CMD="sh -c" \
-    -e CLAUDE_DISK_FLOOR_MIB=999999999 \
-    "$CTR" bash -c '/usr/local/bin/claude-worker-broker >/var/log/claude-worker-broker-floor.log 2>&1'
-sleep 3
-resp="$(as_agent claude-worker-request disk CC5-FLOOR --timeout 15 || true)"
-if [[ "$resp" == error*"disk pressure"* ]]; then
-    okp "a launch below an absurdly-high CLAUDE_DISK_FLOOR_MIB is refused with 'disk pressure' ($resp)"
-else
-    badp "expected an 'error disk pressure' response under an impossible floor (got: '$resp')"
-fi
-as_root pkill -f claude-worker-broker >/dev/null 2>&1 || true
-
-# --- 4c: worker image is reused, never rebuilt ----------------------------------------
-info "phase 6 — the worker image is reused across workers, not rebuilt"
-img_id1="$(as_root docker image inspect "$WORKER_IMG" --format '{{.Id}} {{.Created}}')"
-sleep 2
-as_root docker pull "$WORKER_IMG" >/dev/null 2>&1 || true   # a re-pull of the same tag must not change the id
-img_id2="$(as_root docker image inspect "$WORKER_IMG" --format '{{.Id}} {{.Created}}')"
-if [[ "$img_id1" == "$img_id2" ]]; then
-    okp "the worker image ID + created-time are identical across two workers — reused, never rebuilt"
-else
-    badp "the worker image changed across workers (id1='$img_id1' id2='$img_id2') — expected reuse"
-fi
-
-# --- summary ----------------------------------------------------------------------------
+# --- summary ------------------------------------------------------------------------------
 echo
 echo "== $PASS passed, $FAIL failed =="
-(( KEEP )) && info "--keep: controller '$CTR' left running (docker rm -f $CTR to clean up)"
-(( FAIL == 0 )) || { err "disk safety NOT proven"; exit 1; }
-ok "disk safety proven: floor parsing + refusal matrix, gc plan safety, bounded disk drift over sequential cycles, floor refusal on the real path, worker image reuse"
+(( FAIL == 0 )) || { err "disk-safety NOT proven"; exit 1; }
+ok "disk-safety proven: disk_free_mib parsing + override, disk_gc_plan safety, PKG-3 cache-trim safety"

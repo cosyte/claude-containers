@@ -49,9 +49,7 @@ EXTRA="${CLAUDE_EGRESS_EXTRA_HOSTS:-}"; EXTRA="${EXTRA//,/ }"
 # every other host below — it only ever ADDS the curated registry hosts, never broadens egress by any
 # other means, and does NOTHING unless CLAUDE_EGRESS_PACKAGES is explicitly on. This is a curated (not
 # open) allowlist by design: the supply-chain exfil path this container refuses is *open* egress, so a
-# tool whose registry isn't listed simply won't install until its host is added. Debian/apt mirrors are
-# deliberately NOT here — those need the rootful Sysbox-worker apt tier (PKG-4), not a leaf container.
-# See docs/package-provisioning-security.md for the threat model + containment rules.
+# tool whose registry isn't listed simply won't install until its host is added.
 PACKAGES_HOSTS=""
 if [[ "${CLAUDE_EGRESS_PACKAGES:-0}" =~ ^(1|true|yes|on)$ ]]; then
     PACKAGES_HOSTS="
@@ -64,64 +62,7 @@ if [[ "${CLAUDE_EGRESS_PACKAGES:-0}" =~ ^(1|true|yes|on)$ ]]; then
     log "package-registry egress profile ON (PyPI, crates, Go proxy, mise, ghcr; curated + IP-pinned)"
 fi
 
-# Opt-in Debian-mirror profile (PKG-4). ADDITIVE + IP-pinned exactly like the package profile, but
-# scoped to the rootful Sysbox-worker apt tier: `claude-apt-provision` sets CLAUDE_EGRESS_APT=1 and
-# re-applies this firewall to OPEN the install window, then re-applies it WITHOUT the flag to RE-LOCK
-# (install-then-relock). Deliberately NOT in the default or package profile — a leaf container never
-# reaches the Debian mirrors; only the brokered, curated worker apt path opens them, and only for the
-# window. Nothing broadens unless CLAUDE_EGRESS_APT is explicitly on. See
-# docs/package-provisioning-security.md §4.
-APT_HOSTS=""
-if [[ "${CLAUDE_EGRESS_APT:-0}" =~ ^(1|true|yes|on)$ ]]; then
-    APT_HOSTS="
-    deb.debian.org security.debian.org
-    "
-    log "Debian-mirror egress profile ON (deb.debian.org, security.debian.org; apt install window, IP-pinned)"
-fi
-
-# Cache-proxy egress profile (PKG-6). When CLAUDE_CACHE_PROXY_HOST (or _URL) is set, this worker is in
-# SINGLE-CHOKE-POINT mode: package egress goes through the controller-side pull-through cache
-# (bin/claude-cache-proxy) and NOWHERE else. So the composed allowlist becomes the base infra hosts
-# (Claude API/OAuth/GitHub/telemetry) MINUS the public npm registry, PLUS the proxy host — and the
-# curated CLAUDE_EGRESS_PACKAGES / CLAUDE_EGRESS_APT public registries are DELIBERATELY NOT added
-# (the proxy fronts them; adding them would defeat the "sole external fetcher" property).
-#
-# The proxy host is IP-pinned exactly like every other allowlist host, AND — critically — opened on the
-# proxy's OWN port (default 8081, Nexus), not just 22/80/443: a pull-through cache on 8081 the firewall
-# didn't punch through would be unreachable under lockdown, silently breaking the whole feature. The
-# pinned host+port are derived from the SAME source `claude-cache-proxy` dials: CLAUDE_CACHE_PROXY_URL
-# wins (host + port parsed from it — so a custom-URL proxy is pinned to the host it actually reaches, not
-# the container-name default), else CLAUDE_CACHE_PROXY_HOST + CLAUDE_CACHE_PROXY_PORT. Direct-from-GitHub
-# fetches (git clone, `github:`/`aqua:` mise, non-proxied `go get`) still use the GitHub allowlist — a
-# documented, pinned, audited host, not the proxy (a known boundary of the choke point, not open egress).
-# See docs/caching-proxy.md and docs/package-provisioning-security.md §3.8. Nothing here changes
-# behaviour unless a proxy host/URL is explicitly set — the OFF path is byte-identical to before.
-CACHE_PROXY_PIN_HOSTS=""   # the host(s) whose proxy PORT gets punched through (build_rules reads this)
-CACHE_PROXY_PIN_PORT=""
-if [[ -n "${CLAUDE_CACHE_PROXY_HOST:-}" || -n "${CLAUDE_CACHE_PROXY_URL:-}" ]]; then
-    if [[ -n "${CLAUDE_CACHE_PROXY_URL:-}" ]]; then
-        # Parse host + port from the URL (URL wins in claude-cache-proxy's cache_proxy_base_url too).
-        _u="${CLAUDE_CACHE_PROXY_URL#*://}"; _hp="${_u%%/*}"
-        CACHE_PROXY_PIN_HOSTS="${_hp%%:*}"
-        if [[ "$_hp" == *:* ]]; then CACHE_PROXY_PIN_PORT="${_hp##*:}"
-        elif [[ "$CLAUDE_CACHE_PROXY_URL" == https://* ]]; then CACHE_PROXY_PIN_PORT=443
-        else CACHE_PROXY_PIN_PORT=80; fi
-    else
-        CACHE_PROXY_PIN_HOSTS="${CLAUDE_CACHE_PROXY_HOST//,/ }"
-        CACHE_PROXY_PIN_PORT="${CLAUDE_CACHE_PROXY_PORT:-8081}"
-    fi
-    # Drop the public npm registry from the base set — the proxy is npm's egress now.
-    BASE_NO_NPM=""
-    for _h in $DEFAULT_HOSTS; do [[ "$_h" == "registry.npmjs.org" ]] && continue; BASE_NO_NPM="$BASE_NO_NPM $_h"; done
-    HOSTS="$BASE_NO_NPM $EXTRA $CACHE_PROXY_PIN_HOSTS"
-    if [[ -n "${PACKAGES_HOSTS// }" || -n "${APT_HOSTS// }" ]]; then
-        log "cache-proxy egress profile ON — IGNORING CLAUDE_EGRESS_PACKAGES/CLAUDE_EGRESS_APT public registries; the proxy ($CACHE_PROXY_PIN_HOSTS:$CACHE_PROXY_PIN_PORT) is the SOLE registry egress (single choke point)"
-    else
-        log "cache-proxy egress profile ON — registries reachable ONLY via the proxy ($CACHE_PROXY_PIN_HOSTS:$CACHE_PROXY_PIN_PORT); public npm registry dropped (single choke point)"
-    fi
-else
-    HOSTS="$DEFAULT_HOSTS $EXTRA $PACKAGES_HOSTS $APT_HOSTS"
-fi
+HOSTS="$DEFAULT_HOSTS $EXTRA $PACKAGES_HOSTS"
 
 # Dry-run seam for CI/tests (CLAUDE_EGRESS_PRINT_HOSTS accepts the same 1|true|yes|on spellings as the
 # package flag): print the composed allowlist hosts — one per line, IN THE ORDER the resolution loop
@@ -131,14 +72,6 @@ fi
 # indented lines in the heredoc never become tokens — no filtering needed.)
 if [[ "${CLAUDE_EGRESS_PRINT_HOSTS:-0}" =~ ^(1|true|yes|on)$ ]]; then
     printf '%s\n' $HOSTS
-    exit 0
-fi
-
-# Parallel dry-run seam (PKG-6): print the resolved cache-proxy pin as `<host...> <port>` and exit
-# BEFORE iptables, so the proxy-PORT punch-through logic (the bit that keeps a lockdown'd worker able
-# to reach an 8081 proxy) is verifiable with no NET_ADMIN. Empty first line when proxy mode is off.
-if [[ "${CLAUDE_EGRESS_PRINT_PROXY:-0}" =~ ^(1|true|yes|on)$ ]]; then
-    printf '%s %s\n' "${CACHE_PROXY_PIN_HOSTS// /,}" "${CACHE_PROXY_PIN_PORT}"
     exit 0
 fi
 
@@ -183,27 +116,9 @@ rm -rf "$rdir"
 (( ${#NETS[@]} > 0 )) || fail_open "allowlist resolved to zero IPs"
 log "allowlist holds ${#NETS[@]} IPv4 nets from $(echo "$HOSTS" | wc -w) hosts"
 
-# Cache-proxy port punch-through (PKG-6): the proxy listens on its OWN port (default 8081), not
-# 22/80/443, so resolve the pinned proxy host(s) to IPs and open exactly that port to exactly those
-# IPs. Without this a lockdown'd proxy-mode worker could not reach its own proxy — the feature would
-# silently break at first fetch. Only when the port is NOT already in the base 22/80/443 punch (an
-# https proxy on 443 needs no extra rule). Resolution is best-effort/fail-safe: an unresolvable proxy
-# host warns and adds no rule (the worker then can't reach the proxy and its fail-closed client-apply
-# refuses — never a silent open-egress fallback).
-PROXY_NETS=()
-if [[ -n "${CACHE_PROXY_PIN_PORT}" && ! ",22,80,443," == *",${CACHE_PROXY_PIN_PORT},"* ]]; then
-    for h in $CACHE_PROXY_PIN_HOSTS; do
-        [[ -z "$h" ]] && continue
-        pips="$(timeout 6 getent ahostsv4 "$h" 2>/dev/null | awk '{print $1}' | sort -u)"
-        [[ -z "$pips" ]] && { log "WARNING: could not resolve cache-proxy host $h — its port ${CACHE_PROXY_PIN_PORT} is NOT opened (worker will fail-closed on the proxy)"; continue; }
-        for ip in $pips; do PROXY_NETS+=("$ip"); done
-    done
-    (( ${#PROXY_NETS[@]} > 0 )) && log "cache-proxy port punch-through: ${#PROXY_NETS[@]} IP(s) opened on tcp/${CACHE_PROXY_PIN_PORT}"
-fi
-
 # Build the filter-table ruleset and apply it atomically. INPUT stays ACCEPT
 # (inbound SSH; replies ride conntrack), OUTPUT defaults to DROP with the
-# allowlist punched through on 22/80/443 (+ the cache-proxy port for the proxy IPs).
+# allowlist punched through on 22/80/443.
 # $1=1 includes a rate-limited LOG of drops (needs the LOG target; we retry without it if unavailable).
 build_rules() {
     echo "*filter"
@@ -217,10 +132,6 @@ build_rules() {
     local net
     for net in "${NETS[@]}"; do
         echo "-A OUTPUT -p tcp -d $net -m multiport --dports 22,80,443 -j ACCEPT"
-    done
-    # Cache-proxy port: open ONLY the proxy IPs on ONLY the proxy port (a narrow, specific hole).
-    for net in "${PROXY_NETS[@]}"; do
-        echo "-A OUTPUT -p tcp -d $net --dport ${CACHE_PROXY_PIN_PORT} -j ACCEPT"
     done
     [[ "${1:-0}" == 1 ]] && echo '-A OUTPUT -m limit --limit 5/min -j LOG --log-prefix "[egress-drop] "'
     echo "COMMIT"

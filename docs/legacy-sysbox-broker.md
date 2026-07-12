@@ -24,22 +24,60 @@ them from `main`. Any of them can be recovered by checking that branch out.
   broker), §5b (broker controller mode), §5c (broker-must-be-serving), §5d (cache
   proxy), §8a-bis (broker CLAUDE.d loader).
 - **Broker session-config fragment** — `claude-config/CLAUDE.d/broker.md`.
-- **Broker tests** — `test/broker-*.sh` (includes `test/broker-interactive-unit.sh`
-  and `test/broker-claude-d-unit.sh`), `test/cache-proxy-unit.sh`,
-  `test/apt-provision-unit.sh`, and the broker cases in `test/compose-gen-unit.sh`.
+- **Broker tests** — `test/broker-unit.sh`, `test/broker-interactive-unit.sh`,
+  `test/broker-claude-d-unit.sh`, `test/cache-proxy-unit.sh`,
+  `test/apt-provision-unit.sh`, `test/worker-run-unit.sh`, `test/fleet-view-unit.sh`.
+  (`test/compose-gen-unit.sh` carried **no** broker cases — the `SC-5` `done:` line
+  claimed it did; that was wrong, and the file was left untouched.)
 - **Broker-only launch/compose flags** — `--broker`, `--sysbox`, `--worker-tarball`
-  on `bin/claude-launch` and `bin/claude-compose-gen`.
-- **Broker-only env plumbing** — `CLAUDE_WORKER_*`, `CLAUDE_BROKER_*`,
-  `CLAUDE_SYSBOX_*`, `CLAUDE_CACHE_PROXY*`, `CLAUDE_APT_PROVISION*`.
-- **Broker-tier docs** — `docs/caching-proxy.md`,
-  `docs/package-provisioning-security.md` (this page replaces them).
+  on `bin/claude-launch` and `bin/claude-compose-gen`. Both now **reject** these
+  flags with a "removed in SC-5" error rather than ignoring them.
+- **Broker-only env plumbing** — `CLAUDE_WORKER_*`, `CLAUDE_SYSBOX_*`,
+  `CLAUDE_CACHE_PROXY*`, `CLAUDE_APT_PROVISION*`, and `CLAUDE_BROKER_*`
+  **except `CLAUDE_BROKER_GIT_KEY`**.
 
-`bin/{claude-controller,claude-controller-size,claude-controller-verify}` are
-reassessed in `SC-6` — anything with a non-broker function stays on `main`; the
-rest joins the strip. `PKG-2`/`PKG-3`/`PKG-5` mechanisms (`mise` toolchain +
-shared `/cache` + `ignore-scripts`/`lockfile=true`) are **not** broker-tied and
-stay on `main` — the strip is broker + Sysbox + PKG-4 (curated apt) + PKG-6
-(pull-through cache proxy) only.
+  > ⚠️ **`CLAUDE_BROKER_GIT_KEY` STAYS on `main` — do not strip it.** Despite the
+  > name it has nothing to do with the worker broker: it is the **git-key broker**,
+  > a live credential-isolation control that holds the SSH deploy key in a
+  > root-owned `ssh-agent` so the unprivileged agent can sign/push but cannot read
+  > the key bytes (`entrypoint.sh` §5; `README.md`; and §3.3 of
+  > `docs/package-provisioning-security.md`, which names it as one of the two
+  > controls that make package provisioning safe). A `CLAUDE_BROKER_*` glob applied
+  > naively in `SC-6`/`SC-7` would delete it — don't.
+- **Controller-envelope sizing tier** — `bin/claude-controller-size`,
+  `bin/claude-controller-verify`, `bin/claude-sizing-verify`. These sized and
+  verified a controller for *K nested Sysbox workers*; with the workers gone
+  they have no non-broker function (`claude-controller-size`'s docker-args
+  output leads with `--runtime=sysbox-runc`). The reusable sizing math
+  (`size_to_mib` / `mem_reservation_for`) was kept in `bin/_common.sh`.
+- **The `CLAUDE.d/` per-mode fragment loader** — `bin/claude-md-fragments` and
+  `entrypoint.sh` §8a-bis. It existed solely to teach the broker channel via
+  `claude-config/CLAUDE.d/broker.md`; `claude-config/settings.json`'s only
+  content was the `SessionStart` hook that invoked it.
+
+  > **Upgrade note.** That hook was persisted into every per-project **config
+  > volume** by pre-`SC-5` images, and §8b's merge lets existing user settings
+  > win — so removing the binary alone would have left the hook firing an ENOENT
+  > at every session start on any upgraded volume. `entrypoint.sh` §8b therefore
+  > carries a **self-heal** that drops a `SessionStart` hook pointing at
+  > `/usr/local/bin/claude-md-fragments` (a user's own hooks are untouched),
+  > mirroring the existing telemetry-kill migration. Covered by `test/unit.sh`.
+- **PKG-4 curated apt manifest** — `claude-config/apt-manifest.txt`.
+- **Broker-tier docs** — `docs/caching-proxy.md` (PKG-6) and `docs/substrate.md`
+  (the Sysbox substrate); this page replaces them.
+  `docs/package-provisioning-security.md` was **retained**, reduced to the PKG-1
+  / PKG-5 controls that are still live — only its PKG-4/PKG-6 sections were cut.
+
+**`SC-6` scope after this strip.** Of the original controller tier, only
+`bin/claude-controller` survives — now a thin pass-through that `exec`s
+`claude-autopilot` (its `slots>1` broker-dispatch loop went with the broker).
+`SC-6` decides whether that pass-through still earns its place, and should also
+reassess `bin/claude-reaper`: its worker-container-reaping duty was broker-tied
+and is gone, leaving a spool-pruning duty whose spool no surviving code writes
+to. `PKG-2`/`PKG-3`/`PKG-5` mechanisms (`mise` toolchain + shared `/cache` +
+`ignore-scripts`/`lockfile=true`) are **not** broker-tied and stay on `main` —
+the strip is broker + Sysbox + PKG-4 (curated apt) + PKG-6 (pull-through cache
+proxy) only.
 
 ## Why we retired it
 

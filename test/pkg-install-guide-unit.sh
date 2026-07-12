@@ -3,27 +3,27 @@
 # section of the baked global `claude-config/CLAUDE.md` that teaches an
 # in-container Claude Code session the mise-first package-install pattern per
 # ecosystem (Python / Node / Rust / Go), the PEP-668 dead-ends for the system
-# Python 3.11 interpreter, the no-sudo/no-apt reality of a leaf container, the
-# PKG-4 apt-manifest.txt path for Sysbox workers, the PKG-3 /cache shared cache,
-# and the explicit refusal of sudo / --break-system-packages / edits to
-# /etc,/opt,/usr.
+# Python 3.11 interpreter, the no-sudo/no-apt reality of a container (system
+# libraries have no self-service path — the worker-tier apt path that used to
+# provide one, PKG-4, was retired in SC-5; see docs/legacy-sysbox-broker.md),
+# the PKG-3 /cache shared cache, and the explicit refusal of sudo /
+# --break-system-packages / edits to /etc,/opt,/usr.
 #
 # NO docker, NO sysbox. §8a of entrypoint.sh already installs the baked
 # CLAUDE.md into the running container on first start (proven by
-# test/unit.sh / test/broker-claude-d-unit.sh's §D pattern for CLAUDE.d/); this
-# unit test is a **content contract** on the baked file itself — an in-repo
-# regression guard that every mandatory phrase survives future edits, so an
-# in-container agent that reads the file gets actionable guidance instead of
-# flailing on a PEP-668 refusal, a sudo dead-end, or a break-system-packages
-# footgun.
+# test/unit.sh); this unit test is a **content contract** on the baked file
+# itself — an in-repo regression guard that every mandatory phrase survives
+# future edits, so an in-container agent that reads the file gets actionable
+# guidance instead of flailing on a PEP-668 refusal, a sudo dead-end, or a
+# break-system-packages footgun.
 #
 #   A. claude-config/CLAUDE.md — the "Installing packages" section exists,
 #      names each ecosystem's mise-first invocation, calls out the PEP-668
 #      externally-managed reality with every dead-end path (`--user`,
 #      `--break-system-packages`, `uv pip install --system`), points at
-#      `uv run --with` for a one-off script, wires Node/Rust/Go, points at
-#      PKG-4's `apt-manifest.txt` for the Sysbox syslib path, points at
-#      PKG-3's `/cache` for the shared cache, and refuses `sudo` +
+#      `uv run --with` for a one-off script, wires Node/Rust/Go, states there
+#      is no self-service path for system libraries, points at PKG-3's
+#      `/cache` for the shared cache, and refuses `sudo` +
 #      `--break-system-packages` + edits to `/etc`/`/opt`/`/usr`.
 #   B. entrypoint.sh §8a — the baked CLAUDE.md install path is unchanged
 #      (this item ships GUIDANCE, not new mechanism); the section is
@@ -150,28 +150,24 @@ else
     bad "Go: 'go install' MUST be named as the second step"
 fi
 
-# A6. (e) System libraries — no sudo in leaves, PKG-4's apt-manifest.txt in Sysbox workers.
+# A6. (e) System libraries — no sudo, no self-service path (PKG-4's Sysbox-worker
+# apt tier was retired in SC-5; see docs/legacy-sysbox-broker.md).
 if has "$CLAUDE_MD" 'no `sudo`' \
    || has "$CLAUDE_MD" 'no sudo' \
    || has "$CLAUDE_MD" "**no \`sudo\`**"; then
-    ok "System libs: leaf containers 'no sudo' called out"
+    ok "System libs: 'no sudo' called out"
 else
-    bad "System libs: the phrase 'no sudo' (leaf has no sudo) MUST appear"
+    bad "System libs: the phrase 'no sudo' MUST appear"
 fi
-if has "$CLAUDE_MD" 'CLAUDE_APT_PROVISION=1'; then
-    ok "System libs: CLAUDE_APT_PROVISION=1 named as the Sysbox worker gate"
+if has "$CLAUDE_MD" 'no self-service path'; then
+    ok "System libs: 'no self-service path' stated (no in-session apt mechanism)"
 else
-    bad "System libs: 'CLAUDE_APT_PROVISION=1' MUST be named (PKG-4's tier gate)"
+    bad "System libs: 'no self-service path' MUST be stated (there is no in-session apt mechanism)"
 fi
-if has "$CLAUDE_MD" 'apt-manifest.txt'; then
-    ok "System libs: 'apt-manifest.txt' named as the curated pinned manifest"
+if has "$CLAUDE_MD" 'base-image rebuild'; then
+    ok "System libs: 'base-image rebuild' named as the only route to a new syslib"
 else
-    bad "System libs: 'apt-manifest.txt' MUST be named (PKG-4's curated pinned manifest)"
-fi
-if has "$CLAUDE_MD" 'before' && has "$CLAUDE_MD" 'the agent'; then
-    ok "System libs: apt runs 'before the agent starts' (root-timed) called out"
-else
-    bad "System libs: apt is installed 'before the agent starts' (root, not runtime) MUST be stated"
+    bad "System libs: 'base-image rebuild' MUST be named as the only route to a new syslib"
 fi
 
 # A7. (f) PKG-3 shared cache — /cache is where everything lands.
@@ -214,7 +210,7 @@ echo "== B. entrypoint.sh §8a: baked CLAUDE.md install path unchanged (no new m
 bash -n "$ENTRY" && ok "entrypoint.sh parses (bash -n)" || bad "entrypoint.sh has a syntax error"
 
 # Extract §8a so the assertion is scoped and cannot be masked by a lookalike elsewhere.
-SEC8A="$(awk '/^# 8a\. Global CLAUDE.md/,/^# 8a-bis\./' "$ENTRY")"
+SEC8A="$(awk '/^# 8a\. Global CLAUDE.md/,/^# 8b\./' "$ENTRY")"
 if grep -qF 'BAKE_DIR/CLAUDE.md' <<<"$SEC8A" \
    && grep -qF '! -e "$CLAUDE_CONFIG_DIR/CLAUDE.md"' <<<"$SEC8A" \
    && grep -qF 'install -o' <<<"$SEC8A"; then

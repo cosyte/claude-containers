@@ -7,9 +7,9 @@
 # for parallel workers, bounded by a fail-safe trim. The LIVE proof (two sessions reuse a
 # cached install, real trim reclaim, no cross-worker corruption, a missing cache degrades
 # to per-container installs) needs a real build and is the on-host manual gate documented
-# in docs/shared-tool-cache.md; bin/claude-disk-verify --check additionally re-runs the
-# docker-free cache-trim safety here on a fleet host. Here we prove the WIRING is present
-# and correctly scoped:
+# in docs/shared-tool-cache.md; bin/claude-disk-verify additionally re-runs the
+# docker-free cache-trim safety here as a one-command sanity pass. Here we prove the
+# WIRING is present and correctly scoped:
 #   - the Dockerfile relocates the caches to /cache and keeps it fail-safe (baked, chowned)
 #   - the _common.sh cache helpers (name normalization, mount args, size measurement)
 #   - the claude-disk-gc cache trim (fixed re-fetchable-only plan; idle-only; fail-safe)

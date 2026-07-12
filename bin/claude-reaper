@@ -1,113 +1,64 @@
 #!/usr/bin/env bash
-# claude-reaper — clean up ephemeral worker residue the broker/worker didn't (CC-4).
+# claude-reaper — prune aged spool litter from a request/response spool directory.
 #
-# claude-worker-run (CC-4 Deliverable 1) drives a worker's single /work-on and exits; the
-# broker launches every worker `--rm`, so a CLEAN exit already makes the container vanish
-# with no residue. This reaper mops up what an UNCLEAN exit leaves behind — a `kill -9`,
-# an OOM, an inner-daemon restart mid-run — plus the request/response spool files those
-# same unclean paths can orphan.
-#
-# Two duties, both idempotent and fail-safe (never `die` mid-reap; a docker/spool error is
-# a loud warn, and the reap continues):
-#   1. remove any claude.worker=1 container NOT running (exited/dead/created) — freeing
-#      its name so a re-request of the same item doesn't hit a docker name conflict.
-#      RUNNING workers are never touched: the status filter is exact, and if a container's
-#      state can't be determined it is SKIPPED, never removed (fail closed on ambiguity).
-#   2. prune the broker spool ($CLAUDE_BROKER_DIR, default /run/claude/broker):
-#      responses/ files older than CLAUDE_REAPER_SPOOL_TTL, and orphaned requests/ +
-#      staging/ files older than the same TTL (a live request is normally consumed within
-#      seconds — anything that old is spool litter, not in-flight work). `.lock` is never
-#      touched.
+# SC-5 removed this reaper's other duty — reaping exited/dead/created `claude.worker=1`
+# containers the (now-deleted) worker broker's `--rm` launches could still leave behind on
+# an unclean exit. That duty is gone along with the broker/worker substrate it served (see
+# docs/legacy-sysbox-broker.md). What's left is a standalone, generic spool-pruning utility:
+# aged files under a spool directory's responses/requests/staging subdirectories are
+# reclaimed, `.lock` is never touched. Idempotent and fail-safe (never `die` mid-reap; a
+# prune error is a loud warn and the reap continues). No entrypoint path currently starts
+# this — it previously ran only inside the retired broker/controller mode; run it by hand or
+# on your own cron/timer against whatever spool-shaped directory you point it at.
 #
 # Usage:
 #   bin/claude-reaper           one-shot: reap once, print counts, exit 0
 #   bin/claude-reaper --loop    reap every CLAUDE_REAPER_INTERVAL seconds, forever
 #
 # Env:
-#   CLAUDE_BROKER_DIR           broker spool root       (default /run/claude/broker)
+#   CLAUDE_REAPER_SPOOL_DIR     spool root to prune       (default /run/claude/reaper-spool)
 #   CLAUDE_REAPER_INTERVAL      seconds between --loop cycles (default 300)
 #   CLAUDE_REAPER_SPOOL_TTL     seconds before a spool file is prunable (default 3600)
 #
 # Test seam — UNIT TESTS / OPERATOR DRY-RUNS ONLY, loudly warned when active:
-#   CLAUDE_REAPER_DRYRUN=1   prints what WOULD be removed/pruned, removes/prunes nothing
+#   CLAUDE_REAPER_DRYRUN=1   prints what WOULD be pruned, prunes nothing
 #
 # Sourcing this file defines the reaper_* functions and returns (the unit-test seam);
 # executing it runs a one-shot or --loop reap.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-# All docker traffic funnels through this one wrapper (stubbable by unit tests — nothing
-# else in this script may call docker directly).
-reaper_docker() { docker "$@"; }
-
-# --- 1. exited/dead/created workers ----------------------------------------------------
-# Prints one container id per line — the ids reaper_once should remove. Fails CLOSED: a
-# docker query error is a warn + empty output (never workers half-listed and half-missed).
-reaper_exited_workers() {
-    local status ids
-    for status in exited dead created; do
-        if ! ids="$(reaper_docker ps -a --filter label=claude.worker=1 --filter "status=$status" -q 2>&1)"; then
-            warn "reaper: could not list claude.worker=1 containers with status=$status (docker error) — skipping this status, continuing"
-            continue
-        fi
-        # `[[ -n ]] && printf` as the LAST statement of the final loop iteration would
-        # return false (no ids this status) — that would exit the function nonzero and,
-        # under a caller's `set -e`, blow up a plain `x="$(reaper_exited_workers)"`
-        # assignment. This is a selector, not a predicate: it must always return 0.
-        if [[ -n "$ids" ]]; then printf '%s\n' "$ids"; fi
-    done
-    return 0
-}
-
-# --- 2. stale spool files ---------------------------------------------------------------
+# --- stale spool files -------------------------------------------------------------------
 # Prints one path per line — files reaper_once should prune. Guards missing dirs (no-op,
-# not an error: a controller that never started the broker has no spool yet). Never
-# touches .lock. Uses find -type f -mmin so it is robust to clock skew/relative age rather
-# than parsing stat output by hand.
+# not an error: a spool that was never populated has nothing to prune). Never touches
+# .lock. Uses find -type f -mmin so it is robust to clock skew/relative age rather than
+# parsing stat output by hand.
 reaper_stale_spool_files() {
-    local broker_dir="$1" ttl="$2" mmin d
+    local spool_dir="$1" ttl="$2" mmin d
     mmin=$(( ttl / 60 ))
     (( mmin < 1 )) && mmin=1
     for d in responses requests staging; do
-        [[ -d "$broker_dir/$d" ]] || continue
-        find "$broker_dir/$d" -type f -mmin "+$mmin" -print 2>/dev/null || true
+        [[ -d "$spool_dir/$d" ]] || continue
+        find "$spool_dir/$d" -type f -mmin "+$mmin" -print 2>/dev/null || true
     done
     return 0
 }
 
 # --- driver -------------------------------------------------------------------------------
-# reaper_once — run both duties once, report counts. Never dies: a failure in either duty
-# is warned and the other duty still runs. Returns 0 always (a bad cycle under --loop must
-# log and continue, not abort the loop).
+# reaper_once — prune once, report counts. Never dies: a prune failure is warned and the
+# rest of the sweep still runs. Returns 0 always (a bad cycle under --loop must log and
+# continue, not abort the loop).
 reaper_once() {
-    local broker_dir="${CLAUDE_BROKER_DIR:-/run/claude/broker}"
+    local spool_dir="${CLAUDE_REAPER_SPOOL_DIR:-/run/claude/reaper-spool}"
     local ttl="${CLAUDE_REAPER_SPOOL_TTL:-3600}"
     [[ "$ttl" =~ ^[0-9]+$ ]] || { warn "reaper: CLAUDE_REAPER_SPOOL_TTL '$ttl' is not a positive integer — using the default 3600"; ttl=3600; }
 
     local dryrun=0
     if [[ "${CLAUDE_REAPER_DRYRUN:-0}" == 1 ]]; then
-        warn "TEST SEAM ACTIVE: CLAUDE_REAPER_DRYRUN=1 — reporting what WOULD be removed/pruned, changing nothing"
+        warn "TEST SEAM ACTIVE: CLAUDE_REAPER_DRYRUN=1 — reporting what WOULD be pruned, changing nothing"
         dryrun=1
     fi
 
-    # --- duty 1: exited/dead/created workers ---
-    local removed=0 remove_failed=0 id
-    while IFS= read -r id; do
-        [[ -n "$id" ]] || continue
-        if (( dryrun )); then
-            echo "would remove worker container: $id"
-            removed=$((removed + 1))
-            continue
-        fi
-        if reaper_docker rm -f "$id" >/dev/null 2>&1; then
-            removed=$((removed + 1))
-        else
-            warn "reaper: could not remove worker container $id — leaving it, continuing"
-            remove_failed=$((remove_failed + 1))
-        fi
-    done < <(reaper_exited_workers || true)
-
-    # --- duty 2: stale spool files ---
     local pruned=0 prune_failed=0 f
     while IFS= read -r f; do
         [[ -n "$f" ]] || continue
@@ -125,12 +76,12 @@ reaper_once() {
             warn "reaper: could not prune spool file $f — leaving it, continuing"
             prune_failed=$((prune_failed + 1))
         fi
-    done < <(reaper_stale_spool_files "$broker_dir" "$ttl" || true)
+    done < <(reaper_stale_spool_files "$spool_dir" "$ttl" || true)
 
     if (( dryrun )); then
-        ok "reaper (dry-run): would remove $removed worker container(s), would prune $pruned spool file(s)"
+        ok "reaper (dry-run): would prune $pruned spool file(s)"
     else
-        ok "reaper: removed $removed worker container(s) (failed: $remove_failed), pruned $pruned spool file(s) (failed: $prune_failed)"
+        ok "reaper: pruned $pruned spool file(s) (failed: $prune_failed)"
     fi
     return 0
 }

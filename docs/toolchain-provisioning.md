@@ -66,8 +66,10 @@ agent immediately — no `sudo`, no image rebuild.
      the GitHub-released python-build-standalone, which is on the base allowlist, so it works under
      lockdown as-is.
 
-   System `.so` libraries are **out of scope** entirely — that gap is the Sysbox-worker apt tier
-   (PKG-4), never rootless in a leaf container.
+   System `.so` libraries are **out of scope** entirely — no self-service path provisions them (a
+   worker-tier `apt` used to close this gap, PKG-4, but was retired in SC-5 along with the Sysbox
+   substrate it depended on; see [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md)). A system
+   library needs a base-image rebuild.
 
 ## The deliberate trust decision — `trusted_config_paths = /workspace`, not `/`
 
@@ -139,8 +141,8 @@ per-repo `/workspace/.npmrc` opt-out) is documented in
 ## Non-goals (inherited + new)
 
 - **No system `.so` libraries.** mise provisions binaries and language toolchains, not arbitrary
-  system libraries — those are the Sysbox-worker apt tier (PKG-4) or a base-image rebuild. (roadmap
-  §II.9)
+  system libraries — those need a base-image rebuild (the worker-tier apt path that used to close
+  this gap, PKG-4, was retired in SC-5; see docs/legacy-sysbox-broker.md). (roadmap §II.9)
 - **No blanket config trust.** `/workspace` only; never `/`. See above.
 - **Language toolchains are not reachable under egress lockdown yet.** `node@`/`go@`/`rust` fetch their
   runtimes from vendor hosts (`nodejs.org`, `go.dev`, `static.rust-lang.org`) not on the current
@@ -148,5 +150,6 @@ per-repo `/workspace/.npmrc` opt-out) is documented in
   — a candidate firewall follow-up, deliberately not bundled into PKG-2's scope. Default (lockdown off)
   and `python@`/`github:`/`aqua:` under lockdown are unaffected. (How it's wired §4.)
 - **`mise use` is not a security boundary on its own.** It sits on top of the PKG-1 containment
-  (curated egress, credentials-unreachable-during-fetch, install-then-relock) and the PKG-5 script
-  hardening — it does not replace them.
+  (curated egress, credentials-unreachable-during-fetch) and the PKG-5 script hardening — it does
+  not replace them. (The `install-then-relock` window was PKG-4's apt mechanism, retired with the
+  Sysbox/broker substrate in `SC-5`; see `docs/legacy-sysbox-broker.md`.)
