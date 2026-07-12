@@ -410,6 +410,40 @@ the flat runc cap-drop hardening (the inner dockerd needs its caps; the userns i
 boundary), auto-selects the controller image, and sizes the container for the CC-3 controller
 envelope (Σ K workers + overhead) so the broker's own capacity fail-safe passes.
 
+**The lead session boots knowing how to dispatch (CC-BROKER-CLAUDE-D).** In `--broker`
+mode the baked global `CLAUDE.md` alone teaches nothing about the broker channel —
+Claude would open the interactive session with no idea that `claude-worker-request` is
+the *only* way to spawn a nested worker, why the inner Docker socket is off-limits, or
+that WIP=K is enforced as backpressure. Closing that gap has two moving parts, cleanly
+separated:
+
+- The **loader** — a baked `SessionStart` hook (`bin/claude-md-fragments`, registered
+  in the image's `claude-config/settings.json`) that concatenates
+  `~/.claude/CLAUDE.d/*.md` into the session's initial context. Registered
+  unconditionally, since it is a passive reader: on any container that has no
+  `CLAUDE.d/` directory (or an empty one), the hook short-circuits at its `[[ -d ]]`
+  guard and emits **zero bytes**. So a non-broker container gains an idle
+  `SessionStart` entry in its merged `settings.json` (this is a real, observable
+  addition — not literally byte-identical to the pre-slice image) but its runtime
+  session-start output is unchanged.
+- The **broker-mode payload** — `claude-config/CLAUDE.d/broker.md`, installed into
+  `~/.claude/CLAUDE.d/` by `entrypoint.sh` §8a-bis **only** when four conditions hold:
+  `CLAUDE_WORKER_BROKER=1`; the broker's spool directory
+  (`"${CLAUDE_BROKER_DIR:-/run/claude/broker}/requests"`) is present — the exact
+  signal §5c blocked on before the agent starts, so this is a redundancy check on
+  the same invariant, not a race; the baked fragment ships in the image; and no
+  user-mounted fragment already occupies the target (§8's "we only fill what's
+  absent" rule holds — a mount always wins). The fragment is **mechanism-only**:
+  the client contract, the inner-Docker-socket refusal, WIP=K as backpressure, and
+  an explicit `no default dispatch loop` disclaimer. When to spawn is the operator's
+  or the session prompt's call, never a policy the fragment prescribes.
+
+So a plain `claude-launch` is **not literally byte-identical** to the pre-slice image
+(its `~/.claude/settings.json` picks up the loader hook), but at runtime the loader is
+byte-silent (empty stdout, exit 0), no `CLAUDE.d/` payload is installed, and the
+observable session is unchanged. Broker containers pick up the addendum, and any
+future mode-specific fragment can ride the same loader.
+
 Clearing the flat hardening does **not** weaken the egress firewall: when `CLAUDE_EGRESS_LOCKDOWN=1`,
 `claude-launch` re-adds an explicit `--cap-add NET_ADMIN` on the Sysbox path so the (fail-open)
 firewall always has the capability it needs to apply its iptables rules — rather than depending on
