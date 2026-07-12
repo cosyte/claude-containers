@@ -9,6 +9,16 @@ Auth is your Claude **Max** subscription via OAuth. No API keys — the entrypoi
 hard-fails if `ANTHROPIC_API_KEY` is set so you never accidentally bill per
 token.
 
+> **Substrate change in progress (2026-07-12).** The nested-Sysbox worker-broker
+> path referenced below (`--broker`/`--sysbox`, controller mode, curated worker
+> `apt`, pull-through cache proxy — the `CC-*` and `PKG-*` work) is being
+> retired in favor of Claude Code subagents in per-worktree git worktrees. The final broker-path
+> state is frozen at branch `legacy/sysbox-broker-2026-07-12` + tag
+> `legacy-sysbox-broker-2026-07-12` — see
+> [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md). The
+> Remote-Control core, `/next` autopilot, launch/compose-gen (sans broker
+> flags), housekeeping, baked config, and the security floor all stay on `main`.
+
 ## Quick start
 
 ```bash
