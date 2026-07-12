@@ -450,6 +450,21 @@ firewall always has the capability it needs to apply its iptables rules — rath
 Sysbox's implicit cap set (which does grant it — verified `CapEff 0x1ffffffffff` on this fleet — but
 is not a contract we rely on).
 
+**Durable worker image.** The broker launches workers from `CLAUDE_WORKER_IMAGE` (default
+`claude-code-box:latest`), which must be **on the inner daemon** — and that daemon starts **empty on
+every (re)create**. A locally-built image can't be pulled (no registry), so §5a of the entrypoint
+optionally **loads a worker-image tarball** mounted into the controller: set
+`CLAUDE_WORKER_IMAGE_TARBALL` to a bind-mounted `docker save` tarball (a HOST file that survives a
+recreate), and §5a loads it into the inner daemon before the broker — idempotent (skipped if the image
+is already present, e.g. after a plain restart) and fail-soft (a load problem warns, never blocks boot).
+`claude-launch --broker --worker-tarball <path>` and `claude-compose-gen --broker <repos>
+--worker-tarball <path>` both wire this up.
+
+**Regenerable compose.** `claude-compose-gen --broker <repos>` emits a broker-controller service
+directly (controller image, `runtime: sysbox-runc`, the CC-3 controller envelope, the broker +
+attestation env, no cap-drop, and — with `--worker-tarball` — the tarball mount), so broker services
+survive a regenerate instead of needing a hand-edit.
+
 ### Effective slots stay at 1 until PAR-4.1 + PAR-7.1 land
 
 `bin/claude-controller` computes **effective worker slots** as

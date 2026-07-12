@@ -39,11 +39,16 @@
 #                              (WIP-capped at K). Implies --sysbox, auto-selects the
 #                              controller image (make build-controller), and sizes the
 #                              container for Σ(K workers)+overhead. Needs Sysbox.
+#   --worker-tarball <path>    (with --broker) host path to a `docker save` tarball of the
+#                              worker image (default claude-code-box:latest). The entrypoint
+#                              loads it into the inner daemon on boot, so the worker image
+#                              survives a container recreate (the inner daemon starts empty
+#                              each time). Create it: docker save claude-code-box:latest -o <path>
 set -euo pipefail
 LAUNCH_BIN_DIR="$(dirname "${BASH_SOURCE[0]}")"
 source "$LAUNCH_BIN_DIR/_common.sh"
 
-usage() { sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
 # EXTRA/MCP_LIST/DEVCMD/MKTS/PLUGINS default from .env (sourced by _common.sh);
@@ -65,7 +70,7 @@ MODEL="${CLAUDE_MODEL:-}"
 EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER="" BROWSER_EXPLICIT=0 IMAGE_EXPLICIT=0 CACHE_ARG=""
 # SYSBOX/BROKER: run under Sysbox and (for --broker) start the worker broker so the
 # session can spawn nested autonomous workers. --broker implies --sysbox (below).
-SYSBOX=0 BROKER=0
+SYSBOX=0 BROKER=0 WORKER_TARBALL=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --repo)        REPO="$2"; OPTS_GIVEN=1; shift 2 ;;
@@ -87,6 +92,7 @@ while [[ $# -gt 0 ]]; do
         --no-cache)    CACHE_ARG="off"; OPTS_GIVEN=1; shift ;;
         --sysbox)      SYSBOX=1; OPTS_GIVEN=1; shift ;;
         --broker)      BROKER=1; OPTS_GIVEN=1; shift ;;
+        --worker-tarball) WORKER_TARBALL="$2"; OPTS_GIVEN=1; shift 2 ;;
         -h|--help)     usage 0 ;;
         -*)            die "unknown option: $1 (try --help)" ;;
         *)             [[ -z "$PROJECT" ]] && PROJECT="$1" || die "unexpected arg: $1"; shift ;;
@@ -110,6 +116,8 @@ fi
 # on a daemon that isn't userns-remapped, and needs a host-attested CVE-patched Sysbox
 # version — both of which the --sysbox path provides. So --broker implies --sysbox.
 [[ "$BROKER" == 1 ]] && SYSBOX=1
+# --worker-tarball only means anything with a broker (it feeds the inner daemon).
+[[ -n "$WORKER_TARBALL" && "$BROKER" != 1 ]] && warn "--worker-tarball is ignored without --broker (no inner daemon to load it into)"
 
 # Validate --expose maps (HOSTPORT:CONTAINERPORT) and build the docker -p args.
 EXPOSE_ARGS=()
@@ -289,6 +297,15 @@ if [[ "$SYSBOX" == 1 ]]; then
             || die "controller sizing (claude-controller-size --flags) failed — this host can't fit K workers (see above), or the umbrella parallel.config.json is unreadable."
         mapfile -t SIZING_ARGS <<<"$SIZE_OUT"     # --runtime=sysbox-runc + cpu/mem/pids envelope
         BROKER_ENV_ARGS=(-e CLAUDE_WORKER_BROKER=1)
+        # Durable worker image: mount the tarball read-only; the entrypoint loads it into
+        # the (empty-on-recreate) inner daemon on boot, so the worker image survives a recreate.
+        if [[ -n "$WORKER_TARBALL" ]]; then
+            [[ -f "$WORKER_TARBALL" ]] || die "--worker-tarball '$WORKER_TARBALL' not found. Create it: docker save claude-code-box:latest -o '$WORKER_TARBALL'"
+            WORKER_TARBALL="$(cd "$(dirname "$WORKER_TARBALL")" && pwd)/$(basename "$WORKER_TARBALL")"
+            RO_MOUNTS+=(-v "$WORKER_TARBALL:/etc/claude/worker-image.tar:ro")
+            BROKER_ENV_ARGS+=(-e CLAUDE_WORKER_IMAGE_TARBALL=/etc/claude/worker-image.tar)
+            info "Worker image tarball: $WORKER_TARBALL → loaded into the inner daemon on boot (durable across recreate)"
+        fi
         info "Worker broker: ON — this session can spawn nested autonomous workers via claude-worker-request (WIP-capped at K; sized for the controller envelope)"
     else
         SIZING_ARGS=(--runtime=sysbox-runc "${FLAT_PROFILE[@]}")

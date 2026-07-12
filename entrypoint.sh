@@ -233,6 +233,31 @@ if [[ "${CLAUDE_WORKER_BROKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
         log "Inner dockerd        : ready after ${dwaited}s"
     fi
 
+    # --- durable worker image (CC-INTERACTIVE-BROKER) ---
+    # The broker launches workers from CLAUDE_WORKER_IMAGE, which must be ON the inner
+    # daemon. That daemon starts EMPTY on every (re)create — so without this, the first
+    # worker launch after a recreate has to pull/rebuild, and a locally-built (registry-
+    # less) image can't be pulled at all. If a worker-image tarball is mounted
+    # (CLAUDE_WORKER_IMAGE_TARBALL — a HOST file that survives container recreate), load it
+    # into the inner daemon now, before the broker. Idempotent (skipped if the image is
+    # already present, e.g. after a plain restart) and FAIL-SOFT (a load failure warns but
+    # never blocks boot — the broker just refuses launches until the image is present).
+    if [[ -n "${CLAUDE_WORKER_IMAGE_TARBALL:-}" ]]; then
+        _wimg="${CLAUDE_WORKER_IMAGE:-claude-code-box:latest}"
+        if ! [[ -f "$CLAUDE_WORKER_IMAGE_TARBALL" ]]; then
+            log "Worker image        : WARNING — CLAUDE_WORKER_IMAGE_TARBALL '$CLAUDE_WORKER_IMAGE_TARBALL' not found (mount it read-only); broker will refuse launches until $_wimg is present"
+        elif docker image inspect "$_wimg" >/dev/null 2>&1; then
+            log "Worker image        : $_wimg already on the inner daemon — skipping tarball load"
+        else
+            log "Worker image        : loading $_wimg from $CLAUDE_WORKER_IMAGE_TARBALL (durable across recreate; first load may take ~1m)"
+            if docker load -i "$CLAUDE_WORKER_IMAGE_TARBALL" >>/var/log/inner-dockerd.log 2>&1; then
+                log "Worker image        : loaded"
+            else
+                log "Worker image        : WARNING — failed to load $CLAUDE_WORKER_IMAGE_TARBALL (see /var/log/inner-dockerd.log); broker will refuse launches until $_wimg is present"
+            fi
+        fi
+    fi
+
     # --- worker broker (CC-2) ---
     # Best-effort early lock: keep the agent off an already-present inner socket
     # even before the broker's own lockdown (the broker re-asserts at startup).
