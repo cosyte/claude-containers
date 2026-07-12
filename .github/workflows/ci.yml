@@ -52,5 +52,5 @@ jobs:
         run: test/broker-interactive-unit.sh
       - name: broker CLAUDE.d unit tests (CC-BROKER-CLAUDE-D — SessionStart-hook fragment loader teaches the interactive lead that claude-worker-request is the sole dispatch channel; broker-only install, non-broker byte-silent)
         run: test/broker-claude-d-unit.sh
-      - name: pkg-install-guide unit tests (CC-PKG-INSTALL-GUIDE — content contract on the baked global CLAUDE.md's 'Installing packages' section: mise-first per ecosystem, PEP-668 dead-ends, PKG-3 /cache, PKG-4 apt-manifest.txt, no-sudo/no-break-system-packages refusal)
+      - name: pkg-install-guide unit tests (CC-PKG-INSTALL-GUIDE — content contract on the baked global CLAUDE.md — mise-first per ecosystem, PEP-668 dead-ends, PKG-3 /cache, PKG-4 apt-manifest.txt, no-sudo/no-break-system-packages refusal)
         run: test/pkg-install-guide-unit.sh
