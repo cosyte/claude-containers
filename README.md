@@ -194,6 +194,21 @@ starts with the `claude-worker-request` mechanism, the WIP=K backpressure rule, 
 the "never touch the inner Docker socket" refusal already in context. Non-broker
 containers leave `CLAUDE.d/` absent and the hook is a silent no-op.
 
+**Durable worker image.** The broker launches workers from `claude-code-box:latest`,
+which must be on the *inner* daemon — and that daemon starts empty on every recreate. So
+save the worker image to a host tarball and mount it; the entrypoint loads it on boot
+(idempotent + fail-soft):
+
+```bash
+docker save claude-code-box:latest -o /opt/homelab/claude/worker-image.tar
+./bin/claude-launch cockpit --broker --worker-tarball /opt/homelab/claude/worker-image.tar --repo …
+```
+
+**Many broker sessions at once:** `claude-compose-gen --broker <repos> --worker-tarball
+<path>` emits broker-controller services (controller image + Sysbox + envelope sizing +
+the tarball), so a whole roster of brokers survives a regenerate.
+>>>>>>> 6028630 (feat(controller): durable worker image + compose-gen --broker)
+
 ## Environment variables
 
 Set in `.env` (auto-loaded by the scripts and passed into containers). Real env

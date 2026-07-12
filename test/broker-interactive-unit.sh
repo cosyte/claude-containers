@@ -208,6 +208,60 @@ has  "$MF" 'WITH_DOCKER=$(WITH_DOCKER)'         && ok "Makefile threads WITH_DOC
 has  "$COMMON" 'CLAUDE_IMAGE_CONTROLLER="${CLAUDE_IMAGE_CONTROLLER:-claude-code-box:controller}"' \
     && ok "_common.sh defines CLAUDE_IMAGE_CONTROLLER" || bad "_common.sh missing CLAUDE_IMAGE_CONTROLLER default"
 
+# ============================================================================================
+echo "== D. durable worker image: entrypoint tarball auto-load + claude-launch --worker-tarball =="
+# ============================================================================================
+# §5a loads the worker image from a mounted tarball (survives recreate — inner daemon is empty
+# each time), idempotently (skip if present) and fail-soft (a load failure warns, never dies).
+SEC5A="$(sed -n '/durable worker image (CC-INTERACTIVE-BROKER)/,/worker broker (CC-2)/p' "$ENTRY")"
+if grep -qF 'CLAUDE_WORKER_IMAGE_TARBALL' <<<"$SEC5A" && grep -qF 'docker load -i' <<<"$SEC5A"; then
+    ok "§5a loads the worker image from CLAUDE_WORKER_IMAGE_TARBALL"
+else
+    bad "§5a does not load a worker-image tarball"
+fi
+grep -qF 'docker image inspect "$_wimg"' <<<"$SEC5A" \
+    && ok "§5a is idempotent (skips the load when the worker image is already present)" \
+    || bad "§5a is not idempotent (would reload every boot)"
+# Fail-soft: the load is inside the §5a block, which never calls die (only log/WARNING).
+if ! grep -qE '\bdie\b' <<<"$SEC5A"; then
+    ok "§5a is fail-soft (a tarball problem warns, never dies — the broker just refuses launches)"
+else
+    bad "§5a can die on a tarball problem (should be fail-soft)"
+fi
+# claude-launch --worker-tarball: mounts the tarball + sets the env, only with --broker.
+hasE "$LAUNCH" '^\s*--worker-tarball\)' && ok "claude-launch parses --worker-tarball" || bad "claude-launch missing --worker-tarball"
+has "$LAUNCH" '/etc/claude/worker-image.tar:ro' && has "$LAUNCH" 'CLAUDE_WORKER_IMAGE_TARBALL=/etc/claude/worker-image.tar' \
+    && ok "--worker-tarball mounts the tarball read-only + sets CLAUDE_WORKER_IMAGE_TARBALL" \
+    || bad "--worker-tarball does not wire the mount + env"
+
+# ============================================================================================
+echo "== E. compose-gen --broker: generates a broker controller service =="
+# ============================================================================================
+CG="$REPO_ROOT/bin/claude-compose-gen"
+bash -n "$CG" && ok "claude-compose-gen parses (bash -n)" || bad "claude-compose-gen has a syntax error"
+hasE "$CG" '^\s*--broker\)' && hasE "$CG" '^\s*--worker-tarball\)' \
+    && ok "compose-gen parses --broker and --worker-tarball" || bad "compose-gen missing --broker / --worker-tarball"
+# Functional: generate one broker + one plain service and assert the broker's shape (and that
+# the plain service is unchanged — the regression that matters for a mixed roster).
+GENOUT="$TMPD/gen.yml"; TARBALL="$TMPD/w.tar"; : > "$TARBALL"
+if bash "$CG" --out "$GENOUT" --broker br --worker-tarball "$TARBALL" cosyte/br cosyte/plain >/dev/null 2>&1; then
+    brk="$(sed -n '/^  br:/,/^  plain:/p' "$GENOUT")"
+    pln="$(sed -n '/^  plain:/,/^volumes:/p' "$GENOUT")"
+    grep -qF 'image: claude-code-box:controller' <<<"$brk" && grep -qF 'runtime: sysbox-runc' <<<"$brk" \
+        && ok "broker service uses the controller image + sysbox-runc runtime" || bad "broker service image/runtime wrong"
+    grep -qF 'CLAUDE_WORKER_BROKER: "1"' <<<"$brk" && grep -qF 'CLAUDE_SYSBOX_ATTESTED_VERSION' <<<"$brk" \
+        && ok "broker service sets CLAUDE_WORKER_BROKER + attestation" || bad "broker service missing broker env"
+    grep -qF 'worker-image.tar:ro' <<<"$brk" && grep -qF 'CLAUDE_WORKER_IMAGE_TARBALL' <<<"$brk" \
+        && ok "broker service mounts the worker tarball + sets the env" || bad "broker service missing tarball wiring"
+    grep -qF 'cap_drop' <<<"$brk" && bad "broker service must NOT cap_drop (Sysbox is the boundary)" \
+        || ok "broker service has no cap_drop (Sysbox userns is the boundary)"
+    grep -qF 'cap_drop' <<<"$pln" && grep -qF 'image: claude-code-box:latest' <<<"$pln" \
+        && ok "a PLAIN service in the same roster is unchanged (lean image + cap_drop)" \
+        || bad "regression: a plain service lost its hardening / lean image"
+else
+    bad "compose-gen --broker failed to generate"
+fi
+
 echo
 echo "broker-interactive-unit: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

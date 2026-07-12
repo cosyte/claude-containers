@@ -66,6 +66,15 @@
 #                       these repos (repeatable; comma/space lists ok). Their
 #                       service uses CLAUDE_IMAGE_BROWSER (default
 #                       claude-code-box:browser; `make build-browser`).
+#     --broker <repos>  make these repos BROKER CONTROLLERS: they run an inner dockerd +
+#                       worker broker (CC-2) so the session can spawn nested workers via
+#                       claude-worker-request. Uses the controller image (CLAUDE_IMAGE_CONTROLLER,
+#                       `make build-controller`; the controller+browser image if also --browser),
+#                       runs under --runtime=sysbox-runc, sizes for the CC-3 controller envelope,
+#                       and drops the runc cap hardening (Sysbox userns is the boundary). Needs Sysbox.
+#     --worker-tarball <path>  (with --broker) host path to a `docker save` tarball of the worker
+#                       image; the entrypoint loads it into each broker's inner daemon on boot so
+#                       the worker image survives a recreate. `docker save claude-code-box:latest -o <path>`.
 #     --marketplace <map>  add a git plugin marketplace to a repo at runtime.
 #                       Format REPO=NAME=URL (repeatable). The repo's service
 #                       gets CLAUDE_EXTRA_MARKETPLACES with this entry appended,
@@ -167,7 +176,7 @@ NETWORK=""
 # Default = the CACHE_VOLUME name (claude-cache); --no-cache / --cache off disables it.
 CACHE_VOL="$CACHE_VOLUME"
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() BROKER_RAW=() WORKER_TARBALL=""
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
 # follow so they override scalars (--out/--org/--port-base) and append to
 # repeatables (--active/--expose/…). --scenario/--env-file were consumed in the
@@ -187,6 +196,8 @@ while [[ $# -gt 0 ]]; do
         --mem)             MEM_RAW+=("$2"); shift 2 ;;
         --model)           MODEL_RAW+=("$2"); shift 2 ;;
         --browser)         BROWSER_RAW+=("$2"); shift 2 ;;
+        --broker)          BROKER_RAW+=("$2"); shift 2 ;;
+        --worker-tarball)  WORKER_TARBALL="$2"; shift 2 ;;
         --marketplace)     MKTS_RAW+=("$2"); shift 2 ;;
         --plugin)          PLUGINS_RAW+=("$2"); shift 2 ;;
         --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
@@ -288,6 +299,40 @@ for tok in "${BROWSER_RAW[@]:-}"; do
         BROWSER["$(sanitize "$one")"]=1
     done
 done
+
+# Broker controllers (CC-INTERACTIVE-BROKER): services that run an inner dockerd + the
+# worker broker (CC-2) so they can spawn nested workers via claude-worker-request. Image
+# must be built WITH_DOCKER=1 (make build-controller); runs under --runtime=sysbox-runc,
+# sized for the CC-3 controller envelope, and does NOT apply the runc cap-drop (Sysbox
+# userns is the boundary; the inner dockerd needs its capabilities). A --broker service that
+# is ALSO --browser gets the combined controller+browser image.
+declare -A BROKER=()
+for tok in "${BROKER_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    for one in $(echo "$tok" | tr ',' ' '); do
+        BROKER["$(sanitize "$one")"]=1
+    done
+done
+CONTROLLER_IMAGE="${CLAUDE_IMAGE_CONTROLLER:-claude-code-box:controller}"
+CONTROLLER_BROWSER_IMAGE="${CLAUDE_IMAGE_CONTROLLER_BROWSER:-claude-code-box:controller-browser}"
+if [[ ${#BROKER[@]} -gt 0 ]]; then
+    # Attest a CVE-patched Sysbox at gen time (the same host runs the compose); fall back to
+    # the immovable CVE floor if this box has no Sysbox — the broker re-validates >= floor at run.
+    BROKER_SYSBOX_ATTEST="$SYSBOX_CVE_FLOOR"
+    _sv="$( preflight_sysbox >/dev/null 2>&1 && printf '%s' "${SYSBOX_VERSION:-}" || true )"
+    [[ -n "$_sv" ]] && BROKER_SYSBOX_ATTEST="$_sv"
+    # CC-3 controller envelope (Σ K workers + overhead) — brokers use this, not the flat profile.
+    BROKER_K="$(resolve_parallel_k)" || die "cannot resolve K for broker sizing"
+    controller_envelope "$BROKER_K"   # sets CTRL_CPUS / CTRL_MEM_MIB / CTRL_MEM_RESERVATION_MIB / CTRL_PIDS
+    # Durable worker image: an optional host tarball, loaded into each broker's inner daemon
+    # on boot (the inner daemon starts empty on every recreate). Resolve to an absolute path.
+    if [[ -n "$WORKER_TARBALL" ]]; then
+        [[ -f "$WORKER_TARBALL" ]] || die "--worker-tarball '$WORKER_TARBALL' not found (docker save claude-code-box:latest -o '$WORKER_TARBALL')"
+        WORKER_TARBALL="$(cd "$(dirname "$WORKER_TARBALL")" && pwd)/$(basename "$WORKER_TARBALL")"
+    fi
+elif [[ -n "$WORKER_TARBALL" ]]; then
+    warn "--worker-tarball is ignored without --broker (no broker service to load it into)"
+fi
 
 # Runtime plugin marketplaces per service: svc -> comma-separated "name=url" list.
 # Each --marketplace value is REPO=NAME=URL — split on the FIRST = to peel off
@@ -483,6 +528,14 @@ for row in "${FINAL[@]}"; do
     if [[ "$svc_mem" == "$CLAUDE_MEM_LIMIT" ]]; then svc_res="$CLAUDE_MEM_RESERVATION"
     else svc_res="$(mem_reservation_for "$svc_mem")" \
         || die "--mem '$svc_mem' for $svc is unparseable (want e.g. 4g)"; fi
+    # Broker controllers use the CC-3 controller envelope (Σ K workers + overhead), not the
+    # flat per-repo profile — else the broker's own capacity fail-safe refuses to serve.
+    svc_pids="${CLAUDE_PIDS_LIMIT}"
+    svc_tarball_mount=""
+    if [[ -n "${BROKER[$svc]:-}" ]]; then
+        svc_cpu="$CTRL_CPUS"; svc_mem="${CTRL_MEM_MIB}m"; svc_res="${CTRL_MEM_RESERVATION_MIB}m"; svc_pids="$CTRL_PIDS"
+        [[ -n "$WORKER_TARBALL" ]] && svc_tarball_mount=$'\n      - '"${WORKER_TARBALL}:/etc/claude/worker-image.tar:ro"
+    fi
     # Per-repo --model override emits a literal; otherwise emit a compose
     # interpolation so a fleet-wide CLAUDE_MODEL (env/.env) wins, defaulting to
     # opus — the best available model — when nothing is set.
@@ -490,9 +543,15 @@ for row in "${FINAL[@]}"; do
     else svc_model='${CLAUDE_MODEL:-opus}'; fi
     svc_image="${CLAUDE_IMAGE}"
     [[ -n "${BROWSER[$svc]:-}" ]] && svc_image="$BROWSER_IMAGE"
+    svc_runtime=""
+    if [[ -n "${BROKER[$svc]:-}" ]]; then
+        svc_image="$CONTROLLER_IMAGE"
+        [[ -n "${BROWSER[$svc]:-}" ]] && svc_image="$CONTROLLER_BROWSER_IMAGE"
+        svc_runtime=$'\n    runtime: sysbox-runc'
+    fi
     cat <<EOF
   ${svc}:
-    image: ${svc_image}
+    image: ${svc_image}${svc_runtime}
     build:
       context: ${ABS_CONTEXT}
       args:
@@ -516,7 +575,7 @@ for row in "${FINAL[@]}"; do
     # container swap there deadlocked the whole box on 2026-07-09. Keep these equal.
     memswap_limit: ${svc_mem}
     mem_reservation: ${svc_res}
-    pids_limit: ${CLAUDE_PIDS_LIMIT}
+    pids_limit: ${svc_pids}
     stop_grace_period: ${CLAUDE_STOP_TIMEOUT}s
     tmpfs:
       - /tmp:rw,nosuid,nodev,exec,size=1g
@@ -534,19 +593,26 @@ EOF
     fi
     # Escape hardening (mirrors claude-launch via _common.sh): no-new-privileges
     # always; drop ALL caps + re-add the minimal set unless CLAUDE_HARDEN_CAPS=0;
-    # add NET_ADMIN when the egress firewall is enabled.
-    echo "    security_opt:"
-    echo "      - no-new-privileges:true"
-    _caps=""
-    if [[ "$CLAUDE_HARDEN_CAPS" =~ ^(1|true|yes|on)$ ]]; then
-        echo "    cap_drop:"
-        echo "      - ALL"
-        _caps="$CLAUDE_MIN_CAPS"
-    fi
-    [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]] && _caps="$_caps NET_ADMIN"
-    if [[ -n "${_caps// }" ]]; then
+    # add NET_ADMIN when the egress firewall is enabled. A BROKER controller skips all of
+    # this — Sysbox's userns is the isolation boundary and the inner dockerd needs its caps
+    # (mirrors claude-launch --sysbox); only NET_ADMIN stays, when egress lockdown is on.
+    if [[ -z "${BROKER[$svc]:-}" ]]; then
+        echo "    security_opt:"
+        echo "      - no-new-privileges:true"
+        _caps=""
+        if [[ "$CLAUDE_HARDEN_CAPS" =~ ^(1|true|yes|on)$ ]]; then
+            echo "    cap_drop:"
+            echo "      - ALL"
+            _caps="$CLAUDE_MIN_CAPS"
+        fi
+        [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]] && _caps="$_caps NET_ADMIN"
+        if [[ -n "${_caps// }" ]]; then
+            echo "    cap_add:"
+            for c in $_caps; do echo "      - $c"; done
+        fi
+    elif [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]]; then
         echo "    cap_add:"
-        for c in $_caps; do echo "      - $c"; done
+        echo "      - NET_ADMIN"
     fi
     cat <<EOF
     environment:
@@ -584,6 +650,11 @@ EOF
         pv="${pv//\\/\\\\}"; pv="${pv//\"/\\\"}"; pv="${pv//\$/\$\$}"
         echo "      CLAUDE_EXTRA_PLUGINS: \"${pv}\""
     fi
+    if [[ -n "${BROKER[$svc]:-}" ]]; then
+        echo "      CLAUDE_WORKER_BROKER: \"1\""
+        echo "      CLAUDE_SYSBOX_ATTESTED_VERSION: \"${BROKER_SYSBOX_ATTEST}\""
+        [[ -n "$WORKER_TARBALL" ]] && echo "      CLAUDE_WORKER_IMAGE_TARBALL: \"/etc/claude/worker-image.tar\""
+    fi
     cat <<EOF
       GIT_AUTHOR_NAME: "${GH_NAME}"
       GIT_AUTHOR_EMAIL: "${GH_MAIL}"
@@ -597,7 +668,7 @@ EOF
       - claude-ws-${svc}:/workspace${CACHE_NAME:+
       - claude-cache:/cache}
       - ${AK}:/etc/claude/authorized_keys:ro
-      - ${GK}:/etc/claude/git-key:ro
+      - ${GK}:/etc/claude/git-key:ro${svc_tarball_mount}
     labels:
       claude.managed: "1"
       claude.project: "${svc}"
@@ -688,6 +759,18 @@ docker image inspect "$CLAUDE_IMAGE" >/dev/null 2>&1 || warn "image $CLAUDE_IMAG
 if (( ${#BROWSER[@]} > 0 )); then
     img_browser="$(docker image inspect -f '{{ index .Config.Labels "claude.browser" }}' "$BROWSER_IMAGE" 2>/dev/null || true)"
     [[ "$img_browser" == "1" ]] || warn "image $BROWSER_IMAGE was not built with WITH_BROWSER=1 — run 'make build-browser' before 'up' (--browser services won't get the chrome-devtools MCP otherwise)"
+fi
+
+# Warn if --broker was used but the controller image(s) actually used aren't built/labeled.
+if (( ${#BROKER[@]} > 0 )); then
+    _check=()
+    for s in "${!BROKER[@]}"; do
+        if [[ -n "${BROWSER[$s]:-}" ]]; then _check+=("$CONTROLLER_BROWSER_IMAGE"); else _check+=("$CONTROLLER_IMAGE"); fi
+    done
+    for _bimg in $(printf '%s\n' "${_check[@]}" | sort -u); do
+        img_ctrl="$(docker image inspect -f '{{ index .Config.Labels "claude.controller" }}' "$_bimg" 2>/dev/null || true)"
+        [[ "$img_ctrl" == "1" ]] || warn "controller image $_bimg not built with WITH_DOCKER=1 — run 'make build-controller' before 'up' (--broker services need an inner dockerd or they fail closed at boot)"
+    done
 fi
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing — run 'make login'"
 info "Validate:  docker compose -f $OUT config >/dev/null && echo OK"
