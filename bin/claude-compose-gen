@@ -383,6 +383,9 @@ esac
 # builds from — which silently rewrites build.context on every service. Pin it in
 # the scenario (--build-context) so regen is reproducible from any checkout.
 ABS_CONTEXT="${BUILD_CONTEXT:-$CLAUDE_DOCKER_ROOT}"
+# Shared, host-wide, external volumes the operator must create once. claude-auth is
+# listed separately in the header (it's `make login`'s job, not a bare create).
+SHARED_VOL_LIST="${SSHKEYS_VOLUME}${CACHE_NAME:+ $CACHE_NAME}"
 [[ -d "$ABS_CONTEXT" ]] || die "--build-context '$ABS_CONTEXT' is not a directory"
 # Compose has no ~ expansion — resolve host SSH paths to absolute now.
 AK="${SSH_AUTHORIZED_KEYS/#\~/$HOME}"
@@ -504,9 +507,11 @@ cat <<EOF
 # Prerequisites (once):
 #   1. Build the image:        make build           # in ${ABS_CONTEXT}
 #   2. One-time OAuth login:    make login           # writes the claude-auth volume
-#   3. Shared SSH host keys:    docker volume create ${SSHKEYS_VOLUME}
-#      (empty is fine — the entrypoint seeds it on first boot. It is declared
-#       external so a 'down -v' on one stack can't rotate the whole fleet's keys.)
+#   3. Shared host-wide volumes — create once (empty is fine, they self-seed):
+#        for v in ${SHARED_VOL_LIST}; do docker volume create "\$v"; done
+#      These are declared external because EVERY stack and standalone container
+#      mounts the same ones: a 'down -v' on one stack would otherwise rotate the
+#      whole fleet's SSH host keys and wipe the shared tool cache.
 #   4. Authorized SSH pubkey:   ${AK}
 #   5. Git deploy key w/ ${ORG} read:  ${GK}
 #      (its .pub added to the ${ORG} org / each repo as a read/write deploy key)
@@ -695,11 +700,14 @@ cat <<EOF
     name: ${SSHKEYS_VOLUME}
     external: true
 EOF
-# Shared tool cache (PKG-3): one volume for the whole stack (NOT external — docker
-# compose creates it on first `up`, seeded from the image's /cache). Every service
-# mounts it at /cache, so a mise/cargo/go/npm/uv install by one is a hit for the rest.
+# Shared tool cache (PKG-3): every service mounts it at /cache, so a mise/cargo/go/
+# npm/uv install by one is a hit for the rest. It defaults to ONE name (claude-cache)
+# per host, so stacks share it — that's deliberate (a wider cache = more hits), and it
+# is why it must be external: otherwise a `down -v` on one stack wipes the cache out
+# from under every other stack. Docker still seeds an empty external volume from the
+# image's /cache on first mount, so `docker volume create` + `up` behaves as before.
 if [[ -n "$CACHE_NAME" ]]; then
-    printf '  claude-cache:\n    name: %s\n' "$CACHE_NAME"
+    printf '  claude-cache:\n    name: %s\n    external: true\n' "$CACHE_NAME"
 fi
 declare -A OWNED_VOLS=([${AUTH_VOLUME}]=1 [${SSHKEYS_VOLUME}]=1)
 [[ -n "$CACHE_NAME" ]] && OWNED_VOLS[$CACHE_NAME]=1
@@ -778,7 +786,9 @@ if (( ${#BROWSER[@]} > 0 )); then
 fi
 
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing — run 'make login'"
-# Both shared volumes are external now, so a missing one is a hard 'up' failure.
-docker volume inspect "$SSHKEYS_VOLUME" >/dev/null 2>&1 \
-    || warn "ssh host-key volume '$SSHKEYS_VOLUME' missing — run 'docker volume create $SSHKEYS_VOLUME' before 'up' (it's external; empty is fine)"
+# The shared volumes are external now, so a missing one is a hard 'up' failure.
+for v in $SHARED_VOL_LIST; do
+    docker volume inspect "$v" >/dev/null 2>&1 \
+        || warn "shared volume '$v' missing — run 'docker volume create $v' before 'up' (it's external; empty is fine, it self-seeds)"
+done
 info "Validate:  docker compose -f $OUT config >/dev/null && echo OK"

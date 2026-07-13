@@ -271,7 +271,7 @@ echo "== shared claude-auth / claude-sshkeys are external =="
 OUTS="$TMPD/sh/dc.yml"
 if env CLAUDE_PORTS_USED_OVERRIDE= "$GEN" --env-file "$ENVF" --out "$OUTS" --port-base 3900 \
     s/one s/two >/dev/null 2>&1; then
-    for v in claude-auth claude-sshkeys; do
+    for v in claude-auth claude-sshkeys claude-cache; do
         # grep the 2 lines under the volume key in the top-level volumes block.
         awk '/^volumes:/,0' "$OUTS" | grep -A2 "^  $v:" | grep -q 'external: true' \
             && ok "$v is declared external: true" \
@@ -284,6 +284,16 @@ if env CLAUDE_PORTS_USED_OVERRIDE= "$GEN" --env-file "$ENVF" --out "$OUTS" --por
         || ok "per-repo volumes stay stack-owned (not external)"
 else
     bad "shared-volume generation failed"
+fi
+# --no-cache must not leave a dangling external cache volume behind.
+OUTNC="$TMPD/nc/dc.yml"
+if env CLAUDE_PORTS_USED_OVERRIDE= "$GEN" --env-file "$ENVF" --out "$OUTNC" --port-base 3900 \
+    --no-cache s/one >/dev/null 2>&1; then
+    grep -q 'claude-cache' "$OUTNC" \
+        && bad "--no-cache still emitted a cache volume" \
+        || ok "--no-cache emits no cache volume at all"
+else
+    bad "--no-cache generation failed"
 fi
 
 # --- summary ------------------------------------------------------------------------------
