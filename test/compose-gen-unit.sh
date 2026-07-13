@@ -265,6 +265,27 @@ gen --env-file "$ENVF" --out "$TMPD/bc2/dc.yml" --build-context "$TMPD/does-not-
     && bad "--build-context accepted a nonexistent dir" \
     || ok "--build-context fails closed on a missing dir"
 
+# --- shared volumes are external (a `down -v` on one stack must not nuke the fleet) --------
+echo
+echo "== shared claude-auth / claude-sshkeys are external =="
+OUTS="$TMPD/sh/dc.yml"
+if env CLAUDE_PORTS_USED_OVERRIDE= "$GEN" --env-file "$ENVF" --out "$OUTS" --port-base 3900 \
+    s/one s/two >/dev/null 2>&1; then
+    for v in claude-auth claude-sshkeys; do
+        # grep the 2 lines under the volume key in the top-level volumes block.
+        awk '/^volumes:/,0' "$OUTS" | grep -A2 "^  $v:" | grep -q 'external: true' \
+            && ok "$v is declared external: true" \
+            || bad "$v must be external — a 'down -v' on one stack would delete it fleet-wide"
+    done
+    # The per-repo volumes are this stack's OWN — they must stay non-external, or
+    # a first `up` on a clean host fails instead of creating them.
+    awk '/^volumes:/,0' "$OUTS" | grep -A2 '^  claude-ws-one:' | grep -q 'external: true' \
+        && bad "claude-ws-one must NOT be external (the stack owns it)" \
+        || ok "per-repo volumes stay stack-owned (not external)"
+else
+    bad "shared-volume generation failed"
+fi
+
 # --- summary ------------------------------------------------------------------------------
 echo
 echo "compose-gen-unit: $PASS passed, $FAIL failed"

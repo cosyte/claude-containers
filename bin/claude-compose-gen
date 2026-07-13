@@ -504,8 +504,11 @@ cat <<EOF
 # Prerequisites (once):
 #   1. Build the image:        make build           # in ${ABS_CONTEXT}
 #   2. One-time OAuth login:    make login           # writes the claude-auth volume
-#   3. Authorized SSH pubkey:   ${AK}
-#   4. Git deploy key w/ ${ORG} read:  ${GK}
+#   3. Shared SSH host keys:    docker volume create ${SSHKEYS_VOLUME}
+#      (empty is fine — the entrypoint seeds it on first boot. It is declared
+#       external so a 'down -v' on one stack can't rotate the whole fleet's keys.)
+#   4. Authorized SSH pubkey:   ${AK}
+#   5. Git deploy key w/ ${ORG} read:  ${GK}
 #      (its .pub added to the ${ORG} org / each repo as a read/write deploy key)
 #
 # Resource model: only "active" repos start by default. Every other repo is
@@ -674,7 +677,14 @@ EOF
     fi
 done
 
-# top-level volumes
+# top-level volumes.
+# claude-auth and claude-sshkeys are SHARED HOST-WIDE — every stack and every
+# standalone container mounts the same two. They are external so a `docker compose
+# down -v` on ONE stack cannot delete them out from under the others: losing
+# claude-auth means re-running `make login`, and losing claude-sshkeys rotates the
+# SSH host keys of the whole fleet (every client then gets a MITM warning until
+# `ssh-keygen -R` per port). External also means `up` fails fast if they're missing,
+# rather than silently creating an empty one.
 echo
 echo "volumes:"
 cat <<EOF
@@ -683,6 +693,7 @@ cat <<EOF
     external: true
   claude-sshkeys:
     name: ${SSHKEYS_VOLUME}
+    external: true
 EOF
 # Shared tool cache (PKG-3): one volume for the whole stack (NOT external — docker
 # compose creates it on first `up`, seeded from the image's /cache). Every service
@@ -767,4 +778,7 @@ if (( ${#BROWSER[@]} > 0 )); then
 fi
 
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing — run 'make login'"
+# Both shared volumes are external now, so a missing one is a hard 'up' failure.
+docker volume inspect "$SSHKEYS_VOLUME" >/dev/null 2>&1 \
+    || warn "ssh host-key volume '$SSHKEYS_VOLUME' missing — run 'docker volume create $SSHKEYS_VOLUME' before 'up' (it's external; empty is fine)"
 info "Validate:  docker compose -f $OUT config >/dev/null && echo OK"
