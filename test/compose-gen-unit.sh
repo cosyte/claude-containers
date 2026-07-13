@@ -206,6 +206,65 @@ else
     bad "port-seeding generation failed"
 fi
 
+# --- --mount: cross-stack volume mounts ---------------------------------------------------
+echo
+echo "== --mount (foreign volume into a service) =="
+OUTM="$TMPD/m/dc.yml"
+if env CLAUDE_PORTS_USED_OVERRIDE= "$GEN" --env-file "$ENVF" --out "$OUTM" --port-base 3900 \
+    --mount one=claude-ws-super:/super:ro m/one m/two >/dev/null 2>&1; then
+    # Emitted INSIDE the service's volumes list — the --expose bug (emitted after
+    # cap_add, parsed as a bogus capability) is the reason this is asserted.
+    awk '/^  one:/,/^  two:/' "$OUTM" | awk '/volumes:/,/labels:/' \
+        | grep -q -- '- claude-ws-super:/super:ro' \
+        && ok "--mount lands in the service's volumes list" \
+        || bad "--mount entry not in one's volumes block"
+    # Foreign volume must be external, or a `down -v` here deletes another stack's data.
+    awk '/^volumes:/,0' "$OUTM" | grep -A2 '^  claude-ws-super:' | grep -q 'external: true' \
+        && ok "--mount volume is declared external: true" \
+        || bad "claude-ws-super should be declared external in the top-level volumes"
+    # It must NOT leak onto services that didn't ask for it.
+    awk '/^  two:/,/^volumes:/' "$OUTM" | grep -q -- '- claude-ws-super:/super:ro' \
+        && bad "--mount leaked onto service 'two'" \
+        || ok "--mount applies only to the named repo"
+else
+    bad "--mount generation failed"
+fi
+
+# Rejections: a bare rw default is fine, but the footguns must fail closed.
+gen --env-file "$ENVF" --out "$TMPD/m2/dc.yml" --mount one=/host/path:/super m/one \
+    && bad "--mount accepted a host path (should require a named volume)" \
+    || ok "--mount rejects a host path"
+gen --env-file "$ENVF" --out "$TMPD/m3/dc.yml" --mount one=claude-ws-super:relative m/one \
+    && bad "--mount accepted a relative path" \
+    || ok "--mount rejects a relative container path"
+gen --env-file "$ENVF" --out "$TMPD/m4/dc.yml" --mount one=claude-ws-super:/workspace:ro m/one \
+    && bad "--mount accepted a path shadowing /workspace" \
+    || ok "--mount refuses to shadow the service's own /workspace"
+# Mounting a volume this stack manages is ambiguous (it'd be declared twice, and
+# external:true would be a lie) — must die rather than emit a broken file.
+gen --env-file "$ENVF" --out "$TMPD/m5/dc.yml" --mount one=claude-ws-two:/two:ro m/one m/two \
+    && bad "--mount accepted a volume this stack owns" \
+    || ok "--mount rejects a volume the stack itself manages"
+
+# --- --build-context: pin build.context independent of the running checkout ---------------
+echo
+echo "== --build-context (reproducible regen from any checkout) =="
+OUTB="$TMPD/bc/dc.yml"
+if env CLAUDE_PORTS_USED_OVERRIDE= "$GEN" --env-file "$ENVF" --out "$OUTB" --port-base 3900 \
+    --build-context "$TMPD" b/one >/dev/null 2>&1; then
+    grep -q "context: $TMPD\$" "$OUTB" \
+        && ok "--build-context pins build.context" \
+        || bad "build.context should be $TMPD, got: $(grep -m1 'context:' "$OUTB")"
+    grep -q "context: $REPO_ROOT\$" "$OUTB" \
+        && bad "build.context still follows the running checkout" \
+        || ok "--build-context overrides the running checkout's path"
+else
+    bad "--build-context generation failed"
+fi
+gen --env-file "$ENVF" --out "$TMPD/bc2/dc.yml" --build-context "$TMPD/does-not-exist" b/one \
+    && bad "--build-context accepted a nonexistent dir" \
+    || ok "--build-context fails closed on a missing dir"
+
 # --- summary ------------------------------------------------------------------------------
 echo
 echo "compose-gen-unit: $PASS passed, $FAIL failed"
