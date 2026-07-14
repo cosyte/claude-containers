@@ -23,12 +23,8 @@ jobs:
         run: test/cli-version-unit.sh
       - name: sizing unit tests (size/reservation math)
         run: test/sizing-unit.sh
-      - name: reaper unit tests (spool-file prune, TTL boundary, fail-safe)
-        run: test/reaper-unit.sh
       - name: disk unit tests (free-space parsing + gc plan safety + fail-safe)
         run: test/disk-unit.sh
-      - name: controller unit tests (byte-identical claude-autopilot pass-through)
-        run: test/controller-unit.sh
       - name: compose-gen unit tests (scenario .conf expansion + env layering + cross-stack port reservation)
         run: test/compose-gen-unit.sh
       - name: egress-packages unit tests (PKG-1 opt-in package-registry allowlist — additive, opt-in, leak-free)

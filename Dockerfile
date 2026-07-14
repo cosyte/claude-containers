@@ -250,36 +250,12 @@ RUN set -eux; \
 # the variant by probing the baked binaries on PATH instead.)
 LABEL claude.browser="${WITH_BROWSER}"
 
-# --- Optional: Docker engine for the CONTROLLER image variant ------------------
-# Build with `--build-arg WITH_DOCKER=1` (or `make build-controller`) to bake the
-# Docker Engine (dockerd + CLI + containerd) into the image, producing the
-# "controller" variant. SC-5 retired the Sysbox nested-worker-broker substrate that
-# used to consume this variant (see docs/legacy-sysbox-broker.md) — nothing in this
-# image currently starts dockerd. Kept building (this ARG + the controller image
-# target) because SC-6 will decide whether the controller tier survives at all;
-# until then this is dormant capability, not a wired feature. Default OFF: the lean
-# image ships no docker engine. ~400 MB delta when on.
-ARG WITH_DOCKER=0
-RUN set -eux; \
-    if [ "$WITH_DOCKER" = "1" ]; then \
-        install -m 0755 -d /etc/apt/keyrings; \
-        curl -fsSL https://download.docker.com/linux/debian/gpg \
-            -o /etc/apt/keyrings/docker.asc; \
-        chmod a+r /etc/apt/keyrings/docker.asc; \
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-            > /etc/apt/sources.list.d/docker.list; \
-        apt-get update; \
-        apt-get install -y --no-install-recommends \
-            docker-ce docker-ce-cli containerd.io; \
-        apt-get clean; \
-        rm -rf /var/lib/apt/lists/*; \
-        # Prove the engine + CLI are present (nothing in-image currently starts dockerd).
-        dockerd --version; docker --version; containerd --version; \
-    else \
-        echo "WITH_DOCKER=0 — skipping the Docker engine (lean session image)"; \
-    fi
-# Image-capability label: identifies the controller variant on disk.
-LABEL claude.controller="${WITH_DOCKER}"
+# The WITH_DOCKER "controller" image variant (dockerd + CLI + containerd, ~400 MB) was
+# REMOVED in CC-BINS. It existed solely to host the Sysbox nested-worker-broker substrate
+# SC-5 retired (see docs/legacy-sysbox-broker.md). Nothing started dockerd afterwards, and
+# nothing *could*: bin/claude-launch, bin/claude-compose-gen and docker-compose.yml grant no
+# --privileged and mount no docker socket, so the baked engine had no way to run even if
+# something had tried. Deleting 400 MB of unreachable daemon is not a capability loss.
 
 # --- Non-root user ------------------------------------------------------------
 # The entrypoint starts as root (sshd, volume chown) then drops to this user
@@ -319,23 +295,19 @@ COPY bin/claude-egress-firewall /usr/local/bin/claude-egress-firewall
 COPY bin/claude-secret-guard /usr/local/bin/claude-secret-guard
 COPY bin/claude-rc-watchdog /usr/local/bin/claude-rc-watchdog
 COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
-# _common.sh rides along because claude-disk-gc (and claude-controller) source it.
+# _common.sh rides along because claude-disk-gc sources it.
 COPY bin/_common.sh /usr/local/bin/_common.sh
 # Storage/disk safety: claude-disk-gc is a standalone maintenance tool (docker system +
 # builder prune, plus the PKG-3 shared-cache trim) — run it manually or on your own
 # cron/timer; no entrypoint path auto-starts it.
 COPY bin/claude-disk-gc /usr/local/bin/claude-disk-gc
-# claude-reaper is likewise a standalone spool-pruning maintenance tool; no entrypoint
-# path auto-starts it (see bin/claude-reaper's own header).
-COPY bin/claude-reaper /usr/local/bin/claude-reaper
 # Dependency manifest linter (PKG-5): warns on unpinned/`latest` specs in a repo's
 # mise.toml / package.json (or refuses under --strict), so an agent-committed manifest
 # stays reproducibly pinned. Advisory by default; never blocks a session.
 COPY bin/claude-deps-check /usr/local/bin/claude-deps-check
-# claude-controller: the CLAUDE_CONTROLLER=1 tmux main-pane entrypoint. Since SC-5
-# retired the Sysbox nested-worker-broker dispatch tier it used to run, this is now a
-# thin pass-through to claude-autopilot (see bin/claude-controller's own header).
-COPY bin/claude-controller /usr/local/bin/claude-controller
+# claude-reaper and claude-controller were REMOVED in CC-BINS: the reaper pruned a spool
+# only the retired broker ever wrote to, and the controller had collapsed to a
+# pass-through to claude-autopilot. See docs/legacy-sysbox-broker.md.
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-dev /usr/local/bin/claude-autopilot \
@@ -345,9 +317,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-rc-watchdog \
         /usr/local/bin/claude-healthcheck \
         /usr/local/bin/claude-disk-gc \
-        /usr/local/bin/claude-reaper \
         /usr/local/bin/claude-deps-check \
-        /usr/local/bin/claude-controller \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
 

@@ -181,8 +181,13 @@ observability (CC-7) — plus the PKG-4 (curated worker apt) and PKG-6 (pull-thr
 cache proxy) supply-chain hardening built on top of it.
 
 That whole substrate was retired on 2026-07-12 in favor of Claude Code subagents in
-per-worktree git worktrees, and stripped from `main` (SC-5). The frozen implementation
-and full rationale live in
+per-worktree git worktrees, and stripped from `main` (SC-5). A follow-up, **CC-BINS**
+(2026-07-14), pruned the residue the strip left behind — `bin/claude-controller` (by then
+a pass-through to `claude-autopilot`; `CLAUDE_CONTROLLER=1` now refuses to boot),
+`bin/claude-reaper` (it pruned a spool nothing writes to), the `WITH_DOCKER` controller
+image variant (an unreachable `dockerd`), and the autopilot's `/next` default
+(`CLAUDE_AUTOPILOT_CMD` is now required). The frozen implementation, the full rationale,
+and the CC-BINS resolution live in
 [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md); nothing above or below this
 note describes it.
 

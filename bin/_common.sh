@@ -38,11 +38,6 @@ fi
 
 # --- Defaults ----------------------------------------------------------------
 CLAUDE_IMAGE="${CLAUDE_IMAGE:-claude-code-box:latest}"
-# Controller image variant: the WITH_DOCKER=1 build that bakes the Docker engine.
-# Build: make build-controller. (The legacy Sysbox-nested worker-broker path that
-# used to consume this variant was retired in SC-5 — see docs/legacy-sysbox-broker.md.
-# Whether the controller tier survives at all is SC-6's call.)
-CLAUDE_IMAGE_CONTROLLER="${CLAUDE_IMAGE_CONTROLLER:-claude-code-box:controller}"
 AUTH_VOLUME="${AUTH_VOLUME:-claude-auth}"
 SSHKEYS_VOLUME="${SSHKEYS_VOLUME:-claude-sshkeys}"
 # Shared tool cache (PKG-3): ONE volume shared across every managed container,

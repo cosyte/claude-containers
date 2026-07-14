@@ -219,6 +219,441 @@ else
     bad "could not extract §0's retired-env guard from entrypoint.sh (the SC-5 guard is missing)"
 fi
 
+# ==========================================================================================
+# CC-BINS — the bins that lost their reason are gone, and their removal is LOUD
+# ==========================================================================================
+echo
+echo "== CC-BINS: claude-controller / claude-reaper / the WITH_DOCKER variant are fully gone =="
+
+# A deleted bin that some file still names is worse than the bin: a stale `COPY bin/claude-reaper`
+# fails the image build outright, and a stale CI step or npm-test entry fails every run. Pin the
+# absence at every site that referenced them, so a partial revert cannot pass.
+for f in bin/claude-controller bin/claude-reaper test/controller-unit.sh test/reaper-unit.sh; do
+    [[ ! -e "$REPO_ROOT/$f" ]] \
+        && ok  "$f is deleted" \
+        || bad "$f still exists — CC-BINS removed it"
+done
+
+# Strip whole-line comments before asserting: the tombstone comments that RECORD the removal
+# (and point at docs/legacy-sysbox-broker.md) legitimately name these things. What must not
+# survive is a live COPY/chmod/ARG/target.
+code_of() { grep -vE '^[[:space:]]*#' "$1"; }
+
+if ! code_of "$REPO_ROOT/Dockerfile" | grep -qE 'claude-(controller|reaper)'; then
+    ok  "Dockerfile has no live COPY/chmod of the pruned bins (a stale COPY would fail the build)"
+else
+    bad "Dockerfile still references a pruned bin: $(code_of "$REPO_ROOT/Dockerfile" | grep -E 'claude-(controller|reaper)')"
+fi
+if ! code_of "$REPO_ROOT/Dockerfile" | grep -q 'WITH_DOCKER' \
+   && ! code_of "$REPO_ROOT/Makefile" | grep -q 'WITH_DOCKER'; then
+    ok  "the WITH_DOCKER controller image variant is gone from Dockerfile + Makefile (~400 MB of unreachable dockerd)"
+else
+    bad "WITH_DOCKER survives as live code in the Dockerfile or Makefile"
+fi
+if ! grep -qE '(controller|reaper)-unit\.sh' "$REPO_ROOT/package.json" "$REPO_ROOT/.github/workflows/ci.yml"; then
+    ok  "npm test + CI no longer invoke the deleted controller/reaper suites"
+else
+    bad "package.json or ci.yml still runs a deleted test suite"
+fi
+# CLAUDE_IMAGE_CONTROLLER only ever named the WITH_DOCKER build.
+if ! grep -q 'CLAUDE_IMAGE_CONTROLLER' "$REPO_ROOT/bin/_common.sh" "$REPO_ROOT/.env.example"; then
+    ok  "CLAUDE_IMAGE_CONTROLLER is gone (it named nothing buildable)"
+else
+    bad "CLAUDE_IMAGE_CONTROLLER survives, but nothing can build that image any more"
+fi
+
+echo
+echo "== CC-BINS: entrypoint REFUSES CLAUDE_CONTROLLER=1 (never silently boots interactive) =="
+
+# CLAUDE_CONTROLLER is NOT an inert leftover like the §0 vars — it is an ACTIVE request for
+# unattended operation. Warn-and-ignore would boot an unattended fleet container into an
+# interactive Remote-Control session nobody is watching, which never runs the loop: a container
+# that looks alive and does nothing. So this one DIES (§0b).
+#
+# BOTH the guard AND the real `die` it depends on are extracted from entrypoint.sh — never
+# mirrored. A local stub `die` would keep passing if entrypoint's real one stopped exiting
+# non-zero, which is exactly the drift that turns a gate into theater.
+CTRL_GUARD="$(awk '/^case "\$\{CLAUDE_CONTROLLER/,/^esac/' "$ENTRYPOINT")"
+# Handles die() written as a one-liner (as it is today) or reformatted across lines: start at
+# its definition, stop at the first line closing a brace.
+REAL_DIE="$(awk '/^die\(\)/{f=1} f{print; if (/\}[[:space:]]*$/) exit}' "$ENTRYPOINT")"
+ctrl_run() { ( eval "$REAL_DIE"; set -euo pipefail; eval "$CTRL_GUARD" ) 2>&1; }
+ctrl_rc()  { ( eval "$REAL_DIE"; set -euo pipefail; eval "$CTRL_GUARD" ) >/dev/null 2>&1; echo $?; }
+
+# PROVE THE EXTRACTED die() ACTUALLY WORKS, rather than merely being non-empty. A text check
+# passes on a half-extracted function; the eval then throws a syntax error, `die` is undefined,
+# and "command not found" under `set -e` LOOKS exactly like a refusal — so the controller
+# assertions below would all still pass while testing nothing at all. Exercise it instead.
+die_rc="$( ( eval "$REAL_DIE"; die "probe" ) >/dev/null 2>&1; echo $? )"
+die_out="$( ( eval "$REAL_DIE"; die "probe" ) 2>&1 )"
+[[ "$die_rc" == "1" && "$die_out" == *"probe"* ]] \
+    && ok  "entrypoint's real die() extracted AND exercised (exits 1, prints its message) — not a stub, not a broken eval" \
+    || bad "the extracted die() does not behave (rc=$die_rc, out=$die_out) — the CLAUDE_CONTROLLER gate would be theater"
+
+if [[ -n "$CTRL_GUARD" ]]; then
+    for v in 1 true yes on; do
+        rc="$(CLAUDE_CONTROLLER="$v" ctrl_rc)"
+        [[ "$rc" != "0" ]] \
+            && ok  "CLAUDE_CONTROLLER=$v is REFUSED (exit $rc), not silently downgraded to interactive" \
+            || bad "CLAUDE_CONTROLLER=$v booted anyway — an unattended container would silently run interactive"
+    done
+
+    # The refusal has to be ACTIONABLE, or the operator just sees their fleet crashloop.
+    out="$(CLAUDE_CONTROLLER=1 ctrl_run)"
+    [[ "$out" == *"CLAUDE_AUTOPILOT=1"* ]] \
+        && ok  "the refusal names the replacement (CLAUDE_AUTOPILOT=1 — the same loop it always was)" \
+        || bad "the CLAUDE_CONTROLLER refusal does not tell the operator what to set instead: $out"
+
+    # A clean boot, and the inert CLAUDE_CONTROLLER=0 that every old .env.example carries, must
+    # sail straight through — refusing THOSE would brick every container.
+    rc="$(ctrl_rc)";                     [[ "$rc" == "0" ]] \
+        && ok  "unset CLAUDE_CONTROLLER → no refusal (clean boot unaffected)" \
+        || bad "the guard aborts a CLEAN boot (exit $rc) — every container would fail to start"
+    rc="$(CLAUDE_CONTROLLER=0 ctrl_rc)"; [[ "$rc" == "0" ]] \
+        && ok  "CLAUDE_CONTROLLER=0 → no refusal (a stale .env line never blocks boot)" \
+        || bad "CLAUDE_CONTROLLER=0 aborted the boot (exit $rc) — stale .env files would brick"
+else
+    bad "could not extract the CLAUDE_CONTROLLER refusal from entrypoint.sh (CC-BINS guard is missing)"
+fi
+
+echo
+echo "== CC-BINS: claude-autopilot never invents a prompt (the /next default is gone) =="
+
+# The old CLAUDE_AUTOPILOT_CMD default was `/next` — a cosyte-cockpit command this generic image
+# does not ship, so on almost every container it resolved to nothing at all. (It did NOT reach the
+# model as a literal prompt: `claude -p` reports an unknown slash command as a zero-turn success
+# and never invokes the model — see the next section, which is where the real damage was.) The fix
+# is a hard rule: NO COMMAND, NO RUN. These tests prove `claude` is never invoked without one —
+# using a stub that records every invocation.
+AP="$REPO_ROOT/bin/claude-autopilot"
+APD="$(mktemp -d)"; trap 'rm -rf "$APD"' EXIT
+mkdir -p "$APD/bin"
+cat > "$APD/bin/claude" <<EOF
+#!/usr/bin/env bash
+echo "INVOKED \$*" >> "$APD/claude-invocations"
+echo '{"is_error": false, "result": "ok", "session_id": "s", "total_cost_usd": 0, "num_turns": 1, "duration_ms": 1}'
+EOF
+chmod +x "$APD/bin/claude"
+# Run the autopilot with the stub on PATH and a throwaway HOME. stdin is /dev/null so the
+# `exec bash -l` it drops into on refusal hits EOF and exits instead of hanging the suite.
+run_autopilot() {  # run_autopilot <timeout-secs> <env=val...>
+    local t="$1"; shift
+    ( : > "$APD/claude-invocations"
+      timeout "$t" env PATH="$APD/bin:$PATH" HOME="$APD/home" "$@" \
+          bash "$AP" </dev/null 2>&1 ) || true
+}
+invocations() { wc -l < "$APD/claude-invocations" | tr -d ' '; }
+
+# 1. No command, no queue → refuse, and DO NOT call claude.
+out="$(run_autopilot 10 CLAUDE_AUTOPILOT_INTERVAL=1)"
+[[ "$(invocations)" == "0" ]] \
+    && ok  "no CLAUDE_AUTOPILOT_CMD + no queue → claude is NEVER invoked (no invented prompt)" \
+    || bad "the autopilot invoked claude with no command set — the /next class of bug is back"
+[[ "$out" == *"CLAUDE_AUTOPILOT_CMD is not set"* && "$out" == *"NO DEFAULT"* ]] \
+    && ok  "it says WHY it refused (CLAUDE_AUTOPILOT_CMD unset, no default)" \
+    || bad "the refusal is not explained: $out"
+[[ "$out" == *"CLAUDE_AUTOPILOT_QUEUE=1"* ]] \
+    && ok  "the refusal names both ways forward (set a CMD, or run as a queue consumer)" \
+    || bad "the refusal does not tell the operator what to do: $out"
+
+# 2. Queue on, queue EMPTY, no command → idle. Not a run, and still no claude.
+out="$(run_autopilot 4 CLAUDE_AUTOPILOT_QUEUE=1 CLAUDE_AUTOPILOT_INTERVAL=1)"
+[[ "$(invocations)" == "0" ]] \
+    && ok  "empty queue + no fallback command → idles, never invokes claude" \
+    || bad "a pure queue consumer invoked claude on an EMPTY queue — it invented work"
+[[ "$out" == *"idling"* ]] \
+    && ok  "the idle is announced (an operator can tell 'waiting' from 'wedged')" \
+    || bad "the idle cycle is silent: $out"
+
+# 3. Positive control — the refusal must not have broken the actual loop. With a command set,
+#    claude IS invoked, with exactly that prompt. Without this, tests 1-2 would pass on a
+#    permanently broken autopilot.
+out="$(run_autopilot 20 CLAUDE_AUTOPILOT_CMD=/build-the-thing CLAUDE_AUTOPILOT_MAX_RUNS=1 CLAUDE_AUTOPILOT_INTERVAL=0)"
+[[ "$(invocations)" == "1" ]] \
+    && ok  "CLAUDE_AUTOPILOT_CMD set → claude is invoked exactly once (MAX_RUNS=1) — the loop still works" \
+    || bad "with a command set, claude was invoked $(invocations) times (expected 1): $out"
+grep -q -- '-p /build-the-thing' "$APD/claude-invocations" \
+    && ok  "the prompt passed to claude is CLAUDE_AUTOPILOT_CMD verbatim" \
+    || bad "claude got the wrong prompt: $(cat "$APD/claude-invocations")"
+
+echo
+echo "== CC-BINS: a zero-turn 'Unknown command' is a FAILURE, not a healthy \$0 run =="
+
+# THE TRAP, verified by hand against the pinned CLI (2.1.207):
+#   $ claude -p "/typo" --output-format json ; echo $?
+#   {"subtype":"success","is_error":false,"num_turns":0,"result":"Unknown command: /typo",
+#    "total_cost_usd":0}
+#   0
+# Exit 0 and is_error:false — so the autopilot's success check scored it as a GOOD run. Left
+# unguarded, a typo'd CLAUDE_AUTOPILOT_CMD gives you a container that logs a healthy "$0 run"
+# every interval forever and does nothing, and a queued task filed to done/ though it never
+# ran. This stub reproduces that exact response shape.
+mkdir -p "$APD/unkbin"
+cat > "$APD/unkbin/claude" <<EOF
+#!/usr/bin/env bash
+echo "INVOKED \$*" >> "$APD/claude-invocations"
+echo '{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"Unknown command: /typo","session_id":"s","total_cost_usd":0,"duration_ms":10}'
+exit 0
+EOF
+chmod +x "$APD/unkbin/claude"
+run_autopilot_unk() {  # same harness, but with the unknown-command stub
+    local t="$1"; shift
+    ( : > "$APD/claude-invocations"
+      timeout "$t" env PATH="$APD/unkbin:$PATH" HOME="$APD/uhome" "$@" \
+          bash "$AP" </dev/null 2>&1 ) || true
+}
+
+# 1. No queue: it must STOP (drop to a shell), not spin forever pretending to work.
+#    MAX_RUNS is 0 (unlimited) and INTERVAL 1 — an unguarded loop would run many times in 6s.
+out="$(run_autopilot_unk 6 CLAUDE_AUTOPILOT_CMD=/typo CLAUDE_AUTOPILOT_INTERVAL=1)"
+[[ "$out" == *"nothing ran"* && "$out" == *"Unknown command: /typo"* ]] \
+    && ok  "a zero-turn 'Unknown command' is reported as a failure, quoting what claude said" \
+    || bad "the unknown-command no-op was NOT flagged — the loop counted it as a healthy run: $out"
+[[ "$(invocations)" == "1" ]] \
+    && ok  "it stops after the first unknown-command run (did not spin: 1 invocation, not many)" \
+    || bad "the loop kept firing an unknown command ($(invocations)x in 6s) — the silent-green no-op is back"
+[[ "$out" == *"Dropping to a shell"* ]] \
+    && ok  "with no queue to fall back on, it drops to a shell (the reason stays on the pane)" \
+    || bad "it neither ran nor stopped visibly: $out"
+
+# 2. Queued task whose body is an unknown command → filed under failed/, NOT done/. This is the
+#    scm-observer → queue fleet path: filing unrun work as done is the silent data-loss case.
+rm -rf "$APD/uhome"; mkdir -p "$APD/uhome/.claude/autopilot-queue/pending"
+printf '/typo' > "$APD/uhome/.claude/autopilot-queue/pending/001-task"
+out="$(run_autopilot_unk 6 CLAUDE_AUTOPILOT_QUEUE=1 CLAUDE_AUTOPILOT_INTERVAL=1 CLAUDE_AUTOPILOT_QUEUE_DELAY=1)"
+Q="$APD/uhome/.claude/autopilot-queue"
+if [[ -z "$(ls -A "$Q/done" 2>/dev/null)" ]] && [[ -n "$(ls -A "$Q/failed" 2>/dev/null)" ]]; then
+    ok  "a queued task that ran NOTHING is filed under failed/, never done/"
+else
+    bad "queued unknown-command task was filed as DONE (done/: $(ls -A "$Q/done" 2>/dev/null), failed/: $(ls -A "$Q/failed" 2>/dev/null)) — unrun work marked complete"
+fi
+
+# 3. A broken CLAUDE_AUTOPILOT_CMD *fallback* must not kill a working queue consumer: drop the
+#    fallback, keep draining. (Otherwise one typo throws away the useful half of the container.)
+rm -rf "$APD/uhome"
+out="$(run_autopilot_unk 6 CLAUDE_AUTOPILOT_QUEUE=1 CLAUDE_AUTOPILOT_CMD=/typo \
+        CLAUDE_AUTOPILOT_INTERVAL=1 CLAUDE_AUTOPILOT_QUEUE_DELAY=1)"
+[[ "$out" == *"disabling the CLAUDE_AUTOPILOT_CMD fallback"* && "$out" == *"idling"* ]] \
+    && ok  "a bogus fallback is dropped and the queue consumer survives (idles, keeps serving the queue)" \
+    || bad "a bogus fallback either killed the queue consumer or kept spinning: $out"
+[[ "$(invocations)" == "1" ]] \
+    && ok  "it stops re-firing the bogus fallback (1 invocation, then idle)" \
+    || bad "the bogus fallback kept firing ($(invocations)x) instead of being disabled"
+
+echo
+echo "== CC-BINS: the outcome checks FAIL CLOSED — stderr can't be merged into the JSON =="
+
+# THE FAIL-OPEN this closes. The real pinned CLI writes to STDERR when stdin is an open pipe
+# with no data (verified: 157 bytes, "Warning: no stdin data received in 3s..."). The loop used
+# to run `claude ... >"$out" 2>&1`, so that line landed in $out AHEAD of the JSON — $out was
+# then unparseable, EVERY jq read returned empty, `.is_error` read empty rather than "true",
+# the zero-turn check read empty, and the run scored as a SUCCESS. A poison queued task went
+# to done/. Any stderr line at all (deprecation notice, update nag, token refresh) does this.
+# So the stub below emits the real CLI's stdout AND its real stderr.
+mkdir -p "$APD/errbin"
+cat > "$APD/errbin/claude" <<EOF
+#!/usr/bin/env bash
+echo "INVOKED \$*" >> "$APD/claude-invocations"
+echo 'Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.' >&2
+echo '{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"Unknown command: /typo","session_id":"s","total_cost_usd":0,"duration_ms":10}'
+exit 0
+EOF
+chmod +x "$APD/errbin/claude"
+
+# A queued poison task, with the CLI also writing to stderr. It must STILL be caught and filed
+# under failed/ — this is the exact case that silently landed in done/ before.
+rm -rf "$APD/ehome"; mkdir -p "$APD/ehome/.claude/autopilot-queue/pending"
+printf '/typo' > "$APD/ehome/.claude/autopilot-queue/pending/001-task"
+out="$( : > "$APD/claude-invocations"
+        timeout 6 env PATH="$APD/errbin:$PATH" HOME="$APD/ehome" \
+            CLAUDE_AUTOPILOT_QUEUE=1 CLAUDE_AUTOPILOT_INTERVAL=1 CLAUDE_AUTOPILOT_QUEUE_DELAY=1 \
+            bash "$AP" </dev/null 2>&1 || true )"
+E="$APD/ehome/.claude/autopilot-queue"
+if [[ -z "$(ls -A "$E/done" 2>/dev/null)" ]] && [[ -n "$(ls -A "$E/failed" 2>/dev/null)" ]]; then
+    ok  "stderr on the CLI does NOT blind the checks — the poison task still lands in failed/, not done/"
+else
+    bad "FAIL-OPEN: with stderr present the run scored as success (done/: $(ls -A "$E/done" 2>/dev/null)) — unrun work marked complete"
+fi
+[[ "$out" == *"Unknown command: /typo"* ]] \
+    && ok  "the unknown-command result is still detected when the CLI also writes to stderr" \
+    || bad "the guard went blind once stderr was in play: $out"
+
+# And the structural rule: a log that will not parse is a FAILURE, never a success. This is what
+# makes the above robust against ANY future CLI chatter, not just the stdin warning.
+mkdir -p "$APD/garbagebin"
+cat > "$APD/garbagebin/claude" <<EOF
+#!/usr/bin/env bash
+echo "INVOKED \$*" >> "$APD/claude-invocations"
+echo 'this is not json at all'
+exit 0
+EOF
+chmod +x "$APD/garbagebin/claude"
+rm -rf "$APD/ghome"; mkdir -p "$APD/ghome/.claude/autopilot-queue/pending"
+printf 'do some real work' > "$APD/ghome/.claude/autopilot-queue/pending/001-task"
+out="$( : > "$APD/claude-invocations"
+        timeout 6 env PATH="$APD/garbagebin:$PATH" HOME="$APD/ghome" \
+            CLAUDE_AUTOPILOT_QUEUE=1 CLAUDE_AUTOPILOT_INTERVAL=1 CLAUDE_AUTOPILOT_QUEUE_DELAY=1 \
+            bash "$AP" </dev/null 2>&1 || true )"
+G="$APD/ghome/.claude/autopilot-queue"
+if [[ -z "$(ls -A "$G/done" 2>/dev/null)" ]] && [[ -n "$(ls -A "$G/failed" 2>/dev/null)" ]]; then
+    ok  "an unparseable run log FAILS CLOSED (task → failed/): 'cannot verify' never scores as success"
+else
+    bad "FAIL-OPEN: an unparseable run log scored as SUCCESS (done/: $(ls -A "$G/done" 2>/dev/null))"
+fi
+[[ "$out" == *"no readable result object"* ]] \
+    && ok  "it says the log could not be read (an operator can see why the run was failed)" \
+    || bad "the unparseable log was not reported: $out"
+
+echo
+echo "== CC-BINS: ANY zero-turn run is a no-op — not just the 'Unknown command' typo =="
+
+# The predicate is `num_turns == 0` ALONE. It must NOT be narrowed to results whose text starts
+# with "Unknown command:", because on the pinned CLI (2.1.207) EVERY slash command that exists
+# but is unavailable headless returns the same zero-turn is_error:false exit-0 shape:
+#   /help    → result:"/help isn't available in this environment."
+#   /cost    → result:"You are currently using your subscription…"
+#   /compact → result:""   ← no message at all
+#   /clear   → result:""
+# A string-matching guard files all of those to done/. Zero turns is zero work — full stop. These
+# stubs reproduce the two shapes a string check would miss (a non-matching message, and none).
+zero_turn_stub() {  # zero_turn_stub <dir> <result-text>
+    mkdir -p "$APD/$1"
+    cat > "$APD/$1/claude" <<EOF
+#!/usr/bin/env bash
+echo "INVOKED \$*" >> "$APD/claude-invocations"
+echo '{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"$2","session_id":"s","total_cost_usd":0,"duration_ms":10}'
+exit 0
+EOF
+    chmod +x "$APD/$1/claude"
+}
+# Queue a task, run the real autopilot against <stub>, report where the task landed.
+task_lands_in() {  # task_lands_in <stubdir> <homedir>
+    local stub="$1" home="$2"
+    rm -rf "$APD/$home"; mkdir -p "$APD/$home/.claude/autopilot-queue/pending"
+    printf 'do real work' > "$APD/$home/.claude/autopilot-queue/pending/001-task"
+    ( : > "$APD/claude-invocations"
+      timeout 6 env PATH="$APD/$stub:$PATH" HOME="$APD/$home" \
+          CLAUDE_AUTOPILOT_QUEUE=1 CLAUDE_AUTOPILOT_INTERVAL=1 CLAUDE_AUTOPILOT_QUEUE_DELAY=1 \
+          bash "$AP" </dev/null 2>&1 || true ) >/dev/null
+    local q="$APD/$home/.claude/autopilot-queue"
+    if [[ -n "$(ls -A "$q/failed" 2>/dev/null)" && -z "$(ls -A "$q/done" 2>/dev/null)" ]]; then
+        echo failed
+    elif [[ -n "$(ls -A "$q/done" 2>/dev/null)" ]]; then
+        echo done
+    else
+        echo neither
+    fi
+}
+
+zero_turn_stub helpbin "/help isn't available in this environment."
+[[ "$(task_lands_in helpbin hlhome)" == "failed" ]] \
+    && ok  "a zero-turn run with a NON-'Unknown command' message (/help) is a failure, not done/" \
+    || bad "FAIL-OPEN: a /help-shaped zero-turn no-op was filed as DONE — the guard only catches typos"
+
+zero_turn_stub quietbin ""
+[[ "$(task_lands_in quietbin qthome)" == "failed" ]] \
+    && ok  "a zero-turn run with NO message at all (/compact, /clear) is a failure, not done/" \
+    || bad "FAIL-OPEN: a silent zero-turn no-op was filed as DONE — nothing ran and nothing was said"
+
+# The other half of the rule: a run that DID invoke the model is a success, whatever it says —
+# including one whose text happens to discuss an unknown command (num_turns >= 1 protects it,
+# which is why the string condition was never needed).
+zero_turn_stub_multiturn() {
+    mkdir -p "$APD/mtbin"
+    cat > "$APD/mtbin/claude" <<EOF
+#!/usr/bin/env bash
+echo "INVOKED \$*" >> "$APD/claude-invocations"
+echo '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"Unknown command: /foo is what the docs say to avoid","session_id":"s","total_cost_usd":0.2,"duration_ms":10}'
+exit 0
+EOF
+    chmod +x "$APD/mtbin/claude"
+}
+zero_turn_stub_multiturn
+[[ "$(task_lands_in mtbin mthome2)" == "done" ]] \
+    && ok  "a real multi-turn run whose text merely DISCUSSES 'Unknown command' still succeeds (no false positive)" \
+    || bad "false positive: a genuine multi-turn run was failed because of its result text"
+
+echo
+echo "== CC-BINS: the check validates JSON *shape*, not just syntax (CLAUDE_EXTRA_ARGS=--verbose) =="
+
+# THE SAME FAIL-OPEN, ONE LAYER UP. CLAUDE_EXTRA_ARGS is a documented, first-class tunable
+# (.env.example, README, `claude-launch --extra-args`). Adding `--verbose` makes the pinned CLI
+# emit a top-level ARRAY of stream messages rather than one result object — verified against
+# 2.1.207. An array is VALID JSON, so a syntax-only check (`jq -e .`) passes it; then every field
+# read against an array returns empty, is_error reads "" (not "true") and num_turns reads ""
+# (not "0"), and BOTH guards silently disengage. And `--verbose` is exactly the flag an operator
+# reaches for to ask "why is my autopilot doing nothing?" — so the debugging flag would recreate
+# the silence. The loop must reduce either shape to the result object. These stubs reproduce the
+# real array shape (system/assistant/result elements, result LAST).
+mkdir -p "$APD/arrbin"
+cat > "$APD/arrbin/claude" <<EOF
+#!/usr/bin/env bash
+echo "INVOKED \$*" >> "$APD/claude-invocations"
+echo '[{"type":"system","subtype":"init"},{"type":"assistant"},{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"Unknown command: /typo","session_id":"s","total_cost_usd":0,"duration_ms":10}]'
+exit 0
+EOF
+chmod +x "$APD/arrbin/claude"
+rm -rf "$APD/ahome"; mkdir -p "$APD/ahome/.claude/autopilot-queue/pending"
+printf '/typo' > "$APD/ahome/.claude/autopilot-queue/pending/001-task"
+out="$( : > "$APD/claude-invocations"
+        timeout 6 env PATH="$APD/arrbin:$PATH" HOME="$APD/ahome" \
+            CLAUDE_AUTOPILOT_QUEUE=1 CLAUDE_AUTOPILOT_INTERVAL=1 CLAUDE_AUTOPILOT_QUEUE_DELAY=1 \
+            bash "$AP" </dev/null 2>&1 || true )"
+A="$APD/ahome/.claude/autopilot-queue"
+if [[ -z "$(ls -A "$A/done" 2>/dev/null)" ]] && [[ -n "$(ls -A "$A/failed" 2>/dev/null)" ]]; then
+    ok  "the --verbose ARRAY shape is still read — poison task lands in failed/, not done/"
+else
+    bad "FAIL-OPEN: a top-level array (valid JSON, wrong shape) disengaged the guards — task filed as done"
+fi
+
+# POSITIVE CONTROL: the array shape must still be read as a SUCCESS when the run genuinely
+# succeeded. Otherwise "fail closed" would just mean "--verbose breaks the autopilot".
+mkdir -p "$APD/arrokbin"
+cat > "$APD/arrokbin/claude" <<EOF
+#!/usr/bin/env bash
+echo "INVOKED \$*" >> "$APD/claude-invocations"
+echo '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"did the work","session_id":"s","total_cost_usd":0.5,"duration_ms":10}]'
+exit 0
+EOF
+chmod +x "$APD/arrokbin/claude"
+rm -rf "$APD/aokhome"; mkdir -p "$APD/aokhome/.claude/autopilot-queue/pending"
+printf 'do real work' > "$APD/aokhome/.claude/autopilot-queue/pending/001-task"
+out="$( : > "$APD/claude-invocations"
+        timeout 6 env PATH="$APD/arrokbin:$PATH" HOME="$APD/aokhome" \
+            CLAUDE_AUTOPILOT_QUEUE=1 CLAUDE_AUTOPILOT_INTERVAL=1 CLAUDE_AUTOPILOT_QUEUE_DELAY=1 \
+            bash "$AP" </dev/null 2>&1 || true )"
+K="$APD/aokhome/.claude/autopilot-queue"
+if [[ -n "$(ls -A "$K/done" 2>/dev/null)" ]] && [[ -z "$(ls -A "$K/failed" 2>/dev/null)" ]]; then
+    ok  "a genuinely successful --verbose run is still scored SUCCESS (fail-closed ≠ '--verbose is broken')"
+else
+    bad "a good run under --verbose was wrongly failed — the shape check false-positives"
+fi
+[[ "$out" == *"did the work"* ]] \
+    && ok  "the result text is read out of the array's result element" \
+    || bad "the array's result element was not surfaced: $out"
+
+# EMPTY LOG. `jq -e .` exits 0 on an empty file (surprising, and exactly the kind of thing a
+# syntax-only check gets wrong), so nothing but an explicit -s test catches this.
+mkdir -p "$APD/emptybin"
+cat > "$APD/emptybin/claude" <<EOF
+#!/usr/bin/env bash
+echo "INVOKED \$*" >> "$APD/claude-invocations"
+exit 0
+EOF
+chmod +x "$APD/emptybin/claude"
+rm -rf "$APD/mthome"; mkdir -p "$APD/mthome/.claude/autopilot-queue/pending"
+printf 'do real work' > "$APD/mthome/.claude/autopilot-queue/pending/001-task"
+out="$( : > "$APD/claude-invocations"
+        timeout 6 env PATH="$APD/emptybin:$PATH" HOME="$APD/mthome" \
+            CLAUDE_AUTOPILOT_QUEUE=1 CLAUDE_AUTOPILOT_INTERVAL=1 CLAUDE_AUTOPILOT_QUEUE_DELAY=1 \
+            bash "$AP" </dev/null 2>&1 || true )"
+M="$APD/mthome/.claude/autopilot-queue"
+if [[ -z "$(ls -A "$M/done" 2>/dev/null)" ]] && [[ -n "$(ls -A "$M/failed" 2>/dev/null)" ]]; then
+    ok  "an EMPTY run log fails closed (task → failed/) — 'jq -e .' exits 0 on empty; -s catches it"
+else
+    bad "FAIL-OPEN: an empty run log scored as SUCCESS (done/: $(ls -A "$M/done" 2>/dev/null))"
+fi
+
 echo
 echo "== $PASS passed, $FAIL failed =="
 exit $(( FAIL > 0 ? 1 : 0 ))

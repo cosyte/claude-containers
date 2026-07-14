@@ -17,8 +17,10 @@ token.
 > stripped from `main`. The frozen implementation is preserved at branch
 > `legacy/sysbox-broker-2026-07-12` + tag `legacy-sysbox-broker-2026-07-12` — see
 > [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md). The Remote-Control
-> core, `/next` autopilot, launch/compose-gen (sans broker flags), housekeeping,
-> baked config, and the security floor all stay on `main`.
+> core, the autopilot loop, launch/compose-gen (sans broker flags), housekeeping,
+> baked config, and the security floor all stay on `main`. A follow-up, **CC-BINS**,
+> then pruned the residue the strip left behind: `claude-controller`, `claude-reaper`,
+> the `WITH_DOCKER` image variant, and the autopilot's `/next` default.
 
 ## Quick start
 
@@ -91,17 +93,32 @@ A container has two modes, selected by `CLAUDE_AUTOPILOT`:
   session (`claude-session`), as above.
 - **autopilot** (`CLAUDE_AUTOPILOT=1`) — the main pane instead runs a **headless
   Claude loop** (`claude-autopilot`): every `CLAUDE_AUTOPILOT_INTERVAL` seconds
-  it fires `claude -p "$CLAUDE_AUTOPILOT_CMD"` (default `/next`) and prints the
-  result. No Remote Control link (the watchdog is skipped); SSH still attaches
-  to the live pane so you can watch it. Each run is a fresh session — perfect for
-  a session-independent command like `/next` that recovers its state from disk.
+  it fires `claude -p "$CLAUDE_AUTOPILOT_CMD"` and prints the result. No Remote
+  Control link (the watchdog is skipped); SSH still attaches to the live pane so
+  you can watch it. Each run is a fresh session — which suits a session-independent
+  command that recovers its state from disk.
 
-Point one autopilot container at a repo whose continuous-build command you want
-run hands-off:
+> **`CLAUDE_AUTOPILOT_CMD` is required and has no default.** It used to default to
+> `/next`. That was wrong: this is a *generic* image — it bakes no `/next`, and the
+> workspace you mount is arbitrary, so on almost every container the default resolved
+> to nothing at all. With no command set, the autopilot now refuses to run (or idles,
+> if it is a queue consumer). **No command, no run.**
+>
+> **Set it to a command your workspace actually defines.** On the pinned CLI, `claude -p`
+> does *not* error on an unknown slash command — it returns a **zero-turn "success"**
+> (`num_turns: 0`, `is_error: false`, exit 0, `$0`, the model never invoked, `result:
+> "Unknown command: /typo"`). The autopilot therefore treats a zero-turn
+> `Unknown command:` result as a **failure**: it says so loudly, files a queued task
+> under `failed/` rather than `done/`, and stops (or, if it is also a queue consumer,
+> drops the broken fallback and keeps draining the queue). Without that check a typo'd
+> command would have produced a container that logs a healthy `$0` run every interval,
+> forever, having done nothing.
+
+Point one autopilot container at a repo, with a command *that repo defines*:
 
 ```bash
-CLAUDE_AUTOPILOT=1 CLAUDE_AUTOPILOT_CMD=/next CLAUDE_AUTOPILOT_INTERVAL=3600 \
-  ./bin/claude-launch cockpit --repo git@github.com:cosyte/<umbrella>.git
+CLAUDE_AUTOPILOT=1 CLAUDE_AUTOPILOT_CMD='/my-build-command' CLAUDE_AUTOPILOT_INTERVAL=3600 \
+  ./bin/claude-launch builder --repo git@github.com:<org>/<repo>.git
 ```
 
 On a rate/usage-limit failure the loop parses the actual reset time (from the
@@ -113,8 +130,8 @@ hot error loop still can't burn your quota. Each run logs its `total_cost_usd`
 container. Per-run JSON logs land in `CLAUDE_AUTOPILOT_LOG_DIR` (default
 `~/.claude/autopilot-logs`); `claude-logs` still shows the entrypoint/sshd log.
 
-By default each cycle is a fresh session (suits session-independent commands
-like `/next` that recover state from disk). Set `CLAUDE_AUTOPILOT_RESUME=1` to
+By default each cycle is a fresh session (suits session-independent commands that
+recover state from disk). Set `CLAUDE_AUTOPILOT_RESUME=1` to
 instead carry the exact conversation forward via `--resume <session_id>` (the ID
 is captured from each run's JSON and persisted on the container's config volume)
 — use it for a single stateful long-running task rather than a queue-driven one.
@@ -123,8 +140,10 @@ is captured from each run's JSON and persisted on the container's config volume)
 `CLAUDE_AUTOPILOT_QUEUE=1` turns the loop into a queue consumer: it claims the
 oldest pending prompt file (atomic `mv`, so it's restart- and race-safe), runs it
 as a one-shot task, and files it under `done/` or `failed/`. When the queue
-drains it falls back to `CLAUDE_AUTOPILOT_CMD` (`/next`) on the interval — so a
-queued container is *also* a continuous-build container. Enqueue from inside the
+drains it falls back to `CLAUDE_AUTOPILOT_CMD` on the interval — so a queued
+container is *also* a continuous-build container. Leave `CLAUDE_AUTOPILOT_CMD`
+unset and it is a **pure queue consumer**: on an empty queue it simply idles,
+rather than inventing a prompt to fill the gap. Enqueue from inside the
 container (SSH in, then):
 
 ```bash
@@ -164,13 +183,17 @@ shared across all running containers via the converged `claude-auth` volume, so
 mind the plan's 5-hour and weekly limits when choosing the interval and how many
 autopilot containers run at once — a too-tight cadence exhausts the subscription.
 
-**Controller mode** (`CLAUDE_CONTROLLER=1`) is a third main-pane mode. It used to wire a
-Sysbox-nested controller to the umbrella's `PAR-*` lease/scheduler/bump-worker control
-plane and dispatch nested workers; SC-5 retired that dispatch tier (see
-[docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md)), so today it is a thin
-pass-through to exactly the autopilot loop above, byte-identical. A follow-up item
-(SC-6) will decide whether this mode is worth keeping at all; most containers should
-keep using plain `CLAUDE_AUTOPILOT=1`.
+**Controller mode is gone.** `CLAUDE_CONTROLLER=1` used to be a third main-pane mode,
+wiring a Sysbox-nested controller to a lease/scheduler/bump-worker control plane and
+dispatching nested workers. SC-5 retired that dispatch tier (see
+[docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md)), which left the mode a
+byte-identical pass-through to `CLAUDE_AUTOPILOT=1` — a mode whose only job was
+selecting another mode. CC-BINS removed it, along with `bin/claude-controller`, the
+`WITH_DOCKER` image variant it ran in, and `claude-reaper` (which pruned a spool only
+the retired broker ever wrote to). **Setting `CLAUDE_CONTROLLER=1` now refuses to boot**,
+with a message pointing at `CLAUDE_AUTOPILOT=1` — rather than silently starting an
+interactive session in an unattended container nobody is watching. Use
+`CLAUDE_AUTOPILOT=1`; it is the same loop, and always was.
 
 ## Environment variables
 
@@ -189,11 +212,11 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `acceptEdits`/`auto`/`bypassPermissions`/`manual`/`dontAsk`/`plan` — the choice set the pinned CLI accepts. Honored by both the interactive session and autopilot; `acceptEdits` is the safer fleet posture (gates shell/network). **`default` was renamed `manual` upstream in CLI 2.1.200** and no longer appears in `claude --help`; it is still accepted for now (verified on 2.1.207), so existing `.env` files keep working — but prefer `manual`, since an undocumented alias can be dropped |
 | `CLAUDE_SECRET_GUARD` | `1` | `1` installs a fleet-wide git pre-commit hook that blocks committing secrets (`.env`, `*.pem`, `*.key`, `id_rsa`, PRIVATE KEY blocks). Bypass once with `git commit --no-verify`; extend via `CLAUDE_SECRET_GUARD_EXTRA` |
 | `CLAUDE_AUTOPILOT` | `0` | `1` = unattended mode: main pane runs a headless `claude -p` loop instead of Remote Control (see [Unattended autopilot](#unattended-autopilot)) |
-| `CLAUDE_AUTOPILOT_CMD` | `/next` | What the autopilot loop runs each cycle |
+| `CLAUDE_AUTOPILOT_CMD` | **none — required** | What the autopilot loop runs each cycle. **No default** (it used to be `/next`, which this generic image does not ship). Unset + no queue = the autopilot refuses to run |
 | `CLAUDE_AUTOPILOT_INTERVAL` | `3600` | Seconds between successful autopilot runs |
 | `CLAUDE_AUTOPILOT_MAX_RUNS` | `0` | Stop after N autopilot runs (`0` = unlimited) |
 | `CLAUDE_AUTOPILOT_RESUME` | `0` | `1` = carry the conversation forward via `--resume <session_id>` each cycle instead of a fresh session |
-| `CLAUDE_AUTOPILOT_QUEUE` | `0` | `1` = consume prompt files from a durable task queue (`claude-enqueue`), falling back to `/next` when empty (see [Unattended autopilot](#unattended-autopilot)) |
+| `CLAUDE_AUTOPILOT_QUEUE` | `0` | `1` = consume prompt files from a durable task queue (`claude-enqueue`), falling back to `CLAUDE_AUTOPILOT_CMD` when empty — or idling, if that is unset (see [Unattended autopilot](#unattended-autopilot)) |
 | `CLAUDE_SCM_OBSERVER` | `0` | `1` = poll the repo's PRs via `gh` and route CI failures / change requests / merge conflicts into the queue (`CLAUDE_SCM_*` tune it; see `.env.example`) |
 | `CLAUDE_OTEL_ENABLED` | `0` | `1` (or setting `OTEL_EXPORTER_OTLP_ENDPOINT`) exports Claude Code's per-call cost/token telemetry to an OTLP backend, tagged per container. `CLAUDE_OTEL_TRACES=1` adds traces; see `.env.example` for the `OTEL_*` vars |
 | `CLAUDE_EXTRA_ARGS` | — | Extra args to `claude` (or `--extra-args`) |
@@ -215,12 +238,9 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts. Extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. Fail-open on error |
 | `CLAUDE_EGRESS_PACKAGES` | `0` | `1` = additively allowlist the curated **package registries** (PyPI, crates.io, Go proxy, `mise.run`, `ghcr.io`) so agent-driven `pip`/`cargo`/`go`/`mise` installs work under lockdown. Opt-in and curated (not open); nothing else broadens. Debian/apt system libs have no self-service path (see [docs/package-provisioning-security.md](docs/package-provisioning-security.md)) |
 | `CLAUDE_BROKER_GIT_KEY` | `0` | `1` = hold the SSH deploy key in a root ssh-agent (agent signs/pushes but can't read the key bytes) instead of a readable `~/.ssh/id_ed25519` |
-| `CLAUDE_REAPER_INTERVAL` | `300` | Seconds between `claude-reaper --loop` cycles (standalone tool; nothing auto-starts it) |
-| `CLAUDE_REAPER_SPOOL_TTL` | `3600` | Seconds before an orphaned spool file (`responses/`, `requests/`, `staging/`) is prunable by `claude-reaper` |
-| `CLAUDE_REAPER_SPOOL_DIR` | `/run/claude/reaper-spool` | Spool root `claude-reaper` prunes |
 | `CLAUDE_DISK_DATA_ROOT` | `/var/lib/docker` | Path whose free space `claude-disk-gc` reports before/after each cycle |
 | `CLAUDE_DISK_GC_INTERVAL` | `3600` | Seconds between `claude-disk-gc --loop` cycles (standalone tool; nothing auto-starts it) |
-| `CLAUDE_CONTROLLER` | `0` | `1` = controller mode: main pane runs `claude-controller`, a thin pass-through to `claude-autopilot` since SC-5 retired its broker-dispatch tier. Takes priority over `CLAUDE_AUTOPILOT` if both are set; no Remote Control link either way |
+| `CLAUDE_CONTROLLER` | *removed* | **Removed in CC-BINS — setting it to `1` now refuses to boot.** It had collapsed to a byte-identical pass-through to `CLAUDE_AUTOPILOT=1`. Use that instead |
 | `CLAUDE_STOP_TIMEOUT` | `20` | Graceful stop timeout (s) |
 | `AUTH_VOLUME`/`SSHKEYS_VOLUME` | `claude-auth`/`claude-sshkeys` | Shared volume names |
 | `ANTHROPIC_API_KEY` | unset | **Must stay unset** — entrypoint hard-fails otherwise |
@@ -261,8 +281,6 @@ claude-rm    <name> [--yes] [--purge]   remove (+volumes with --purge)
 claude-logs  <name> [-n LINES]    tail the entrypoint/sshd log
 claude-disk-gc [--loop]           GC docker image/build-cache layers + trim the shared cache
 claude-disk-verify                prove disk-hygiene logic (docker-free, safe anywhere)
-claude-reaper [--loop]            prune aged spool litter under a spool directory
-claude-controller                 CLAUDE_CONTROLLER=1 main pane; a thin pass-through to claude-autopilot
 ```
 
 A nested-Sysbox worker-broker substrate used to run alongside `claude-launch --broker`,
