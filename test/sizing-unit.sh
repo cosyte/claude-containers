@@ -17,8 +17,23 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMPD="$(mktemp -d)"
 trap 'rm -rf "$TMPD"' EXIT
 
+# --- Hermetic repo root (no .env) ----------------------------------------------------
+# These tests drive the sizing derivations by passing CLAUDE_MEM_LIMIT etc. through the
+# AMBIENT env. But bin/_common.sh sources the repo's .env with `set -a`, and its documented
+# precedence is "ambient env < base .env" — so on any machine that HAS a real .env, the
+# repo's own CLAUDE_MEM_LIMIT overrode the value under test and these assertions read the
+# developer's config instead of their input. It passed only on a checkout with no .env (CI),
+# and failed on every configured host (e.g. a 16g .env made the 8g→6144m case read 12288m).
+#
+# So source _common.sh from a throwaway root that has bin/ and deliberately NO .env. The
+# code under test is byte-identical; only the ambient config is removed. Keep new sizing
+# cases pointed at $HERMETIC_ROOT, not $REPO_ROOT.
+HERMETIC_ROOT="$TMPD/hermetic"
+mkdir -p "$HERMETIC_ROOT"
+cp -R "$REPO_ROOT/bin" "$HERMETIC_ROOT/bin"
+
 # shellcheck disable=SC1091
-source "$REPO_ROOT/bin/_common.sh"
+source "$HERMETIC_ROOT/bin/_common.sh"
 set +e
 
 PASS=0 FAIL=0
@@ -64,13 +79,13 @@ fi
 
 # Derived flat-session reservation at source time: 75% of an overridden limit,
 # and an explicit reservation wins.
-derived="$(env CLAUDE_MEM_LIMIT=8g bash -c 'source "'"$REPO_ROOT"'/bin/_common.sh"; echo "$CLAUDE_MEM_RESERVATION"')"
+derived="$(env CLAUDE_MEM_LIMIT=8g bash -c 'source "'"$HERMETIC_ROOT"'/bin/_common.sh"; echo "$CLAUDE_MEM_RESERVATION"')"
 [[ "$derived" == 6144m ]] && ok "CLAUDE_MEM_RESERVATION derives from an overridden limit (8g → 6144m)" \
     || bad "derived reservation for 8g must be 6144m (got '$derived')"
-explicit="$(env CLAUDE_MEM_LIMIT=8g CLAUDE_MEM_RESERVATION=1g bash -c 'source "'"$REPO_ROOT"'/bin/_common.sh"; echo "$CLAUDE_MEM_RESERVATION"')"
+explicit="$(env CLAUDE_MEM_LIMIT=8g CLAUDE_MEM_RESERVATION=1g bash -c 'source "'"$HERMETIC_ROOT"'/bin/_common.sh"; echo "$CLAUDE_MEM_RESERVATION"')"
 [[ "$explicit" == 1g ]] && ok "an explicit CLAUDE_MEM_RESERVATION wins over the derivation" \
     || bad "explicit reservation must win (got '$explicit')"
-if env CLAUDE_MEM_LIMIT=banana bash -c 'source "'"$REPO_ROOT"'/bin/_common.sh"' >/dev/null 2>&1; then
+if env CLAUDE_MEM_LIMIT=banana bash -c 'source "'"$HERMETIC_ROOT"'/bin/_common.sh"' >/dev/null 2>&1; then
     bad "a garbage CLAUDE_MEM_LIMIT must refuse at source time (fail closed)"
 else
     ok "a garbage CLAUDE_MEM_LIMIT refuses at source time (fail closed)"
@@ -97,7 +112,7 @@ echo "== claude-compose-gen: mem_reservation + pids_limit ride every service =="
 
 OUT="$TMPD/out/compose.yml"
 if env CLAUDE_MEM_LIMIT=4g CLAUDE_PIDS_LIMIT=2048 \
-    "$REPO_ROOT/bin/claude-compose-gen" --out "$OUT" cosyte/hl7 cosyte/mllp:main >/dev/null 2>&1; then
+    "$HERMETIC_ROOT/bin/claude-compose-gen" --out "$OUT" cosyte/hl7 cosyte/mllp:main >/dev/null 2>&1; then
     if grep -q "mem_reservation: 3072m" "$OUT" && grep -q "pids_limit: 2048" "$OUT"; then
         ok "services carry the derived mem_reservation (3072m) + pids_limit (2048)"
     else
@@ -108,7 +123,7 @@ else
 fi
 rm -f "$OUT"
 if env CLAUDE_MEM_LIMIT=4g \
-    "$REPO_ROOT/bin/claude-compose-gen" --out "$OUT" --mem hl7=2g cosyte/hl7 >/dev/null 2>&1; then
+    "$HERMETIC_ROOT/bin/claude-compose-gen" --out "$OUT" --mem hl7=2g cosyte/hl7 >/dev/null 2>&1; then
     if grep -q "mem_limit: 2g" "$OUT" && grep -q "mem_reservation: 1536m" "$OUT"; then
         ok "a per-repo --mem override derives its own 75% reservation (2g → 1536m, never inverted)"
     else
