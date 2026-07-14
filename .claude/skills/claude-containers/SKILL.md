@@ -38,6 +38,14 @@ small descriptive commits as you change things.
     `/home/claude/.claude` (= `CLAUDE_CONFIG_DIR`). All session/history/state.
   - `claude-ws-<project>` — **per container**, `/workspace` (the git repo).
     `--workspace <path>` bind-mounts a host checkout instead.
+  - `claude-scratch-<project>` — **per container**, `/scratch`, and **`TMPDIR`
+    points at it**. `/tmp` is a tmpfs (RAM, 1g, charged to the memory cgroup), so
+    without this a pip/uv wheel build, a `docker save|load`, or the inner
+    containerd dies at 1 GiB with ENOSPC while the pool has TBs free — and a
+    bigger tmpfs would just turn that into an OOM kill instead. Cleared on every
+    boot (it is scratch, not state); `claude-rm --purge` deletes it. `dockerd`/
+    `containerd` inherit TMPDIR; `bash_profile` re-exports it for SSH logins,
+    which get a fresh env from sshd.
   - Rationale: a single shared `~/.claude` would corrupt concurrent sessions
     and collide on the `/workspace` project key. A background loop in the
     entrypoint keeps `.credentials.json` converged between `/auth` and each

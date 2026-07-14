@@ -224,6 +224,63 @@ else
         || ok "generated compose grants no privileged and mounts no host socket"
 fi
 
+# --- Disk-backed scratch (TMPDIR) ------------------------------------------------------
+# /tmp is a tmpfs: RAM, 1g, charged to the memory cgroup. Anything honoring TMPDIR — pip/uv
+# wheel builds, `docker save|load`, the inner containerd's mount dirs — hits that wall and
+# dies with ENOSPC while the pool has terabytes free. These pin the fix: temp goes to disk.
+echo "== scratch volume: TMPDIR is disk-backed, not the RAM tmpfs =="
+
+[[ "$(scratch_volume foo)" == "claude-scratch-foo" ]] \
+    && ok "scratch_volume foo → claude-scratch-foo" \
+    || bad "scratch_volume foo → got '$(scratch_volume foo)'"
+
+if grep -qE -- '-e TMPDIR=/scratch' <<<"$launch_code" && grep -qE 'scratch_volume .*:/scratch' <<<"$launch_code"; then
+    ok "claude-launch mounts the scratch volume and points TMPDIR at it"
+else
+    bad "claude-launch must mount claude-scratch-<proj> at /scratch and set TMPDIR=/scratch"
+fi
+# The regression that would silently undo all of this: TMPDIR left on the tmpfs.
+grep -qE -- '-e TMPDIR=/tmp' <<<"$launch_code" \
+    && bad "TMPDIR must NOT point at /tmp (that is the 1g RAM tmpfs this fixes)" \
+    || ok "TMPDIR does not point back at the tmpfs"
+
+if [[ -s "$OUT" ]]; then
+    if grep -q 'TMPDIR: "/scratch"' "$OUT" && grep -q 'claude-scratch-api:/scratch' "$OUT"; then
+        ok "compose-gen gives every service the scratch volume + TMPDIR"
+    else
+        bad "compose-gen must mount claude-scratch-<svc>:/scratch and set TMPDIR"
+    fi
+    grep -qE '^  claude-scratch-api:' "$OUT" \
+        && ok "the scratch volume is declared top-level" \
+        || bad "claude-scratch-api must be declared under volumes:"
+    # Stack-owned, so a --mount naming it must be refused (else it is declared twice: once by
+    # us, once as external — a duplicate YAML key — and `down -v` could delete another
+    # stack's scratch).
+    # Capture, don't pipe: the generator DIES here (exit 1) — that is the pass condition — and
+    # under `pipefail` a `cmd | grep -q` pipeline would report that exit as failure even though
+    # grep matched. Same trap that made test/unit.sh flaky.
+    dup_out="$("$REPO_ROOT/bin/claude-compose-gen" --out "$TMPD/dup.yml" \
+                 --mount api=claude-scratch-api:/x acme/api 2>&1 || true)"
+    if grep -q 'already managed by this stack' <<<"$dup_out"; then
+        ok "--mount naming this stack's own scratch volume is refused"
+    else
+        bad "--mount of claude-scratch-<svc> must be refused (it is stack-owned)"
+    fi
+fi
+
+# The entrypoint must CLEAR scratch on boot: it is a volume, so unlike a tmpfs it survives
+# restarts and would otherwise accumulate abandoned wheel builds until the pool fills.
+if grep -qE 'find "\$SCRATCH_DIR" -mindepth 1' "$REPO_ROOT/entrypoint.sh"; then
+    ok "the entrypoint clears scratch on boot (a volume does not self-empty like a tmpfs)"
+else
+    bad "the entrypoint must clear the scratch dir on boot"
+fi
+# sshd builds a fresh env, so an SSH login would silently fall back to /tmp without this.
+grep -q 'export TMPDIR=/scratch' "$REPO_ROOT/bash_profile" \
+    && ok "bash_profile re-exports TMPDIR (sshd does not inherit the container env)" \
+    || bad "bash_profile must export TMPDIR so SSH logins get the disk-backed temp too"
+
 echo
+
 echo "docker-unit: $PASS passed, $FAIL failed"
 (( FAIL == 0 ))

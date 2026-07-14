@@ -77,6 +77,7 @@ the `./bin/` prefix.
    claude-config-<proj> (per ctr) sessions + state     → /home/claude/.claude
    claude-ws-<proj>     (per ctr) the git repo         → /workspace
    claude-docker-<proj> (per ctr) inner image store    → /var/lib/docker  (--docker only)
+   claude-scratch-<proj>(per ctr) disk-backed TMPDIR   → /scratch
 ```
 
 Why credentials and config are split: a single shared `~/.claude` across
@@ -255,6 +256,8 @@ vars override `.env`. Full reference: `.env.example`.
 | `/home/claude/.claude` | `claude-config-<proj>` volume | per container | Sessions, history, merged config, plugins |
 | `/workspace` | `claude-ws-<proj>` volume *or* `--workspace` bind | per container | The git repo |
 | `/var/lib/docker` | `claude-docker-<proj>` volume | per container, `--docker` only | Inner Docker image store — pulled base images + built layers. Can reach tens of GB; `claude-rm --purge` deletes it |
+| `/scratch` | `claude-scratch-<proj>` volume | per container | **`TMPDIR`** — disk-backed temp. Cleared on every boot; `claude-rm --purge` deletes it |
+| `/tmp` | tmpfs (**RAM**, 1 GB) | per container | Small temp only. Charged to the memory cgroup — big writes belong in `/scratch` |
 | `/etc/claude/authorized_keys` | host `SSH_AUTHORIZED_KEYS` | read-only | Who may SSH in |
 | `/etc/claude/git-key` | host `GIT_SSH_KEY` | read-only | Git push key |
 | `/opt/claude-config` | baked into image | image | Bake-in template merged on start |
@@ -496,6 +499,29 @@ stack keeps its full `cap_drop`.
 Not to be confused with the retired nested-Sysbox **worker broker**
 ([docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md)): this reuses that
 era's runtime and nothing else — no broker, no worker plane, no spool.
+
+## Temp space: `/scratch`, not `/tmp`
+
+`/tmp` is a **tmpfs** — it lives in RAM, is capped at 1 GB, and every page is charged to the
+container's memory cgroup. With `TMPDIR` unset, everything large defaults there: `pip`/`uv`
+building wheels, `docker save`/`load` tarballs, and (in a `--docker` session) the inner
+containerd's mount dirs. The result is an install that dies at 1 GiB with a confusing
+`ENOSPC` while the host has terabytes free — or, worse, a session that OOM-kills itself
+because a build filled RAM it was accounted for.
+
+So every container gets a **disk-backed `claude-scratch-<name>` volume mounted at
+`/scratch`, and `TMPDIR` points at it**. Temp writes land on disk, where the space actually
+is; `/tmp` stays a small, fast tmpfs for what a tmpfs is good at. `dockerd` and `containerd`
+inherit `TMPDIR` from the entrypoint, and `bash_profile` re-exports it, so an SSH login gets
+the same behaviour as the agent (sshd builds a fresh environment and would otherwise fall
+back to `/tmp`).
+
+It is scratch, not state: the entrypoint **clears it on every boot**. A volume — unlike a
+tmpfs — survives restarts, so without that it would accumulate abandoned wheel builds and
+half-written tarballs until the pool filled. `claude-rm --purge` deletes it.
+
+Raising the `/tmp` tmpfs instead would have been the wrong fix: it is RAM, so a 10 GB `/tmp`
+would simply move the failure from `ENOSPC` to an OOM kill inside the session's own cgroup.
 
 ## Toolchains on demand (`mise`)
 

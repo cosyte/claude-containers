@@ -26,10 +26,15 @@ CFG_VOL="$(cfg_volume "$PROJECT")"
 # is the one volume here that can be tens of GB, and deleting it means the next session
 # rebuilds/re-pulls from cold. It simply won't exist for an ordinary session.
 DOCKER_VOL="$(docker_volume "$PROJECT")"
+# Disk-backed TMPDIR (/scratch). Pure scratch — cleared on every boot — so it is purged
+# without ceremony; it exists as a volume rather than a tmpfs precisely so it CAN be
+# reclaimed here instead of bloating the container's writable layer forever.
+SCRATCH_VOL="$(scratch_volume "$PROJECT")"
 [[ "$(container_state "$CN")" == "absent" ]] && die "no such container: $CN"
 
 PURGE_VOLS=("$WS_VOL" "$CFG_VOL")
 docker volume inspect "$DOCKER_VOL" >/dev/null 2>&1 && PURGE_VOLS+=("$DOCKER_VOL")
+docker volume inspect "$SCRATCH_VOL" >/dev/null 2>&1 && PURGE_VOLS+=("$SCRATCH_VOL")
 
 echo "About to remove container: $CN"
 if [[ "$PURGE" == "1" ]]; then

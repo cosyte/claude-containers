@@ -269,6 +269,19 @@ cfg_volume() { echo "claude-config-$1"; }
 # shared): two daemons must never write one image store. claude-rm --purge deletes it; it is
 # the one volume here that can reach tens of GB, so it is called out in the purge prompt.
 docker_volume() { echo "claude-docker-$1"; }
+# Per-container disk-backed scratch, mounted at /scratch and used as TMPDIR.
+#
+# Why this exists: /tmp is a TMPFS — RAM, capped at CLAUDE_TMPFS_SIZE (1g), charged to the
+# container's memory cgroup. With TMPDIR unset, everything defaults there: pip/uv building
+# wheels, `docker save|load` tarballs, and the inner containerd's mount dirs. A large package
+# install therefore dies at 1 GiB with a confusing ENOSPC while 1.5 TB sits free on disk.
+# Pointing TMPDIR at a volume moves those writes to disk, where space actually is.
+#
+# A VOLUME rather than a plain dir on the container's writable layer (/var/tmp would also be
+# disk): a fat writable layer can only be reclaimed by deleting the container, while a volume
+# is visible in `docker system df` and reclaimable by `claude-rm --purge`. This repo already
+# keeps everything that grows in a volume for exactly that reason.
+scratch_volume() { echo "claude-scratch-$1"; }
 
 # --- Shared tool cache (PKG-3) -----------------------------------------------
 # cache_name — the shared cache volume name, or "" when disabled. A launcher may

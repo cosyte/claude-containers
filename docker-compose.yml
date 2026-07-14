@@ -53,6 +53,10 @@ services:
       # Never add ANTHROPIC_API_KEY here. This stack is subscription-OAuth only;
       # the entrypoint hard-fails if it sees a non-empty ANTHROPIC_API_KEY.
       CLAUDE_PROJECT_NAME: ${CLAUDE_PROJECT_NAME}
+      # Send temp writes to the disk-backed /scratch volume instead of the /tmp tmpfs
+      # (RAM). pip/uv wheel builds, docker save|load tarballs and the inner containerd's
+      # mount dirs all honor TMPDIR; on /tmp they hit a 1 GiB wall.
+      TMPDIR: /scratch
       CLAUDE_EXTRA_ARGS: ${CLAUDE_EXTRA_ARGS:-}
       CLAUDE_MCP_ENABLED: ${CLAUDE_MCP_ENABLED:-}
       # Frontend debugging: set to 1 to register the chrome-devtools MCP
@@ -78,6 +82,10 @@ services:
       # when GIT_REPO_URL is set). To bind-mount a local checkout instead,
       # comment the next line and uncomment the bind line.
       - claude-ws:/workspace
+      # Disk-backed TMPDIR. /tmp is a tmpfs (RAM, 1g, charged to the memory cgroup), so
+      # without this a large pip/npm install or a docker save|load dies at 1 GiB with an
+      # ENOSPC that looks like a bug. See the TMPDIR env below.
+      - claude-scratch:/scratch
       # - ${CLAUDE_WORKSPACE_HOST_DIR:-./workspace}:/workspace
       - ${SSH_AUTHORIZED_KEYS:-~/.ssh/authorized_keys}:/etc/claude/authorized_keys:ro
       - ${GIT_SSH_KEY:-~/.ssh/claude-git-key}:/etc/claude/git-key:ro
@@ -104,3 +112,5 @@ volumes:
     name: claude-config-${CLAUDE_PROJECT_NAME}
   claude-ws:
     name: claude-ws-${CLAUDE_PROJECT_NAME}
+  claude-scratch:
+    name: claude-scratch-${CLAUDE_PROJECT_NAME}

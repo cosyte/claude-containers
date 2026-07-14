@@ -356,6 +356,8 @@ docker run -d \
     "${ENV_FILE_ARG[@]}" \
     "${DOCKER_ENV[@]}" \
     "${DOCKER_VOL_ARGS[@]}" \
+    -v "$(scratch_volume "$PROJECT"):/scratch" \
+    -e TMPDIR=/scratch \
     -e CLAUDE_PROJECT_NAME="$PROJECT" \
     -e CLAUDE_MODEL="$MODEL" \
     -e CLAUDE_EXTRA_ARGS="$EXTRA" \

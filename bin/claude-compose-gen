@@ -679,6 +679,10 @@ EOF
     fi
     [[ -n "${BROWSER[$svc]:-}" ]] && echo '      CLAUDE_BROWSER: "1"'
     [[ -n "${DOCKER[$svc]:-}" ]]  && echo '      CLAUDE_DOCKER: "1"'
+    # Disk-backed TMPDIR. Without it everything temp (pip/uv wheel builds, docker
+    # save|load tarballs, the inner containerd's mount dirs) defaults to /tmp — a 1g
+    # tmpfs in RAM — and a big install dies with ENOSPC while the pool sits mostly empty.
+    echo '      TMPDIR: "/scratch"'
     # Marketplace/plugin lists: quote and escape \, ", and $ the same way as
     # CLAUDE_DEV_CMD so compose doesn't interpolate URL fragments like $foo.
     if [[ -n "${MKTS[$svc]:-}" ]]; then
@@ -701,7 +705,8 @@ EOF
       - claude-auth:/auth
       - claude-sshkeys:/etc/ssh/host-keys
       - claude-config-${svc}:/home/claude/.claude
-      - claude-ws-${svc}:/workspace${CACHE_NAME:+
+      - claude-ws-${svc}:/workspace
+      - claude-scratch-${svc}:/scratch${CACHE_NAME:+
       - claude-cache:/cache}
 EOF
     # Extra foreign volumes (--mount) — another stack's workspace, usually :ro.
@@ -768,8 +773,10 @@ for row in "${FINAL[@]}"; do
     IFS=$'\t' read -r svc _ _ <<<"$row"
     printf '  claude-config-%s:\n    name: claude-config-%s\n' "$svc" "$svc"
     printf '  claude-ws-%s:\n    name: claude-ws-%s\n' "$svc" "$svc"
+    printf '  claude-scratch-%s:\n    name: claude-scratch-%s\n' "$svc" "$svc"
     OWNED_VOLS["claude-config-$svc"]=1
     OWNED_VOLS["claude-ws-$svc"]=1
+    OWNED_VOLS["claude-scratch-$svc"]=1
     # Only --docker services get an image store; declaring it for every service would
     # create empty volumes for sessions that will never run a daemon. It is OWNED by this
     # stack like the config/ws volumes, so register it too — otherwise a --mount naming it
