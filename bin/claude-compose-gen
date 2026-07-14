@@ -75,6 +75,19 @@
 #                       NAME@MKT (the MKT must come from a --marketplace on the
 #                       same repo). Sets CLAUDE_EXTRA_PLUGINS on the service.
 #                       e.g. --plugin site=software-engineering@claude-skills,data@claude-skills
+#     --mount <map>     mount an EXISTING named volume into a repo's service at an
+#                       extra path. Format REPO=VOLUME:/PATH[:ro] (repeatable).
+#                       Use it to give one session read access to another's
+#                       checkout, e.g. --mount cosyte=claude-ws-super:/super:ro
+#                       The volume is declared `external: true` (it belongs to
+#                       another stack), so `up` fails fast if it doesn't exist and
+#                       a `down -v` here can never delete it. Prefer :ro — two live
+#                       Claude sessions writing one git tree race on the index.
+#     --build-context <dir>  build.context for every service (default: the checkout
+#                       this script runs from). Pin it in the scenario when the
+#                       deployment builds from a DIFFERENT clone than the one you
+#                       regenerate from — otherwise every service's build.context
+#                       silently follows whichever checkout ran the generator.
 #     --forks           include forks (default: source repos only)
 #     --archived        include archived repos (default: skip)
 #     --limit <n>       gh repo list limit (default: 500)
@@ -166,8 +179,9 @@ NETWORK=""
 # Shared tool cache (PKG-3): ONE volume shared by every service, mounted at /cache.
 # Default = the CACHE_VOLUME name (claude-cache); --no-cache / --cache off disables it.
 CACHE_VOL="$CACHE_VOLUME"
+BUILD_CONTEXT=""
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=()
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
 # follow so they override scalars (--out/--org/--port-base) and append to
 # repeatables (--active/--expose/…). --scenario/--env-file were consumed in the
@@ -191,6 +205,8 @@ while [[ $# -gt 0 ]]; do
             die "claude-compose-gen: $1 was removed in SC-5 (legacy Sysbox/broker substrate retired; see docs/legacy-sysbox-broker.md)" ;;
         --marketplace)     MKTS_RAW+=("$2"); shift 2 ;;
         --plugin)          PLUGINS_RAW+=("$2"); shift 2 ;;
+        --mount)           MOUNTS_RAW+=("$2"); shift 2 ;;
+        --build-context)   BUILD_CONTEXT="$2"; shift 2 ;;
         --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
         --forks)           WANT_FORKS=1; shift ;;
         --archived)        WANT_ARCHIVED=1; shift ;;
@@ -315,6 +331,36 @@ for tok in "${PLUGINS_RAW[@]:-}"; do
     PLUGINS[$ps]="${PLUGINS[$ps]:-}${PLUGINS[$ps]:+,}${pv}"
 done
 
+# Extra named volumes per service: svc -> newline-separated "VOLUME:/PATH[:ro]".
+# Each --mount value is REPO=VOLUME:/PATH[:ro]. The volume is FOREIGN by design
+# (it belongs to another stack), so it is declared external below: `up` fails
+# fast if it's missing, and a `down -v` here can never delete someone else's data.
+declare -A MOUNTS=()
+declare -A MOUNT_VOLS=()   # volume name -> 1, for the top-level external block
+for tok in "${MOUNTS_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == *=* ]] || die "--mount must be REPO=VOLUME:/PATH[:ro] (got '$tok')"
+    us="$(sanitize "${tok%%=*}")"
+    uv="${tok#*=}"
+    IFS=: read -r mvol mpath mopt <<<"$uv"
+    # A named volume only — a host path here would punch a hole out of the
+    # container's filesystem, which is not what this flag is for.
+    [[ "$mvol" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
+        || die "--mount volume must be a named volume, not a path (got '$mvol' in '$tok')"
+    [[ "$mpath" == /* ]] \
+        || die "--mount path must be absolute (got '$mpath' in '$tok')"
+    [[ -z "$mopt" || "$mopt" == "ro" || "$mopt" == "rw" ]] \
+        || die "--mount option must be ro or rw (got '$mopt' in '$tok')"
+    # Refuse to shadow a mount the service already owns — silently masking the
+    # workspace or config volume would be near-impossible to debug from inside.
+    case "$mpath" in
+        /workspace|/home/claude/.claude|/auth|/cache|/etc/ssh/host-keys|/etc/claude/*)
+            die "--mount path '$mpath' would shadow a mount the service already has (in '$tok')" ;;
+    esac
+    MOUNTS[$us]="${MOUNTS[$us]:-}${MOUNTS[$us]:+$'\n'}${mvol}:${mpath}${mopt:+:$mopt}"
+    MOUNT_VOLS[$mvol]=1
+done
+
 # The generated multi-repo compose is deployment config, not part of this
 # project — refuse to write it anywhere inside the repo so it can't be
 # committed here by accident. Resolve paths without requiring them to exist.
@@ -332,7 +378,15 @@ case "$OUT_ABS/" in
        e.g. --out /srv/claude/docker-compose.yml" ;;
 esac
 
-ABS_CONTEXT="$CLAUDE_DOCKER_ROOT"
+# Build context defaults to the checkout the generator runs from, but a stack is
+# often regenerated from a DIFFERENT clone of this repo than the one the deployment
+# builds from — which silently rewrites build.context on every service. Pin it in
+# the scenario (--build-context) so regen is reproducible from any checkout.
+ABS_CONTEXT="${BUILD_CONTEXT:-$CLAUDE_DOCKER_ROOT}"
+# Shared, host-wide, external volumes the operator must create once. claude-auth is
+# listed separately in the header (it's `make login`'s job, not a bare create).
+SHARED_VOL_LIST="${SSHKEYS_VOLUME}${CACHE_NAME:+ $CACHE_NAME}"
+[[ -d "$ABS_CONTEXT" ]] || die "--build-context '$ABS_CONTEXT' is not a directory"
 # Compose has no ~ expansion — resolve host SSH paths to absolute now.
 AK="${SSH_AUTHORIZED_KEYS/#\~/$HOME}"
 GK="${GIT_SSH_KEY/#\~/$HOME}"
@@ -453,8 +507,13 @@ cat <<EOF
 # Prerequisites (once):
 #   1. Build the image:        make build           # in ${ABS_CONTEXT}
 #   2. One-time OAuth login:    make login           # writes the claude-auth volume
-#   3. Authorized SSH pubkey:   ${AK}
-#   4. Git deploy key w/ ${ORG} read:  ${GK}
+#   3. Shared host-wide volumes — create once (empty is fine, they self-seed):
+#        for v in ${SHARED_VOL_LIST}; do docker volume create "\$v"; done
+#      These are declared external because EVERY stack and standalone container
+#      mounts the same ones: a 'down -v' on one stack would otherwise rotate the
+#      whole fleet's SSH host keys and wipe the shared tool cache.
+#   4. Authorized SSH pubkey:   ${AK}
+#   5. Git deploy key w/ ${ORG} read:  ${GK}
 #      (its .pub added to the ${ORG} org / each repo as a read/write deploy key)
 #
 # Resource model: only "active" repos start by default. Every other repo is
@@ -599,6 +658,16 @@ EOF
       - claude-config-${svc}:/home/claude/.claude
       - claude-ws-${svc}:/workspace${CACHE_NAME:+
       - claude-cache:/cache}
+EOF
+    # Extra foreign volumes (--mount) — another stack's workspace, usually :ro.
+    # Emitted INSIDE the volumes list, before the key binds.
+    if [[ -n "${MOUNTS[$svc]:-}" ]]; then
+        while IFS= read -r m; do
+            [[ -n "$m" ]] || continue
+            printf '      - %s\n' "$m"
+        done <<< "${MOUNTS[$svc]}"
+    fi
+    cat <<EOF
       - ${AK}:/etc/claude/authorized_keys:ro
       - ${GK}:/etc/claude/git-key:ro
     labels:
@@ -613,7 +682,14 @@ EOF
     fi
 done
 
-# top-level volumes
+# top-level volumes.
+# claude-auth and claude-sshkeys are SHARED HOST-WIDE — every stack and every
+# standalone container mounts the same two. They are external so a `docker compose
+# down -v` on ONE stack cannot delete them out from under the others: losing
+# claude-auth means re-running `make login`, and losing claude-sshkeys rotates the
+# SSH host keys of the whole fleet (every client then gets a MITM warning until
+# `ssh-keygen -R` per port). External also means `up` fails fast if they're missing,
+# rather than silently creating an empty one.
 echo
 echo "volumes:"
 cat <<EOF
@@ -622,17 +698,33 @@ cat <<EOF
     external: true
   claude-sshkeys:
     name: ${SSHKEYS_VOLUME}
+    external: true
 EOF
-# Shared tool cache (PKG-3): one volume for the whole stack (NOT external — docker
-# compose creates it on first `up`, seeded from the image's /cache). Every service
-# mounts it at /cache, so a mise/cargo/go/npm/uv install by one is a hit for the rest.
+# Shared tool cache (PKG-3): every service mounts it at /cache, so a mise/cargo/go/
+# npm/uv install by one is a hit for the rest. It defaults to ONE name (claude-cache)
+# per host, so stacks share it — that's deliberate (a wider cache = more hits), and it
+# is why it must be external: otherwise a `down -v` on one stack wipes the cache out
+# from under every other stack. Docker still seeds an empty external volume from the
+# image's /cache on first mount, so `docker volume create` + `up` behaves as before.
 if [[ -n "$CACHE_NAME" ]]; then
-    printf '  claude-cache:\n    name: %s\n' "$CACHE_NAME"
+    printf '  claude-cache:\n    name: %s\n    external: true\n' "$CACHE_NAME"
 fi
+declare -A OWNED_VOLS=([${AUTH_VOLUME}]=1 [${SSHKEYS_VOLUME}]=1)
+[[ -n "$CACHE_NAME" ]] && OWNED_VOLS[$CACHE_NAME]=1
 for row in "${FINAL[@]}"; do
     IFS=$'\t' read -r svc _ _ <<<"$row"
     printf '  claude-config-%s:\n    name: claude-config-%s\n' "$svc" "$svc"
     printf '  claude-ws-%s:\n    name: claude-ws-%s\n' "$svc" "$svc"
+    OWNED_VOLS["claude-config-$svc"]=1
+    OWNED_VOLS["claude-ws-$svc"]=1
+done
+
+# --mount volumes belong to ANOTHER stack: declare them external so `up` fails
+# fast when one is missing and `down -v` here can never delete them.
+for mvol in "${!MOUNT_VOLS[@]}"; do
+    [[ -z "${OWNED_VOLS[$mvol]:-}" ]] \
+        || die "--mount volume '$mvol' is already managed by this stack — mount a volume from a DIFFERENT stack"
+    printf '  %s:\n    name: %s\n    external: true\n' "$mvol" "$mvol"
 done
 
 # Shared external network: point this stack's default network at a pre-existing
@@ -694,4 +786,9 @@ if (( ${#BROWSER[@]} > 0 )); then
 fi
 
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing — run 'make login'"
+# The shared volumes are external now, so a missing one is a hard 'up' failure.
+for v in $SHARED_VOL_LIST; do
+    docker volume inspect "$v" >/dev/null 2>&1 \
+        || warn "shared volume '$v' missing — run 'docker volume create $v' before 'up' (it's external; empty is fine, it self-seeds)"
+done
 info "Validate:  docker compose -f $OUT config >/dev/null && echo OK"
