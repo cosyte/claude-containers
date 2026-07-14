@@ -21,23 +21,55 @@ PROJECT="$(sanitize "$PROJECT")"
 CN="$(cname "$PROJECT")"
 WS_VOL="$(ws_volume "$PROJECT")"
 CFG_VOL="$(cfg_volume "$PROJECT")"
+# The inner Docker image store, present only for a --docker session. Purged with the rest,
+# but listed separately with its size: it holds pulled base images and build layers, so it
+# is the one volume here that can be tens of GB, and deleting it means the next session
+# rebuilds/re-pulls from cold. It simply won't exist for an ordinary session.
+DOCKER_VOL="$(docker_volume "$PROJECT")"
 [[ "$(container_state "$CN")" == "absent" ]] && die "no such container: $CN"
+
+PURGE_VOLS=("$WS_VOL" "$CFG_VOL")
+docker volume inspect "$DOCKER_VOL" >/dev/null 2>&1 && PURGE_VOLS+=("$DOCKER_VOL")
 
 echo "About to remove container: $CN"
 if [[ "$PURGE" == "1" ]]; then
     echo "  --purge: also DELETING volumes '$WS_VOL' and '$CFG_VOL'"
     echo "  (workspace contents and conversation history will be lost)"
+    if [[ " ${PURGE_VOLS[*]} " == *" $DOCKER_VOL "* ]]; then
+        dsize="$(docker system df -v --format '{{range .Volumes}}{{if eq .Name "'"$DOCKER_VOL"'"}}{{.Size}}{{end}}{{end}}' 2>/dev/null || true)"
+        echo "  --purge: also DELETING the inner Docker image store '$DOCKER_VOL'${dsize:+ ($dsize)}"
+        echo "  (every image this session pulled or built is gone; the next one starts cold)"
+    fi
 fi
 if [[ "$YES" != "1" ]]; then
     read -rp "Proceed? [y/N] " ans
     [[ "$ans" =~ ^[Yy]$ ]] || { info "aborted"; exit 0; }
 fi
 
-docker rm -f "$CN" >/dev/null
+# Stop gracefully BEFORE removing, rather than letting `docker rm -f` SIGKILL it. A --docker
+# session runs an inner daemon whose containers and shims must be torn down first (the
+# entrypoint's TERM trap does that): force-killing PID 1 under it leaves the tree to be
+# SIGKILLed, and the exit event can arrive too late for Docker, which then fails the removal
+# with "tried to kill container, but did not receive an exit event". Under `set -e` that
+# aborted this script BEFORE the purge below, leaving volumes behind — the container was
+# gone but its data was not. A graceful stop makes that orderly; the -f rm is still the
+# backstop for a container that is already dead or wedged.
+if [[ "$(container_state "$CN")" == "running" ]]; then
+    docker stop -t "$CLAUDE_STOP_TIMEOUT" "$CN" >/dev/null 2>&1 \
+        || warn "graceful stop of $CN failed or timed out — forcing removal"
+fi
+if ! docker rm -f "$CN" >/dev/null 2>&1; then
+    # It may have died anyway (the kill lands even when the event is late). Re-check before
+    # giving up, so a late exit event doesn't strand the volumes we promised to purge.
+    sleep 2
+    docker rm -f "$CN" >/dev/null 2>&1 \
+        || [[ "$(container_state "$CN")" == "absent" ]] \
+        || die "could not remove container $CN — remove it by hand, then re-run with --purge"
+fi
 ok "Removed container $CN"
 
 if [[ "$PURGE" == "1" ]]; then
-    for v in "$WS_VOL" "$CFG_VOL"; do
+    for v in "${PURGE_VOLS[@]}"; do
         if docker volume inspect "$v" >/dev/null 2>&1; then
             docker volume rm "$v" >/dev/null && ok "Removed volume $v"
         fi

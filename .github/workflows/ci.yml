@@ -27,6 +27,8 @@ jobs:
         run: test/disk-unit.sh
       - name: compose-gen unit tests (scenario .conf expansion + env layering + cross-stack port reservation)
         run: test/compose-gen-unit.sh
+      - name: docker unit tests (--docker inner engine — cap-drop skipped ONLY in docker mode, sysbox preflight fails closed, no --privileged / no host socket)
+        run: test/docker-unit.sh
       - name: egress-packages unit tests (PKG-1 opt-in package-registry allowlist — additive, opt-in, leak-free)
         run: test/egress-packages-unit.sh
       - name: mise unit tests (PKG-2 baked toolchain provisioner — pinned install, shims on PATH, /workspace-only trust)
