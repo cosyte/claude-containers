@@ -2,9 +2,9 @@
   "name": "claude-containers",
   "version": "0.0.0",
   "private": true,
-  "description": "Task-runner shim only — this repo is bash + Make + Docker, ships no package, and has zero dependencies. The scripts below exist so the umbrella's scripts/verify.sh and CI drive the same gates.",
+  "description": "Task-runner shim only \u2014 this repo is bash + Make + Docker, ships no package, and has zero dependencies. The scripts below exist so the umbrella's scripts/verify.sh and CI drive the same gates.",
   "scripts": {
     "lint": "make lint",
-    "test": "test/unit.sh && test/cli-version-unit.sh && test/sizing-unit.sh && test/disk-unit.sh && test/compose-gen-unit.sh && test/egress-packages-unit.sh && test/mise-unit.sh && test/cache-unit.sh && test/manifest-hardening-unit.sh && test/pkg-install-guide-unit.sh"
+    "test": "test/unit.sh && test/cli-version-unit.sh && test/sizing-unit.sh && test/disk-unit.sh && test/compose-gen-unit.sh && test/docker-unit.sh && test/egress-packages-unit.sh && test/mise-unit.sh && test/cache-unit.sh && test/manifest-hardening-unit.sh && test/pkg-install-guide-unit.sh"
   }
 }

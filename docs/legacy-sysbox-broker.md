@@ -178,3 +178,30 @@ launch/compose-gen (minus broker flags), housekeeping (disk-gc, healthcheck), ba
 config (`claude-config/`), and the security floor (secret guard, egress firewall,
 `CLAUDE_BROKER_GIT_KEY`) all continue on `main`. The r730xd mobile-Remote-Control
 workflow is unchanged.
+
+## Postscript: the Sysbox *runtime* came back — the broker did not
+
+`--docker` (2026-07-14) gives a session its own Docker engine so it can build images
+and run containers/compose stacks, and it runs the container under
+`--runtime=sysbox-runc`. That is a deliberate reuse of the **runtime** this substrate
+introduced, and of nothing else: there is no broker, no worker plane, no spool, no
+controller mode, no `CLAUDE_WORKER_*`. The retired flags (`--broker`, `--sysbox`,
+`--worker-tarball`) remain hard errors; `--sysbox` now redirects to `--docker`, which
+selects the runtime itself.
+
+It also **inverts** this substrate's central design move. The broker chowned the inner
+socket to root and mediated every launch specifically to keep the agent OFF the inner
+daemon (the agent was the untrusted party). Under `--docker`, the agent using Docker
+*is* the feature, so it is placed in the `docker` group and handed the socket — which
+means it can reach root inside its own container. Sysbox's user namespace is what makes
+that acceptable (container-root maps to an unprivileged host uid), but the consequence
+is that `CLAUDE_BROKER_GIT_KEY` and `CLAUDE_EGRESS_LOCKDOWN` — both of which assume root
+is separate from the agent — do not bind on a `--docker` container. See
+[architecture.md](architecture.md) ("container workflows are an opt-in image variant on
+Sysbox").
+
+Worth recording for anyone reading the CC-BINS commit: it deleted `WITH_DOCKER` on the
+correct grounds that the baked engine was unreachable — no runtime, no privilege, no
+socket, and nothing that started `dockerd`. The Sysbox runtime is exactly the missing
+piece, and `test/unit.sh` now pins the *wiring* rather than the absence, so the engine
+cannot silently become dead weight again.

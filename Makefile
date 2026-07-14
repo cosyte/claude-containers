@@ -19,8 +19,10 @@ BUILDX_BUILDER      ?= claude-box
 # Frontend-debugging variant: 1 bakes headless Chromium + chrome-devtools-mcp.
 # Off by default (the lean image is unchanged). `make build-browser` flips it.
 WITH_BROWSER        ?= 0
-# The WITH_DOCKER controller variant was removed in CC-BINS — see the Dockerfile and
-# docs/legacy-sysbox-broker.md.
+# Container-workflow variant: 1 bakes the Docker engine (dockerd + CLI + containerd +
+# compose/buildx plugins) so a session can build images and run containers. Needs
+# --runtime=sysbox-runc at launch. Off by default. `make build-docker` flips it.
+WITH_DOCKER         ?= 0
 
 BUILD_ARGS = \
   --build-arg NODE_VERSION=$(NODE_VERSION) \
@@ -30,7 +32,8 @@ BUILD_ARGS = \
   --build-arg CLAUDE_UID=$(CLAUDE_UID) \
   --build-arg CLAUDE_GID=$(CLAUDE_GID) \
   --build-arg CLAUDE_USER=$(CLAUDE_USER) \
-  --build-arg WITH_BROWSER=$(WITH_BROWSER)
+  --build-arg WITH_BROWSER=$(WITH_BROWSER) \
+  --build-arg WITH_DOCKER=$(WITH_DOCKER)
 
 .DEFAULT_GOAL := help
 .PHONY: help builder build build-all build-browser push login launch list attach stop rm logs clean lint smoke
@@ -57,6 +60,16 @@ build-browser: ## Build the browser-enabled variant (Chromium + chrome-devtools-
 	@$(MAKE) build WITH_BROWSER=1 CLAUDE_IMAGE=$(or $(CLAUDE_IMAGE_BROWSER),claude-code-box:browser)
 	@echo "Built browser variant. Launch with:  ./bin/claude-launch <name> --browser --workspace <path>"
 	@echo "Or set CLAUDE_IMAGE=claude-code-box:browser in your .env so every launch uses it."
+
+build-docker: ## Build the container-workflow variant (Docker engine baked in), tag :docker
+	@$(MAKE) build WITH_DOCKER=1 CLAUDE_IMAGE=$(or $(CLAUDE_IMAGE_DOCKER),claude-code-box:docker)
+	@echo "Built docker variant. Launch with:  ./bin/claude-launch <name> --docker --workspace <path>"
+	@echo "Needs the Sysbox runtime on this host (docker info | grep sysbox-runc)."
+
+build-docker-browser: ## Build BOTH variants in one image (engine + Chromium), tag :docker-browser
+	@$(MAKE) build WITH_DOCKER=1 WITH_BROWSER=1 \
+	  CLAUDE_IMAGE=$(or $(CLAUDE_IMAGE_DOCKER_BROWSER),claude-code-box:docker-browser)
+	@echo "Built docker+browser variant. Launch with:  ./bin/claude-launch <name> --docker --browser --workspace <path>"
 
 push: builder ## Build+push amd64+arm64 to the registry in CLAUDE_IMAGE
 	docker buildx build $(BUILD_ARGS) --platform $(PLATFORMS) \

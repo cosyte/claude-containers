@@ -66,6 +66,14 @@
 #                       these repos (repeatable; comma/space lists ok). Their
 #                       service uses CLAUDE_IMAGE_BROWSER (default
 #                       claude-code-box:browser; `make build-browser`).
+#     --docker <repos>  give these repos their own Docker engine, so the session can
+#                       build images and run containers/compose stacks (repeatable;
+#                       comma/space lists ok). The service runs under the Sysbox
+#                       runtime (runtime: sysbox-runc) so the inner daemon needs no
+#                       --privileged and no host socket, keeps its image store in a
+#                       claude-docker-<repo> volume, and uses CLAUDE_IMAGE_DOCKER
+#                       (default claude-code-box:docker; `make build-docker`) — or
+#                       CLAUDE_IMAGE_DOCKER_BROWSER when combined with --browser.
 #     --marketplace <map>  add a git plugin marketplace to a repo at runtime.
 #                       Format REPO=NAME=URL (repeatable). The repo's service
 #                       gets CLAUDE_EXTRA_MARKETPLACES with this entry appended,
@@ -167,7 +175,7 @@ NETWORK=""
 # Default = the CACHE_VOLUME name (claude-cache); --no-cache / --cache off disables it.
 CACHE_VOL="$CACHE_VOLUME"
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() DOCKER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=()
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
 # follow so they override scalars (--out/--org/--port-base) and append to
 # repeatables (--active/--expose/…). --scenario/--env-file were consumed in the
@@ -187,6 +195,7 @@ while [[ $# -gt 0 ]]; do
         --mem)             MEM_RAW+=("$2"); shift 2 ;;
         --model)           MODEL_RAW+=("$2"); shift 2 ;;
         --browser)         BROWSER_RAW+=("$2"); shift 2 ;;
+        --docker)          DOCKER_RAW+=("$2"); shift 2 ;;
         --broker|--worker-tarball)
             die "claude-compose-gen: $1 was removed in SC-5 (legacy Sysbox/broker substrate retired; see docs/legacy-sysbox-broker.md)" ;;
         --marketplace)     MKTS_RAW+=("$2"); shift 2 ;;
@@ -291,6 +300,20 @@ for tok in "${BROWSER_RAW[@]:-}"; do
     done
 done
 
+# Container workflows: services with their own Docker engine (CLAUDE_DOCKER=1), able to
+# build images and run containers/compose stacks. Image must be built with WITH_DOCKER=1
+# (`make build-docker`), and the service runs under the Sysbox runtime.
+declare -A DOCKER=()
+for tok in "${DOCKER_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    for one in $(echo "$tok" | tr ',' ' '); do
+        DOCKER["$(sanitize "$one")"]=1
+    done
+done
+# Fail here, not at `up`: without the runtime the inner daemon has no user namespace and
+# the container dies on a 60s entrypoint timeout, which reads as a mysterious boot failure.
+(( ${#DOCKER[@]} > 0 )) && preflight_sysbox
+
 # Runtime plugin marketplaces per service: svc -> comma-separated "name=url" list.
 # Each --marketplace value is REPO=NAME=URL — split on the FIRST = to peel off
 # the repo, keep the rest verbatim (URLs commonly contain =, : and @).
@@ -344,6 +367,10 @@ GH_MAIL="$(git config --global user.email 2>/dev/null || true)"
 # in; non-browser services keep the lean CLAUDE_IMAGE. Default to the standard
 # `make build-browser` tag; override with CLAUDE_IMAGE_BROWSER.
 BROWSER_IMAGE="${CLAUDE_IMAGE_BROWSER:-claude-code-box:browser}"
+# --docker services need an engine baked in (`make build-docker`); a service that is BOTH
+# needs the image with both (`make build-docker-browser`), since these are baked, not mounted.
+DOCKER_IMAGE="${CLAUDE_IMAGE_DOCKER:-claude-code-box:docker}"
+DOCKER_BROWSER_IMAGE="${CLAUDE_IMAGE_DOCKER_BROWSER:-claude-code-box:docker-browser}"
 
 # --- Collect repos as "owner<TAB>name<TAB>branch" -----------------------------
 # Two independent sources, combined: (1) gh enumeration of --org (owner=ORG for
@@ -491,8 +518,13 @@ for row in "${FINAL[@]}"; do
     # opus — the best available model — when nothing is set.
     if [[ -n "${MODEL[$svc]:-}" ]]; then svc_model="${MODEL[$svc]}"
     else svc_model='${CLAUDE_MODEL:-opus}'; fi
+    # Image selection. --browser and --docker are orthogonal capabilities but they are
+    # baked, not mounted, so a service needing both needs the image that has both.
     svc_image="${CLAUDE_IMAGE}"
-    [[ -n "${BROWSER[$svc]:-}" ]] && svc_image="$BROWSER_IMAGE"
+    if   [[ -n "${BROWSER[$svc]:-}" && -n "${DOCKER[$svc]:-}" ]]; then svc_image="$DOCKER_BROWSER_IMAGE"
+    elif [[ -n "${BROWSER[$svc]:-}" ]];                          then svc_image="$BROWSER_IMAGE"
+    elif [[ -n "${DOCKER[$svc]:-}" ]];                           then svc_image="$DOCKER_IMAGE"
+    fi
     cat <<EOF
   ${svc}:
     image: ${svc_image}
@@ -535,13 +567,25 @@ EOF
             [[ -n "$m" ]] && echo "      - \"${m}\""
         done <<<"${EXPOSE[$svc]}"
     fi
+    # --docker: run this service under Sysbox, which puts the inner dockerd in a user
+    # namespace (container-root → an unprivileged host uid). That is what makes nested
+    # Docker safe with no --privileged and no host-socket mount, both of which would give
+    # the agent the host. Compose's `runtime:` is the v2 spec field for exactly this.
+    [[ -n "${DOCKER[$svc]:-}" ]] && echo "    runtime: sysbox-runc"
     # Escape hardening (mirrors claude-launch via _common.sh): no-new-privileges
     # always; drop ALL caps + re-add the minimal set unless CLAUDE_HARDEN_CAPS=0;
     # add NET_ADMIN when the egress firewall is enabled.
+    #
+    # A --docker service SKIPS the cap-drop: an inner daemon cannot run under the minimal
+    # set (it needs NET_ADMIN for its bridge/iptables and SYS_ADMIN to mount layers, and
+    # neither is even in Docker's default set). Sysbox grants container-root the full set
+    # anyway — measured CapEff 000001ffffffffff with uid_map 0→165536 — but those caps are
+    # powers over the container's own userns, not the host. Same trade as claude-launch's
+    # harden_run_args, kept per-service so a lean sibling in the same stack stays hardened.
     echo "    security_opt:"
     echo "      - no-new-privileges:true"
     _caps=""
-    if [[ "$CLAUDE_HARDEN_CAPS" =~ ^(1|true|yes|on)$ ]]; then
+    if [[ -z "${DOCKER[$svc]:-}" ]] && [[ "$CLAUDE_HARDEN_CAPS" =~ ^(1|true|yes|on)$ ]]; then
         echo "    cap_drop:"
         echo "      - ALL"
         _caps="$CLAUDE_MIN_CAPS"
@@ -575,6 +619,7 @@ EOF
         echo "      CLAUDE_DEV_CMD: \"${dc}\""
     fi
     [[ -n "${BROWSER[$svc]:-}" ]] && echo '      CLAUDE_BROWSER: "1"'
+    [[ -n "${DOCKER[$svc]:-}" ]]  && echo '      CLAUDE_DOCKER: "1"'
     # Marketplace/plugin lists: quote and escape \, ", and $ the same way as
     # CLAUDE_DEV_CMD so compose doesn't interpolate URL fragments like $foo.
     if [[ -n "${MKTS[$svc]:-}" ]]; then
@@ -601,11 +646,19 @@ EOF
       - claude-cache:/cache}
       - ${AK}:/etc/claude/authorized_keys:ro
       - ${GK}:/etc/claude/git-key:ro
+EOF
+    # Inner Docker image store. Sysbox gives the container its own /var/lib/docker, but it
+    # dies WITH the container — so without this volume every recreate re-pulls every base
+    # image and rebuilds every layer cold. Per-service, never shared: two daemons must not
+    # write one image store.
+    [[ -n "${DOCKER[$svc]:-}" ]] && echo "      - claude-docker-${svc}:/var/lib/docker"
+    cat <<EOF
     labels:
       claude.managed: "1"
       claude.project: "${svc}"
       claude.ssh_port: "${port}"
       claude.repo: "${url}"
+      claude.docker: "${DOCKER[$svc]:-0}"
 EOF
     # Non-active repos: defined but behind a profile, so `up -d` skips them.
     if [[ $HAVE_ACTIVE -eq 1 && -z "${ACTIVE[$svc]:-}" ]]; then
@@ -633,6 +686,10 @@ for row in "${FINAL[@]}"; do
     IFS=$'\t' read -r svc _ _ <<<"$row"
     printf '  claude-config-%s:\n    name: claude-config-%s\n' "$svc" "$svc"
     printf '  claude-ws-%s:\n    name: claude-ws-%s\n' "$svc" "$svc"
+    # Only --docker services get an image store; declaring it for every service would
+    # create empty volumes for sessions that will never run a daemon.
+    [[ -n "${DOCKER[$svc]:-}" ]] \
+        && printf '  claude-docker-%s:\n    name: claude-docker-%s\n' "$svc" "$svc"
 done
 
 # Shared external network: point this stack's default network at a pre-existing
@@ -671,6 +728,7 @@ for r in "${FINAL[@]}"; do
     [[ -n "${DEVCMD[$s]:-}" ]] && extra="$extra +dev"
     [[ -n "${CPU[$s]:-}" || -n "${MEM[$s]:-}" ]] && extra="$extra +res(${CPU[$s]:-$CLAUDE_CPU_LIMIT}cpu/${MEM[$s]:-$CLAUDE_MEM_LIMIT})"
     [[ -n "${BROWSER[$s]:-}" ]] && extra="$extra +browser"
+    [[ -n "${DOCKER[$s]:-}" ]] && extra="$extra +docker(sysbox)"
     [[ -n "${MODEL[$s]:-}" ]] && extra="$extra +model(${MODEL[$s]})"
     if [[ -n "${MKTS[$s]:-}" ]]; then
         n_mkts="$(awk -F, '{print NF}' <<<"${MKTS[$s]}")"
@@ -691,6 +749,24 @@ docker image inspect "$CLAUDE_IMAGE" >/dev/null 2>&1 || warn "image $CLAUDE_IMAG
 if (( ${#BROWSER[@]} > 0 )); then
     img_browser="$(docker image inspect -f '{{ index .Config.Labels "claude.browser" }}' "$BROWSER_IMAGE" 2>/dev/null || true)"
     [[ "$img_browser" == "1" ]] || warn "image $BROWSER_IMAGE was not built with WITH_BROWSER=1 — run 'make build-browser' before 'up' (--browser services won't get the chrome-devtools MCP otherwise)"
+fi
+# Same for --docker. Check the image each docker service will actually use: a service that
+# is both --docker and --browser gets the combined image, and a missing engine there is a
+# boot failure (the entrypoint dies on 'dockerd not in this image'), not a silent downgrade.
+if (( ${#DOCKER[@]} > 0 )); then
+    _need_combined=0
+    for s in "${!DOCKER[@]}"; do [[ -n "${BROWSER[$s]:-}" ]] && _need_combined=1; done
+    for img in "$DOCKER_IMAGE" $( ((_need_combined)) && echo "$DOCKER_BROWSER_IMAGE" ); do
+        img_docker="$(docker image inspect -f '{{ index .Config.Labels "claude.docker" }}' "$img" 2>/dev/null || true)"
+        [[ "$img_docker" == "1" ]] && continue
+        if [[ "$img" == "$DOCKER_BROWSER_IMAGE" ]]; then
+            warn "image $img was not built with WITH_DOCKER=1 — run 'make build-docker-browser' before 'up' (a service that is both --docker and --browser needs the combined image)"
+        else
+            warn "image $img was not built with WITH_DOCKER=1 — run 'make build-docker' before 'up' (--docker services will fail to boot otherwise)"
+        fi
+    done
+    warn "--docker services can reach root INSIDE their own container (Sysbox keeps that off the host)."
+    warn "  CLAUDE_BROKER_GIT_KEY and CLAUDE_EGRESS_LOCKDOWN do not bind on them — see docs/architecture.md."
 fi
 
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing — run 'make login'"

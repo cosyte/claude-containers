@@ -244,12 +244,48 @@ if ! code_of "$REPO_ROOT/Dockerfile" | grep -qE 'claude-(controller|reaper)'; th
 else
     bad "Dockerfile still references a pruned bin: $(code_of "$REPO_ROOT/Dockerfile" | grep -E 'claude-(controller|reaper)')"
 fi
-if ! code_of "$REPO_ROOT/Dockerfile" | grep -q 'WITH_DOCKER' \
-   && ! code_of "$REPO_ROOT/Makefile" | grep -q 'WITH_DOCKER'; then
-    ok  "the WITH_DOCKER controller image variant is gone from Dockerfile + Makefile (~400 MB of unreachable dockerd)"
+# WITH_DOCKER is BACK, deliberately — but the property CC-BINS was protecting still holds and
+# is what we assert now. It deleted the variant because the baked engine was UNREACHABLE: no
+# runtime, no --privileged, no socket mount, and nothing that started dockerd — 400 MB of dead
+# daemon. The engine only earns its place if it can actually run, so pin the wiring, not the
+# absence: the entrypoint must start it, and the launcher must give it the Sysbox runtime that
+# lets it start without privilege. Break either and the variant is dead weight again.
+# (See docs/architecture.md; the worker BROKER it originally served stays retired.)
+# NOTE — materialize code_of's output into a variable instead of piping it into `grep -q`.
+# This file runs under `set -o pipefail`, and `producer | grep -q X` is a trap there: grep -q
+# exits the moment it matches, the producer takes SIGPIPE (141), and pipefail reports the
+# PIPELINE as failed even though the pattern was found. It is timing-dependent, so it shows
+# up as a test that passes locally and reds CI at random. Keep the here-string form.
+has() { grep -qE -- "$2" <<<"$1"; }   # has "<text>" "<ere>"
+dockerfile_code="$(code_of "$REPO_ROOT/Dockerfile")"
+entrypoint_code="$(code_of "$REPO_ROOT/entrypoint.sh")"
+launch_code="$(code_of "$REPO_ROOT/bin/claude-launch")"
+
+if has "$dockerfile_code" 'WITH_DOCKER'; then
+    ok  "the WITH_DOCKER image variant exists (bakes dockerd + CLI + compose/buildx)"
 else
-    bad "WITH_DOCKER survives as live code in the Dockerfile or Makefile"
+    bad "WITH_DOCKER is missing from the Dockerfile — --docker sessions cannot have an engine"
 fi
+if has "$entrypoint_code" 'CLAUDE_DOCKER' && has "$entrypoint_code" '(^|[[:space:]])dockerd[[:space:]]*>>'; then
+    ok  "the entrypoint actually STARTS the baked engine (CLAUDE_DOCKER=1 → dockerd)"
+else
+    bad "nothing starts dockerd — the baked engine is unreachable again (the exact defect CC-BINS deleted it for)"
+fi
+if has "$launch_code" 'runtime=sysbox-runc'; then
+    ok  "claude-launch gives the engine a runtime it can start under (--runtime=sysbox-runc)"
+else
+    bad "claude-launch selects no Sysbox runtime — an inner dockerd cannot start without the userns"
+fi
+# The two shortcuts that would make an inner engine trivial and catastrophic. Sysbox exists
+# precisely so neither is needed; if one appears, the isolation story is gone.
+for f in bin/claude-launch bin/claude-compose-gen entrypoint.sh docker-compose.yml; do
+    [[ -e "$REPO_ROOT/$f" ]] || continue
+    if has "$(code_of "$REPO_ROOT/$f")" '--privileged|privileged:[[:space:]]*true|/var/run/docker\.sock'; then
+        bad "$f grants --privileged or mounts the host docker socket — either hands the agent the host"
+    else
+        ok  "$f grants no --privileged and mounts no host docker socket"
+    fi
+done
 if ! grep -qE '(controller|reaper)-unit\.sh' "$REPO_ROOT/package.json" "$REPO_ROOT/.github/workflows/ci.yml"; then
     ok  "npm test + CI no longer invoke the deleted controller/reaper suites"
 else

@@ -250,12 +250,52 @@ RUN set -eux; \
 # the variant by probing the baked binaries on PATH instead.)
 LABEL claude.browser="${WITH_BROWSER}"
 
-# The WITH_DOCKER "controller" image variant (dockerd + CLI + containerd, ~400 MB) was
-# REMOVED in CC-BINS. It existed solely to host the Sysbox nested-worker-broker substrate
-# SC-5 retired (see docs/legacy-sysbox-broker.md). Nothing started dockerd afterwards, and
-# nothing *could*: bin/claude-launch, bin/claude-compose-gen and docker-compose.yml grant no
-# --privileged and mount no docker socket, so the baked engine had no way to run even if
-# something had tried. Deleting 400 MB of unreachable daemon is not a capability loss.
+# --- Optional: Docker engine (the :docker image variant) -----------------------
+# Build with `--build-arg WITH_DOCKER=1` (or `make build-docker`) to bake the Docker
+# Engine into the image, so a session can BUILD IMAGES AND RUN CONTAINERS — Dockerfiles,
+# compose stacks, testcontainers — as part of its normal work. ~400 MB delta; default OFF.
+#
+# History, because this ARG existed twice before under a different name: it originally
+# hosted the Sysbox nested-worker-BROKER substrate (retired in SC-5), then CC-BINS deleted
+# it outright, correctly observing that nothing started dockerd and nothing *could* — the
+# launchers grant no --privileged and mount no docker socket, so the baked engine was
+# unreachable. This variant is NOT that comeback: there is no broker, no worker plane, no
+# spool. What changed is the missing piece CC-BINS named. The container now runs under
+# `--runtime=sysbox-runc`, which puts the inner daemon in a USER NAMESPACE (container-root
+# → an unprivileged host uid), so nested Docker needs neither --privileged nor a host
+# socket mount — both remain FORBIDDEN, and both would hand a prompt-injectable agent the
+# host. entrypoint.sh §5a starts the daemon; bin/claude-launch --docker selects the runtime.
+#
+# The broker never needed to *compose* anything, so it installed neither plugin. A session
+# testing container workflows needs both, plus buildx for a modern `docker build`.
+ARG WITH_DOCKER=0
+RUN set -eux; \
+    if [ "$WITH_DOCKER" = "1" ]; then \
+        install -m 0755 -d /etc/apt/keyrings; \
+        curl -fsSL https://download.docker.com/linux/debian/gpg \
+            -o /etc/apt/keyrings/docker.asc; \
+        chmod a+r /etc/apt/keyrings/docker.asc; \
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+            > /etc/apt/sources.list.d/docker.list; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends \
+            docker-ce docker-ce-cli containerd.io \
+            docker-buildx-plugin docker-compose-plugin; \
+        apt-get clean; \
+        rm -rf /var/lib/apt/lists/*; \
+        # Prove the whole surface a session actually uses is present; the entrypoint (§5a)
+        # starts dockerd. `docker compose`/`buildx` are plugins — a missing plugin is a
+        # silent "unknown command" at runtime, so assert them at BUILD time instead.
+        dockerd --version; docker --version; containerd --version; \
+        docker buildx version; docker compose version; \
+    else \
+        echo "WITH_DOCKER=0 — skipping the Docker engine (lean session image)"; \
+    fi
+# Image-capability label: bin/claude-launch reads this to fail early (loud, actionable)
+# when --docker targets an image with no engine. Orthogonal to claude.browser — both ARGs
+# can be set in one build (make build-docker-browser) and each label is checked on its own.
+# (The in-container entrypoint can't read its own image labels, so §5a probes PATH instead.)
+LABEL claude.docker="${WITH_DOCKER}"
 
 # --- Non-root user ------------------------------------------------------------
 # The entrypoint starts as root (sshd, volume chown) then drops to this user

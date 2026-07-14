@@ -85,9 +85,29 @@ need_docker() {
 # Docker-run hardening flags (no-new-privileges + minimal capabilities), as a
 # space-separated string the launcher reads into an array. Used by claude-launch;
 # claude-compose-gen emits the equivalent YAML.
+#
+# harden_run_args [docker_mode] — pass 1 for a --docker (Sysbox) container.
+#
+# In docker mode the cap-drop is SKIPPED, because an inner dockerd cannot run under
+# the minimal set (it needs NET_ADMIN for its bridge/iptables and SYS_ADMIN to mount
+# layers; neither is even in Docker's *default* set). This is not the loss it looks
+# like. Measured on this host — `docker run --runtime=sysbox-runc alpine cat
+# /proc/self/status,/proc/self/uid_map`:
+#
+#   runc         CapEff 00000000a80425fb   uid_map 0 0 4294967295  → container-root IS host root
+#   sysbox-runc  CapEff 000001ffffffffff   uid_map 0 165536 65536  → container-root is host uid 165536
+#
+# Sysbox hands container-root the FULL capability set, but inside a user namespace whose
+# root maps to an unprivileged host uid — so those caps are powers over the container's
+# own namespace, not the host. Dropping them would break the daemon while buying nothing
+# the userns isn't already buying. no-new-privileges is kept either way (verified: nested
+# build+run works with it on); its one real cost is that setuid binaries inside an INNER
+# container (sudo, ping) can't elevate.
 harden_run_args() {
+    local docker_mode="${1:-0}"
     local out="--security-opt no-new-privileges"
-    if [[ "$CLAUDE_HARDEN_CAPS" =~ ^(1|true|yes|on)$ ]]; then
+    if [[ ! "$docker_mode" =~ ^(1|true|yes|on)$ ]] \
+       && [[ "$CLAUDE_HARDEN_CAPS" =~ ^(1|true|yes|on)$ ]]; then
         out+=" --cap-drop ALL"
         local c; for c in $CLAUDE_MIN_CAPS; do out+=" --cap-add $c"; done
     fi
@@ -95,6 +115,22 @@ harden_run_args() {
     # stays unprivileged and so cannot alter the rules).
     [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]] && out+=" --cap-add NET_ADMIN"
     echo "$out"
+}
+
+# Refuse --docker on a host with no Sysbox runtime. Without it the inner daemon has no
+# user namespace to live in and dies ~60s later inside the container, surfacing as an
+# opaque entrypoint timeout — so fail here instead, loudly, with the fix. The ONLY
+# alternatives to Sysbox are --privileged and a host-socket mount, and both hand a
+# prompt-injectable agent the host, so neither is offered as a fallback.
+preflight_sysbox() {
+    docker info --format '{{range $r, $_ := .Runtimes}}{{$r}} {{end}}' 2>/dev/null \
+        | grep -qw 'sysbox-runc' && return 0
+    die "--docker needs the Sysbox runtime, which this host's Docker daemon does not have.
+       Sysbox runs the inner daemon in a user namespace (container-root → an unprivileged
+       host uid), which is what makes nested Docker safe without --privileged or a host
+       socket mount. Neither of those is an acceptable substitute here: each would give
+       the agent root on the host.
+       Install:  https://github.com/nestybox/sysbox   then:  docker info | grep sysbox-runc"
 }
 
 # Warn (don't block) if the host's runC is vulnerable to the Nov-2025 container-
@@ -227,6 +263,12 @@ sanitize() {
 cname()      { echo "claude-$1"; }
 ws_volume()  { echo "claude-ws-$1"; }
 cfg_volume() { echo "claude-config-$1"; }
+# Per-container /var/lib/docker for --docker sessions. Sysbox gives each container its own
+# inner image store, but that store dies WITH the container — so without this volume every
+# recreate re-pulls every base image and rebuilds every layer from cold. Per-container (not
+# shared): two daemons must never write one image store. claude-rm --purge deletes it; it is
+# the one volume here that can reach tens of GB, so it is called out in the purge prompt.
+docker_volume() { echo "claude-docker-$1"; }
 
 # --- Shared tool cache (PKG-3) -----------------------------------------------
 # cache_name — the shared cache volume name, or "" when disabled. A launcher may
