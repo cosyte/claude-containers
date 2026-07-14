@@ -431,6 +431,48 @@ else
         '! docker logs "$CN" 2>&1 | grep -qi "Browser image detected"'
 fi
 
+# --- 16e. Disk-backed scratch (TMPDIR) ----------------------------------------
+# /tmp is a 1g tmpfs in RAM. Anything honoring TMPDIR (pip/uv wheel builds, docker
+# save|load, the inner containerd) hits that wall and ENOSPCs while the pool has terabytes
+# free — so temp must land on a disk-backed volume instead.
+#
+# Needs its OWN container: the scratch volume + TMPDIR are supplied by claude-launch, not
+# baked into the image, so $CN (a bare `docker run` above) has neither. Reproduce the
+# launcher's two flags exactly, then assert the IMAGE does its half — prepare the dir and
+# re-export TMPDIR for login shells.
+SCRCN="claude-smoke-scratch-$$"
+SCRVOL="claude-smoke-scratch-vol-$$"
+docker volume create "$SCRVOL" >/dev/null 2>&1 || true
+docker run -d --name "$SCRCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=scratchsmoke \
+    -e TMPDIR=/scratch -v "$SCRVOL:/scratch" \
+    --tmpfs /tmp:rw,nosuid,nodev,exec,size=1g \
+    -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+wait_tmux "$SCRCN" || true
+
+check "the entrypoint reports preparing the disk-backed scratch dir" \
+    'docker logs "$SCRCN" 2>&1 | grep -qi "Scratch (TMPDIR)"'
+check "the agent's TMPDIR points at /scratch, not the tmpfs" \
+    '[ "$(docker exec "$SCRCN" gosu claude sh -c "echo \$TMPDIR")" = "/scratch" ]'
+# Guard against a vacuous pass: /scratch must EXIST and be a real mount, not resolve to /.
+check "/scratch is a mounted volume and is NOT a tmpfs" \
+    'docker exec "$SCRCN" sh -c "mountpoint -q /scratch" && ! docker exec "$SCRCN" findmnt -no FSTYPE /scratch | grep -q tmpfs'
+# The actual user-visible bug: a write bigger than the whole tmpfs must now succeed.
+check "a 1200MB write (larger than the entire 1g tmpfs) succeeds in TMPDIR" \
+    'docker exec "$SCRCN" gosu claude sh -c "dd if=/dev/zero of=\$TMPDIR/big bs=1M count=1200 2>/dev/null && rm -f \$TMPDIR/big"'
+# sshd builds a FRESH environment, so a login shell must re-export it — otherwise an
+# interactive `pip install` fails where the agent's own identical command succeeds.
+check "an SSH-style login shell (cleared env) also gets the disk-backed TMPDIR" \
+    '[ "$(docker exec "$SCRCN" gosu claude env -i /bin/bash -lc "echo \$TMPDIR")" = "/scratch" ]'
+# It is scratch, not state: a volume survives restart, so stale files must be cleared on boot
+# or abandoned wheel builds accumulate until the pool fills.
+docker exec "$SCRCN" sh -c 'touch /scratch/stale-from-last-boot' >/dev/null 2>&1 || true
+docker restart "$SCRCN" >/dev/null 2>&1 || true
+wait_tmux "$SCRCN" || true
+check "scratch is cleared on boot (a volume does not self-empty like a tmpfs)" \
+    '! docker exec "$SCRCN" test -e /scratch/stale-from-last-boot'
+docker rm -f "$SCRCN" >/dev/null 2>&1 || true
+docker volume rm "$SCRVOL" >/dev/null 2>&1 || true
+
 # --- 17. Container workflows (--docker): the agent can actually build + run ----
 # The end-to-end proof, and the only one that matters: an UNPRIVILEGED agent inside the
 # session builds an image and runs a container, with no --privileged and no host socket.

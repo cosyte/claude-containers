@@ -117,6 +117,33 @@ chown -R "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR" "$CLAUDE_HOME/.ssh"
 chown "$CLAUDE_UID:$CLAUDE_GID" "$WORKSPACE" 2>/dev/null || true
 chmod 700 "$CLAUDE_HOME/.ssh"
 
+# --- 2a. Disk-backed scratch (TMPDIR) ----------------------------------------
+# /tmp is a tmpfs: RAM, ~1g, charged to the memory cgroup. With TMPDIR unset everything
+# large lands there — pip/uv wheel builds, `docker save|load` tarballs, the inner
+# containerd's mount dirs — and dies at the cap with an ENOSPC that reads like a bug, while
+# the host has terabytes free. So point TMPDIR at a disk-backed volume. TMPDIR is exported
+# by the launcher/compose (so dockerd, containerd and every child inherit it); this block
+# just makes the directory usable, and tolerates its absence so an older container (or a
+# plain `docker run` of this image) still boots with the historical /tmp behaviour.
+SCRATCH_DIR="${TMPDIR:-}"
+if [[ -n "$SCRATCH_DIR" && "$SCRATCH_DIR" != "/tmp" ]]; then
+    if mkdir -p "$SCRATCH_DIR" 2>/dev/null; then
+        # 1777 like /tmp: the agent is unprivileged, but root writes here too (dockerd).
+        chown "$CLAUDE_UID:$CLAUDE_GID" "$SCRATCH_DIR" 2>/dev/null || true
+        chmod 1777 "$SCRATCH_DIR" 2>/dev/null || true
+        # Clear stale contents on boot. This is scratch, not state: a volume (unlike a tmpfs)
+        # survives restarts, so without this it accumulates every abandoned wheel build and
+        # half-written tarball forever, and slowly fills the pool. Deleting only at boot means
+        # nothing in flight is ever pulled out from under a running process.
+        find "$SCRATCH_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+        log "Scratch (TMPDIR)    : $SCRATCH_DIR (disk-backed; cleared on boot)"
+    else
+        log "WARNING: TMPDIR=$SCRATCH_DIR is not creatable — falling back to /tmp (a 1g tmpfs)."
+        log "WARNING: Large installs/builds may fail with ENOSPC. Mount a scratch volume there."
+        unset TMPDIR
+    fi
+fi
+
 # --- 3. SSH host keys (persistent) -------------------------------------------
 if [[ ! -f "$HOSTKEY_DIR/ssh_host_ed25519_key" ]]; then
     log "Generating persistent SSH host keys"
