@@ -224,6 +224,31 @@ else
         || ok "generated compose grants no privileged and mounts no host socket"
 fi
 
+    # `image:` and `build:` are BOTH set, so compose builds from the context whenever the
+    # tagged image is missing — and then tags the result with that name. If the variant build
+    # args don't ride along, that produces a LEAN image wearing the :docker/:docker-browser
+    # tag: the --docker service then fails to boot ("dockerd is not in this image") while the
+    # tag claims otherwise. Pin the args to the image each service is actually given.
+    api_build="$(awk '/^  api:$/,/container_name/' "$OUT")"
+    web_build="$(awk '/^  web:$/,/container_name/' "$OUT")"
+    plain_build="$(awk '/^  plain:$/,/container_name/' "$OUT")"
+    if grep -q 'WITH_DOCKER: "1"' <<<"$api_build" && grep -q 'WITH_BROWSER: "0"' <<<"$api_build"; then
+        ok "a --docker service builds with WITH_DOCKER=1 (matches its :docker tag)"
+    else
+        bad "a --docker service must pass WITH_DOCKER=1 to the build, or a rebuild yields a lean image under the :docker tag"
+    fi
+    if grep -q 'WITH_DOCKER: "1"' <<<"$web_build" && grep -q 'WITH_BROWSER: "1"' <<<"$web_build"; then
+        ok "a --docker + --browser service builds with BOTH args (matches :docker-browser)"
+    else
+        bad "a --docker+--browser service must pass WITH_DOCKER=1 and WITH_BROWSER=1"
+    fi
+    if grep -q 'WITH_DOCKER: "0"' <<<"$plain_build" && grep -q 'WITH_BROWSER: "0"' <<<"$plain_build"; then
+        ok "a plain service builds lean (no engine, no Chromium)"
+    else
+        bad "a plain service must build lean"
+    fi
+
+
 # --- Disk-backed scratch (TMPDIR) ------------------------------------------------------
 # /tmp is a tmpfs: RAM, 1g, charged to the memory cgroup. Anything honoring TMPDIR — pip/uv
 # wheel builds, `docker save|load`, the inner containerd's mount dirs — hits that wall and

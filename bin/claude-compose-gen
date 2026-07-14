@@ -597,6 +597,15 @@ for row in "${FINAL[@]}"; do
         CLAUDE_UID: "\${CLAUDE_UID:-1000}"
         CLAUDE_GID: "\${CLAUDE_GID:-1000}"
         CLAUDE_USER: "\${CLAUDE_USER:-claude}"
+        # The variant build args MUST ride along, because \`image:\` and \`build:\` are both
+        # set: compose builds from this context whenever the tagged image is MISSING (and on
+        # \`build\` / \`up --build\`), then tags the result with that name. Omitting these
+        # silently produced a LEAN image wearing the :browser/:docker tag — a --browser
+        # service would come up with no chrome-devtools MCP, and a --docker service would
+        # fail to boot outright ("dockerd is not in this image"), with the tag insisting
+        # otherwise. Emit them per service so the built image matches the tag it is given.
+        WITH_BROWSER: "${BROWSER[$svc]:-0}"
+        WITH_DOCKER: "${DOCKER[$svc]:-0}"
     container_name: claude-${svc}
     hostname: ${svc}
     restart: unless-stopped
