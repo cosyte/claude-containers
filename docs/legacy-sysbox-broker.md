@@ -68,16 +68,63 @@ them from `main`. Any of them can be recovered by checking that branch out.
   `docs/package-provisioning-security.md` was **retained**, reduced to the PKG-1
   / PKG-5 controls that are still live — only its PKG-4/PKG-6 sections were cut.
 
-**`SC-6` scope after this strip.** Of the original controller tier, only
-`bin/claude-controller` survives — now a thin pass-through that `exec`s
-`claude-autopilot` (its `slots>1` broker-dispatch loop went with the broker).
-`SC-6` decides whether that pass-through still earns its place, and should also
-reassess `bin/claude-reaper`: its worker-container-reaping duty was broker-tied
-and is gone, leaving a spool-pruning duty whose spool no surviving code writes
-to. `PKG-2`/`PKG-3`/`PKG-5` mechanisms (`mise` toolchain + shared `/cache` +
+`PKG-2`/`PKG-3`/`PKG-5` mechanisms (`mise` toolchain + shared `/cache` +
 `ignore-scripts`/`lockfile=true`) are **not** broker-tied and stay on `main` —
 the strip is broker + Sysbox + PKG-4 (curated apt) + PKG-6 (pull-through cache
 proxy) only.
+
+## The follow-up strip: `CC-BINS` (2026-07-14) — resolving what `SC-5` left dangling
+
+`SC-5` deferred three things to a follow-up (it called it `SC-6`; it shipped as
+**`CC-BINS`**). All three turned out to be residue, and all three were removed:
+
+- **`bin/claude-controller` — REMOVED.** With the broker-dispatch tier gone it was a
+  byte-identical pass-through that `exec`'d `claude-autopilot`: a *mode whose only job
+  was selecting another mode*. **`CLAUDE_CONTROLLER=1` now REFUSES to boot** (`entrypoint.sh`,
+  the mode-selection block) rather than being warn-and-ignored the way §0 treats the inert
+  broker env vars. The distinction is deliberate: those vars are dead leftovers in a `.env`,
+  but `CLAUDE_CONTROLLER=1` is an **active request for unattended operation**. Ignoring it
+  would boot an unattended fleet container into an *interactive* Remote-Control session that
+  nobody is watching and that never runs the loop — a container that looks alive and does
+  nothing. The refusal names `CLAUDE_AUTOPILOT=1`, which is the same loop and always was.
+  (`CLAUDE_CONTROLLER=0`, which every pre-`CC-BINS` `.env.example` carries, still boots
+  cleanly — a stale line must never brick a container.)
+- **`bin/claude-reaper` — REMOVED.** Its worker-container-reaping duty went with the broker,
+  leaving a generic pruner for a spool (`/run/claude/reaper-spool`) that **no surviving code
+  writes to and no entrypoint path starts**. `CLAUDE_REAPER_*` went with it. Note this is
+  *not* `bin/claude-disk-gc`, which survives: disk-gc reclaims real Docker layers on the host
+  and has a reason independent of the broker.
+- **The autopilot's `/next` default — REMOVED; `CLAUDE_AUTOPILOT_CMD` is now required.**
+  `/next` was the cosyte cockpit's continuous-build command, and this is a *generic* image
+  that bakes no such skill (`claude-config/skills/` ships only `example-skill` and
+  `frontend-debugging`), so on almost every container the default resolved to nothing. The
+  rule is now **no command, no run**: the autopilot refuses to start without one, and a queue
+  consumer with no fallback command *idles* on an empty queue rather than inventing work.
+
+  > **The sharp edge, verified by hand against the pinned CLI (2.1.207).** An unknown slash
+  > command is **not an error** to `claude -p`. It returns a zero-turn *success*:
+  > `{"subtype":"success","is_error":false,"num_turns":0,"result":"Unknown command: /typo",`
+  > `"total_cost_usd":0}`, exit **0** — the model is never invoked. The autopilot's success
+  > check (`exit 0` + `is_error != true`) therefore scored the old `/next` default as a
+  > **healthy run**, every interval, forever: `fails` stayed 0 so backoff never engaged, each
+  > cycle logged `run #N` and `cost: $0`, and a **queued task** would be filed to `done/` —
+  > silently marking work that never ran as done, on the very `claude-scm-observer` → queue
+  > path built to run a fleet unattended. A container that looks perfectly alive and does
+  > literally nothing is the worst failure this script can have. CC-BINS therefore also makes
+  > a zero-turn `Unknown command:` result a **FAILURE** (both conditions, so a legitimate run
+  > that merely *discusses* an unknown command cannot trip it) — which closes the whole class,
+  > not just `/next`: an operator typo, a renamed skill, or a workspace whose `.claude/` never
+  > cloned now fails loudly instead of spinning.
+
+**Also removed: the `WITH_DOCKER` "controller" image variant** (`make build-controller`,
+`CLAUDE_IMAGE_CONTROLLER`, `LABEL claude.controller`, ~400 MB of `dockerd` + CLI +
+`containerd`). It existed only to host the nested-Sysbox substrate. Nothing started `dockerd`
+after `SC-5` — and nothing *could*: `claude-launch`, `claude-compose-gen` and
+`docker-compose.yml` grant no `--privileged` and mount no Docker socket, so the baked engine
+was unreachable even in principle.
+
+> ⚠️ **`CLAUDE_BROKER_GIT_KEY` survived `CC-BINS` too, exactly as this page warned.** The
+> `CLAUDE_BROKER_*` glob was checked hit-by-hit rather than swept. It stays.
 
 ## Why we retired it
 
@@ -125,8 +172,9 @@ branch is planned.
 
 ## What stays on `main`
 
-The Remote-Control core (SSH → tmux → Claude Code), unattended `/next`
-autopilot, launch/compose-gen (minus broker flags), housekeeping (reaper,
-disk-gc, healthcheck), baked config (`claude-config/`), and the security floor
-(secret guard, egress firewall) all continue on `main`. The r730xd
-mobile-Remote-Control workflow is unchanged.
+The Remote-Control core (SSH → tmux → Claude Code), the unattended autopilot loop
+(driven by `CLAUDE_AUTOPILOT_CMD`, plus the durable task queue and the SCM observer),
+launch/compose-gen (minus broker flags), housekeeping (disk-gc, healthcheck), baked
+config (`claude-config/`), and the security floor (secret guard, egress firewall,
+`CLAUDE_BROKER_GIT_KEY`) all continue on `main`. The r730xd mobile-Remote-Control
+workflow is unchanged.

@@ -4,8 +4,8 @@
 # Polls the workspace repo's GitHub PRs and routes actionable events into the
 # durable task queue (the autopilot loop consumes them). This closes the loop
 # from "blind timer" toward observe → derive → act: instead of only running
-# /next on a clock, the fleet reacts to CI failures, change requests, and merge
-# conflicts as they appear. Polling (not webhooks) keeps the container's
+# CLAUDE_AUTOPILOT_CMD on a clock, the fleet reacts to CI failures, change requests,
+# and merge conflicts as they appear. Polling (not webhooks) keeps the container's
 # outbound-only posture — no inbound port.
 #
 # Started by the entrypoint in its own tmux window 'scm' when

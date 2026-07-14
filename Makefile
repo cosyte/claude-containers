@@ -19,12 +19,8 @@ BUILDX_BUILDER      ?= claude-box
 # Frontend-debugging variant: 1 bakes headless Chromium + chrome-devtools-mcp.
 # Off by default (the lean image is unchanged). `make build-browser` flips it.
 WITH_BROWSER        ?= 0
-# Controller variant: 1 bakes the Docker engine (dockerd + CLI + containerd). Off by
-# default. `make build-controller` flips it. (The Sysbox nested-worker-broker path
-# this variant used to serve was retired in SC-5 — see docs/legacy-sysbox-broker.md;
-# the variant still builds because SC-6 will decide whether the controller tier
-# survives at all.)
-WITH_DOCKER         ?= 0
+# The WITH_DOCKER controller variant was removed in CC-BINS — see the Dockerfile and
+# docs/legacy-sysbox-broker.md.
 
 BUILD_ARGS = \
   --build-arg NODE_VERSION=$(NODE_VERSION) \
@@ -34,11 +30,10 @@ BUILD_ARGS = \
   --build-arg CLAUDE_UID=$(CLAUDE_UID) \
   --build-arg CLAUDE_GID=$(CLAUDE_GID) \
   --build-arg CLAUDE_USER=$(CLAUDE_USER) \
-  --build-arg WITH_BROWSER=$(WITH_BROWSER) \
-  --build-arg WITH_DOCKER=$(WITH_DOCKER)
+  --build-arg WITH_BROWSER=$(WITH_BROWSER)
 
 .DEFAULT_GOAL := help
-.PHONY: help builder build build-all build-browser build-controller push login launch list attach stop rm logs clean lint smoke
+.PHONY: help builder build build-all build-browser push login launch list attach stop rm logs clean lint smoke
 
 help: ## Show this help
 	@# Grep only this Makefile, not all of MAKEFILE_LIST: `-include .env` adds
@@ -62,11 +57,6 @@ build-browser: ## Build the browser-enabled variant (Chromium + chrome-devtools-
 	@$(MAKE) build WITH_BROWSER=1 CLAUDE_IMAGE=$(or $(CLAUDE_IMAGE_BROWSER),claude-code-box:browser)
 	@echo "Built browser variant. Launch with:  ./bin/claude-launch <name> --browser --workspace <path>"
 	@echo "Or set CLAUDE_IMAGE=claude-code-box:browser in your .env so every launch uses it."
-
-build-controller: ## Build the controller variant (Docker engine baked in), tag :controller
-	@$(MAKE) build WITH_DOCKER=1 CLAUDE_IMAGE=$(or $(CLAUDE_IMAGE_CONTROLLER),claude-code-box:controller)
-	@echo "Built controller variant (docker engine baked in, dormant capability)."
-	@echo "See docs/legacy-sysbox-broker.md — SC-6 will decide whether this tier survives."
 
 push: builder ## Build+push amd64+arm64 to the registry in CLAUDE_IMAGE
 	docker buildx build $(BUILD_ARGS) --platform $(PLATFORMS) \

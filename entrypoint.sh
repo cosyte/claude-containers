@@ -65,6 +65,31 @@ if (( ${#_retired_set[@]} > 0 )); then
 fi
 unset _v _retired_set RETIRED_VARS
 
+# --- 0b. Refuse the retired CLAUDE_CONTROLLER mode (CC-BINS) ------------------
+# SC-5 deleted the broker-dispatch tier this mode existed to drive, leaving
+# bin/claude-controller a byte-identical pass-through to claude-autopilot — a mode whose only
+# job was selecting another mode. CC-BINS removed it.
+#
+# This DIES where §0 above merely WARNS, and the difference is the point. Those vars are inert
+# leftovers in a .env: nothing reads them, so warning is enough and refusing to boot on a stale
+# line would be the worse bug. CLAUDE_CONTROLLER=1 is not inert — it is an ACTIVE request for
+# UNATTENDED operation. Warn-and-ignore would fall through to interactive mode and boot a fleet
+# container into a Remote-Control session that nobody is watching and that never runs the loop:
+# a container that looks alive and does nothing, which is the worst state this image can be in.
+# So refuse, and name the replacement. It costs the operator one character.
+#
+# Fails FAST — here, not at mode selection ~500 lines down — so a `--restart unless-stopped`
+# container doesn't crashloop through sshd, volume chown and a repo clone before saying why.
+# (CLAUDE_CONTROLLER=0, which every pre-CC-BINS .env.example carries, matches nothing and boots
+# clean: a stale line must never brick a container.)
+case "${CLAUDE_CONTROLLER:-0}" in
+    1|true|yes|on)
+        die "CLAUDE_CONTROLLER was REMOVED in CC-BINS. It had been a byte-identical pass-through
+       to CLAUDE_AUTOPILOT=1 ever since SC-5 retired the Sysbox nested-worker-broker
+       dispatch tier it existed to drive (see docs/legacy-sysbox-broker.md). Set
+       CLAUDE_AUTOPILOT=1 instead — it is the same loop, and always was." ;;
+esac
+
 # --- 1. Refuse API-key auth --------------------------------------------------
 # This image is OAuth-subscription only. An API key would silently override the
 # subscription and bill per-token, so fail fast and loud.
@@ -593,30 +618,17 @@ export CLAUDE_PROJECT_NAME CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}" \
 export CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
 log "Model               : $CLAUDE_MODEL (override with CLAUDE_MODEL; 'default' = Claude Code's pick)"
 
-# Three modes:
+# Two modes:
 #   interactive (default)      — main pane is claude-session (Remote Control + SSH).
 #   autopilot (CLAUDE_AUTOPILOT=1) — main pane is claude-autopilot, a headless Claude
-#                           loop (default `/next`) for unattended continuous build-out;
+#                           loop running CLAUDE_AUTOPILOT_CMD for unattended build-out;
 #                           there is no Remote Control link, so the RC watchdog is
 #                           skipped.
-#   controller (CLAUDE_CONTROLLER=1) — main pane is claude-controller. SC-5 removed the
-#                           broker-dispatch tier this used to drive (the slots>1 loop that
-#                           leased backlog items and spawned nested Sysbox workers), so
-#                           what remains is exactly the slots==1 collapse it always had as
-#                           its safe default: a byte-identical pass-through to the autopilot
-#                           launch above. There are no slots any more. CLAUDE_CONTROLLER
-#                           takes priority over CLAUDE_AUTOPILOT if both are set. No Remote
-#                           Control link, same as autopilot (the RC watchdog is skipped).
-#                           SC-6 decides whether this mode still earns its place.
-# Either way SSH attaches to the live tmux pane.
-case "${CLAUDE_CONTROLLER:-0}" in
-    1|true|yes|on) CLAUDE_MODE=controller;  MAIN_PANE_CMD=/usr/local/bin/claude-controller ;;
-    *)
-        case "${CLAUDE_AUTOPILOT:-0}" in
-            1|true|yes|on) CLAUDE_MODE=autopilot;   MAIN_PANE_CMD=/usr/local/bin/claude-autopilot ;;
-            *)             CLAUDE_MODE=interactive; MAIN_PANE_CMD=/usr/local/bin/claude-session ;;
-        esac
-        ;;
+# Either way SSH attaches to the live tmux pane. The third mode, CLAUDE_CONTROLLER, was
+# removed in CC-BINS and is refused up in §0b — long before we get here.
+case "${CLAUDE_AUTOPILOT:-0}" in
+    1|true|yes|on) CLAUDE_MODE=autopilot;   MAIN_PANE_CMD=/usr/local/bin/claude-autopilot ;;
+    *)             CLAUDE_MODE=interactive; MAIN_PANE_CMD=/usr/local/bin/claude-session ;;
 esac
 export CLAUDE_MODE \
        CLAUDE_AUTOPILOT_CMD="${CLAUDE_AUTOPILOT_CMD:-}" \
@@ -711,7 +723,7 @@ fi
 # watchdog detects that terminal state from the RC debug log and respawns the
 # session with --continue once the pane is idle.
 RC_WATCHDOG_PID=""
-if [[ "$CLAUDE_MODE" == "autopilot" || "$CLAUDE_MODE" == "controller" ]]; then
+if [[ "$CLAUDE_MODE" == "autopilot" ]]; then
     log "Remote Control watchdog skipped ($CLAUDE_MODE mode — no Remote Control session)"
 elif [[ "${CLAUDE_RC_WATCHDOG:-1}" != "0" ]]; then
     asclaude /usr/local/bin/claude-rc-watchdog &
@@ -722,10 +734,12 @@ else
 fi
 
 echo
-if [[ "$CLAUDE_MODE" == "controller" ]]; then
-    log "Controller          : pass-through to claude-autopilot in tmux window 'main' (see bin/claude-controller)"
-elif [[ "$CLAUDE_MODE" == "autopilot" ]]; then
-    log "Autopilot           : headless loop running '${CLAUDE_AUTOPILOT_CMD:-/next}' in tmux window 'main'"
+if [[ "$CLAUDE_MODE" == "autopilot" ]]; then
+    if [[ -n "${CLAUDE_AUTOPILOT_CMD:-}" ]]; then
+        log "Autopilot           : headless loop running '${CLAUDE_AUTOPILOT_CMD}' in tmux window 'main'"
+    else
+        log "Autopilot           : queue consumer in tmux window 'main' (no CLAUDE_AUTOPILOT_CMD — idles when the queue is empty)"
+    fi
 else
     log "Remote Control name : $CLAUDE_PROJECT_NAME  (look for it in the Claude app Code tab)"
 fi

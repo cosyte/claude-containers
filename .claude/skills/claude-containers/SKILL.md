@@ -95,15 +95,11 @@ small descriptive commits as you change things.
 | `Makefile` | `build` (host arch, loaded), `build-all`/`push` (amd64+arm64 via buildx), `login`, `launch/list/attach/stop/rm/logs`, `lint`, `smoke` (build + smoke test), `clean`. |
 | `.env.example` | Every tunable, documented. Copy to `.env`. |
 | `test/smoke.sh` | Automated acceptance for everything that doesn't need real OAuth/phone. |
-| `test/unit.sh` | Docker-free unit tests (version-floor helper, warn-only runc posture) — what CI runs. |
+| `test/unit.sh` | Docker-free unit tests (version-floor helper, warn-only runc posture, the §0 retired-env guard, and the CC-BINS gates: the pruned bins stay pruned, `CLAUDE_CONTROLLER=1` is refused, and the autopilot never invokes `claude` without a command) — what CI runs. |
 | `test/sizing-unit.sh` | Docker-free sizing tests (size/reservation math, K resolution from the umbrella config, compose reservation/pids emission) — CI. |
-| `test/reaper-unit.sh` | Docker-free spool-pruning tests (stale-file selection, `.lock` never, TTL boundary, idempotency, fail-safe) — CI. |
 | `test/disk-unit.sh` | Docker-free disk tests (`disk_free_mib` parse/fail-closed, `claude-disk-gc`'s plan safety) — CI. |
-| `test/controller-unit.sh` | Docker-free controller tests (byte-identical pass-through to `claude-autopilot`, no direct git commit/push) — CI. |
 | `bin/claude-disk-gc` | Standalone maintenance tool: `docker system prune -f` + `docker builder prune -f` (a fixed plan — never `-a`/`--volumes`), plus the PKG-3 shared-cache trim; one-shot or `--loop`; fail-safe. No entrypoint path auto-starts it. |
 | `bin/claude-disk-verify` | Docker-free sanity pass re-running the disk-hygiene logic (free-space parsing, gc-plan safety, cache-trim safety) — safe anywhere, no docker needed. |
-| `bin/claude-reaper` | Standalone maintenance tool: prunes aged spool litter under a spool directory's `responses/`/`requests/`/`staging/` subdirs (never `.lock`); idempotent; fail-safe; one-shot or `--loop`. No entrypoint path auto-starts it. |
-| `bin/claude-controller` | `CLAUDE_CONTROLLER=1` tmux main-pane entrypoint — a thin pass-through to `claude-autopilot`, byte-identical. |
 | `docs/` | `architecture.md` (decisions + acceptance map), `legacy-sysbox-broker.md` (the retired nested-Sysbox worker-broker substrate — frozen implementation + rationale), `customizing-bakeins.md`, `troubleshooting.md`. |
 
 ## Operational playbook
