@@ -9,13 +9,27 @@
 # the local `claude` process keeps running, healthy, and the mobile app shows
 # the session offline. Upstream context — anthropics/claude-code#34255, #29726.
 #
-# Detection reads the RC debug log written by `claude-session`. The bridge logs
-# its terminal give-up as `[remote-bridge] … recovery exhausted after N
-# attempts` (or `[bridge:repl] notifyBridgeFailed`), and a (re)connect as
-# `[remote-bridge] v2 transport connected`. On a confirmed dead state the
-# watchdog waits for the claude pane to go idle (so an in-flight turn is never
-# interrupted), then respawns the pane with `claude-session --continue`. The
-# Remote Control session name is unchanged, so the app reconnects on its own.
+# Detection reads the RC debug log written by `claude-session`. Three decisive
+# states, by most-recent decisive line:
+#   dead  — `[remote-bridge] … recovery exhausted after N attempts` /
+#           `[bridge:repl] notifyBridgeFailed`: terminal, restart to recover.
+#   auth  — `Login expired` / `Not logged in` / `requires a claude.ai
+#           subscription`: the claude.ai login has expired, so the bridge
+#           refuses to enable. A restart only helps once fresh credentials
+#           exist, so the watchdog restarts on auth ONLY when the local
+#           credential is valid again (the entrypoint reconcile loop delivers it
+#           within ~30s of `make login`); otherwise it says what to do and waits
+#           rather than churning to MAX_RESTARTS against an empty credential.
+#   alive — `[remote-bridge] v2 transport connected`.
+# On a dead/recoverable state the watchdog waits for the claude pane to go idle
+# (so an in-flight turn is never interrupted), then respawns the pane with
+# `claude-session --continue`. The Remote Control session name is unchanged, so
+# the app reconnects on its own.
+#
+# A `--continue` respawn of a large, stale session opens an interactive
+# "Resume from summary" menu and blocks on it — the bridge never registers until
+# a choice is made. dismiss_resume_menu takes the recommended option after a
+# restart so recovery stays unattended.
 #
 # Runs as the `claude` user, started by the entrypoint. Disable the whole
 # watchdog by launching the container with CLAUDE_RC_WATCHDOG=0.
@@ -29,30 +43,55 @@ IDLE_SECONDS="${CLAUDE_RC_IDLE_SECONDS:-45}"       # pane must be quiet this lon
 COOLDOWN="${CLAUDE_RC_COOLDOWN:-180}"              # min seconds between restarts
 MAX_RESTARTS="${CLAUDE_RC_MAX_RESTARTS:-10}"       # give up after this many in a row
 RESPAWN_CMD="${CLAUDE_RC_RESPAWN_CMD:-/usr/local/bin/claude-session --continue}"
+# Local per-container credential; a restart can only re-authenticate if this
+# still holds a real token. Mirrors entrypoint.sh's creds_have_token check.
+CREDS_FILE="${CLAUDE_CREDS_FILE:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json}"
 
 say() { echo "[rc-watchdog] $*"; }
 
-if [[ -z "$LOG" ]]; then
-    say "CLAUDE_RC_DEBUG_LOG is empty — nothing to watch. Exiting."
-    exit 0
-fi
-
-# Most recent decisive RC bridge event in the log. Prints: dead | alive | unknown
-#   dead    — the bridge gave up reconnecting ("recovery exhausted after …", or
-#             notifyBridgeFailed) — terminal, no recovery
-#   alive   — the bridge (re)connected ("v2 transport connected")
-#   unknown — no decisive event yet (fresh session, or never dropped)
+# Most recent decisive RC bridge event in the log. Prints: dead | auth | alive | unknown
 rc_state() {
     [[ -s "$LOG" ]] || { echo unknown; return; }
     local last
     last="$(tail -n 800 "$LOG" 2>/dev/null \
-        | grep -aoE 'v2 transport connected|recovery exhausted after|notifyBridgeFailed' \
+        | grep -aoE 'v2 transport connected|recovery exhausted after|notifyBridgeFailed|Login expired|Not logged in|requires a claude\.ai subscription' \
         | tail -n1)"
     case "$last" in
-        'recovery exhausted after'|'notifyBridgeFailed') echo dead ;;
-        'v2 transport connected')                        echo alive ;;
-        *)                                               echo unknown ;;
+        'recovery exhausted after'|'notifyBridgeFailed')                      echo dead ;;
+        'Login expired'|'Not logged in'|'requires a claude.ai subscription')  echo auth ;;
+        'v2 transport connected')                                             echo alive ;;
+        *)                                                                    echo unknown ;;
     esac
+}
+
+# True when the local credential holds a non-empty OAuth access token — i.e. a
+# restart could actually re-authenticate. Claude Code empties this field when a
+# refresh fails (a logout), so an empty token means "waiting for `make login`".
+login_valid() {
+    [[ -s "$CREDS_FILE" ]] && grep -q '"accessToken"[[:space:]]*:[[:space:]]*"[^"]' "$CREDS_FILE"
+}
+
+# True when the pane is showing the interactive `--continue` resume selector.
+is_resume_menu() {  # is_resume_menu <pane-text>
+    [[ "$1" == *"Resume from summary"* || "$1" == *"Resume full session"* ]]
+}
+
+# After a --continue respawn, a large/stale session may park on the resume menu
+# and never register the bridge. Best-effort: if that menu appears within a short
+# window, press Enter to take the recommended (summary) option. If it never shows
+# (recent/small sessions resume straight through), this just returns.
+dismiss_resume_menu() {
+    local i pane
+    for ((i = 0; i < 20; i++)); do
+        sleep 1
+        [[ "$(rc_state)" == alive ]] && return 0   # bridge already up — nothing to dismiss
+        pane="$(tmux capture-pane -p -t "$WINDOW" 2>/dev/null)" || return 0
+        if is_resume_menu "$pane"; then
+            say "Resume menu detected after restart — selecting 'Resume from summary' to continue."
+            tmux send-keys -t "$WINDOW" Enter 2>/dev/null || true
+            return 0
+        fi
+    done
 }
 
 # True when the claude pane content is unchanged across IDLE_SECONDS — i.e. no
@@ -80,49 +119,87 @@ restart_session() {
     pkill -9 -f 'remote-control' 2>/dev/null || true
     if tmux respawn-pane -k -t "$WINDOW" "$RESPAWN_CMD"; then
         say "Session respawned; Remote Control should re-register within ~30s."
+        dismiss_resume_menu
     else
         say "WARNING: 'tmux respawn-pane' failed — could not restart the session."
     fi
 }
 
-restarts=0
-last_restart=0
-
-say "started — watching ${LOG} (tmux target ${WINDOW}, check every ${CHECK_INTERVAL}s)"
-
-while sleep "$CHECK_INTERVAL"; do
-    # Container shutting down — the entrypoint killed tmux.
-    tmux has-session -t "$SESSION" >/dev/null 2>&1 || { say "tmux session gone — exiting."; break; }
-
-    now="$(date +%s)"
-    state="$(rc_state)"
-
-    # A previous restart that has held past the cooldown counts as a success:
-    # reset the counter so MAX_RESTARTS only ever trips on a run of failures.
-    if (( restarts > 0 )) && (( now - last_restart > COOLDOWN )) && [[ "$state" != dead ]]; then
-        say "Remote Control stable since the last restart — resetting restart counter."
-        restarts=0
+watch_loop() {
+    if [[ -z "$LOG" ]]; then
+        say "CLAUDE_RC_DEBUG_LOG is empty — nothing to watch. Exiting."
+        return 0
     fi
 
-    [[ "$state" == dead ]] || continue
-    (( now - last_restart < COOLDOWN )) && continue   # let the last restart settle
+    local restarts=0 last_restart=0 auth_warned=0 now state
 
-    if (( restarts >= MAX_RESTARTS )); then
-        say "Remote Control still dead after ${restarts} restarts — giving up auto-restart."
-        say "Investigate: 'claude remote-control --verbose' and RC eligibility (see troubleshooting.md)."
-        break
-    fi
+    say "started — watching ${LOG} (tmux target ${WINDOW}, check every ${CHECK_INTERVAL}s)"
 
-    say "Remote Control link is dead (bridge recovery budget exhausted)."
-    say "Waiting for the claude pane to go idle before restarting…"
-    while ! pane_idle; do
-        # A manual /remote-control reconnect (or any recovery) clears the state.
-        [[ "$(rc_state)" == dead ]] || break
+    while sleep "$CHECK_INTERVAL"; do
+        # Container shutting down — the entrypoint killed tmux.
+        tmux has-session -t "$SESSION" >/dev/null 2>&1 || { say "tmux session gone — exiting."; break; }
+
+        now="$(date +%s)"
+        state="$(rc_state)"
+
+        # A live link clears transient bookkeeping: a restart that has held past
+        # the cooldown counts as a success, so MAX_RESTARTS only ever trips on a
+        # run of failures.
+        if [[ "$state" == alive ]]; then
+            auth_warned=0
+            if (( restarts > 0 )) && (( now - last_restart > COOLDOWN )); then
+                say "Remote Control stable since the last restart — resetting restart counter."
+                restarts=0
+            fi
+        fi
+
+        # Expired-login state: restart only when a restart can actually help.
+        if [[ "$state" == auth ]]; then
+            if login_valid; then
+                (( now - last_restart < COOLDOWN )) && continue
+                if (( restarts >= MAX_RESTARTS )); then
+                    say "Remote Control still down after ${restarts} restarts despite a valid credential — giving up auto-restart."
+                    say "Investigate: 'claude remote-control --verbose' and RC eligibility (see troubleshooting.md)."
+                    break
+                fi
+                say "Remote Control was down on an expired login; the local credential is valid again — restarting to reload it."
+                while ! pane_idle; do [[ "$(rc_state)" == auth ]] || break; done
+                [[ "$(rc_state)" == auth ]] || { say "Recovered before restart — standing down."; continue; }
+                restarts=$((restarts + 1)); last_restart="$(date +%s)"; auth_warned=0
+                restart_session
+            elif (( ! auth_warned )); then
+                say "Remote Control is DOWN: the claude.ai login has expired. Run 'make login' on the host — every session recovers automatically once fresh credentials reconcile in (~30s)."
+                auth_warned=1
+            fi
+            continue
+        fi
+
+        [[ "$state" == dead ]] || continue
+        (( now - last_restart < COOLDOWN )) && continue   # let the last restart settle
+
+        if (( restarts >= MAX_RESTARTS )); then
+            say "Remote Control still dead after ${restarts} restarts — giving up auto-restart."
+            say "Investigate: 'claude remote-control --verbose' and RC eligibility (see troubleshooting.md)."
+            break
+        fi
+
+        say "Remote Control link is dead (bridge recovery budget exhausted)."
+        say "Waiting for the claude pane to go idle before restarting…"
+        while ! pane_idle; do
+            # A manual /remote-control reconnect (or any recovery) clears the state.
+            [[ "$(rc_state)" == dead ]] || break
+        done
+        [[ "$(rc_state)" == dead ]] || { say "Remote Control recovered on its own — standing down."; continue; }
+
+        restarts=$((restarts + 1))
+        last_restart="$(date +%s)"
+        say "Pane idle; restart attempt #${restarts}."
+        restart_session
     done
-    [[ "$(rc_state)" == dead ]] || { say "Remote Control recovered on its own — standing down."; continue; }
+}
 
-    restarts=$((restarts + 1))
-    last_restart="$(date +%s)"
-    say "Pane idle; restart attempt #${restarts}."
-    restart_session
-done
+# Executed directly -> run the watcher. Sourced (unit tests) -> just define the
+# helpers above without starting the loop.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    watch_loop
+fi
