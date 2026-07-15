@@ -24,6 +24,22 @@ converges `/auth` and the per-container copy every ~30s. If you just ran
 (`claude-stop`/`claude-launch`) so it re-seeds immediately. Re-auth from
 scratch: `docker volume rm claude-auth && make login`.
 
+**Every session at once reports `Login expired · Please run /login` (Remote
+Control offline fleet-wide).** The claude.ai OAuth **refresh token** expired (or
+a refresh failed). On that failure Claude Code rewrites `.credentials.json` with
+**empty** token fields — a logout that leaves a well-formed, freshly-mtimed file
+behind. The reconcile loop now **refuses to propagate a tokenless credential**
+(it checks for a non-empty `accessToken` and instead *repairs* a logged-out copy
+from whichever side still holds a real token — see `creds_have_token` in
+`entrypoint.sh`), so a per-container hiccup self-heals from the shared master and
+only a genuine refresh-token expiry takes auth down. Older images lacked that
+guard and would publish the empty credential to `/auth` and every container,
+turning one expiry into a blackout (observed 2026-07-15). Fix: **`make login`**
+on the host. Within ~30s the reconcile loop delivers the fresh token to every
+container, and the RC watchdog (below) restarts each session to reload it — no
+manual per-container action needed. Confirm the token landed:
+`docker exec <name> node -e 'const o=require("/home/claude/.claude/.credentials.json").claudeAiOauth; console.log(!!o.accessToken, new Date(o.expiresAt))'`.
+
 ## Remote Control session not in the mobile app
 
 ### "Remote Control is not yet enabled for your account" (most common)
@@ -97,7 +113,19 @@ The image handles this with two pieces:
   claude pane to go idle (so an in-flight turn is never cut off), then respawns
   the pane with `claude-session --continue`. The Remote Control name is
   unchanged, so the app reconnects on its own within ~30s and the conversation
-  is preserved.
+  is preserved. Two states beyond the terminal give-up:
+  - **Expired login** (`Login expired` / `Not logged in` / `requires a claude.ai
+    subscription`): the bridge refuses to enable because auth is gone, and a
+    restart can't fix that until fresh credentials exist. The watchdog restarts
+    on this state **only once the local credential is valid again** (so after a
+    host-side `make login` it recovers automatically); while the credential is
+    still empty it logs a single "run `make login`" line and waits instead of
+    churning to `MAX_RESTARTS` against a dead credential.
+  - **Resume-menu park**: a `--continue` respawn of a large, stale session opens
+    the interactive "Resume from summary" menu and blocks there — the bridge
+    never registers until it's dismissed. The watchdog detects that screen after
+    a restart and selects the recommended (summary) option so recovery stays
+    unattended.
 
 **What you'll see.** `claude-list` shows `Up … (unhealthy)` briefly, then the
 watchdog restarts the session and it returns to `(healthy)`. `claude-logs

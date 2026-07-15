@@ -691,5 +691,88 @@ else
 fi
 
 echo
+echo "== credential reconcile guard: creds_have_token refuses a tokenless (logged-out) copy =="
+
+# 2026-07-15 incident: a claude.ai refresh-token expiry made Claude Code rewrite
+# .credentials.json with EMPTY token fields (a logout). The reconcile loop took
+# that freshly-mtimed, tokenless file as "newest wins" and published it to the
+# shared /auth master and every container — one expiry became a fleet-wide
+# "Login expired" blackout. The guard (creds_have_token) is EXTRACTED from
+# entrypoint.sh here — not mirrored — so this test cannot silently drift from the
+# shipped predicate.
+ENTRYPOINT="$REPO_ROOT/entrypoint.sh"
+CREDS_FN="$(awk '/^creds_have_token\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$ENTRYPOINT")"
+if [[ -n "$CREDS_FN" ]] && eval "$CREDS_FN" 2>/dev/null; then
+    CD="$(mktemp -d)"
+    printf '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-REALtok","refreshToken":"rt","expiresAt":9}}' > "$CD/good.json"
+    printf '{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}'                        > "$CD/empty.json"
+    printf '{"claudeAiOauth":{"accessToken": "spaced-ok"}}'                                               > "$CD/spaced.json"
+    : > "$CD/blank.json"
+    creds_have_token "$CD/good.json"    && ok  "a real access token is accepted"                  || bad "real token wrongly rejected"
+    creds_have_token "$CD/spaced.json"  && ok  "whitespace after the colon still parses"          || bad "spaced token wrongly rejected"
+    ! creds_have_token "$CD/empty.json" && ok  "a logged-out (empty-token) credential is refused"  || bad "POISON: empty-token credential accepted — a logout would spread fleet-wide"
+    ! creds_have_token "$CD/blank.json" && ok  "an empty file is refused"                           || bad "empty file accepted"
+    ! creds_have_token "$CD/missing"    && ok  "a missing file is refused"                          || bad "missing file accepted"
+    rm -rf "$CD"
+else
+    bad "could not extract creds_have_token() from entrypoint.sh — the guard test is a no-op"
+fi
+
+# Structural tripwire: reconcile_creds must gate propagation on creds_have_token and
+# delegate the atomic move to publish_creds (no raw 'mv -f' that could republish a
+# tokenless file). Locks the fix against an accidental revert to unguarded copying.
+RECON_FN="$(awk '/^reconcile_creds\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$ENTRYPOINT")"
+if [[ -n "$RECON_FN" ]] && grep -q 'creds_have_token' <<<"$RECON_FN" && ! grep -q 'mv -f' <<<"$RECON_FN"; then
+    ok  "reconcile_creds gates every propagation on creds_have_token (no unguarded copy)"
+else
+    bad "reconcile_creds may copy without a token guard — a tokenless credential could spread"
+fi
+
+echo
+echo "== RC watchdog: auth-aware state machine + login gate + resume-menu detection =="
+
+# The watchdog is source-guarded (watch_loop runs only when executed, not sourced),
+# so these exercise the real helpers with no docker and no tmux.
+WD="$REPO_ROOT/bin/claude-rc-watchdog"
+WLOG="$(mktemp)"; WCRED="$(mktemp)"
+
+( export CLAUDE_RC_DEBUG_LOG="$WLOG" CLAUDE_CREDS_FILE="$WCRED"
+  # shellcheck disable=SC1090
+  source "$WD"                                                    # helpers only; loop NOT started
+  fail=0
+  : > "$WLOG";                                                    [[ "$(rc_state)" == unknown ]] || { echo s1; fail=1; }
+  printf '[remote-bridge] v2 transport connected\n'  >> "$WLOG";  [[ "$(rc_state)" == alive   ]] || { echo s2; fail=1; }
+  printf 'turn ended in error: Login expired\n'      >> "$WLOG";  [[ "$(rc_state)" == auth    ]] || { echo s3; fail=1; }
+  printf 'recovery exhausted after 6 attempts\n'     >> "$WLOG";  [[ "$(rc_state)" == dead    ]] || { echo s4; fail=1; }
+  printf '[remote-bridge] v2 transport connected\n'  >> "$WLOG";  [[ "$(rc_state)" == alive   ]] || { echo s5; fail=1; }
+  printf 'Remote Control requires a claude.ai subscription.\n' >> "$WLOG"; [[ "$(rc_state)" == auth ]] || { echo s6; fail=1; }
+  exit $fail
+) && ok "rc_state maps alive/auth/dead/unknown by most-recent decisive line" \
+   || bad "rc_state state machine is wrong (see s#)"
+
+( export CLAUDE_RC_DEBUG_LOG="$WLOG" CLAUDE_CREDS_FILE="$WCRED"
+  # shellcheck disable=SC1090
+  source "$WD"
+  fail=0
+  printf '{"claudeAiOauth":{"accessToken":""}}'    > "$WCRED";    login_valid && { echo g1; fail=1; }   # empty token => NOT valid
+  printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$WCRED";  ! login_valid && { echo g2; fail=1; }   # real token => valid
+  : > "$WCRED";                                                   login_valid && { echo g3; fail=1; }   # blank file => NOT valid
+  exit $fail
+) && ok "login_valid gates restart on a real token (empty/blank => wait for make login)" \
+   || bad "login_valid is wrong (see g#)"
+
+( export CLAUDE_RC_DEBUG_LOG="$WLOG" CLAUDE_CREDS_FILE="$WCRED"
+  # shellcheck disable=SC1090
+  source "$WD"
+  fail=0
+  is_resume_menu "This session is 4h old. ❯ 1. Resume from summary (recommended)" || { echo m1; fail=1; }
+  is_resume_menu "  2. Resume full session as-is"                                  || { echo m2; fail=1; }
+  is_resume_menu "❯ an ordinary prompt with no menu"                               && { echo m3; fail=1; }
+  exit $fail
+) && ok "is_resume_menu recognises the --continue resume selector only" \
+   || bad "is_resume_menu is wrong (see m#)"
+rm -f "$WLOG" "$WCRED"
+
+echo
 echo "== $PASS passed, $FAIL failed =="
 exit $(( FAIL > 0 ? 1 : 0 ))

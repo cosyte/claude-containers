@@ -353,24 +353,55 @@ chown root:root "$AUTH_DIR" 2>/dev/null || true
 chmod 700 "$AUTH_DIR" 2>/dev/null || true
 [[ -e "$AUTH_DIR/.credentials.json" ]] && { chown root:root "$AUTH_DIR/.credentials.json" 2>/dev/null || true; chmod 600 "$AUTH_DIR/.credentials.json" 2>/dev/null || true; }
 
+# A .credentials.json is USABLE only if it carries a non-empty OAuth access
+# token. When a token refresh fails, Claude Code rewrites the file in place with
+# EMPTY token fields (accessToken/refreshToken => "") — i.e. it logs the session
+# out but leaves a well-formed, freshly-mtimed JSON behind. Without this guard
+# the reconcile loop treated that tokenless file as the "newest wins" copy and
+# published it to the shared /auth master and thence to every other container —
+# turning one account's token expiry into a fleet-wide "Login expired" blackout
+# (observed 2026-07-15). The guard makes the loop refuse to propagate a tokenless
+# credential and instead REPAIR a tokenless/absent copy from whichever side still
+# holds a real token, so a per-container logout self-heals from the good master
+# and only a genuine refresh-token expiry (fixed by `make login`) can take auth
+# down. See docs/troubleshooting.md.
+creds_have_token() {  # creds_have_token <file>  -> 0 if it holds a non-empty access token
+    [[ -s "$1" ]] && grep -q '"accessToken"[[:space:]]*:[[:space:]]*"[^"]' "$1"
+}
+
+# Publish SRC over DST atomically: a unique tmp in DST's own dir (so a shared
+# /auth is never left with a half-written file, and no fixed tmp name can be
+# picked up by a concurrent container), then rename. Ownership follows DST — the
+# shared master stays root:600, the per-container copy claude:600.
+publish_creds() {  # publish_creds <src> <dst>
+    local src="$1" dst="$2" t
+    t="$(mktemp "$dst.XXXXXX")" || return 1
+    if [[ "$dst" == "$CLAUDE_CONFIG_DIR/.credentials.json" ]]; then
+        { install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 "$src" "$t" && mv -f "$t" "$dst"; } || { rm -f "$t"; return 1; }
+    else
+        { install -m 600 "$src" "$t" && mv -f "$t" "$dst"; } || { rm -f "$t"; return 1; }
+    fi
+}
+
 reconcile_creds() {
-    local a="$AUTH_DIR/.credentials.json"
-    local b="$CLAUDE_CONFIG_DIR/.credentials.json"
-    local t
+    local a="$AUTH_DIR/.credentials.json"           # shared fleet master (root:600)
+    local b="$CLAUDE_CONFIG_DIR/.credentials.json"  # per-container copy (claude:600)
     while sleep 30; do
-        [[ -s "$a" || -s "$b" ]] || continue
-        # Stage into a unique tmp file in the *target* dir, then atomic-rename.
-        # /auth is shared by every container, so a fixed tmp name would let one
-        # container's mv pick up another container's half-written file and
-        # publish a partial/corrupt .credentials.json fleet-wide.
-        if [[ -s "$b" && ( ! -s "$a" || "$b" -nt "$a" ) ]] && ! cmp -s "$b" "$a"; then
-            t="$(mktemp "$a.XXXXXX")" || continue
-            { install -m 600 "$b" "$t" && mv -f "$t" "$a"; } || rm -f "$t"
-        elif [[ -s "$a" && "$a" -nt "$b" ]] && ! cmp -s "$a" "$b"; then
-            t="$(mktemp "$b.XXXXXX")" || continue
-            { install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 "$a" "$t" \
-                && mv -f "$t" "$b"; } || rm -f "$t"
+        if creds_have_token "$b" && ! creds_have_token "$a"; then
+            # master absent/logged-out, local good -> seed or repair the master
+            publish_creds "$b" "$a"
+        elif creds_have_token "$a" && ! creds_have_token "$b"; then
+            # local absent/logged-out, master good -> repair the local copy
+            publish_creds "$a" "$b"
+        elif creds_have_token "$b" && [[ "$b" -nt "$a" ]] && ! cmp -s "$b" "$a"; then
+            # both good, local refreshed more recently -> push the refresh up
+            publish_creds "$b" "$a"
+        elif creds_have_token "$a" && [[ "$a" -nt "$b" ]] && ! cmp -s "$a" "$b"; then
+            # both good, master refreshed more recently -> pull the refresh down
+            publish_creds "$a" "$b"
         fi
+        # both tokenless (a real refresh-token expiry): nothing to do — the loop
+        # never invents a token; recovery is `make login` on the host.
     done
 }
 reconcile_creds &
