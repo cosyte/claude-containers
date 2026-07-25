@@ -59,7 +59,7 @@ PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 # default those runs would silently execute on Sonnet 5 — the exact downgrade
 # CC-CLAUDE-CODE-UPGRADE exists to prevent. CLAUDE_MODEL is passed through to `--model`
 # VERBATIM: use an alias the pinned CLI actually ships (`opus`, `sonnet`, `haiku`, `opusplan`,
-# `fable`, `best`) or a full model id. NOTE: `default` is NOT in 2.1.207's alias table and is
+# `fable`, `best`) or a full model id. NOTE: `default` is NOT in the pinned CLI's alias table and is
 # not verified — do not rely on it.
 MODEL="${CLAUDE_MODEL:-opus}"
 QUEUE="${CLAUDE_AUTOPILOT_QUEUE:-0}"
@@ -230,7 +230,7 @@ while :; do
     #
     #   1. `claude -p` writes a warning to STDERR when stdin is an open pipe with no data —
     #      "Warning: no stdin data received in 3s, proceeding without it..." (157 bytes,
-    #      verified on the pinned 2.1.207). Any non-tty invocation gets it: `ssh <ctr>
+    #      verified on the then-pinned 2.1.207). Any non-tty invocation gets it: `ssh <ctr>
     #      claude-autopilot`, `docker exec`, a cron. `</dev/null` is what that warning itself
     #      tells you to do, and it stops the warning at the source.
     #   2. Under `2>&1` that line lands in $out AHEAD of the JSON, so $out is no longer valid
@@ -291,7 +291,7 @@ while :; do
 
     # THE NO-OP GUARD. `num_turns == 0` means THE MODEL WAS NEVER INVOKED — nothing ran, $0
     # spent — and `claude -p` reports that as a plain SUCCESS: exit 0, is_error:false, subtype
-    # "success". Probed by hand against the PINNED CLI (2.1.207, Dockerfile ARG
+    # "success". Probed by hand against the then-PINNED CLI (2.1.207, Dockerfile ARG
     # CLAUDE_CODE_VERSION); every one of these exits 0 with is_error:false:
     #
     #   /typo     → num_turns:0  result:"Unknown command: /typo"

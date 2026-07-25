@@ -415,7 +415,7 @@ grep -q -- '-p /build-the-thing' "$APD/claude-invocations" \
 echo
 echo "== CC-BINS: a zero-turn 'Unknown command' is a FAILURE, not a healthy \$0 run =="
 
-# THE TRAP, verified by hand against the pinned CLI (2.1.207):
+# THE TRAP, verified by hand against the then-pinned CLI (2.1.207):
 #   $ claude -p "/typo" --output-format json ; echo $?
 #   {"subtype":"success","is_error":false,"num_turns":0,"result":"Unknown command: /typo",
 #    "total_cost_usd":0}
@@ -544,7 +544,7 @@ echo
 echo "== CC-BINS: ANY zero-turn run is a no-op — not just the 'Unknown command' typo =="
 
 # The predicate is `num_turns == 0` ALONE. It must NOT be narrowed to results whose text starts
-# with "Unknown command:", because on the pinned CLI (2.1.207) EVERY slash command that exists
+# with "Unknown command:", because on the then-pinned CLI (2.1.207) EVERY slash command that exists
 # but is unavailable headless returns the same zero-turn is_error:false exit-0 shape:
 #   /help    → result:"/help isn't available in this environment."
 #   /cost    → result:"You are currently using your subscription…"
@@ -615,7 +615,7 @@ echo "== CC-BINS: the check validates JSON *shape*, not just syntax (CLAUDE_EXTR
 # THE SAME FAIL-OPEN, ONE LAYER UP. CLAUDE_EXTRA_ARGS is a documented, first-class tunable
 # (.env.example, README, `claude-launch --extra-args`). Adding `--verbose` makes the pinned CLI
 # emit a top-level ARRAY of stream messages rather than one result object — verified against
-# 2.1.207. An array is VALID JSON, so a syntax-only check (`jq -e .`) passes it; then every field
+# the then-pinned 2.1.207. An array is VALID JSON, so a syntax-only check (`jq -e .`) passes it; then every field
 # read against an array returns empty, is_error reads "" (not "true") and num_turns reads ""
 # (not "0"), and BOTH guards silently disengage. And `--verbose` is exactly the flag an operator
 # reaches for to ask "why is my autopilot doing nothing?" — so the debugging flag would recreate

@@ -611,7 +611,7 @@ for row in "${FINAL[@]}"; do
       context: ${ABS_CONTEXT}
       args:
         NODE_VERSION: "\${NODE_VERSION:-24}"
-        CLAUDE_CODE_VERSION: "\${CLAUDE_CODE_VERSION:-2.1.207}"
+        CLAUDE_CODE_VERSION: "\${CLAUDE_CODE_VERSION:-2.1.220}"
         UV_VERSION: "\${UV_VERSION:-latest}"
         PNPM_VERSION: "\${PNPM_VERSION:-latest}"
         CLAUDE_UID: "\${CLAUDE_UID:-1000}"

@@ -17,19 +17,45 @@ FROM node:${NODE_VERSION}-bookworm-slim
 # --- Build-time configuration -------------------------------------------------
 # CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control.
 #
-# 2.1.207 (npm `latest` on 2026-07-12) is verified to support the exact launch this
+# 2.1.220 (npm `latest` on 2026-07-25) is verified to support the exact launch this
 # image makes — `claude --dangerously-skip-permissions --remote-control <name>`
 # (bin/claude-session) — with both flags accepted TOGETHER and no interlock between
 # them. That combination is the reason this ARG is pinned at all; re-verify it on any
 # future bump (test/cli-version-unit.sh asserts the pin is consistent; the live
 # --remote-control handshake is the on-host check, CC-CLAUDE-CODE-UPGRADE-SMOKE).
 #
-# WHY THE BUMP (CC-CLAUDE-CODE-UPGRADE): the `opus` alias resolves to the LATEST Opus,
-# and Opus 4.8 shipped in CLI 2.1.154 — so the old 2.1.145 pin silently resolved
-# `--model opus` (this image's default) to Opus 4.7, quietly downgrading every gate
-# agent below what ADR 0009 requires. 2.1.207 restores `opus` -> Opus 4.8.
+# ⚠️ WHAT THE 2.1.207 -> 2.1.220 BUMP CHANGES ABOUT THE MODEL. CLI 2.1.219 introduced
+# Claude Opus 5 (`claude-opus-5`, 1M context) as the NEW DEFAULT Opus. The `opus` alias
+# this image passes resolves to the LATEST Opus, so the fleet moves Opus 4.8 -> Opus 5
+# on this bump. That is an UPGRADE and clears ADR 0009, but it is a real behavior change
+# (different model, far larger context) and not a no-op — it is the headline reason to
+# re-verify rather than assume. Pin CLAUDE_MODEL=claude-opus-4-8 on a container that
+# must stay on 4.8. Note 2.1.219 also dropped Opus 4.7 from fast mode.
 #
-# Also landed between 2.1.145 and 2.1.207, and accounted for here:
+# WHY THE FLOOR EXISTS (CC-CLAUDE-CODE-UPGRADE): the `opus` alias resolves to the LATEST
+# Opus, and Opus 4.8 shipped in CLI 2.1.154 — so the old 2.1.145 pin silently resolved
+# `--model opus` (this image's default) to Opus 4.7, quietly downgrading every gate
+# agent below what ADR 0009 requires. The >=2.1.154 floor below is what makes that
+# downgrade impossible; it stays a floor, not an equality, and 2.1.220 clears it.
+#
+# Landed between 2.1.207 and 2.1.220, and relevant to this image:
+#   - 2.1.211: parallel sessions no longer all log out simultaneously on wake, and
+#     2.1.214 fixed feature flags going stale after a token rotation. Both are upstream
+#     fixes for the exact fleet-wide auth/Remote-Control failure mode this repo worked
+#     around in entrypoint.sh's reconcile guard + watchdog (PR #36). Keep the guard —
+#     it covers the OAuth-credential expiry, which is a different trigger.
+#   - 2.1.216: worktree-isolated subagents no longer redirect git at the shared
+#     checkout. This repo replaced the retired Sysbox broker with subagents in git
+#     worktrees, so that bug hit our primary parallelism path directly.
+#   - 2.1.212/2.1.217/2.1.219: subagent limits moved repeatedly — a per-session spawn
+#     cap (200), then a concurrency cap (20) with nesting OFF by default, then nesting
+#     re-enabled to depth 3. Anything that fans out subagents should not assume the
+#     2.1.207 behavior.
+#   - 2.1.214: `docker` daemon-redirect flags now prompt for permission. Harmless here
+#     (sessions run bypassPermissions) but it is the kind of change that would bite a
+#     --docker container running a stricter permission mode.
+#
+# Carried forward from the 2.1.145 -> 2.1.207 bump, still accounted for here:
 #   - 2.1.197: Sonnet 5 became Claude Code's OWN default model. Harmless for us only
 #     because entrypoint.sh always exports CLAUDE_MODEL (default `opus`) and both
 #     claude-session and claude-autopilot pass `--model` explicitly. Do not remove
@@ -44,7 +70,7 @@ FROM node:${NODE_VERSION}-bookworm-slim
 #     tmux pane would die on an invalid-choice refusal.
 #   - 2.1.198: Remote Control is disabled when ANTHROPIC_BASE_URL points at a
 #     non-Anthropic host. This image never sets it (and §1 refuses API-key auth).
-ARG CLAUDE_CODE_VERSION=2.1.207
+ARG CLAUDE_CODE_VERSION=2.1.220
 # PNPM_VERSION: pnpm baked into the image. "latest" works but isn't
 # reproducible — pin a real version (e.g. 10.4.1), same as UV_VERSION.
 ARG PNPM_VERSION=latest
@@ -109,7 +135,7 @@ RUN set -eu; \
     case "${CLAUDE_CODE_VERSION}" in \
         ''|*[!0-9.]*|.*|*.) \
             echo "ERROR: CLAUDE_CODE_VERSION='${CLAUDE_CODE_VERSION}' is not a dotted-numeric version." >&2; \
-            echo "       Pin an exact version (e.g. 2.1.207) — 'latest' is NOT supported here:" >&2; \
+            echo "       Pin an exact version (e.g. 2.1.220) — 'latest' is NOT supported here:" >&2; \
             echo "       the image must be reproducible, and a floating tag cannot be floor-checked." >&2; \
             exit 1 ;; \
     esac; \

@@ -24,7 +24,7 @@ PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 # not reach. Without this default that session would silently run Sonnet 5 while every
 # other session ran Opus. CLAUDE_MODEL is passed through to `--model` VERBATIM: use an alias
 # the pinned CLI actually ships (`opus`, `sonnet`, `haiku`, `opusplan`, `fable`, `best`) or a
-# full model id. NOTE: `default` is NOT in 2.1.207's alias table and is not verified — do not
+# full model id. NOTE: `default` is NOT in the pinned CLI's alias table and is not verified — do not
 # rely on it to defer to Claude Code's own pick; pass an explicit alias instead.
 MODEL="${CLAUDE_MODEL:-opus}"
 

@@ -80,7 +80,7 @@ small descriptive commits as you change things.
   `claude plugin install` in the entrypoint.
 - **Workspace trust is pre-accepted** by seeding `.claude.json`
   (`hasCompletedOnboarding`, `projects["/workspace"].hasTrustDialogAccepted`).
-- Pinned/verified Claude Code: **2.1.207** (min 2.1.52 for Remote Control). `--model opus` resolves to **Opus 4.8** from CLI 2.1.154 — the 2.1.145 pin silently gave Opus 4.7.
+- Pinned/verified Claude Code: **2.1.220** (min 2.1.52 for Remote Control). `--model opus` tracks the LATEST Opus: **Opus 5** (1M context) from CLI 2.1.219, Opus 4.8 from 2.1.154 — the 2.1.145 pin silently gave Opus 4.7. A bump can therefore change the fleet's MODEL, not just the CLI; pin `CLAUDE_MODEL=claude-opus-4-8` to hold a container back.
   Everything was verified against that binary, not just docs.
 
 ## Codebase map
@@ -290,7 +290,7 @@ SSH-into-session. Real OAuth + the phone-app green-dot remain manual.
   empty workspace + no `--repo`, unreadable mounted key.
 - **App session missing / no green dot** → needs ≥2.1.52 + open outbound 443;
   check `claude-logs` shows "started in tmux"; same Max account as login.
-- **skip-permissions vs Remote Control** → works on pinned 2.1.207: the top-level launch
+- **skip-permissions vs Remote Control** → works on pinned 2.1.220: the top-level launch
   `claude --dangerously-skip-permissions --remote-control <name>` was verified to parse and
   start (as the unprivileged `claude` user), with no interlock between the two flags. This is
   why the CLI is pinned at all — re-verify on any bump. (The `claude remote-control`
