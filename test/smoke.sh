@@ -22,12 +22,13 @@ BRKCN="claude-smoke-broker-$$"
 BRWACN="claude-smoke-browser-auto-$$"
 BRWOCN="claude-smoke-browser-off-$$"
 BRWFCN="claude-smoke-browser-force-$$"
+BRWLCN="claude-smoke-browser-live-$$"
 AUTHVOL="claude-smoke-auth-$$"
 WSVOL="claude-smoke-ws-$$"
 PASS=0 FAIL=0
 
 cleanup() {
-    docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" "$BRWACN" "$BRWOCN" "$BRWFCN" >/dev/null 2>&1 || true
+    docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" "$BRWACN" "$BRWOCN" "$BRWFCN" "$BRWLCN" >/dev/null 2>&1 || true
     docker volume rm "$AUTHVOL" "$WSVOL" >/dev/null 2>&1 || true
     rm -rf "$TMP"
 }
@@ -431,7 +432,64 @@ else
         '! docker logs "$CN" 2>&1 | grep -qi "Browser image detected"'
 fi
 
-# --- 16e. Disk-backed scratch (TMPDIR) ----------------------------------------
+# --- 16e. LIVE: the registered MCP actually drives a real Chrome --------------
+# 16a proves the MCP is REGISTERED. It cannot prove the browser LAUNCHES: the
+# stubs are never executed. That gap hid a real outage — the pin was 0.x, which
+# has no --chromeArg, so yargs SILENTLY dropped --no-sandbox, Chrome died with
+# "No usable sandbox!", and every tool call returned "Target closed" while
+# `claude mcp get` still reported "Connected". Registration checks are blind to
+# it; only spawning the registered command and making a CDP round-trip is not.
+# Needs the baked Chromium, so it runs only on the real browser variant.
+if [ "$IMG_IS_BROWSER" != "1" ]; then
+    echo "  SKIP  16e live browser checks (\$IMAGE is lean — no baked Chromium to drive)"
+else
+    docker run -d --name "$BRWLCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=browserlive \
+        -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+    wait_tmux "$BRWLCN" || true
+    # Read the REGISTERED command/args back out of the config and spawn exactly
+    # those — so the test exercises what a session really runs, not a copy of it.
+    docker exec -i "$BRWLCN" gosu claude tee /home/claude/mcp-live-probe.mjs >/dev/null <<'PROBE'
+import {spawn} from 'node:child_process';
+import {readFileSync} from 'node:fs';
+const cfg = JSON.parse(readFileSync('/home/claude/.claude/.claude.json', 'utf8'));
+const s = (cfg.mcpServers ?? {})['chrome-devtools'];
+if (!s) { console.error('no chrome-devtools server registered'); process.exit(1); }
+const p = spawn(s.command, s.args ?? [], {env: {...process.env, ...(s.env ?? {})}});
+p.on('error', e => { console.error('spawn failed: ' + e.message); process.exit(1); });
+const send = o => p.stdin.write(JSON.stringify(o) + '\n');
+let buf = '';
+p.stdout.on('data', d => {
+  buf += d;
+  let i;
+  while ((i = buf.indexOf('\n')) >= 0) {
+    const line = buf.slice(0, i).trim();
+    buf = buf.slice(i + 1);
+    if (!line) continue;
+    let m;
+    try { m = JSON.parse(line); } catch { continue; }
+    if (m.id !== 2) continue;
+    const text = (m.result?.content ?? []).map(c => c.text).join(' ').replace(/\n/g, ' ');
+    if (m.result && !m.result.isError) { console.log('OK: ' + text); process.exit(0); }
+    console.error('tool call failed: ' + text);   // e.g. "Target closed"
+    process.exit(1);
+  }
+});
+send({jsonrpc: '2.0', id: 1, method: 'initialize', params: {protocolVersion: '2024-11-05', capabilities: {}, clientInfo: {name: 'smoke', version: '1'}}});
+setTimeout(() => {
+  send({jsonrpc: '2.0', method: 'notifications/initialized'});
+  send({jsonrpc: '2.0', id: 2, method: 'tools/call', params: {name: 'list_pages', arguments: {}}});
+}, 1500);
+setTimeout(() => { console.error('timed out waiting for list_pages'); process.exit(1); }, 60000);
+PROBE
+    check "registered chrome-devtools MCP really launches Chrome (live CDP round-trip)" \
+        'docker exec "$BRWLCN" gosu claude node /home/claude/mcp-live-probe.mjs'
+    # Pins the exact regression: --chromeArg must EXIST, or --no-sandbox is dropped.
+    check "pinned chrome-devtools-mcp supports --chromeArg (launch flags not silently dropped)" \
+        'docker exec "$BRWLCN" gosu claude chrome-devtools-mcp --help 2>&1 | grep -q -- "--chromeArg"'
+    docker rm -f "$BRWLCN" >/dev/null 2>&1 || true
+fi
+
+# --- 16f. Disk-backed scratch (TMPDIR) ----------------------------------------
 # /tmp is a 1g tmpfs in RAM. Anything honoring TMPDIR (pip/uv wheel builds, docker
 # save|load, the inner containerd) hits that wall and ENOSPCs while the pool has terabytes
 # free — so temp must land on a disk-backed volume instead.

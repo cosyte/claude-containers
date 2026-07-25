@@ -653,6 +653,11 @@ fi
 # Registration is idempotent (the `claude mcp get` guard below), so re-runs and
 # a resumed session never double-register. Headless, isolated profile (clean per
 # session); --no-sandbox is required in unprivileged Docker.
+#
+# The --chromeArg flags below need chrome-devtools-mcp >=1.0 (the Dockerfile pin
+# asserts this at build time). On 0.x they were silently dropped by yargs, Chrome
+# exited with "No usable sandbox!", and every tool call failed "Target closed".
+# --no-usage-statistics opts out of the telemetry 1.x sends to Google by default.
 _browser_baked() {
     command -v chrome-devtools-mcp >/dev/null 2>&1 && command -v chromium >/dev/null 2>&1
 }
@@ -676,7 +681,8 @@ _register_chrome_devtools_mcp() {
             "--isolated",
             "--chromeArg=--no-sandbox",
             "--chromeArg=--disable-dev-shm-usage",
-            "--chromeArg=--disable-gpu"
+            "--chromeArg=--disable-gpu",
+            "--no-usage-statistics"
         ],
         env: { CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "1" }
     }')"

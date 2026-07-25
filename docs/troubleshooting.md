@@ -245,6 +245,21 @@ tri-state: unset = auto (browser image self-enables), `1`/`--browser` = force on
   ```
   Both must succeed. If `chromium` is missing, the image was built without
   `WITH_BROWSER=1`.
+- **Every tool call fails `Protocol error (Target.setDiscoverTargets): Target
+  closed`, on the very first call.** Chrome is dying the instant it spawns.
+  Check the launch flags are actually *reaching* Chrome — `chrome-devtools-mcp`
+  uses yargs, which **silently ignores unknown options**, so a server pinned
+  below 1.0 (no `--chromeArg` support) drops `--no-sandbox` without a word.
+  Chrome then exits with `No usable sandbox!` and `claude mcp get` still
+  cheerfully reports `Connected`. Confirm the pin supports the flag:
+  ```
+  ssh -p <port> claude@host 'chrome-devtools-mcp --help | grep -- --chromeArg'
+  ```
+  No output means the image is too old — rebuild (`make build-browser`) to pick
+  up the pinned version, then **recreate** the container. Note that §10b's
+  registration is idempotent: it skips when a `chrome-devtools` entry already
+  exists, so a *restart* alone will not rewrite a stale config. To see exactly
+  what Chrome received, point `--executablePath` at a wrapper that logs `"$@"`.
 - **"Failed to launch the browser process".** Almost always sandbox/seccomp.
   The entrypoint already passes `--chromeArg=--no-sandbox
   --chromeArg=--disable-dev-shm-usage --chromeArg=--disable-gpu` to

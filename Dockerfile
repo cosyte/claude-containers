@@ -226,7 +226,12 @@ RUN set -eux; \
 # image is unchanged unless you opt in. ~200 MB delta when on.
 ARG WITH_BROWSER=0
 # Pin to the latest verified release. Bump via the build arg.
-ARG CHROME_DEVTOOLS_MCP_VERSION=0.7.0
+# NOTE: must be >=1.0 — §10b passes --chromeArg=--no-sandbox, and 0.x has no
+# --chromeArg option. yargs SILENTLY IGNORES unknown flags, so on 0.x the
+# sandbox flag vanished and every Chrome launch died with "No usable sandbox!",
+# surfacing to the agent as "Target closed" on the first tool call. The
+# --help assertion below fails the build if the pin ever regresses.
+ARG CHROME_DEVTOOLS_MCP_VERSION=1.6.0
 RUN set -eux; \
     if [ "$WITH_BROWSER" = "1" ]; then \
         apt-get update; \
@@ -241,6 +246,14 @@ RUN set -eux; \
         npm cache clean --force; \
         chromium --version; \
         chrome-devtools-mcp --help >/dev/null; \
+        # Assert the pinned MCP actually SUPPORTS --chromeArg. Without this the
+        # failure is invisible at build time (yargs drops unknown flags without
+        # complaint) and only shows up as a dead browser at agent runtime.
+        if ! chrome-devtools-mcp --help 2>&1 | grep -q -- '--chromeArg'; then \
+            echo "FATAL: chrome-devtools-mcp@${CHROME_DEVTOOLS_MCP_VERSION} has no --chromeArg option;" >&2; \
+            echo "       entrypoint.sh §10b needs it to pass --no-sandbox. Pin >=1.0." >&2; \
+            exit 1; \
+        fi; \
     else \
         echo "WITH_BROWSER=0 — skipping Chromium + chrome-devtools-mcp"; \
     fi
