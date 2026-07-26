@@ -910,8 +910,30 @@ trap shutdown TERM INT
 
 # Keep PID 1 alive while the container should run. If the tmux server dies
 # entirely (rare), exit so Docker's restart policy can recover it.
-while asclaude tmux has-session -t claude >/dev/null 2>&1; do
+#
+# Require several CONSECUTIVE failures, not one. This probe is not a pure read:
+# `asclaude` is gosu + env + tmux, so every check costs three forks. When the container
+# is out of PIDs — the cgroup pids.max counts THREADS, so a browser or inner-dockerd
+# session reaches it long before the process count suggests — fork returns EAGAIN and
+# the probe fails against a tmux that is perfectly alive. Treating that one failure as
+# "tmux died" tore a healthy container down, and the restart policy then brought it back
+# with an empty session, losing the user's work (cosyte, 2026-07-26: the entrypoint
+# logged `fork: retry: Resource temporarily unavailable` four seconds after it reported
+# "tmux session ended"). Retrying costs a few extra seconds when tmux is genuinely gone;
+# not retrying costs a live session on any transient resource blip.
+LIVENESS_MAX_FAILURES="${CLAUDE_LIVENESS_MAX_FAILURES:-3}"
+liveness_failures=0
+while :; do
+    if asclaude tmux has-session -t claude >/dev/null 2>&1; then
+        liveness_failures=0
+    else
+        liveness_failures=$(( liveness_failures + 1 ))
+        if (( liveness_failures >= LIVENESS_MAX_FAILURES )); then
+            break
+        fi
+        log "tmux liveness probe failed (${liveness_failures}/${LIVENESS_MAX_FAILURES}) — retrying in 5s"
+    fi
     sleep 5 & wait $!
 done
-log "tmux session ended"
+log "tmux session ended (liveness probe failed ${LIVENESS_MAX_FAILURES}x consecutively)"
 shutdown
