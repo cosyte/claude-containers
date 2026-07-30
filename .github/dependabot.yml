@@ -4,7 +4,7 @@
 # zero dependencies, so an npm entry would watch nothing and imply coverage that
 # does not exist.
 #
-# The Claude Code CLI version is NOT watched either — it is pinned as a Docker
+# The Claude Code CLI version is NOT watched either: it is pinned as a Docker
 # build arg / env default in several places at once (Dockerfile, Makefile,
 # .env.example), which Dependabot cannot see, and `test/cli-version-unit.sh`
 # enforces that those declarations agree. Bumping it is a deliberate act with a

@@ -1,6 +1,6 @@
 # ── claude-compose-gen scenario file ─────────────────────────────────────────
-# A scenario .conf is just the generator's own flags, PERSISTED — one
-# "--flag [value]" per line — so a fleet's exact repo list + per-repo config
+# A scenario .conf is just the generator's own flags, PERSISTED: one
+# "--flag [value]" per line, so a fleet's exact repo list + per-repo config
 # lives in a file instead of a fragile one-off command line. Run it with:
 #
 #     claude-compose-gen --scenario /path/to/this.conf
@@ -11,25 +11,25 @@
 #
 # Format rules:
 #   • one flag per line; the value is the LITERAL rest of the line after the
-#     first whitespace — so values with spaces, ';', '$' or '=' need NO quoting
+#     first whitespace, so values with spaces, ';', '$' or '=' need NO quoting
 #     (see the --dev-cmd line below);
 #   • lines whose first non-blank char is '#' are comments; blank lines skipped;
 #   • an inline '#' is NOT a comment (URLs and dev-cmds may contain one);
 #   • boolean flags (e.g. --forks) sit on a line by themselves.
 #
 # WHERE THESE LIVE: scenario files are DEPLOYMENT config, like the compose they
-# produce — keep them OUTSIDE this repo, next to their stack's compose + .env
+# produce: keep them OUTSIDE this repo, next to their stack's compose + .env
 # (e.g. /srv/claude/<stack>/<stack>.conf). --scenario takes a path; a bare name
 # only resolves when CLAUDE_SCENARIOS_DIR is exported.
 #
-# Everything below is a PLACEHOLDER — the paths, the org and the repo names are
+# Everything below is a PLACEHOLDER: the paths, the org and the repo names are
 # made up. This example shows the "work" stack of a two-stack host; the second
 # stack would be another .conf with its own --out, --env-file and a disjoint
 # port range (e.g. 2250+), which is what keeps the two from colliding.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Per-stack env: sourced ON TOP of the repo .env at generation time (port range,
-# image, resources) AND — because it sits beside --out — auto-loaded by
+# image, resources) AND, because it sits beside --out: auto-loaded by
 # `docker compose up` (so GH_TOKEN differs per stack). Point both at one file.
 --env-file /srv/claude/work/.env
 --out /srv/claude/work/docker-compose.yml

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# claude-list — table of all claude-* containers.
+# claude-list: table of all claude-* containers.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 need_docker
 
 # `{{.Status}}` carries both uptime and the healthcheck verdict, e.g.
-# "Up 2 hours (healthy)" / "Up 5 minutes (unhealthy)" — (unhealthy) means the
+# "Up 2 hours (healthy)" / "Up 5 minutes (unhealthy)": (unhealthy) means the
 # Claude session or its Remote Control link is down (see docs/troubleshooting.md).
 fmt='{{.Names}}\t{{.State}}\t{{.Label "claude.ssh_port"}}\t{{.Label "claude.repo"}}\t{{.Status}}'
 rows="$(docker ps -a --filter 'label=claude.managed=1' --format "$fmt" 2>/dev/null || true)"

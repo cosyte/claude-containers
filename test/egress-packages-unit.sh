@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# egress-packages-unit.sh — pure-logic tests for the opt-in package-registry egress profile in
-# bin/claude-egress-firewall. NO docker, NO NET_ADMIN, NO live iptables — safe for CI / scripts/verify.sh.
+# egress-packages-unit.sh: pure-logic tests for the opt-in package-registry egress profile in
+# bin/claude-egress-firewall. NO docker, NO NET_ADMIN, NO live iptables: safe for CI / scripts/verify.sh.
 #
 # The firewall's host-SELECTION (the part this profile changes) is exercised via its CLAUDE_EGRESS_PRINT_HOSTS=1
 # dry-run seam, which prints the composed allowlist host set and exits BEFORE touching iptables. The
@@ -15,7 +15,7 @@ PASS=0 FAIL=0
 ok()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 
-# hosts <extra-env...> — the composed allowlist host set for the given env (dry-run, sorted, one per line)
+# hosts <extra-env...>: the composed allowlist host set for the given env (dry-run, sorted, one per line)
 hosts() { env "$@" CLAUDE_EGRESS_PRINT_HOSTS=1 bash "$FW" 2>/dev/null; }
 
 PKG_HOSTS="pypi.org files.pythonhosted.org crates.io index.crates.io static.crates.io proxy.golang.org sum.golang.org mise.run ghcr.io"
@@ -49,7 +49,7 @@ ON="$(hosts CLAUDE_EGRESS_PACKAGES=1)"
 for h in api.anthropic.com github.com registry.npmjs.org; do
   grep -qxF "$h" <<<"$ON" || bad "profile ON dropped a baked default host: $h"
 done
-ok "profile ON: additive — the baked default hosts are all still present"
+ok "profile ON: additive, the baked default hosts are all still present"
 
 # Debian/apt mirrors are deliberately NOT in this profile (they need the retired worker apt tier)
 grep -qiE 'debian|ubuntu|deb\.' <<<"$ON" && bad "profile ON wrongly included a Debian/apt mirror (retired-apt-tier scope)" \

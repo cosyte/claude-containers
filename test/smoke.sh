@@ -39,7 +39,7 @@ bad()  { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 
 echo "== image: $IMAGE =="
-docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "image missing — build first"; exit 1; }
+docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "image missing: build first"; exit 1; }
 
 # --- fixtures ---------------------------------------------------------------
 ssh-keygen -q -t ed25519 -f "$TMP/key" -N ''
@@ -130,17 +130,17 @@ check "entrypoint defaults the model to opus (best available)" \
 
 # --- the CLI pin, checked against the RUNNING IMAGE (CC-CLAUDE-CODE-UPGRADE) --------
 # test/cli-version-unit.sh proves the six *declarations* of the pin agree, but it is
-# pure-static — it reads repo files and never the built image. These are the live half:
+# pure-static: it reads repo files and never the built image. These are the live half:
 # the image you are actually about to run really ships the pinned CLI, and really is at
 # or above the Opus-4.8 floor. A stale gitignored .env silently overrides the repo's pin
 # (the Makefile's `-include .env` beats `?=` AND the Dockerfile ARG), so without a check
-# against the real image a host can keep shipping an old CLI — and `--model opus` keeps
-# silently resolving to Opus 4.7 — with every other gate green.
+# against the real image a host can keep shipping an old CLI, and `--model opus` keeps
+# silently resolving to Opus 4.7: with every other gate green.
 PINNED_VER="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=\(.*\)$/\1/p' "$(dirname "${BASH_SOURCE[0]}")/../Dockerfile")"
 OPUS48_FLOOR=2.1.154
 check "image ships the pinned Claude Code CLI ($PINNED_VER)" \
     '[[ "$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")" == "$PINNED_VER" ]]'
-check "the CLI in the image clears the Opus-4.8 floor ($OPUS48_FLOOR — else '--model opus' means 4.7)" \
+check "the CLI in the image clears the Opus-4.8 floor ($OPUS48_FLOOR, else '--model opus' means 4.7)" \
     'v="$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")"; [[ "$(printf "%s\n%s\n" "$OPUS48_FLOOR" "$v" | sort -V | head -1)" == "$OPUS48_FLOOR" ]]'
 check "claude binary is at /usr/local/bin/claude" \
     'cexec "test -e /usr/local/bin/claude"'
@@ -201,7 +201,7 @@ GENOUT="$TMP/gen-compose.yml"
 if "$REPO_ROOT/bin/claude-compose-gen" --out "$GENOUT" \
        --cpu alpha=7 --mem alpha=777m --model alpha=sonnet --browser beta acme/alpha acme/beta >/dev/null 2>&1; then
     # Extract exactly one service's block (its `^  name:` header to the next
-    # service or top-level key) so assertions don't depend on line offsets — the
+    # service or top-level key) so assertions don't depend on line offsets: the
     # environment block grows over time and fixed -A windows silently rot.
     svc_block(){ awk -v s="^  $1:\$" '
         $0 ~ s {f=1; print; next}
@@ -245,7 +245,7 @@ check "claude pane lives in tmux window 'main'" \
 check "RC watchdog process is running" \
     'cexec "pgrep -f claude-rc-watchdog" >/dev/null 2>&1'
 # No auth in smoke, so `claude` is not running and the probe will report
-# unhealthy — assert only that it executes cleanly and emits a verdict line.
+# unhealthy: assert only that it executes cleanly and emits a verdict line.
 check "healthcheck runs and emits a verdict line" \
     'cexec "/usr/local/bin/claude-healthcheck" 2>&1 | grep -qE "^(healthy|unhealthy:)"'
 
@@ -298,7 +298,7 @@ echo "== 14. egress lockdown (opt-in) boots and enforces (or fails open) =="
 check "claude-egress-firewall baked + executable" \
     'cexec "test -x /usr/local/bin/claude-egress-firewall"'
 # Boot a lockdown container (needs NET_ADMIN). The KEY safety property is that
-# lockdown never bricks boot: it either applies default-deny, or fails OPEN — the
+# lockdown never bricks boot: it either applies default-deny, or fails OPEN, the
 # container must come up either way. If the network is reachable and lockdown
 # engages, also assert a non-allowlisted IP is blocked.
 EGHARDEN="$(source "$REPO_ROOT/bin/_common.sh"; CLAUDE_EGRESS_LOCKDOWN=1 harden_run_args)"
@@ -309,7 +309,7 @@ docker run -d --name "$EGCN" $EGHARDEN \
 for _ in $(seq 1 60); do
     docker logs "$EGCN" 2>&1 | grep -qE "Egress lockdown" && break; sleep 1
 done
-check "lockdown container still boots (never bricks — default-deny or fail-open)" \
+check "lockdown container still boots (never bricks, default-deny or fail-open)" \
     'docker exec "$EGCN" gosu claude tmux has-session -t claude >/dev/null 2>&1'
 check "lockdown either enforces default-deny or fails OPEN, never half-applied" \
     'p="$(docker exec "$EGCN" iptables -S OUTPUT 2>/dev/null | head -1)"; [ "$p" = "-P OUTPUT DROP" ] || [ "$p" = "-P OUTPUT ACCEPT" ]'
@@ -320,7 +320,7 @@ if docker exec "$EGCN" iptables -S OUTPUT 2>/dev/null | head -1 | grep -q "DROP"
     check "default-deny still permits an allowlisted host (api.github.com)" \
         'c=$(docker exec "$EGCN" gosu claude curl -sS -m12 -o /dev/null -w "%{http_code}" https://api.github.com 2>/dev/null); [ -n "$c" ] && [ "$c" != 000 ]'
 else
-    echo "  SKIP  default-deny allow/deny checks (lockdown failed open — no network in test env)"
+    echo "  SKIP  default-deny allow/deny checks (lockdown failed open, no network in test env)"
 fi
 docker rm -f "$EGCN" >/dev/null 2>&1 || true
 
@@ -355,7 +355,7 @@ echo "== 16. browser variant: MCP auto-enables, opt-out honored, loud on lean ==
 # We don't need the ~200 MB image here: the entrypoint's §10b detection is purely
 # "both binaries on PATH", so mounting two stub executables onto the LEAN image
 # faithfully simulates the baked variant and exercises the auto-register logic in
-# CI. (mcp add-json/get are local-config ops — no OAuth/network — so a stub that
+# CI. (mcp add-json/get are local-config ops, no OAuth/network, so a stub that
 # is never executed is sufficient; registration stores the config, it never spawns
 # the server here.)
 mkdir -p "$TMP/browserbin"
@@ -382,7 +382,7 @@ check "browser image auto-detected (no second flag needed)" \
 check "chrome-devtools MCP registered on a plain browser-image launch" \
     'docker logs "$BRWACN" 2>&1 | grep -q "Registered MCP server .chrome-devtools."'
 # Proves the MCP is REGISTERED + discoverable in config (what frontend-debugging
-# reads to see the tools) — not that the server spawns. The stub is never
+# reads to see the tools), not that the server spawns. The stub is never
 # executed and the config's --executablePath (/usr/bin/chromium) only exists on
 # the real make-build-browser image; a live-server check belongs to the manual
 # on-host run, not this stubbed CI simulation.
@@ -434,20 +434,20 @@ fi
 
 # --- 16e. LIVE: the registered MCP actually drives a real Chrome --------------
 # 16a proves the MCP is REGISTERED. It cannot prove the browser LAUNCHES: the
-# stubs are never executed. That gap hid a real outage — the pin was 0.x, which
+# stubs are never executed. That gap hid a real outage: the pin was 0.x, which
 # has no --chromeArg, so yargs SILENTLY dropped --no-sandbox, Chrome died with
 # "No usable sandbox!", and every tool call returned "Target closed" while
 # `claude mcp get` still reported "Connected". Registration checks are blind to
 # it; only spawning the registered command and making a CDP round-trip is not.
 # Needs the baked Chromium, so it runs only on the real browser variant.
 if [ "$IMG_IS_BROWSER" != "1" ]; then
-    echo "  SKIP  16e live browser checks (\$IMAGE is lean — no baked Chromium to drive)"
+    echo "  SKIP  16e live browser checks (\$IMAGE is lean, no baked Chromium to drive)"
 else
     docker run -d --name "$BRWLCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=browserlive \
         -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
     wait_tmux "$BRWLCN" || true
     # Read the REGISTERED command/args back out of the config and spawn exactly
-    # those — so the test exercises what a session really runs, not a copy of it.
+    # those, so the test exercises what a session really runs, not a copy of it.
     docker exec -i "$BRWLCN" gosu claude tee /home/claude/mcp-live-probe.mjs >/dev/null <<'PROBE'
 import {spawn} from 'node:child_process';
 import {readFileSync} from 'node:fs';
@@ -492,11 +492,11 @@ fi
 # --- 16f. Disk-backed scratch (TMPDIR) ----------------------------------------
 # /tmp is a 1g tmpfs in RAM. Anything honoring TMPDIR (pip/uv wheel builds, docker
 # save|load, the inner containerd) hits that wall and ENOSPCs while the pool has terabytes
-# free — so temp must land on a disk-backed volume instead.
+# free, so temp must land on a disk-backed volume instead.
 #
 # Needs its OWN container: the scratch volume + TMPDIR are supplied by claude-launch, not
 # baked into the image, so $CN (a bare `docker run` above) has neither. Reproduce the
-# launcher's two flags exactly, then assert the IMAGE does its half — prepare the dir and
+# launcher's two flags exactly, then assert the IMAGE does its half: prepare the dir and
 # re-export TMPDIR for login shells.
 SCRCN="claude-smoke-scratch-$$"
 SCRVOL="claude-smoke-scratch-vol-$$"
@@ -517,7 +517,7 @@ check "/scratch is a mounted volume and is NOT a tmpfs" \
 # The actual user-visible bug: a write bigger than the whole tmpfs must now succeed.
 check "a 1200MB write (larger than the entire 1g tmpfs) succeeds in TMPDIR" \
     'docker exec "$SCRCN" gosu claude sh -c "dd if=/dev/zero of=\$TMPDIR/big bs=1M count=1200 2>/dev/null && rm -f \$TMPDIR/big"'
-# sshd builds a FRESH environment, so a login shell must re-export it — otherwise an
+# sshd builds a FRESH environment, so a login shell must re-export it: otherwise an
 # interactive `pip install` fails where the agent's own identical command succeeds.
 check "an SSH-style login shell (cleared env) also gets the disk-backed TMPDIR" \
     '[ "$(docker exec "$SCRCN" gosu claude env -i /bin/bash -lc "echo \$TMPDIR")" = "/scratch" ]'
@@ -543,9 +543,9 @@ HOST_HAS_SYSBOX=0
 docker info --format '{{range $r, $_ := .Runtimes}}{{$r}} {{end}}' 2>/dev/null | grep -qw sysbox-runc && HOST_HAS_SYSBOX=1
 
 if [ "$IMG_IS_DOCKER" != "1" ]; then
-    echo "  SKIP  17 container-workflow checks (\$IMAGE has no baked engine — build with WITH_DOCKER=1)"
+    echo "  SKIP  17 container-workflow checks (\$IMAGE has no baked engine, build with WITH_DOCKER=1)"
 elif [ "$HOST_HAS_SYSBOX" != "1" ]; then
-    echo "  SKIP  17 container-workflow checks (host has no sysbox-runc runtime — nested Docker cannot be exercised)"
+    echo "  SKIP  17 container-workflow checks (host has no sysbox-runc runtime, nested Docker cannot be exercised)"
 else
     DKCN="claude-smoke-docker-$$"
     docker run -d --name "$DKCN" --runtime=sysbox-runc --security-opt no-new-privileges \

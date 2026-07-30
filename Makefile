@@ -1,4 +1,4 @@
-# Claude Code container — build / auth / run helpers.
+# Claude Code container: build / auth / run helpers.
 # Config comes from .env (if present) then the environment.
 
 SHELL := /bin/bash
@@ -90,7 +90,7 @@ launch: ## make launch ARGS="myproj --repo git@github.com:me/x.git"
 
 list:  ## List all claude-* containers
 	@./bin/claude-list
-attach: ## make attach ARGS="myproj" — attach to a container's tmux session
+attach: ## make attach ARGS="myproj", attach to a container's tmux session
 	@./bin/claude-attach $(ARGS)
 stop:  ## make stop ARGS="myproj"
 	@./bin/claude-stop $(ARGS)

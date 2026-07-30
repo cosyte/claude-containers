@@ -1,8 +1,8 @@
 # Contributing to claude-containers
 
 Thanks for considering a contribution. This is a small, opinionated stack built
-for one job — running isolated, long-lived Claude Code sessions on a self-hosted
-box — so the most useful contributions are usually a reproduction, a host/runtime
+for one job: running isolated, long-lived Claude Code sessions on a self-hosted
+box, so the most useful contributions are usually a reproduction, a host/runtime
 combination we have not tried, or a narrow fix.
 
 Please read [SECURITY.md](./SECURITY.md) before filing anything
@@ -19,7 +19,7 @@ vulnerabilities go through private reporting rather than an issue.
 4. **Redact before pasting.** Logs from this stack can contain tokens, OAuth
    credentials, and repo contents. `GH_TOKEN`, `.credentials.json` and SSH key
    material must never appear in an issue.
-5. Say which mode you were in — interactive, autopilot, queue, or SCM observer.
+5. Say which mode you were in: interactive, autopilot, queue, or SCM observer.
    They fail differently.
 
 ## Opening a PR
@@ -32,7 +32,7 @@ vulnerabilities go through private reporting rather than an issue.
    ```
    Both must be clean. CI runs exactly these.
 3. `make smoke` builds the image and exercises a real container. It is **not** in
-   CI — a hosted runner cannot build and run the image usefully — so run it
+   CI: a hosted runner cannot build and run the image usefully, so run it
    yourself for anything touching the Dockerfile, the entrypoint, or launch.
 4. Keep PRs focused: one logical change. Large reworks should start as an issue.
 5. Imperative commit subjects (`fix(entrypoint): …`, `feat(launch): …`) are
@@ -43,15 +43,15 @@ vulnerabilities go through private reporting rather than an issue.
 ## What this repo is made of
 
 Bash, `make`, and Docker. It ships no package and has **zero runtime
-dependencies** — `package.json` exists only so CI and the unit suites have a
+dependencies**: `package.json` exists only so CI and the unit suites have a
 task runner. Do not add a dependency without a strong reason.
 
-- `bin/` — the operator CLIs (`claude-launch`, `claude-compose-gen`,
+- `bin/`: the operator CLIs (`claude-launch`, `claude-compose-gen`,
   `claude-autopilot`, `claude-disk-gc`, …), sharing `bin/_common.sh`.
-- `entrypoint.sh` — the container boot path, in numbered sections. Most behaviour
+- `entrypoint.sh`: the container boot path, in numbered sections. Most behaviour
   lives here.
-- `test/*.sh` — Docker-free unit suites, one per area, driven by `npm test`.
-- `docs/` — architecture, provisioning, security, troubleshooting.
+- `test/*.sh`: Docker-free unit suites, one per area, driven by `npm test`.
+- `docs/`: architecture, provisioning, security, troubleshooting.
 
 ## Conventions that bite
 
@@ -69,7 +69,7 @@ task runner. Do not add a dependency without a strong reason.
   failure. Assume anything logged may be read by someone who should not see the
   repo.
 - **The Claude Code version pin is declared in several places and a unit suite
-  enforces that they agree** (`test/cli-version-unit.sh`). Bump them together —
+  enforces that they agree** (`test/cli-version-unit.sh`). Bump them together,
   and note that bumping it changes which *model* the `opus` alias resolves to,
   not just which CLI ships.
 

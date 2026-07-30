@@ -36,7 +36,7 @@ add hooks, status line, etc. to every container.
 
 One `*.json` per server in `claude-config/mcp/`; filename (sans `.json`) is the
 server name. Registered at **user scope** on start. `.json.example` files are
-inactive — rename to `.json` to enable.
+inactive: rename to `.json` to enable.
 
 - Shapes: `{"command","args","env"}` (stdio), `{"type":"http","url","headers"}`,
   `{"type":"sse","url","headers"}`.
@@ -76,7 +76,7 @@ SSH into a launched container (you land in the Claude tmux session) and run:
 ```
 /mcp                # baked MCP servers (after enabling one)
 /plugin             # marketplaces + enabled plugins
-/container-info     # baked slash command — prints repo/version/MCP/RC facts
+/container-info     # baked slash command: prints repo/version/MCP/RC facts
 ```
 
 Ask Claude to "use the example-skill" to confirm skills resolve.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit tests for claude-compose-gen's scenario/env-file surface — NO docker,
+# Unit tests for claude-compose-gen's scenario/env-file surface: NO docker,
 # NO gh, NO root. Covers:
 #   - .conf expansion: one "--flag [value]" per line, literal rest-of-line
 #     value (spaces/;/$/= need no quoting), full-line # comments skipped,
@@ -41,7 +41,7 @@ CONF="$TMPD/a.conf"
 # Note the deliberately gnarly --dev-cmd (spaces, ;, $, --) and an inline # in a
 # marketplace value; a full-line comment; a blank line; a bare --forks.
 cat > "$CONF" <<EOF
-# a full-line comment — skipped
+# a full-line comment: skipped
 
 --env-file $ENVF
 --out $OUT
@@ -66,7 +66,7 @@ if gen --scenario "$CONF"; then
         || bad "--browser should switch the image"
     grep -q '"4321:4321"' "$OUT" && ok "--expose publishes the port" || bad "--expose missing"
     # Regression: the expose port must sit INSIDE the ports: block (after
-    # `ports:`, before `security_opt:`), NOT after cap_add — otherwise YAML
+    # `ports:`, before `security_opt:`), NOT after cap_add, otherwise YAML
     # parses the mapping as a bogus capability and the port isn't published.
     ab="$(awk '/^  alpha:/{f=1} f&&/^  beta:/{exit} f' "$OUT")"
     lp="$(grep -n '^    ports:$'        <<<"$ab" | head -1 | cut -d: -f1)"
@@ -212,7 +212,7 @@ echo "== --mount (foreign volume into a service) =="
 OUTM="$TMPD/m/dc.yml"
 if env CLAUDE_PORTS_USED_OVERRIDE= "$GEN" --env-file "$ENVF" --out "$OUTM" --port-base 3900 \
     --mount one=claude-ws-super:/super:ro m/one m/two >/dev/null 2>&1; then
-    # Emitted INSIDE the service's volumes list — the --expose bug (emitted after
+    # Emitted INSIDE the service's volumes list: the --expose bug (emitted after
     # cap_add, parsed as a bogus capability) is the reason this is asserted.
     awk '/^  one:/,/^  two:/' "$OUTM" | awk '/volumes:/,/labels:/' \
         | grep -q -- '- claude-ws-super:/super:ro' \
@@ -241,7 +241,7 @@ gen --env-file "$ENVF" --out "$TMPD/m4/dc.yml" --mount one=claude-ws-super:/work
     && bad "--mount accepted a path shadowing /workspace" \
     || ok "--mount refuses to shadow the service's own /workspace"
 # Mounting a volume this stack manages is ambiguous (it'd be declared twice, and
-# external:true would be a lie) — must die rather than emit a broken file.
+# external:true would be a lie), must die rather than emit a broken file.
 gen --env-file "$ENVF" --out "$TMPD/m5/dc.yml" --mount one=claude-ws-two:/two:ro m/one m/two \
     && bad "--mount accepted a volume this stack owns" \
     || ok "--mount rejects a volume the stack itself manages"
@@ -275,9 +275,9 @@ if env CLAUDE_PORTS_USED_OVERRIDE= "$GEN" --env-file "$ENVF" --out "$OUTS" --por
         # grep the 2 lines under the volume key in the top-level volumes block.
         awk '/^volumes:/,0' "$OUTS" | grep -A2 "^  $v:" | grep -q 'external: true' \
             && ok "$v is declared external: true" \
-            || bad "$v must be external — a 'down -v' on one stack would delete it fleet-wide"
+            || bad "$v must be external: a 'down -v' on one stack would delete it fleet-wide"
     done
-    # The per-repo volumes are this stack's OWN — they must stay non-external, or
+    # The per-repo volumes are this stack's OWN: they must stay non-external, or
     # a first `up` on a clean host fails instead of creating them.
     awk '/^volumes:/,0' "$OUTS" | grep -A2 '^  claude-ws-one:' | grep -q 'external: true' \
         && bad "claude-ws-one must NOT be external (the stack owns it)" \

@@ -2,20 +2,20 @@
 
 ## Component map
 
-- **Dockerfile** — `node:24-bookworm-slim`, system packages, `gh`, `uv`,
+- **Dockerfile**: `node:24-bookworm-slim`, system packages, `gh`, `uv`,
   Claude Code via npm (pinned), non-root `claude` user, hardened sshd config,
   baked-in `claude-config/`.
-- **entrypoint.sh** — runs as root: refuses API-key auth, sets up sshd, fixes
+- **entrypoint.sh**: runs as root: refuses API-key auth, sets up sshd, fixes
   volume ownership, reconciles credentials, pre-accepts trust, merges baked-in
   config, prepares `/workspace`, then `gosu`-drops to `claude` and launches
   Claude Code inside a detached tmux session. Stays PID 1 for clean signals.
-- **claude-session** — the tmux pane command: `cd /workspace`, exec
+- **claude-session**: the tmux pane command: `cd /workspace`, exec
   `claude --dangerously-skip-permissions --remote-control "<project>"`, and
   fall back to a shell if Claude exits so SSH stays usable.
-- **bash_profile** — interactive SSH logins `exec tmux attach` to the live
+- **bash_profile**: interactive SSH logins `exec tmux attach` to the live
   `claude` session; non-interactive SSH (scp/rsync) is untouched.
-- **bin/** — `claude-launch/list/stop/rm/logs` over a shared `_common.sh`.
-- **.claude/skills/claude-containers/** — project skill: when this repo is
+- **bin/**: `claude-launch/list/stop/rm/logs` over a shared `_common.sh`.
+- **.claude/skills/claude-containers/**: project skill: when this repo is
   opened in Claude Code, it teaches the model the architecture, invariants,
   and operational playbook so it can drive build/login/launch/customize/debug.
 
@@ -24,8 +24,8 @@
 Everything below was checked against the installed binary, not just docs:
 
 - `--remote-control [name]` is a real top-level flag; `-n/--name` is a separate
-  display-name flag. The **top-level** launch this image actually makes —
-  `claude --dangerously-skip-permissions --remote-control "<project>"` — was
+  display-name flag. The **top-level** launch this image actually makes:
+  `claude --dangerously-skip-permissions --remote-control "<project>"`: was
   verified to parse and start on 2.1.220 (as the unprivileged `claude` user; the
   CLI refuses skip-permissions when running as root, by design). Verify it on a
   TTY: with no tty the CLI falls into `--print` mode and exits on missing input
@@ -38,7 +38,7 @@ Everything below was checked against the installed binary, not just docs:
   against 2.1.144 and is left unasserted here rather than silently re-dated.
 - `--dangerously-skip-permissions` ≡ `--permission-mode bypassPermissions`.
 - Setting `CLAUDE_CONFIG_DIR` relocates **everything**, including the otherwise
-  HOME-level `.claude.json`, into that directory. Verified empirically — this
+  HOME-level `.claude.json`, into that directory. Verified empirically: this
   is what lets one per-container volume capture all session state.
 - Workspace trust + onboarding live in `<config>/.claude.json` as
   `hasCompletedOnboarding` and `projects["<path>"].hasTrustDialogAccepted`.
@@ -60,10 +60,10 @@ purpose:
 Reason: Claude rewrites `.claude.json`, `history.jsonl` and `sessions/`
 constantly. With one shared config dir, parallel containers race those files,
 and every container's workspace is `/workspace` so they collide on the same
-`projects["/workspace"]` key — one session could resume another's. That breaks
+`projects["/workspace"]` key: one session could resume another's. That breaks
 spec acceptance criteria 6 (resume preserved) and 7 (independent parallel
-containers). The split preserves the spec's actual goal — *one login, every
-container reuses it* — via a shared credentials volume, while keeping sessions
+containers). The split preserves the spec's actual goal: *one login, every
+container reuses it*: via a shared credentials volume, while keeping sessions
 isolated.
 
 **Credential convergence.** Claude refreshes the OAuth token and rewrites
@@ -78,7 +78,7 @@ data loss.
 
 ## Decision: per-container workspace defaults to a named volume
 
-`claude-ws-<project>` (named volume) is the default — consistent with the other
+`claude-ws-<project>` (named volume) is the default: consistent with the other
 volumes, cleanly removed by `claude-rm --purge`, and matches the spec's
 "per-container workspace volume" wording. `--workspace <path>` bind-mounts a
 host checkout instead (use that when you want the repo directly on the host
@@ -97,20 +97,20 @@ The default image stays lean. A `WITH_BROWSER=1` build arg
 (`make build-browser`, tag `claude-code-box:browser`) bakes Debian's headless
 **Chromium** (multi-arch) and the official
 [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)
-server — adding ~200 MB. At runtime, **launching on the browser image is
+server: adding ~200 MB. At runtime, **launching on the browser image is
 sufficient**: the entrypoint auto-detects the baked binaries and registers the
-MCP by default (`CLAUDE_BROWSER` is tri-state — unset = auto, `1`/`--browser` =
+MCP by default (`CLAUDE_BROWSER` is tri-state, unset = auto, `1`/`--browser` =
 force on and fail loud on a lean image, `0`/`--no-browser` = opt out;
 `claude-compose-gen --browser REPO` selects the image and forces it on). So
 Claude gets the full Chrome DevTools Protocol surface
 (navigate / evaluate / console / network / Lighthouse / perf trace / heap
-snapshots / screenshots — 55+ tools) against any frontend the agent runs in
+snapshots / screenshots: 55+ tools) against any frontend the agent runs in
 `/workspace`. Headless-only inside the container; the agent reads pages back
 via screenshots and DOM queries.
 
 Why a build arg, not a runtime install: Chromium is ~200 MB and would cost
 every user, including those who never debug a frontend. Why MCP, not a CLI
-wrapper: it composes with the stack's existing MCP discipline — declarative,
+wrapper: it composes with the stack's existing MCP discipline, declarative,
 secret-free (the MCP needs none), removable per session. Why Chromium over
 `@puppeteer/browsers install chrome` at build time: Debian's package is
 multi-arch with one apt line, vs Puppeteer's per-arch binary download +
@@ -143,7 +143,7 @@ same way:
 | **Sysbox** (`--runtime=sysbox-runc`) | its own daemon in a **user namespace** | container-root is an unprivileged host uid |
 
 The first two are FORBIDDEN in this repo and asserted against in
-`test/unit.sh` + `test/docker-unit.sh` — with `--dangerously-skip-permissions`
+`test/unit.sh` + `test/docker-unit.sh`: with `--dangerously-skip-permissions`
 on by design, a prompt-injectable agent plus either shortcut is host root.
 Sysbox is the only option that keeps nested Docker a *boundary*. Measured on
 the r730xd (`docker run --runtime=sysbox-runc alpine cat /proc/self/status
@@ -156,9 +156,9 @@ sysbox-runc  CapEff 000001ffffffffff   uid_map 0 165536 65536   → container-ro
 
 So the `--docker` container carries the **full** capability set and that is
 fine: the caps are namespaced, and root maps to a host nobody. This is why
-`harden_run_args` **skips `--cap-drop ALL`** in docker mode — an inner daemon
+`harden_run_args` **skips `--cap-drop ALL`** in docker mode: an inner daemon
 cannot start under the minimal set (it needs `NET_ADMIN` for its bridge and
-`SYS_ADMIN` to mount layers; neither is in Docker's *default* set either) — and
+`SYS_ADMIN` to mount layers; neither is in Docker's *default* set either), and
 why skipping it costs nothing the userns isn't already providing. Verified end
 to end: with `no-new-privileges` still on, an inner dockerd starts, builds an
 image and runs a container, and the inner daemon selects `overlayfs` (not the
@@ -170,7 +170,7 @@ rather than degrading to something unsafe.
 **What this deliberately gives up.** Socket access is a path to root *inside*
 the container. The host boundary holds, but two in-container controls assume
 root is separate from the agent, and on a `--docker` session they do not bind:
-`CLAUDE_BROKER_GIT_KEY` (root-owned `ssh-agent` hiding the deploy key — an agent
+`CLAUDE_BROKER_GIT_KEY` (root-owned `ssh-agent` hiding the deploy key, an agent
 with Docker reads the key file directly) and `CLAUDE_EGRESS_LOCKDOWN` (filters
 `OUTPUT`; inner-container traffic is `FORWARD`ed, and container-root can flush
 the rules). Both default off; the launcher and generator warn on the
@@ -178,12 +178,12 @@ combination rather than refusing, since the operator may not care about either
 on a given box. Do not treat them as active on a `--docker` container.
 
 **Not the worker broker.** This reuses the retired substrate's *runtime* and
-nothing else — no broker, no worker plane, no spool, no controller
+nothing else: no broker, no worker plane, no spool, no controller
 ([legacy-sysbox-broker.md](legacy-sysbox-broker.md)). It also inverts that
 design's central move: the broker chowned the socket to root and mediated every
 launch to keep the agent OFF the daemon; here the agent using Docker *is* the
 feature. Note the earlier prune had deleted `WITH_DOCKER` on the correct grounds that
-nothing could start the baked engine (no runtime, no privilege, no socket) — the
+nothing could start the baked engine (no runtime, no privilege, no socket): the
 Sysbox runtime is precisely the missing piece, and `test/unit.sh` now pins the
 wiring (entrypoint starts it, launcher supplies the runtime) instead of pinning
 its absence.
@@ -193,7 +193,7 @@ its absence.
 below 8g). The inner image store is a per-project `claude-docker-<name>` volume
 so a recreate doesn't re-pull every base image; it can reach tens of GB and
 `claude-rm --purge` deletes it. The entrypoint's shutdown trap stops inner
-containers and the daemon before PID 1 exits — without that, force-killing a
+containers and the daemon before PID 1 exits: without that, force-killing a
 Sysbox container with a live inner daemon makes Docker fail the removal with
 "did not receive an exit event", which stranded volumes mid-purge.
 
@@ -204,7 +204,7 @@ required system packages (`build-essential`, Python, gh) which must be in the
 final image per spec. Claude Code is pure JS via npm with the cache cleaned. A
 multi-stage split wouldn't meaningfully shrink the result, so the final stage
 stays single with aggressive apt/npm cleanup. (There is one trivial throwaway
-stage that only re-exports the `uv` binaries — BuildKit forbids variable
+stage that only re-exports the `uv` binaries: BuildKit forbids variable
 expansion directly in `COPY --from=`, so it must go through a named stage.)
 Multi-arch
 (`linux/amd64,linux/arm64`) is handled by `docker buildx` (`make build-all` /
@@ -217,7 +217,7 @@ The cleanest non-interactive method is seeding `<config>/.claude.json` with
 `hasCompletedOnboarding: true` and `projects["/workspace"]
 .hasTrustDialogAccepted: true` (the exact shape Claude Code uses). Done with a
 `jq` merge that only fills missing keys. No `--bare`, no piping `/dev/null`,
-no `-p` — those each disable features we need.
+no `-p`: those each disable features we need.
 
 ## Permission mode & Remote Control
 
@@ -225,8 +225,8 @@ Launch is `claude --dangerously-skip-permissions --remote-control "<project>"`.
 On 2.1.220 these compose correctly. Belt-and-suspenders: `settings.json` also
 sets `permissions.defaultMode = bypassPermissions` and
 `skipDangerousModePermissionPrompt: true` (a real settings key). If a future
-Claude Code regresses the interaction, set `CLAUDE_PERMISSION_MODE=acceptEdits`
-— see troubleshooting for the end-to-end verification.
+Claude Code regresses the interaction, set `CLAUDE_PERMISSION_MODE=acceptEdits`.
+See troubleshooting for the end-to-end verification.
 
 ## Decision: telemetry stays ON (Remote Control depends on it)
 
@@ -234,7 +234,7 @@ Remote Control eligibility is the GrowthBook feature flag `tengu_ccr_bridge`,
 fetched at startup. `DISABLE_TELEMETRY`, `DO_NOT_TRACK`, and
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` each make Claude Code skip the
 GrowthBook fetch, so the flag falls back to its `false` default and RC reports
-"not yet enabled for your account" — even on a fully eligible account
+"not yet enabled for your account": even on a fully eligible account
 (confirmed against Anthropic's docs and 50+ upstream issues; reproduced and
 fixed here). An earlier revision of this image set `DISABLE_TELEMETRY=1` /
 `DO_NOT_TRACK=1` (Dockerfile ENV **and** the entrypoint's settings.json `env`)
@@ -254,12 +254,12 @@ broker that launched hardened nested workers on an inner `dockerd` under Sysbox,
 K-aware resource sizing, a worker-lifecycle run/reap contract,
 disk-safety floors + GC, a controller mode wiring it to an external
 lease/scheduler control plane, and per-worker spend/capacity
-observability — plus the curated worker `apt` and the pull-through
+observability, plus the curated worker `apt` and the pull-through
 cache proxy) supply-chain hardening built on top of it.
 
 That whole substrate was retired on 2026-07-12 in favor of Claude Code subagents in
 per-worktree git worktrees, and stripped from `main`. A follow-up prune
-(2026-07-14), pruned the residue the strip left behind — `bin/claude-controller` (by then
+(2026-07-14), pruned the residue the strip left behind: `bin/claude-controller` (by then
 a pass-through to `claude-autopilot`; `CLAUDE_CONTROLLER=1` now refuses to boot),
 `bin/claude-reaper` (it pruned a spool nothing writes to), the `WITH_DOCKER` controller
 image variant (an unreachable `dockerd`), and the autopilot's default command

@@ -3,7 +3,7 @@
 #
 # Run by the entrypoint AS ROOT (before it drops to the non-root claude user)
 # when CLAUDE_EGRESS_LOCKDOWN=1. Because the agent runs unprivileged without
-# NET_ADMIN, it cannot alter these rules — egress enforcement lives outside the
+# NET_ADMIN, it cannot alter these rules: egress enforcement lives outside the
 # agent's reach, which is the property the security research demanded (app-layer
 # / SNI allowlists are bypassable; an IP-pinned netfilter allowlist is not).
 # Modeled on Anthropic's own .devcontainer/init-firewall.sh.
@@ -19,15 +19,15 @@
 set -uo pipefail
 [[ "${CLAUDE_EGRESS_DEBUG:-0}" == 1 ]] && set -x
 
-log() { echo "[egress] $*" >&2; }   # diagnostics on stderr (like fail_open) — keeps stdout a clean data channel (e.g. the CLAUDE_EGRESS_PRINT_HOSTS host list)
+log() { echo "[egress] $*" >&2; }   # diagnostics on stderr (like fail_open): keeps stdout a clean data channel (e.g. the CLAUDE_EGRESS_PRINT_HOSTS host list)
 fail_open() {
-    log "ERROR: $* — failing OPEN (egress UNRESTRICTED). Fix and restart the container." >&2
+    log "ERROR: $*, failing OPEN (egress UNRESTRICTED). Fix and restart the container." >&2
     iptables -P OUTPUT ACCEPT 2>/dev/null || true
     exit 1
 }
 
 # NOTE: the `iptables`/`iptables-restore` availability check is deferred until AFTER the
-# CLAUDE_EGRESS_PRINT_HOSTS dry-run seam below — the dry run is a pure host dump that needs neither
+# CLAUDE_EGRESS_PRINT_HOSTS dry-run seam below: the dry run is a pure host dump that needs neither
 # binary, so it stays runnable on an iptables-less CI host (the enforcement path still refuses without
 # them, see below).
 
@@ -46,7 +46,7 @@ github.com api.github.com codeload.github.com
 EXTRA="${CLAUDE_EGRESS_EXTRA_HOSTS:-}"; EXTRA="${EXTRA//,/ }"
 
 # Opt-in package-registry profile. ADDITIVE to the default-deny base and IP-pinned exactly like
-# every other host below — it only ever ADDS the curated registry hosts, never broadens egress by any
+# every other host below: it only ever ADDS the curated registry hosts, never broadens egress by any
 # other means, and does NOTHING unless CLAUDE_EGRESS_PACKAGES is explicitly on. This is a curated (not
 # open) allowlist by design: the supply-chain exfil path this container refuses is *open* egress, so a
 # tool whose registry isn't listed simply won't install until its host is added.
@@ -65,17 +65,17 @@ fi
 HOSTS="$DEFAULT_HOSTS $EXTRA $PACKAGES_HOSTS"
 
 # Dry-run seam for CI/tests (CLAUDE_EGRESS_PRINT_HOSTS accepts the same 1|true|yes|on spellings as the
-# package flag): print the composed allowlist hosts — one per line, IN THE ORDER the resolution loop
-# below iterates them (a faithful witness of the enforcement input, not a sorted/deduped view) — and
+# package flag): print the composed allowlist hosts, one per line, IN THE ORDER the resolution loop
+# below iterates them (a faithful witness of the enforcement input, not a sorted/deduped view), and
 # exit 0 BEFORE requiring iptables, so the host-SELECTION logic is verifiable with no NET_ADMIN and no
 # iptables binary. Default off ⇒ behaviour byte-identical. (Unquoted $HOSTS word-splits, so blank/
-# indented lines in the heredoc never become tokens — no filtering needed.)
+# indented lines in the heredoc never become tokens: no filtering needed.)
 if [[ "${CLAUDE_EGRESS_PRINT_HOSTS:-0}" =~ ^(1|true|yes|on)$ ]]; then
     printf '%s\n' $HOSTS
     exit 0
 fi
 
-# Enforcement path only from here — now the iptables tooling is actually required.
+# Enforcement path only from here: now the iptables tooling is actually required.
 command -v iptables         >/dev/null 2>&1 || fail_open "iptables not installed"
 command -v iptables-restore >/dev/null 2>&1 || fail_open "iptables-restore not installed"
 
@@ -84,7 +84,7 @@ declare -A SEEN=()
 NETS=()
 add_net() { [[ -n "$1" && -z "${SEEN[$1]:-}" ]] && { SEEN[$1]=1; NETS+=("$1"); }; }
 
-# GitHub serves git/clone/raw from a large, published IP space — resolving a few
+# GitHub serves git/clone/raw from a large, published IP space: resolving a few
 # hostnames misses codeload/objects mirrors. Pull the official ranges (best-
 # effort; falls back to per-host resolution below).
 if meta="$(curl -fsS --max-time 10 https://api.github.com/meta 2>/dev/null)"; then
@@ -93,12 +93,12 @@ if meta="$(curl -fsS --max-time 10 https://api.github.com/meta 2>/dev/null)"; th
                               | .[] | select(test(":")|not)' 2>/dev/null)
     log "added GitHub published IPv4 ranges from api.github.com/meta"
 else
-    log "WARNING: could not fetch api.github.com/meta — relying on per-host DNS for GitHub"
+    log "WARNING: could not fetch api.github.com/meta, relying on per-host DNS for GitHub"
 fi
 
 # Resolve each allowlist host to its current IPv4s and pin them. Docker's
 # embedded DNS can take ~5s per name on the AAAA path, so resolve all hosts in
-# PARALLEL with a per-host timeout — total stays ~one lookup, not their sum, and
+# PARALLEL with a per-host timeout: total stays ~one lookup, not their sum, and
 # no single slow/hung name blocks boot.
 rdir="$(mktemp -d)"
 for h in $HOSTS; do
@@ -109,7 +109,7 @@ wait
 for h in $HOSTS; do
     [[ -z "$h" ]] && continue
     ips="$(cat "$rdir/${h//\//_}" 2>/dev/null)"
-    [[ -z "$ips" ]] && { log "WARNING: could not resolve $h (timeout/NXDOMAIN) — skipping"; continue; }
+    [[ -z "$ips" ]] && { log "WARNING: could not resolve $h (timeout/NXDOMAIN), skipping"; continue; }
     for ip in $ips; do add_net "$ip"; done
 done
 rm -rf "$rdir"

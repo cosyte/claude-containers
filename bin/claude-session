@@ -16,7 +16,7 @@ NAME="${CLAUDE_PROJECT_NAME:-claude}"
 EXTRA="${CLAUDE_EXTRA_ARGS:-}"
 PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 # Model: the entrypoint normally exports this (default `opus`, the best available).
-# Default it HERE TOO — belt-and-braces, and no longer cosmetic since CLI 2.1.197:
+# Default it HERE TOO: belt-and-braces, and no longer cosmetic since CLI 2.1.197:
 # "no --model" now means Claude Code's own default, which is **Sonnet 5**, not Opus.
 # There is a real path that reaches this script with an unexported CLAUDE_MODEL:
 # `bash_profile` re-execs `tmux new-session … claude-session` when the tmux SERVER has
@@ -24,7 +24,7 @@ PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 # not reach. Without this default that session would silently run Sonnet 5 while every
 # other session ran Opus. CLAUDE_MODEL is passed through to `--model` VERBATIM: use an alias
 # the pinned CLI actually ships (`opus`, `sonnet`, `haiku`, `opusplan`, `fable`, `best`) or a
-# full model id. NOTE: `default` is NOT in the pinned CLI's alias table and is not verified — do not
+# full model id. NOTE: `default` is NOT in the pinned CLI's alias table and is not verified, do not
 # rely on it to defer to Claude Code's own pick; pass an explicit alias instead.
 MODEL="${CLAUDE_MODEL:-opus}"
 

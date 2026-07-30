@@ -1,6 +1,6 @@
 # claude-containers shared tool cache = one `/cache` volume, fail-safe, bounded
 
-**Status:** ACCEPTED — 2026-07-11. This is the design record for how provisioned
+**Status:** ACCEPTED, 2026-07-11. This is the design record for how provisioned
 toolchains and package downloads are **reused across container restarts and across parallel
 workers**. It builds directly on the toolchain provisioner in
 [`docs/toolchain-provisioning.md`](toolchain-provisioning.md) and the containment in
@@ -11,13 +11,13 @@ workers**. It builds directly on the toolchain provisioner in
 
 A single shared **`/cache`** tree holds mise's install store **and** the language
 package-manager caches, so a toolchain or CLI provisioned by one container is a **cache hit**
-for the next launch of that project and for every parallel worker on the host — no re-download.
+for the next launch of that project and for every parallel worker on the host: no re-download.
 
 ```
 /cache
-├── mise/        MISE_DATA_DIR — installed toolchains (installs/), shims/, downloads/, cache/
-├── cargo/       CARGO_HOME — installed bins (bin/) + registry cache
-├── go/          GOPATH — pkg/mod (module cache) + bin
+├── mise/        MISE_DATA_DIR: installed toolchains (installs/), shims/, downloads/, cache/
+├── cargo/       CARGO_HOME: installed bins (bin/) + registry cache
+├── go/          GOPATH: pkg/mod (module cache) + bin
 ├── npm/         npm_config_cache
 ├── uv/          UV_CACHE_DIR (also serves mise `pipx:` via uv)
 └── pip/         PIP_CACHE_DIR
@@ -45,13 +45,13 @@ claude-compose-gen --out stack.yml --no-cache …            # per-container ins
      (ownership preserved), and every container/worker shares it.
    - **No volume** → `/cache` is just the image-layer dir. Provisioning still works; writes
      land in the container's own writable layer (per-container, ephemeral). **A missing or
-     again-empty cache never errors a launch** — it only forgoes the cross-container hit.
+     again-empty cache never errors a launch**: it only forgoes the cross-container hit.
 
 2. **Env points the tools at `/cache` (`Dockerfile` ENV).** `MISE_DATA_DIR`, `CARGO_HOME`,
    `GOPATH`, `GOMODCACHE`, `npm_config_cache`, `UV_CACHE_DIR`, `PIP_CACHE_DIR` all resolve
    under `/cache`. The **agent** (the Claude Code process + its non-interactive `bash -c`
    calls) inherits these from the image ENV. `PATH` prepends `/cache/mise/shims` (so the
-   agent resolves mise-installed tools with no shell activation — the provisioner's guarantee, just
+   agent resolves mise-installed tools with no shell activation: the provisioner's guarantee, just
    relocated) plus `/cache/cargo/bin` and `/cache/go/bin` (so `cargo install` / `go install`
    CLIs resolve too).
 
@@ -59,12 +59,12 @@ claude-compose-gen --out stack.yml --no-cache …            # per-container ins
    the tmux session the entrypoint started, which already carries the image ENV. A *fresh*
    non-tmux fallback shell would **not** inherit it, so the interactive-activation
    block re-exports the cache dirs (`${VAR:-/cache/…}`) **before** `eval "$(mise activate
-   bash)"` — a human who SSHes in to debug uses the same shared store as the agent, never the
+   bash)"`: a human who SSHes in to debug uses the same shared store as the agent, never the
    home default.
 
 4. **Read-mostly share + per-worker write discipline.** Version **selection** is
    per-container: mise reads `/workspace/mise.toml`, and `/workspace` is a *per-container*
-   mount — so two workers can pin different versions without fighting over a shared "active"
+   mount, so two workers can pin different versions without fighting over a shared "active"
    pointer. The **install store** is content-addressed by version (`installs/<tool>/<ver>`),
    and each package manager (mise, cargo, go, npm, uv) locks its own writes, so concurrent
    workers **append** to the shared store without corrupting each other. The share is
@@ -81,9 +81,9 @@ maintenance tool (run it by hand or on your own cron/timer) that spans it:
   (`CLAUDE_DISK_DATA_ROOT`, default `/var/lib/docker`), so a filling cache lowers the free
   space `claude-disk-gc` reports before/after each cycle.
 
-- **Reclaim — the cache trim.** Each `claude-disk-gc` cycle also runs a **cache
+- **Reclaim: the cache trim.** Each `claude-disk-gc` cycle also runs a **cache
   trim** (`cache_gc_once`). When the volume exceeds `CLAUDE_CACHE_MAX_MIB` (default 20 GiB) it
-  removes **only the re-fetchable download/registry caches** — the installed toolchains,
+  removes **only the re-fetchable download/registry caches**: the installed toolchains,
   shims, and `cargo`/`go` bins are **kept**, so a trim frees space without un-provisioning a
   tool (the next use just re-downloads any evicted archive). The exact reclaimed paths are a
   fixed, golden-tested list:
@@ -96,18 +96,18 @@ maintenance tool (run it by hand or on your own cron/timer) that spans it:
   ```
 
   The trim is **fail-safe and idle-gated**: it is a no-op when the cache is disabled, when its
-  size can't be measured (fail-soft — unknown ⇒ do not trim), when it is under budget, and —
-  critically — **while any container mounting the cache is running** (the guard is `docker ps
+  size can't be measured (fail-soft, unknown ⇒ do not trim), when it is under budget, and,
+  critically, **while any container mounting the cache is running** (the guard is `docker ps
   --filter volume=<vol>`, so it covers every `claude-launch`/compose container that mounts
   `/cache`, gating on the volume rather than a narrower label). An `rm` of a download cache
   mid-install would break that install, so the trim only runs when the cache is idle. The
   reclaim itself is a throwaway root `/bin/sh` helper that mounts **only** the cache volume and
-  `rm -rf`s the fixed list — never `-a`, never `--volumes`, never a host path.
+  `rm -rf`s the fixed list, never `-a`, never `--volumes`, never a host path.
 
   **Residual (bounded) race.** There is a narrow TOCTOU window between the idle check and the
   `rm`: a container that starts *after* the `docker ps` check but *before* the helper runs
   could have an in-flight download cache removed. This is **contained by design, not
-  eliminated** — the trim only ever removes **re-fetchable** paths, so the worst case is a
+  eliminated**: the trim only ever removes **re-fetchable** paths, so the worst case is a
   transient failed/retried install (the tool re-downloads), never loss of an installed
   toolchain or any persistent data. gc runs hourly by default, so the window is rare. Closing
   it entirely (a lock the launch path also takes) is deferred; the fail-safe surface makes it
@@ -121,7 +121,7 @@ maintenance tool (run it by hand or on your own cron/timer) that spans it:
 
 ## Verification
 
-CI runs `test/cache-unit.sh` — a docker-free, network-free static + function-level gate
+CI runs `test/cache-unit.sh`: a docker-free, network-free static + function-level gate
 asserting: the `/cache` relocation is present and the tree is baked + chowned (fail-safe); the
 `_common.sh` cache helpers normalize/disable/measure correctly; the disk-gc cache trim plan is
 **exactly** the re-fetchable list and **never** an `installs/`/`shims/`/bin path or a bare
@@ -139,7 +139,7 @@ a full image build and is the manual on-host procedure below (like `make smoke`)
 ```bash
 # session A provisions; session B is a HIT
 claude-launch a --repo … ; ssh … 'mise use node@22'          # downloads to /cache/mise
-claude-launch b --repo … ; ssh … 'time mise use node@22'     # cache hit — no refetch
+claude-launch b --repo … ; ssh … 'time mise use node@22'     # cache hit: no refetch
 
 # fail-safe: no cache volume → per-container install, launch never errors
 claude-launch c --repo … --no-cache ; ssh … 'mise use node@22'   # works, ephemeral
@@ -154,11 +154,11 @@ A single cache **shared across every container on a host** is a shared-fate surf
 one container fetches is reused by the others. This is **acceptable and bounded**, not a new
 hole:
 
-- The containers on a host are **one operator's fleet** — the same trust domain that already
+- The containers on a host are **one operator's fleet**: the same trust domain that already
   shares the git-key broker and the auth volume.
 - **What can enter the cache is still governed by the egress containment**: under `CLAUDE_EGRESS_LOCKDOWN=1`
   only the curated, IP-pinned registries are reachable, and credentials are unreachable
-  during a fetch. The cache holds tool binaries and **public** package archives — **no repo
+  during a fetch. The cache holds tool binaries and **public** package archives: **no repo
   content, no secrets, no PHI** (repos live in per-container `/workspace`, credentials in the
   per-container config volume, neither of which is `/cache`).
 - The cache is **reconstructible**: nothing in it is authoritative. A trim, a `docker volume
@@ -173,11 +173,11 @@ hole:
   physically different hosts is exactly mise's cross-machine caveat¹; a pull-through proxy
  used to offer that, but was retired (docs/legacy-sysbox-broker.md).
 - **No system `.so` libraries.** Inherited from the mise provisioner: the cache holds binaries and language
-  packages, never system libraries — no self-service path provisions those (the worker-tier apt
+  packages, never system libraries: no self-service path provisions those (the worker-tier apt
   path that used to close that gap has been retired; see docs/legacy-sysbox-broker.md).
 
 ---
 
 ¹ mise warns that its data dir is not portable across machines with different OS/arch. Every
-container here runs the same image, so the store is portable across containers **on one host**
-— which is exactly the sharing scope of a docker named volume.
+container here runs the same image, so the store is portable across containers **on one host**,
+which is exactly the sharing scope of a docker named volume.

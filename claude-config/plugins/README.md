@@ -7,7 +7,7 @@ enabled. On container start the entrypoint unions:
 - `enabledPlugins`         → settings.json
 
 Claude Code reads these from `~/.claude/settings.json` and installs/syncs the
-marketplaces and enabled plugins automatically on startup. This is idempotent —
+marketplaces and enabled plugins automatically on startup. This is idempotent:
 already-installed plugins are skipped.
 
 `enabledPlugins` keys are `"<plugin>@<marketplace>"`. The marketplace name is

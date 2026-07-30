@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Unit tests for the surviving resource-sizing surface — NO docker, NO sysbox, NO root.
+# Unit tests for the surviving resource-sizing surface: NO docker, NO sysbox, NO root.
 #
 # The substrate strip removed the K-aware Sysbox-controller-envelope sizing (controller_envelope,
 # CLAUDE_WORKER_*/CLAUDE_CTRL_* profile, resolve_parallel_k, bin/claude-controller-size,
-# and the broker's capacity fail-safe) — that machinery existed solely to size a
+# and the broker's capacity fail-safe), that machinery existed solely to size a
 # controller for K nested Sysbox workers, which no longer exist; see
 # docs/legacy-sysbox-broker.md. What survives, and what this covers, is the
 # non-broker sizing surface in bin/_common.sh:
@@ -20,7 +20,7 @@ trap 'rm -rf "$TMPD"' EXIT
 # --- Hermetic repo root (no .env) ----------------------------------------------------
 # These tests drive the sizing derivations by passing CLAUDE_MEM_LIMIT etc. through the
 # AMBIENT env. But bin/_common.sh sources the repo's .env with `set -a`, and its documented
-# precedence is "ambient env < base .env" — so on any machine that HAS a real .env, the
+# precedence is "ambient env < base .env", so on any machine that HAS a real .env, the
 # repo's own CLAUDE_MEM_LIMIT overrode the value under test and these assertions read the
 # developer's config instead of their input. It passed only on a checkout with no .env (CI),
 # and failed on every configured host (e.g. a 16g .env made the 8g→6144m case read 12288m).
@@ -96,7 +96,7 @@ echo
 echo "== static docker-compose.yml: mem_reservation opt-in (0) + carries pids_limit =="
 
 # The static docker-compose.yml cannot run the 75% derivation, so its
-# reservation must stay OPT-IN (default 0 = disabled) — a fixed default like 3g
+# reservation must stay OPT-IN (default 0 = disabled): a fixed default like 3g
 # would invert against a lowered CLAUDE_MEM_LIMIT and dockerd would reject the
 # container.
 if grep -q 'mem_reservation: ${CLAUDE_MEM_RESERVATION:-0}' "$REPO_ROOT/docker-compose.yml" \

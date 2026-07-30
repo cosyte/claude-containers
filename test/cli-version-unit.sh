@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cli-version-unit.sh — the Claude Code CLI pin is CONSISTENT and above its capability floors.
+# cli-version-unit.sh: the Claude Code CLI pin is CONSISTENT and above its capability floors.
 # Pure-static: NO docker, NO network, NO build.
 #
 # Why this suite exists (CC-CLAUDE-CODE-UPGRADE, 2026-07-12):
@@ -7,13 +7,13 @@
 #   1. THE PIN IS DECLARED IN SIX PLACES AND THEY CAN DISAGREE. `Makefile` passes
 #      `--build-arg CLAUDE_CODE_VERSION=$(CLAUDE_CODE_VERSION)`, which OVERRIDES the
 #      Dockerfile's `ARG` default. So bumping the Dockerfile alone is a NO-OP for
-#      `make build` — the image would silently keep the old CLI. Before this suite the
+#      `make build`: the image would silently keep the old CLI. Before this suite the
 #      repo had already drifted: Dockerfile/Makefile said 2.1.145 while compose-gen and
 #      the README said 2.1.144.
 #
 #   2. THE VERSION SILENTLY SELECTS THE MODEL. This image launches with `--model opus`
 #      (entrypoint exports CLAUDE_MODEL=opus by default), and the `opus` alias resolves
-#      to the LATEST Opus. Opus 4.8 arrived in CLI 2.1.154 — so any pin BELOW that
+#      to the LATEST Opus. Opus 4.8 arrived in CLI 2.1.154, so any pin BELOW that
 #      silently resolves `opus` to Opus 4.7, quietly downgrading every gate agent below
 #      what ADR 0009 requires. A version floor is therefore a correctness gate, not
 #      hygiene: a downgrade must FAIL here, loudly, not degrade in production.
@@ -67,16 +67,16 @@ fi
 echo
 echo "== every other declaration agrees (a disagreement means the build silently ships a different CLI) =="
 
-# Makefile: THE decisive one — it is passed as --build-arg and OVERRIDES the Dockerfile ARG.
+# Makefile: THE decisive one, it is passed as --build-arg and OVERRIDES the Dockerfile ARG.
 mk="$(sed -n 's/^CLAUDE_CODE_VERSION ?= \(.*\)$/\1/p' "$REPO_ROOT/Makefile")"
 [[ "$mk" == "$PINNED" ]] \
-    && ok  "Makefile default ($mk) == Dockerfile ARG — 'make build' really builds the pinned CLI" \
+    && ok  "Makefile default ($mk) == Dockerfile ARG: 'make build' really builds the pinned CLI" \
     || bad "Makefile says '$mk' but Dockerfile ARG says '$PINNED'. The Makefile passes --build-arg, so it WINS: 'make build' would ship '$mk' and the Dockerfile bump would be a NO-OP."
 
 # The Makefile must actually forward it, or the ARG default silently applies instead.
 grep -q -- '--build-arg CLAUDE_CODE_VERSION=$(CLAUDE_CODE_VERSION)' "$REPO_ROOT/Makefile" \
     && ok  "Makefile forwards CLAUDE_CODE_VERSION as a --build-arg" \
-    || bad "Makefile no longer forwards --build-arg CLAUDE_CODE_VERSION (the pin plumbing changed — re-check which value the build actually uses)"
+    || bad "Makefile no longer forwards --build-arg CLAUDE_CODE_VERSION (the pin plumbing changed, re-check which value the build actually uses)"
 
 dc="$(sed -n 's/.*CLAUDE_CODE_VERSION: \${CLAUDE_CODE_VERSION:-\([^}]*\)}.*/\1/p' "$REPO_ROOT/docker-compose.yml")"
 [[ "$dc" == "$PINNED" ]] \
@@ -86,12 +86,12 @@ dc="$(sed -n 's/.*CLAUDE_CODE_VERSION: \${CLAUDE_CODE_VERSION:-\([^}]*\)}.*/\1/p
 cg="$(sed -n 's/.*CLAUDE_CODE_VERSION: "\\\${CLAUDE_CODE_VERSION:-\([^}]*\)}".*/\1/p' "$REPO_ROOT/bin/claude-compose-gen")"
 [[ "$cg" == "$PINNED" ]] \
     && ok  "bin/claude-compose-gen emits the pin ($cg) into generated compose files" \
-    || bad "bin/claude-compose-gen emits '$cg', expected '$PINNED' — generated stacks would build a different CLI"
+    || bad "bin/claude-compose-gen emits '$cg', expected '$PINNED': generated stacks would build a different CLI"
 
 ee="$(sed -n 's/^CLAUDE_CODE_VERSION=\(.*\)$/\1/p' "$REPO_ROOT/.env.example")"
 [[ "$ee" == "$PINNED" ]] \
     && ok  ".env.example ($ee) == the pin" \
-    || bad ".env.example says '$ee', expected '$PINNED' — a fresh copy would pin operators to the wrong CLI"
+    || bad ".env.example says '$ee', expected '$PINNED': a fresh copy would pin operators to the wrong CLI"
 
 grep -q "| \`CLAUDE_CODE_VERSION\` | \`$PINNED\`" "$REPO_ROOT/README.md" \
     && ok  "README documents the pin as $PINNED" \
@@ -108,13 +108,13 @@ echo "== the pin is actually CONSUMED (else it is decorative) =="
 # green while the image shipped whatever npm served that day.
 grep -q 'npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}' "$REPO_ROOT/Dockerfile" \
     && ok  "Dockerfile installs @anthropic-ai/claude-code@\${CLAUDE_CODE_VERSION} (the pin is used, not decorative)" \
-    || bad "Dockerfile no longer installs the pinned version — the ARG is decorative and the image could ship any version"
+    || bad "Dockerfile no longer installs the pinned version: the ARG is decorative and the image could ship any version"
 
 # The build-time guards are what make a stale, gitignored .env fail loudly instead of
 # silently building an old CLI (the Makefile's `-include .env` beats both `?=` and the ARG).
 grep -q 'OPUS48_FLOOR=2.1.154' "$REPO_ROOT/Dockerfile" \
     && ok  "Dockerfile enforces the Opus-4.8 floor at BUILD time (a stale .env fails the build)" \
-    || bad "Dockerfile lost its build-time Opus-4.8 floor — a stale .env would silently build a pre-4.8 CLI and every test would stay green"
+    || bad "Dockerfile lost its build-time Opus-4.8 floor: a stale .env would silently build a pre-4.8 CLI and every test would stay green"
 
 grep -q 'installed CLI reports' "$REPO_ROOT/Dockerfile" \
     && ok  "Dockerfile asserts the INSTALLED binary equals the pin" \
@@ -122,21 +122,21 @@ grep -q 'installed CLI reports' "$REPO_ROOT/Dockerfile" \
 
 grep -q 'image ships the pinned Claude Code CLI' "$REPO_ROOT/test/smoke.sh" \
     && ok  "smoke.sh checks the RUNNING IMAGE against the pin (the live half this static suite cannot do)" \
-    || bad "smoke.sh no longer checks the running image against the pin — nothing proves the built image ships it"
+    || bad "smoke.sh no longer checks the running image against the pin: nothing proves the built image ships it"
 
 echo
-echo "== capability floors (a DOWNGRADE below these degrades behavior silently — it must fail loudly here) =="
+echo "== capability floors (a DOWNGRADE below these degrades behavior silently, it must fail loudly here) =="
 
 if version_ge "$PINNED" "$RC_FLOOR"; then
-    ok "$PINNED >= $RC_FLOOR — Remote Control is supported"
+    ok "$PINNED >= $RC_FLOOR: Remote Control is supported"
 else
-    bad "$PINNED < $RC_FLOOR — Remote Control does not exist in this CLI; the image's whole point breaks"
+    bad "$PINNED < $RC_FLOOR: Remote Control does not exist in this CLI; the image's whole point breaks"
 fi
 
 if version_ge "$PINNED" "$OPUS48_FLOOR"; then
-    ok "$PINNED >= $OPUS48_FLOOR — '--model opus' resolves to Opus 4.8 (ADR 0009)"
+    ok "$PINNED >= $OPUS48_FLOOR: '--model opus' resolves to Opus 4.8 (ADR 0009)"
 else
-    bad "$PINNED < $OPUS48_FLOOR — '--model opus' would SILENTLY resolve to Opus 4.7, downgrading every gate agent below what ADR 0009 requires. This is exactly the defect CC-CLAUDE-CODE-UPGRADE fixed; do not re-introduce it."
+    bad "$PINNED < $OPUS48_FLOOR: '--model opus' would SILENTLY resolve to Opus 4.7, downgrading every gate agent below what ADR 0009 requires. This is exactly the defect CC-CLAUDE-CODE-UPGRADE fixed; do not re-introduce it."
 fi
 
 echo
@@ -146,10 +146,10 @@ echo "== the launch flags the pin exists to protect are still passed =="
 # because the entrypoint always exports a model and both launchers pass --model.
 grep -q 'export CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"' "$REPO_ROOT/entrypoint.sh" \
     && ok  "entrypoint defaults CLAUDE_MODEL=opus (without this, CLI >=2.1.197 would silently run Sonnet 5)" \
-    || bad "entrypoint no longer defaults CLAUDE_MODEL=opus — CLI >=2.1.197 defaults to Sonnet 5, so the fleet would silently switch models"
+    || bad "entrypoint no longer defaults CLAUDE_MODEL=opus: CLI >=2.1.197 defaults to Sonnet 5, so the fleet would silently switch models"
 
 # Assert the DEFAULT, not merely that the string '--model' appears somewhere. Both scripts
-# are reachable with CLAUDE_MODEL unset (a `docker exec`, or any sshd-originated shell — the
+# are reachable with CLAUDE_MODEL unset (a `docker exec`, or any sshd-originated shell, the
 # entrypoint bridges only SSH_AUTH_SOCK into /etc/profile.d, and claude-launch passes a
 # literal empty `-e CLAUDE_MODEL=`). If either falls back to "" it emits NO --model, and
 # post-2.1.197 that silently means Sonnet 5. A bare grep for '--model' would pass in exactly
@@ -158,7 +158,7 @@ for f in bin/claude-session bin/claude-autopilot; do
     if grep -qE '^MODEL="\$\{CLAUDE_MODEL:-opus\}"$' "$REPO_ROOT/$f"; then
         ok "$f defaults MODEL to opus when CLAUDE_MODEL is unset (so it can never silently run Sonnet 5)"
     else
-        bad "$f does not default MODEL to opus — with CLAUDE_MODEL unset it would pass NO --model, and CLI >=2.1.197 defaults to Sonnet 5"
+        bad "$f does not default MODEL to opus: with CLAUDE_MODEL unset it would pass NO --model, and CLI >=2.1.197 defaults to Sonnet 5"
     fi
     grep -q -- '--model' "$REPO_ROOT/$f" \
         && ok  "$f passes --model to the CLI" \
@@ -170,7 +170,7 @@ if grep -q -- '--dangerously-skip-permissions' "$REPO_ROOT/bin/claude-session" \
    && grep -q -- '--remote-control' "$REPO_ROOT/bin/claude-session"; then
     ok "claude-session still combines --dangerously-skip-permissions + --remote-control (the reason the CLI is pinned)"
 else
-    bad "claude-session no longer combines --dangerously-skip-permissions + --remote-control — that combination is the reason this CLI version is pinned"
+    bad "claude-session no longer combines --dangerously-skip-permissions + --remote-control, that combination is the reason this CLI version is pinned"
 fi
 
 echo

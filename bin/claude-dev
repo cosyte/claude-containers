@@ -9,7 +9,7 @@ cd /workspace 2>/dev/null || cd "$HOME"
 CMD="${CLAUDE_DEV_CMD:-}"
 
 if [[ -z "$CMD" ]]; then
-    echo "CLAUDE_DEV_CMD is not set — nothing to run."
+    echo "CLAUDE_DEV_CMD is not set: nothing to run."
     exec bash -l
 fi
 

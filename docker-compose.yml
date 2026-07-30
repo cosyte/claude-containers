@@ -8,7 +8,7 @@
 #   CLAUDE_PROJECT_NAME=myproj SSH_PORT=2200 GIT_REPO_URL=git@github.com:me/x.git \
 #     docker compose up -d
 #
-# `docker compose` can't auto-assign a port from a range — set SSH_PORT
+# `docker compose` can't auto-assign a port from a range: set SSH_PORT
 # explicitly here (the claude-launch script does auto-assign).
 
 services:
@@ -70,7 +70,7 @@ services:
       GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-}
       GIT_COMMITTER_NAME: ${GIT_COMMITTER_NAME:-}
       GIT_COMMITTER_EMAIL: ${GIT_COMMITTER_EMAIL:-}
-      # GitHub PAT — pre-authenticates the `gh` CLI inside the session.
+      # GitHub PAT: pre-authenticates the `gh` CLI inside the session.
       GH_TOKEN: ${GH_TOKEN:-}
       # Pass MCP secrets through from the host .env as needed:
       ROVO_MCP_TOKEN: ${ROVO_MCP_TOKEN:-}
