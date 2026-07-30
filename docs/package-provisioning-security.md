@@ -2,9 +2,10 @@
 
 **Status:** ACCEPTED — 2026-07-11 (PKG-1). This document is both the **threat model** and the
 **decision record** for self-service package provisioning in `claude-containers`. The repo keeps no
-formal `decisions/` directory, so this doc *is* the record (the umbrella-side roadmap
-`operations/roadmaps/claude-containers.md` §II.8 tracks it as the ADR "claude-containers package
-provisioning = curated-allowlist + contained install"). It **gates PKG-2/PKG-3/PKG-5** — nothing
+formal `decisions/` directory, so this doc *is* the record. (The `PKG-*` identifiers come from the
+maintainer's private planning repo, which tracks this as the ADR "claude-containers package
+provisioning = curated-allowlist + contained install"; that repo is not public and nothing here
+requires it — the decisions are stated in full below.) It **gates PKG-2/PKG-3/PKG-5** — nothing
 that lets the agent fetch packages builds until the containment described here is in place.
 (§3.4 and §3.7 below are **RETIRED** — they documented PKG-4's worker-tier `apt` and PKG-6's
 pull-through cache proxy, both retired in SC-5 along with the Sysbox nested-worker-broker substrate
@@ -265,7 +266,8 @@ containment recorded here and inherit it rather than re-deciding it.
 
 ### Source markers
 
-Cited by the roadmap's footnote numbering (`operations/roadmaps/claude-containers.md` §II.11):
+Footnote numbering carried over from the maintainer's private planning notes; the sources
+themselves are public:
 
 - **⁷** Nx malicious-package incident — npm postinstall scripts weaponized local AI coding agents
   (Claude Code, Gemini, Amazon Q) for recon + exfiltration of tokens, SSH keys, env, wallets.

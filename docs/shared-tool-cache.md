@@ -5,8 +5,8 @@ toolchains and package downloads are **reused across container restarts and acro
 workers**. It builds directly on the toolchain provisioner in
 [`docs/toolchain-provisioning.md`](toolchain-provisioning.md) (PKG-2) and the containment in
 [`docs/package-provisioning-security.md`](package-provisioning-security.md) (PKG-1), and
-**inherits, never re-decides, them**. The umbrella roadmap
-`operations/roadmaps/claude-containers.md` §II.8 tracks this as PKG-3.
+**inherits, never re-decides, them**. (`PKG-3` is an identifier from the maintainer's private
+planning repo; the design record is this file.)
 
 ## What shipped
 

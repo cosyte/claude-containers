@@ -3,8 +3,8 @@
 **Status:** ACCEPTED — 2026-07-11 (PKG-2). This is the design record for how a session provisions
 language toolchains and prebuilt CLIs. It builds directly on the containment in
 [`docs/package-provisioning-security.md`](package-provisioning-security.md) (PKG-1) and **inherits,
-never re-decides, it**. The umbrella roadmap `operations/roadmaps/claude-containers.md` §II.8 tracks
-this as PKG-2.
+never re-decides, it**. (`PKG-2` is an identifier from the maintainer's private planning repo; the
+design record is this file, and nothing here depends on reading that.)
 
 ## What shipped
 

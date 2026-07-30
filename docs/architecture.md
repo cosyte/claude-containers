@@ -249,11 +249,11 @@ provide Remote Control; RC is the product, so telemetry stays on.
 ## Retired: the nested-Sysbox worker-broker substrate (CC-1 through CC-7)
 
 An earlier revision of this repo ran a nested-Sysbox "worker broker" substrate so a
-controller container could spawn autonomous nested `/work-on` workers: a root-owned
+controller container could spawn autonomous nested workers: a root-owned
 broker (CC-2) that launched hardened nested workers on an inner `dockerd` under Sysbox
 (CC-1), K-aware resource sizing (CC-3), a worker-lifecycle run/reap contract (CC-4),
-disk-safety floors + GC (CC-5), a controller mode wiring it to the umbrella's
-lease/scheduler/bump-worker control plane (CC-6), and per-worker spend/capacity
+disk-safety floors + GC (CC-5), a controller mode wiring it to an external
+lease/scheduler control plane (CC-6), and per-worker spend/capacity
 observability (CC-7) — plus the PKG-4 (curated worker apt) and PKG-6 (pull-through
 cache proxy) supply-chain hardening built on top of it.
 

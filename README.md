@@ -9,6 +9,13 @@ Auth is your Claude **Max** subscription via OAuth. No API keys — the entrypoi
 hard-fails if `ANTHROPIC_API_KEY` is set so you never accidentally bill per
 token.
 
+> **Unofficial project.** Not affiliated with, endorsed by, or supported by
+> Anthropic. "Claude" and "Claude Code" are Anthropic's trademarks and are used
+> here only to say what this runs. It installs the published
+> `@anthropic-ai/claude-code` CLI at a pinned version; your use of Claude Code
+> and of your Claude subscription remains subject to Anthropic's own terms.
+> Report Claude Code bugs to Anthropic, not here.
+
 > **Substrate change (2026-07-12).** This repo used to run a nested-Sysbox
 > worker-broker path (`--broker`/`--sysbox`, controller dispatch, curated worker
 > `apt`, a pull-through cache proxy — the `CC-*` and `PKG-4`/`PKG-6` work) so a
@@ -704,3 +711,16 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
 
 See [docs/architecture.md](docs/architecture.md#acceptance) for how each spec
 acceptance criterion maps to this implementation and how to verify it.
+
+## Contributing, security, licence
+
+- **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) — the gates are
+  `make lint` + `npm test` (both Docker-free, both what CI runs); `make smoke`
+  builds a real image and is a local gate only.
+- **Security:** [SECURITY.md](SECURITY.md). Report privately, never in an issue.
+  Read the model first — **a container is not a security boundary against a fully
+  weaponized agent**, and several plausible reports are documented non-goals.
+- **Licence:** [MIT](LICENSE).
+- **Support:** none promised. This is self-hosted infrastructure published as-is
+  in case it is useful; issues are read, but there is no SLA and no release
+  cadence — `main` is the version.

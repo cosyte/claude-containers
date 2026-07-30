@@ -183,8 +183,8 @@ generator warns about: `make build`, `make login`, `~/.ssh/authorized_keys`,
 
 **Scenarios + multiple stacks (per-stack env files)**
 ```
-./bin/claude-compose-gen --scenario /opt/homelab/claude/cosyte/cosyte.conf
-./bin/claude-compose-gen --scenario /opt/homelab/claude/personal/personal.conf
+./bin/claude-compose-gen --scenario /srv/claude/work/work.conf
+./bin/claude-compose-gen --scenario /srv/claude/personal/personal.conf
 ```
 A **scenario `.conf`** is the generator's own flags PERSISTED — one
 `--flag [value]` per line, `#` comments, blank lines skipped; the value is the
@@ -192,17 +192,17 @@ literal rest-of-line so spaces/`;`/`$`/`=` need no quoting (see
 `scenarios/example.conf.example`). This fixes the old foot-gun that per-repo
 flags lived only on the CLI and got silently dropped on regen. Flags in the file
 apply first; CLI flags after `--scenario` override a scalar or append to a
-repeatable (`--scenario cosyte.conf --active newrepo`). `--scenario` takes a
+repeatable (`--scenario work.conf --active newrepo`). `--scenario` takes a
 path; a bare name resolves under `CLAUDE_SCENARIOS_DIR`. Scenario files are
 deployment config — keep them **with the compose, outside this repo**.
 
-To run **two independent stacks on one host** (e.g. a `cosyte/*` org stack and a
-`NSchatz/*` personal stack), give each its own dir + `.conf` + `.env`:
+To run **two independent stacks on one host** (e.g. an `your-org/*` work stack and a
+`you/*` personal stack), give each its own dir + `.conf` + `.env`:
 ```
-/opt/homelab/claude/cosyte/{cosyte.conf,.env,docker-compose.yml}    # ports 2200-2249
-/opt/homelab/claude/personal/{personal.conf,.env,docker-compose.yml} # ports 2250-2299
-docker compose -f /opt/homelab/claude/cosyte/docker-compose.yml up -d
-docker compose -f /opt/homelab/claude/personal/docker-compose.yml up -d
+/srv/claude/work/{work.conf,.env,docker-compose.yml}          # ports 2200-2249
+/srv/claude/personal/{personal.conf,.env,docker-compose.yml}  # ports 2250-2299
+docker compose -f /srv/claude/work/docker-compose.yml up -d
+docker compose -f /srv/claude/personal/docker-compose.yml up -d
 ```
 `--env-file <path>` (usually set inside the `.conf`) is sourced ON TOP of the
 repo `.env` at generation time (SSH port range, image, resources), and — because

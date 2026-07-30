@@ -9,7 +9,8 @@ preservation branch and a preservation tag on this repo:
 - **Branch:** [`legacy/sysbox-broker-2026-07-12`](https://github.com/cosyte/claude-containers/tree/legacy/sysbox-broker-2026-07-12)
 - **Tag:** `legacy-sysbox-broker-2026-07-12` (annotated, points at the same commit)
 - **Commit at the freeze:** [`a334902`](https://github.com/cosyte/claude-containers/commit/a334902) — `feat: durable worker image + compose-gen --broker (#25)`
-- **Umbrella pointer at the freeze:** `cosyte/cosyte@8f9d664` (SC plan + ADR 0013 landed 2026-07-12)
+- **Consumer pointer at the freeze:** recorded in the maintainer's private planning repo (not
+  public); nothing on this branch depends on it.
 
 ## What's frozen on the branch
 
@@ -136,7 +137,7 @@ was unreachable even in principle.
   couldn't `docker ps` or `docker logs` into workers (root-only), so debugging
   a stuck worker was guess-and-tail-the-broker. Subagent stdout returns to the
   parent directly; `SendMessage` reaches a running subagent.
-- **Cold-start cost was real.** Each broker worker cloned the umbrella (or
+- **Cold-start cost was real.** Each broker worker cloned the consuming repo (or
   hydrated from a tarball), warmed `mise`, installed deps. Subagents inherit
   the warm tree at zero marginal cost.
 - **Coordinator ⇄ worker was one-way with the broker, two-way with subagents.**
@@ -146,10 +147,9 @@ was unreachable even in principle.
   Remote Control ≠ the multi-tenant unattended-fleet scale the broker was
   designed for.
 
-Full rationale, decisions, and reversibility contract: umbrella
-`operations/plans/SUBAGENT-COCKPIT-PLAN.md` and ADR 0013
-(`documentation/decisions/0013-subagent-first-cockpit.md`), which supersedes ADR
-0011 and amends the substrate clause of ADR 0010.
+The full rationale, decision record and reversibility contract live in the maintainer's private
+planning repo (the ADR that superseded this substrate's own ADR). They are **not public**; what a
+reader of this repo needs is above, and the frozen implementation is on the branch named at the top.
 
 ## How to check out the frozen state
 
