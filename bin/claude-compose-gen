@@ -86,7 +86,7 @@
 #     --mount <map>     mount an EXISTING named volume into a repo's service at an
 #                       extra path. Format REPO=VOLUME:/PATH[:ro] (repeatable).
 #                       Use it to give one session read access to another's
-#                       checkout, e.g. --mount cosyte=claude-ws-super:/super:ro
+#                       checkout, e.g. --mount myrepo=claude-ws-shared:/shared:ro
 #                       The volume is declared `external: true` (it belongs to
 #                       another stack), so `up` fails fast if it doesn't exist and
 #                       a `down -v` here can never delete it. Prefer :ro — two live
@@ -211,7 +211,7 @@ while [[ $# -gt 0 ]]; do
         --browser)         BROWSER_RAW+=("$2"); shift 2 ;;
         --docker)          DOCKER_RAW+=("$2"); shift 2 ;;
         --broker|--worker-tarball)
-            die "claude-compose-gen: $1 was removed in SC-5 (legacy Sysbox/broker substrate retired; see docs/legacy-sysbox-broker.md)" ;;
+            die "claude-compose-gen: $1 was removed (the legacy Sysbox worker-broker substrate is retired; see docs/legacy-sysbox-broker.md)" ;;
         --marketplace)     MKTS_RAW+=("$2"); shift 2 ;;
         --plugin)          PLUGINS_RAW+=("$2"); shift 2 ;;
         --mount)           MOUNTS_RAW+=("$2"); shift 2 ;;

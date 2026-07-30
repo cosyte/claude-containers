@@ -1,9 +1,8 @@
 # Legacy: Sysbox nested-broker path (frozen 2026-07-12)
 
 The nested-Sysbox worker-broker substrate — the CC-1 through CC-7 chain plus the
-PKG-1 through PKG-6 supply-chain hardening built on top of it — was retired as
-the parallel-`/work-on` substrate on **2026-07-12** in favor of **Claude Code
-subagents in per-worktree git worktrees**. The code is frozen (unchanged) on a
+PKG-1 through PKG-6 supply-chain hardening built on top of it — was retired on **2026-07-12** in favor of **Claude Code subagents in per-worktree git
+worktrees**. It existed to run parallel autonomous build workers for one consuming repo. The code is frozen (unchanged) on a
 preservation branch and a preservation tag on this repo:
 
 - **Branch:** [`legacy/sysbox-broker-2026-07-12`](https://github.com/cosyte/claude-containers/tree/legacy/sysbox-broker-2026-07-12)
@@ -95,9 +94,9 @@ proxy) only.
   writes to and no entrypoint path starts**. `CLAUDE_REAPER_*` went with it. Note this is
   *not* `bin/claude-disk-gc`, which survives: disk-gc reclaims real Docker layers on the host
   and has a reason independent of the broker.
-- **The autopilot's `/next` default — REMOVED; `CLAUDE_AUTOPILOT_CMD` is now required.**
-  `/next` was the cosyte cockpit's continuous-build command, and this is a *generic* image
-  that bakes no such skill (`claude-config/skills/` ships only `example-skill` and
+- **The autopilot's default command — REMOVED; `CLAUDE_AUTOPILOT_CMD` is now required.**
+  The default named a continuous-build slash command that existed only in the maintainer's
+  own repo, and this is a *generic* image that bakes no such skill (`claude-config/skills/` ships only `example-skill` and
   `frontend-debugging`), so on almost every container the default resolved to nothing. The
   rule is now **no command, no run**: the autopilot refuses to start without one, and a queue
   consumer with no fallback command *idles* on an empty queue rather than inventing work.
@@ -106,7 +105,7 @@ proxy) only.
   > command is **not an error** to `claude -p`. It returns a zero-turn *success*:
   > `{"subtype":"success","is_error":false,"num_turns":0,"result":"Unknown command: /typo",`
   > `"total_cost_usd":0}`, exit **0** — the model is never invoked. The autopilot's success
-  > check (`exit 0` + `is_error != true`) therefore scored the old `/next` default as a
+  > check (`exit 0` + `is_error != true`) therefore scored that old default as a
   > **healthy run**, every interval, forever: `fails` stayed 0 so backoff never engaged, each
   > cycle logged `run #N` and `cost: $0`, and a **queued task** would be filed to `done/` —
   > silently marking work that never ran as done, on the very `claude-scm-observer` → queue
@@ -114,7 +113,7 @@ proxy) only.
   > literally nothing is the worst failure this script can have. CC-BINS therefore also makes
   > a zero-turn `Unknown command:` result a **FAILURE** (both conditions, so a legitimate run
   > that merely *discusses* an unknown command cannot trip it) — which closes the whole class,
-  > not just `/next`: an operator typo, a renamed skill, or a workspace whose `.claude/` never
+  > not just that one command: an operator typo, a renamed skill, or a workspace whose `.claude/` never
   > cloned now fails loudly instead of spinning.
 
 **Also removed: the `WITH_DOCKER` "controller" image variant** (`make build-controller`,

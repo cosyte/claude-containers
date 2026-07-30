@@ -33,7 +33,7 @@ apply, so the install store is safe to share.
 claude-launch myproj --repo …              # cache ON by default (claude-cache at /cache)
 claude-launch myproj --repo … --cache teamcache   # a differently-named shared volume
 claude-launch myproj --repo … --no-cache   # opt out → per-container installs
-claude-compose-gen --out stack.yml --org cosyte …          # one shared cache across the stack
+claude-compose-gen --out stack.yml --org your-org …          # one shared cache across the stack
 claude-compose-gen --out stack.yml --no-cache …            # per-container installs
 ```
 

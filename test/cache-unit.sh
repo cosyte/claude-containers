@@ -222,7 +222,7 @@ echo "== claude-compose-gen: emits the shared cache, honors --no-cache =="
 # ============================================================================
 GEN="$REPO_ROOT/bin/claude-compose-gen"
 OUT="$(mktemp -u)"; trap 'rm -f "$OUT" "$RANFILE"' EXIT
-run_gen() { "$GEN" --out "$OUT" "$@" cosyte/repo-a cosyte/repo-b >/dev/null 2>&1; }
+run_gen() { "$GEN" --out "$OUT" "$@" acme/repo-a acme/repo-b >/dev/null 2>&1; }
 
 if run_gen; then
   { grep -q 'claude-cache:/cache' "$OUT" && grep -Eq '^  claude-cache:' "$OUT" && grep -q 'name: claude-cache' "$OUT"; } \

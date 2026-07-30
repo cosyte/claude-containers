@@ -47,7 +47,7 @@ for _v in "${RETIRED_VARS[@]}"; do
     [[ -n "${!_v:-}" ]] && _retired_set+=("$_v")
 done
 if (( ${#_retired_set[@]} > 0 )); then
-    log "WARNING: these env vars were RETIRED in SC-5 and are now IGNORED: ${_retired_set[*]}"
+    log "WARNING: these env vars were RETIRED with the worker-broker substrate and are now IGNORED: ${_retired_set[*]}"
     log "WARNING: the Sysbox worker-broker, PKG-4 curated apt, and the PKG-6 pull-through"
     log "WARNING: cache proxy were removed — see docs/legacy-sysbox-broker.md."
     for _v in "${_retired_set[@]}"; do
@@ -84,7 +84,7 @@ unset _v _retired_set RETIRED_VARS
 # clean: a stale line must never brick a container.)
 case "${CLAUDE_CONTROLLER:-0}" in
     1|true|yes|on)
-        die "CLAUDE_CONTROLLER was REMOVED in CC-BINS. It had been a byte-identical pass-through
+        die "CLAUDE_CONTROLLER was REMOVED. It had been a byte-identical pass-through
        to CLAUDE_AUTOPILOT=1 ever since SC-5 retired the Sysbox nested-worker-broker
        dispatch tier it existed to drive (see docs/legacy-sysbox-broker.md). Set
        CLAUDE_AUTOPILOT=1 instead — it is the same loop, and always was." ;;
@@ -500,7 +500,7 @@ if echo "$EXISTING_SETTINGS" \
     | jq -e --arg stale "$STALE_HOOK_CMD" \
         '[.hooks.SessionStart // [] | .[] | .hooks // [] | .[] | select((.command // "") == $stale)] | length > 0' \
         >/dev/null 2>&1; then
-    log "Migrated settings.json: removed the stale '$STALE_HOOK_CMD' SessionStart hook (CLAUDE.d fragment loader, removed in SC-5)"
+    log "Migrated settings.json: removed the stale '$STALE_HOOK_CMD' SessionStart hook (CLAUDE.d fragment loader, since removed)"
 fi
 chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
 if echo "$EXISTING_SETTINGS" | jq -e '.env // {} | (.DISABLE_TELEMETRY // .DO_NOT_TRACK // .CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) != null' >/dev/null 2>&1; then
@@ -917,9 +917,9 @@ trap shutdown TERM INT
 # session reaches it long before the process count suggests — fork returns EAGAIN and
 # the probe fails against a tmux that is perfectly alive. Treating that one failure as
 # "tmux died" tore a healthy container down, and the restart policy then brought it back
-# with an empty session, losing the user's work (cosyte, 2026-07-26: the entrypoint
-# logged `fork: retry: Resource temporarily unavailable` four seconds after it reported
-# "tmux session ended"). Retrying costs a few extra seconds when tmux is genuinely gone;
+# with an empty session, losing the user's work. Observed twice in 16h on a real host:
+# the entrypoint logged `fork: retry: Resource temporarily unavailable` four seconds
+# after it reported "tmux session ended". Retrying costs a few extra seconds when tmux is genuinely gone;
 # not retrying costs a live session on any transient resource blip.
 LIVENESS_MAX_FAILURES="${CLAUDE_LIVENESS_MAX_FAILURES:-3}"
 liveness_failures=0

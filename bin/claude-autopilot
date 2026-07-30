@@ -6,18 +6,18 @@
 # Mirrors claude-dev's "run, then drop to a shell so the SSH/tmux window stays
 # usable" contract.
 #
-# CLAUDE_AUTOPILOT_CMD IS REQUIRED — it has NO DEFAULT (CC-BINS). It used to default
-# to `/next`, the cosyte cockpit's continuous-build-out command. That default was wrong
-# twice over. This image is a GENERIC container: it bakes no `/next` (see
+# CLAUDE_AUTOPILOT_CMD IS REQUIRED — it has NO DEFAULT. It used to default to a slash
+# command that only existed in the maintainer's own repo. That default was wrong twice
+# over. This image is a GENERIC container: it bakes no such command (see
 # claude-config/skills — only example-skill and frontend-debugging ship), and the
 # workspace it is pointed at is arbitrary. So on almost every container the default
 # resolved to NOTHING — and, as the run loop below documents in detail, `claude -p`
 # reports an unknown slash command as a zero-turn SUCCESS (exit 0, is_error:false),
 # which this loop used to count as a healthy run forever: a container that looks alive
-# and does nothing. And where `/next` *does* resolve (the cosyte umbrella) it is a skill
-# whose own contract reads "A human types this; it is not an autopilot loop and must not
-# become one" — so the default either quietly did nothing or violated the contract of the
-# one thing it named. Now: no command, no run. Fail loudly, never silently.
+# and does nothing. And in the one workspace where it *did* resolve, it was an
+# explicitly human-driven command whose own contract said it must not be looped — so the
+# default either quietly did nothing or violated the contract of the one thing it named.
+# Now: no command, no run. Fail loudly, never silently.
 #
 # Selected by CLAUDE_AUTOPILOT=1 (the entrypoint runs this as the main pane
 # instead of claude-session, and skips the Remote Control watchdog).
@@ -88,8 +88,8 @@ esac
 if [[ -z "$PROMPT" && "$QUEUE" != 1 ]]; then
     echo "[autopilot] ERROR: CLAUDE_AUTOPILOT_CMD is not set, and there is nothing else to run."
     echo "[autopilot]"
-    echo "[autopilot] It has NO DEFAULT (it used to default to '/next', a cosyte-cockpit command"
-    echo "[autopilot] this generic image does not ship — see this script's header)."
+    echo "[autopilot] It has NO DEFAULT (it used to default to a command this generic image"
+    echo "[autopilot] does not ship — see this script's header)."
     echo "[autopilot] Whatever you set it to must be a command YOUR workspace defines: an unknown"
     echo "[autopilot] slash command does not error, it just quietly runs nothing."
     echo "[autopilot]"
@@ -197,7 +197,7 @@ while :; do
         task_path=""
         # Pure queue consumer: queue on, nothing pending, and no fallback command. IDLE.
         # Never synthesize a prompt to fill the gap — firing an invented command headless
-        # under --dangerously-skip-permissions is precisely what the old `/next` default did.
+        # under --dangerously-skip-permissions is precisely what the old default command did.
         # This burns no quota and is not a "run", so it does not advance the run counter or
         # touch the failure backoff.
         if [[ -z "$RUN_PROMPT" ]]; then

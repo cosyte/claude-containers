@@ -96,11 +96,11 @@ while [[ $# -gt 0 ]]; do
         # what makes an inner daemon safe), but it is no longer a flag of its own: --docker
         # selects it. Point there rather than dying with a dead-end "removed" message.
         --sysbox)
-            die "claude-launch: --sysbox was removed in SC-5. To run containers inside a
+            die "claude-launch: --sysbox was removed (the nested worker-broker substrate). To run containers inside a
        session, use --docker — it selects --runtime=sysbox-runc for you.
        (The worker broker it used to serve is gone: docs/legacy-sysbox-broker.md.)" ;;
         --broker|--worker-tarball)
-            die "claude-launch: $1 was removed in SC-5 (legacy Sysbox/broker substrate retired; see docs/legacy-sysbox-broker.md)" ;;
+            die "claude-launch: $1 was removed (the legacy Sysbox worker-broker substrate is retired; see docs/legacy-sysbox-broker.md)" ;;
         -h|--help)     usage 0 ;;
         -*)            die "unknown option: $1 (try --help)" ;;
         *)             [[ -z "$PROJECT" ]] && PROJECT="$1" || die "unexpected arg: $1"; shift ;;
