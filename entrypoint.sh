@@ -22,12 +22,12 @@ log()  { echo "[entrypoint] $*"; }
 die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
 asclaude() { gosu "$CLAUDE_USER" env CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" "$@"; }
 
-# --- 0. Refuse retired broker/Sysbox env (SC-5) -------------------------------
+# --- 0. Refuse retired broker/Sysbox env -------------------------------
 # bin/claude-launch and bin/claude-compose-gen already REFUSE the removed --broker /
 # --sysbox / --worker-tarball flags. The env vars those flags used to set are now simply
 # UNREAD, and silence there is not safe: an operator running CLAUDE_CACHE_PROXY_HOST with
 # CLAUDE_EGRESS_LOCKDOWN=1 had a single audited egress choke point (public npm blocked, all
-# package traffic through their proxy). Post-SC-5 the var means nothing, the firewall
+# package traffic through their proxy). Since the strip the var means nothing, the firewall
 # composes its default allowlist, and registry.npmjs.org is directly reachable again — a
 # real, silent loosening of their posture. So say so, loudly, at boot.
 #
@@ -48,7 +48,7 @@ for _v in "${RETIRED_VARS[@]}"; do
 done
 if (( ${#_retired_set[@]} > 0 )); then
     log "WARNING: these env vars were RETIRED with the worker-broker substrate and are now IGNORED: ${_retired_set[*]}"
-    log "WARNING: the Sysbox worker-broker, PKG-4 curated apt, and the PKG-6 pull-through"
+    log "WARNING: the Sysbox worker-broker, the curated apt tier, and the pull-through"
     log "WARNING: cache proxy were removed — see docs/legacy-sysbox-broker.md."
     for _v in "${_retired_set[@]}"; do
         case "$_v" in
@@ -65,10 +65,10 @@ if (( ${#_retired_set[@]} > 0 )); then
 fi
 unset _v _retired_set RETIRED_VARS
 
-# --- 0b. Refuse the retired CLAUDE_CONTROLLER mode (CC-BINS) ------------------
-# SC-5 deleted the broker-dispatch tier this mode existed to drive, leaving
+# --- 0b. Refuse the retired CLAUDE_CONTROLLER mode ------------------
+# The substrate strip deleted the broker-dispatch tier this mode existed to drive, leaving
 # bin/claude-controller a byte-identical pass-through to claude-autopilot — a mode whose only
-# job was selecting another mode. CC-BINS removed it.
+# job was selecting another mode, so it was removed.
 #
 # This DIES where §0 above merely WARNS, and the difference is the point. Those vars are inert
 # leftovers in a .env: nothing reads them, so warning is enough and refusing to boot on a stale
@@ -80,12 +80,12 @@ unset _v _retired_set RETIRED_VARS
 #
 # Fails FAST — here, not at mode selection ~500 lines down — so a `--restart unless-stopped`
 # container doesn't crashloop through sshd, volume chown and a repo clone before saying why.
-# (CLAUDE_CONTROLLER=0, which every pre-CC-BINS .env.example carries, matches nothing and boots
+# (CLAUDE_CONTROLLER=0, which every older .env.example carries, matches nothing and boots
 # clean: a stale line must never brick a container.)
 case "${CLAUDE_CONTROLLER:-0}" in
     1|true|yes|on)
         die "CLAUDE_CONTROLLER was REMOVED. It had been a byte-identical pass-through
-       to CLAUDE_AUTOPILOT=1 ever since SC-5 retired the Sysbox nested-worker-broker
+       to CLAUDE_AUTOPILOT=1 ever since the strip retired the Sysbox nested-worker-broker
        dispatch tier it existed to drive (see docs/legacy-sysbox-broker.md). Set
        CLAUDE_AUTOPILOT=1 instead — it is the same loop, and always was." ;;
 esac
@@ -465,10 +465,10 @@ EXISTING_SETTINGS='{}'
 # were present, drop the cached GrowthBook flags + statsig cache so the next
 # Claude run re-fetches them and RC eligibility resolves correctly.
 #
-# Self-heal 2 (SC-5): drop the stale `claude-md-fragments` SessionStart hook.
-# Images built before SC-5 baked a settings.json whose only content was a
+# Self-heal 2: drop the stale `claude-md-fragments` SessionStart hook.
+# Older images baked a settings.json whose only content was a
 # SessionStart hook invoking /usr/local/bin/claude-md-fragments (the CLAUDE.d
-# per-mode fragment loader). SC-5 deleted that binary, but the hook was already
+# per-mode fragment loader). That binary was deleted, but the hook was already
 # persisted into every per-project config VOLUME — and this merge lets existing
 # user settings win, so it would survive forever and fire an ENOENT at every
 # session start. Same class of residue, same fix, as the telemetry strip above.
@@ -753,7 +753,7 @@ log "Model               : $CLAUDE_MODEL (override with CLAUDE_MODEL; 'default' 
 #                           there is no Remote Control link, so the RC watchdog is
 #                           skipped.
 # Either way SSH attaches to the live tmux pane. The third mode, CLAUDE_CONTROLLER, was
-# removed in CC-BINS and is refused up in §0b — long before we get here.
+# removed and is refused up in §0b — long before we get here.
 case "${CLAUDE_AUTOPILOT:-0}" in
     1|true|yes|on) CLAUDE_MODE=autopilot;   MAIN_PANE_CMD=/usr/local/bin/claude-autopilot ;;
     *)             CLAUDE_MODE=interactive; MAIN_PANE_CMD=/usr/local/bin/claude-session ;;

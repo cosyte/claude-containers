@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# cache-unit.sh — pure-static + function-level tests for the PKG-3 shared tool cache.
+# cache-unit.sh — pure-static + function-level tests for the shared tool cache.
 # NO docker, NO network, NO image build — safe for CI / scripts/verify.sh.
 #
-# PKG-3 points mise's install store + the cargo/go/npm/uv/pip caches at ONE shared /cache
+# The shared cache points mise's install store + the cargo/go/npm/uv/pip caches at ONE shared /cache
 # volume, so a toolchain/CLI provisioned by one container is a cache hit for the next and
 # for parallel workers, bounded by a fail-safe trim. The LIVE proof (two sessions reuse a
 # cached install, real trim reclaim, no cross-worker corruption, a missing cache degrades
@@ -32,7 +32,7 @@ PASS=0 FAIL=0
 ok()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 
-echo "PKG-3 shared tool cache"
+echo "shared tool cache"
 
 # ============================================================================
 echo "== Dockerfile: caches relocated to the shared /cache tree, fail-safe =="
@@ -94,7 +94,7 @@ got="$(CLAUDE_CACHE_SIZE_MIB_OVERRIDE=4096 dir_size_mib /nonexistent 2>/dev/null
 [[ "$got" == "4096" ]] \
   && ok "dir_size_mib honors the CLAUDE_CACHE_SIZE_MIB_OVERRIDE test seam" \
   || bad "dir_size_mib override seam broken (got '$got')"
-if dir_size_mib "/no/such/cache/path/PKG-3" >/dev/null 2>&1; then
+if dir_size_mib "/no/such/cache/path/nope" >/dev/null 2>&1; then
   bad "dir_size_mib must fail on a missing path (fail-soft: unknown size ⇒ do not trim)"
 else
   ok "dir_size_mib fails on a missing path (unknown size ⇒ trim is skipped)"

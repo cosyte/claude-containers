@@ -1,21 +1,21 @@
 # claude-containers package provisioning = curated-allowlist + contained install
 
-**Status:** ACCEPTED — 2026-07-11 (PKG-1). This document is both the **threat model** and the
+**Status:** ACCEPTED — 2026-07-11. This document is both the **threat model** and the
 **decision record** for self-service package provisioning in `claude-containers`. The repo keeps no
 formal `decisions/` directory, so this doc *is* the record. (The `PKG-*` identifiers come from the
 maintainer's private planning repo, which tracks this as the ADR "claude-containers package
 provisioning = curated-allowlist + contained install"; that repo is not public and nothing here
-requires it — the decisions are stated in full below.) It **gates PKG-2/PKG-3/PKG-5** — nothing
+requires it — the decisions are stated in full below.) It **gates the mise provisioner, the shared cache and the manifest hardening** — nothing
 that lets the agent fetch packages builds until the containment described here is in place.
-(§3.4 and §3.7 below are **RETIRED** — they documented PKG-4's worker-tier `apt` and PKG-6's
-pull-through cache proxy, both retired in SC-5 along with the Sysbox nested-worker-broker substrate
+(§3.4 and §3.7 below are **RETIRED** — they documented the worker-tier `apt` provisioner and the
+pull-through cache proxy, both retired along with the Sysbox nested-worker-broker substrate
 they were scoped to — see [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md). Read §3.1, §3.2,
 §3.3, §3.5 and §3.6 as the live containment rules.)
 
-**Scope of what shipped in PKG-1:** the opt-in `CLAUDE_EGRESS_PACKAGES` profile in
+**Scope of what shipped here:** the opt-in `CLAUDE_EGRESS_PACKAGES` profile in
 `bin/claude-egress-firewall` (an additive, IP-pinned registry allowlist) plus this threat model.
-Everything downstream — `mise` (PKG-2), the shared cache (PKG-3),
-`--ignore-scripts` + pinned manifests (PKG-5) — inherits the containment stated here.
+Everything downstream — `mise`, the shared cache,
+`--ignore-scripts` + pinned manifests — inherits the containment stated here.
 
 ---
 
@@ -99,9 +99,9 @@ the curated set.
 container refuses; a missing registry is an inconvenience, an open channel is a breach. (Debian/apt
 mirrors — `deb.debian.org`/`security.debian.org` — are **deliberately not here**; see §4.)
 
-### 3.2 Install-time scripts OFF by default — **shipped (PKG-5)**
+### 3.2 Install-time scripts OFF by default — **shipped**
 
-Agent-initiated installs run with lifecycle hooks disabled. **PKG-5 bakes `ignore-scripts=true` into
+Agent-initiated installs run with lifecycle hooks disabled. **The manifest hardening bakes `ignore-scripts=true` into
 the `claude` user's `~/.npmrc`** — npm, pnpm, and yarn(1.x) all read it, so an agent-run `npm i` /
 `pnpm i` in `/workspace` does not execute a dependency's pre/post-install scripts. It is scoped to the
 **user** config on purpose: the image's own pinned `npm install -g` layers run **as root, before** this,
@@ -141,12 +141,12 @@ provide this and provisioning **inherits, never bypasses** them:
 secrets being *committed*, not exfiltrated over the network. It is not what closes the fetch-window
 exfil path; the two controls above are.)
 
-### 3.4 Install-then-relock — a narrow provisioning window — RETIRED (SC-5)
+### 3.4 Install-then-relock — a narrow provisioning window — RETIRED
 
-**This rule no longer holds and nothing on `main` implements it.** It described PKG-4's brokered
+**This rule no longer holds and nothing on `main` implements it.** It described the brokered
 `apt`, which opened the Debian mirrors for the install window and re-locked egress afterward
-(`bin/claude-apt-provision` + `CLAUDE_EGRESS_APT`). PKG-4 and PKG-6 were retired with the
-Sysbox/broker substrate in `SC-5` (§3.7), and with them the only code that ever opened and
+(`bin/claude-apt-provision` + `CLAUDE_EGRESS_APT`). Both were retired with the
+Sysbox/broker substrate (§3.7), and with them the only code that ever opened and
 re-locked a window. `grep -rn -i 'relock\|re-lock' bin/ entrypoint.sh` now returns nothing.
 
 **The true posture on `main`:** `bin/claude-egress-firewall` is a **one-shot boot script** — it runs
@@ -176,18 +176,18 @@ The dry-run seam (`CLAUDE_EGRESS_PRINT_HOSTS=1`) prints the composed allowlist a
 touching iptables, so the host-selection change the profile makes is verifiable in CI with no
 `NET_ADMIN` and no live firewall.
 
-### 3.6 Reproducible, pinned manifests — **shipped (PKG-5)**
+### 3.6 Reproducible, pinned manifests — **shipped**
 
 Non-reproducible installs are their own supply-chain risk: an unpinned `latest` resolves to whatever
 the registry serves *now* (possibly a freshly-compromised release), and a manifest without a lockfile
-can drift between the agent's install and a later one. PKG-5 adds two reproducibility controls:
+can drift between the agent's install and a later one. The manifest hardening adds two reproducibility controls:
 
 - **mise lockfile determinism.** The image bakes `lockfile = true` into the **global** mise config
   (`~/.config/mise/config.toml`), so a committed `/workspace/mise.lock` is authoritative: `mise
   install`/`use` records and reuses the exact locked tool versions, and a pinned lock reinstalls
-  identical versions — offline, from the PKG-3 shared cache, with no registry round-trip. Global config
+  identical versions — offline, from the shared cache, with no registry round-trip. Global config
   is always trusted (it is mise's own, not a repo `mise.toml`), so this does **not** widen the
-  `/workspace`-only config-trust decision from PKG-2.
+  `/workspace`-only config-trust decision from the mise provisioner.
 - **`claude-deps-check` — an advisory pin linter.** Scans a repo's `mise.toml` (`[tools]`) and
   `package.json` dependency maps for unpinned / `latest` / wildcard / mutable-tag-alias specs (a
   prerelease pin like `1.2.3-rc.0` is correctly treated as pinned). Advisory by default (warns, exit 0 —
@@ -201,13 +201,13 @@ can drift between the agent's install and a later one. PKG-5 adds two reproducib
 Neither is tamper-proof on its own (see the CVE-2025-69263 lockfile-integrity caveat in §3.2); they
 reduce the *drift* and *unpinned-resolution* surface, and compose with the egress + scripts-off layers.
 
-### 3.7 Worker-tier curated `apt` and the pull-through cache proxy — RETIRED (SC-5)
+### 3.7 Worker-tier curated `apt` and the pull-through cache proxy — RETIRED
 
 Two further containment tiers used to build on top of the above: a worker-tier curated `apt`
-(PKG-4, `bin/claude-apt-provision` + `claude-config/apt-manifest.txt`) that closed the system-`.so`-library
+(`bin/claude-apt-provision` + `claude-config/apt-manifest.txt`) that closed the system-`.so`-library
 gap `mise` can't fill, in the Sysbox nested-worker tier only; and a controller-side pull-through
-package cache (PKG-6, `bin/claude-cache-proxy`) that collapsed all package egress to one audited
-proxy host. Both were retired in SC-5 along with the Sysbox nested-worker-broker substrate they
+package cache (`bin/claude-cache-proxy`) that collapsed all package egress to one audited
+proxy host. Both were retired along with the Sysbox nested-worker-broker substrate they
 were scoped to — see [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md) for the frozen
 implementation. System `.so` libraries currently have **no** self-service provisioning path in this
 repo (a documented non-goal — see §4); a plain leaf container never had `apt` access, and now
@@ -217,8 +217,8 @@ neither does anything else.
 
 - **System libraries (`apt`) are not a self-service capability at all.** The agent runs as non-root
   UID 1000 with no `sudo`; `apt-get install <syslib>` is impossible in a plain container by design.
-  A worker-tier `apt` path used to close this gap (PKG-4, §3.7) but was retired in SC-5 along with the
-  Sysbox substrate it depended on. The Debian mirrors are intentionally absent from the PKG-1 profile
+  A worker-tier `apt` path used to close this gap (§3.7) but was retired along with the
+  Sysbox substrate it depended on. The Debian mirrors are intentionally absent from this profile
   for this reason. Getting a system library today means a base-image rebuild (add it to the Dockerfile)
   — there is no in-session provisioning path, and none is planned unless the Sysbox substrate returns.
 - **`ghcr.io`'s blob CDN may need follow-up host additions.** The profile pins `ghcr.io`, but OCI blob
@@ -230,7 +230,7 @@ neither does anything else.
   GHSA-wr8v-3jqh-9x36), and pnpm lockfile-integrity gaps (CVE-2025-69263) mean a lock isn't tamper-proof
   for HTTP/git tarball deps.⁸ It is one layer under the egress + credential layers, not a boundary by
   itself.
-- **No registry min-release-age / age-gating.** `claude-deps-check` flags *unpinned* specs, but PKG-5
+- **No registry min-release-age / age-gating.** `claude-deps-check` flags *unpinned* specs, but the hardening
   does **not** query registries to reject too-new releases (a "wait N days before trusting a version"
   control). That needs live registry egress on every check, which cuts against the offline/locked
   posture; it stays a possible future control, deliberately not built here.
@@ -245,20 +245,20 @@ neither does anything else.
 - Registry egress is an **opt-in, additive, IP-pinned netfilter allowlist** (`CLAUDE_EGRESS_PACKAGES`
   in `bin/claude-egress-firewall`), scoped to the canonical registry hosts in §3.1 — never open
   egress, never an app-layer/SNI filter, always outside the agent's reach.
-- Install-time scripts are **off by default** (PKG-5); credentials are **unreachable during the fetch
+- Install-time scripts are **off by default**; credentials are **unreachable during the fetch
   window** (git-key broker + egress DROP); nothing broadens egress implicitly, and the firewall's
   fail-open-as-a-whole semantics are preserved.
 - System-library provisioning has **no self-service path** (§3.7/§4) — a base-image rebuild only.
 
-> **Amended by `SC-5` (2026-07-12).** The **install-then-relock** window (§3.4) was PKG-4's
+> **Amended by the substrate strip (2026-07-12).** The **install-then-relock** window (§3.4) was the apt tier's
 > mechanism: `bin/claude-apt-provision` opened `deb.debian.org` egress for the install and
-> re-locked it. PKG-4 and PKG-6 were **retired with the Sysbox/broker substrate** (§3.7), so
+> re-locked it. Both were **retired with the Sysbox/broker substrate** (§3.7), so
 > there is no longer any in-session system-package install path to contain — which is why the
 > bullet above states there is no self-service path at all. The surviving containment is the
 > curated **registry** allowlist (§3.1), scripts-off-by-default (§3.2), credential
 > unreachability (§3.3), and pinned manifests (§3.6). See `docs/legacy-sysbox-broker.md`.
 
-This decision **gates PKG-2/PKG-3/PKG-5**: `mise` (rootless toolchains + CLI binaries), the shared
+This decision **gates the mise provisioner, the shared cache and the manifest hardening**: `mise` (rootless toolchains + CLI binaries), the shared
 tool cache, and the pinned/`--ignore-scripts` reproducibility hardening all build on top of the
 containment recorded here and inherit it rather than re-deciding it.
 

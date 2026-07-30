@@ -1,12 +1,11 @@
 # claude-containers shared tool cache = one `/cache` volume, fail-safe, bounded
 
-**Status:** ACCEPTED — 2026-07-11 (PKG-3). This is the design record for how provisioned
+**Status:** ACCEPTED — 2026-07-11. This is the design record for how provisioned
 toolchains and package downloads are **reused across container restarts and across parallel
 workers**. It builds directly on the toolchain provisioner in
-[`docs/toolchain-provisioning.md`](toolchain-provisioning.md) (PKG-2) and the containment in
-[`docs/package-provisioning-security.md`](package-provisioning-security.md) (PKG-1), and
-**inherits, never re-decides, them**. (`PKG-3` is an identifier from the maintainer's private
-planning repo; the design record is this file.)
+[`docs/toolchain-provisioning.md`](toolchain-provisioning.md) and the containment in
+[`docs/package-provisioning-security.md`](package-provisioning-security.md), and
+**inherits, never re-decides, them**. The design record is this file.
 
 ## What shipped
 
@@ -52,13 +51,13 @@ claude-compose-gen --out stack.yml --no-cache …            # per-container ins
    `GOPATH`, `GOMODCACHE`, `npm_config_cache`, `UV_CACHE_DIR`, `PIP_CACHE_DIR` all resolve
    under `/cache`. The **agent** (the Claude Code process + its non-interactive `bash -c`
    calls) inherits these from the image ENV. `PATH` prepends `/cache/mise/shims` (so the
-   agent resolves mise-installed tools with no shell activation — the PKG-2 guarantee, just
+   agent resolves mise-installed tools with no shell activation — the provisioner's guarantee, just
    relocated) plus `/cache/cargo/bin` and `/cache/go/bin` (so `cargo install` / `go install`
    CLIs resolve too).
 
 3. **Interactive shells stay consistent (`~/.bashrc`).** An SSH login normally attaches to
    the tmux session the entrypoint started, which already carries the image ENV. A *fresh*
-   non-tmux fallback shell would **not** inherit it, so the PKG-2 interactive-activation
+   non-tmux fallback shell would **not** inherit it, so the interactive-activation
    block re-exports the cache dirs (`${VAR:-/cache/…}`) **before** `eval "$(mise activate
    bash)"` — a human who SSHes in to debug uses the same shared store as the agent, never the
    home default.
@@ -117,7 +116,7 @@ maintenance tool (run it by hand or on your own cron/timer) that spans it:
   ```bash
   claude-disk-gc                 # one-shot: docker prune + cache trim
   claude-disk-gc --loop          # every CLAUDE_DISK_GC_INTERVAL seconds
-  claude-disk-gc --no-cache-trim # docker prune only (skip the PKG-3 cache trim)
+  claude-disk-gc --no-cache-trim # docker prune only (skip the shared-cache trim)
   ```
 
 ## Verification
@@ -157,7 +156,7 @@ hole:
 
 - The containers on a host are **one operator's fleet** — the same trust domain that already
   shares the git-key broker and the auth volume.
-- **What can enter the cache is still governed by PKG-1**: under `CLAUDE_EGRESS_LOCKDOWN=1`
+- **What can enter the cache is still governed by the egress containment**: under `CLAUDE_EGRESS_LOCKDOWN=1`
   only the curated, IP-pinned registries are reachable, and credentials are unreachable
   during a fetch. The cache holds tool binaries and **public** package archives — **no repo
   content, no secrets, no PHI** (repos live in per-container `/workspace`, credentials in the
@@ -167,15 +166,15 @@ hole:
 
 ## Non-goals
 
-- **Not a security boundary.** The shared cache sits on top of PKG-1 containment and PKG-5
+- **Not a security boundary.** The shared cache sits on top of the egress containment and the manifest hardening
   (script hardening); it does not replace them. It does not add isolation between co-tenant
   workers beyond what they already share.
 - **No cross-host sharing.** `/cache` is a per-host docker volume. Sharing a store across
   physically different hosts is exactly mise's cross-machine caveat¹; a pull-through proxy
-  (PKG-6) used to offer that, but was retired in SC-5 (docs/legacy-sysbox-broker.md).
-- **No system `.so` libraries.** Inherited from PKG-2: the cache holds binaries and language
+ used to offer that, but was retired (docs/legacy-sysbox-broker.md).
+- **No system `.so` libraries.** Inherited from the mise provisioner: the cache holds binaries and language
   packages, never system libraries — no self-service path provisions those (the worker-tier apt
-  path that used to, PKG-4, was retired in SC-5; see docs/legacy-sysbox-broker.md).
+  path that used to close that gap has been retired; see docs/legacy-sysbox-broker.md).
 
 ---
 

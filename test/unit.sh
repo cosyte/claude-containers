@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Unit tests that need NO docker — safe for CI and for `scripts/verify.sh`.
 #
-# Covers the pure-logic checks in bin/_common.sh that survive SC-5 (the Sysbox
+# Covers the pure-logic checks in bin/_common.sh that survive the substrate strip (the Sysbox
 # version-floor refusal, preflight_sysbox/sysbox_version_check, was removed along
 # with the nested-Sysbox worker-broker substrate it gated — see
 # docs/legacy-sysbox-broker.md):
@@ -62,10 +62,10 @@ else
 fi
 
 echo
-echo "== entrypoint.sh §8b: SC-5 self-heal drops the stale claude-md-fragments SessionStart hook =="
+echo "== entrypoint.sh §8b: the self-heal drops the stale claude-md-fragments SessionStart hook =="
 
-# SC-5 deleted bin/claude-md-fragments (the CLAUDE.d fragment loader), but images built
-# BEFORE SC-5 persisted a SessionStart hook invoking it into every per-project config
+# The strip deleted bin/claude-md-fragments (the CLAUDE.d fragment loader), but images built
+# BEFORE it persisted a SessionStart hook invoking it into every per-project config
 # VOLUME. §8b's merge lets existing user settings win, so without a self-heal that hook
 # would survive the upgrade and fire an ENOENT at every session start, forever.
 #
@@ -76,10 +76,10 @@ ENTRYPOINT="$REPO_ROOT/entrypoint.sh"
 # typos STALE_HOOK_CMD, the self-heal silently becomes a production no-op that resurrects
 # the ENOENT defect; a test carrying its own copy of the string would still pass and the
 # gate would be fake. Extracting both halves means the test can only pass if the shipped
-# filter really matches the hook the pre-SC-5 image actually baked (asserted below).
+# filter really matches the hook the older image actually baked (asserted below).
 STALE_CMD="$(sed -n 's/^STALE_HOOK_CMD="\(.*\)"$/\1/p' "$ENTRYPOINT")"
 [[ "$STALE_CMD" == "/usr/local/bin/claude-md-fragments" ]] \
-    && ok  "entrypoint.sh's STALE_HOOK_CMD matches the hook pre-SC-5 images actually baked" \
+    && ok  "entrypoint.sh's STALE_HOOK_CMD matches the hook older images actually baked" \
     || bad "STALE_HOOK_CMD is '$STALE_CMD' — does not match the baked hook; the self-heal is a NO-OP"
 HOOK_FILTER="$(awk '/jq --arg stale "\$STALE_HOOK_CMD"/{f=1; sub(/^.*--arg stale "\$STALE_HOOK_CMD" .$/,""); }
                     f{print}
@@ -89,11 +89,11 @@ HOOK_FILTER="$(awk '/jq --arg stale "\$STALE_HOOK_CMD"/{f=1; sub(/^.*--arg stale
 if [[ -n "$HOOK_FILTER" ]] && echo '{}' | jq --arg stale "$STALE_CMD" "$HOOK_FILTER" >/dev/null 2>&1; then
     ok "the §8b stale-hook jq filter was extracted from entrypoint.sh and parses"
 
-    # The real legacy-volume state: the pre-SC-5 baked settings.json was EXACTLY this.
+    # The real legacy-volume state: the older baked settings.json was EXACTLY this.
     legacy='{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'"$STALE_CMD"'"}]}]}}'
     got="$(echo "$legacy" | jq -c --arg stale "$STALE_CMD" "$HOOK_FILTER")"
     [[ "$got" == '{}' ]] \
-        && ok  "a pre-SC-5 config volume is healed: the stale hook (and the empty .hooks) are dropped" \
+        && ok  "an older config volume is healed: the stale hook (and the empty .hooks) are dropped" \
         || bad "stale hook survived the self-heal: got $got"
 
     # A user's OWN SessionStart hook must NOT be collateral damage.
@@ -143,16 +143,16 @@ if [[ -n "$HOOK_FILTER" ]] && echo '{}' | jq --arg stale "$STALE_CMD" "$HOOK_FIL
         && ok  "malformed .hooks shapes pass through byte-identical (cannot truncate or mangle settings.json)" \
         || bad "$malformed malformed shape(s) were dropped/mangled — settings.json would be truncated or corrupted"
 else
-    bad "could not extract a working stale-hook jq filter from entrypoint.sh §8b (the SC-5 self-heal is missing or broke)"
+    bad "could not extract a working stale-hook jq filter from entrypoint.sh §8b (the self-heal is missing or broke)"
 fi
 
 echo
-echo "== entrypoint.sh §0: retired SC-5 env vars warn loudly, never silently no-op =="
+echo "== entrypoint.sh §0: retired env vars warn loudly, never silently no-op =="
 
 # The removed --broker/--sysbox/--worker-tarball FLAGS hard-die. The env vars they used to
 # set are merely unread — and silence there is unsafe: an operator running
 # CLAUDE_CACHE_PROXY_HOST + CLAUDE_EGRESS_LOCKDOWN=1 had a single audited egress choke
-# point, and post-SC-5 the firewall composes its default allowlist and public npm is
+# point, and since the strip the firewall composes its default allowlist and public npm is
 # reachable again. §0 must SAY so. Extracted from entrypoint.sh, not mirrored.
 GUARD="$(awk '/^# --- 0\. Refuse retired/,/^unset _v _retired_set/' "$ENTRYPOINT")"
 
@@ -216,14 +216,14 @@ if [[ -n "$GUARD" ]]; then
         && ok  "no retired vars set → §0 is silent (no noise on a clean boot)" \
         || bad "§0 emitted output with no retired vars set: $out"
 else
-    bad "could not extract §0's retired-env guard from entrypoint.sh (the SC-5 guard is missing)"
+    bad "could not extract §0's retired-env guard from entrypoint.sh (the retired-env guard is missing)"
 fi
 
 # ==========================================================================================
-# CC-BINS — the bins that lost their reason are gone, and their removal is LOUD
+# The bin prune — the bins that lost their reason are gone, and their removal is LOUD
 # ==========================================================================================
 echo
-echo "== CC-BINS: claude-controller / claude-reaper / the WITH_DOCKER variant are fully gone =="
+echo "== claude-controller / claude-reaper / the WITH_DOCKER variant are fully gone =="
 
 # A deleted bin that some file still names is worse than the bin: a stale `COPY bin/claude-reaper`
 # fails the image build outright, and a stale CI step or npm-test entry fails every run. Pin the
@@ -231,7 +231,7 @@ echo "== CC-BINS: claude-controller / claude-reaper / the WITH_DOCKER variant ar
 for f in bin/claude-controller bin/claude-reaper test/controller-unit.sh test/reaper-unit.sh; do
     [[ ! -e "$REPO_ROOT/$f" ]] \
         && ok  "$f is deleted" \
-        || bad "$f still exists — CC-BINS removed it"
+        || bad "$f still exists — it was removed"
 done
 
 # Strip whole-line comments before asserting: the tombstone comments that RECORD the removal
@@ -244,7 +244,7 @@ if ! code_of "$REPO_ROOT/Dockerfile" | grep -qE 'claude-(controller|reaper)'; th
 else
     bad "Dockerfile still references a pruned bin: $(code_of "$REPO_ROOT/Dockerfile" | grep -E 'claude-(controller|reaper)')"
 fi
-# WITH_DOCKER is BACK, deliberately — but the property CC-BINS was protecting still holds and
+# WITH_DOCKER is BACK, deliberately — but the property that prune was protecting still holds and
 # is what we assert now. It deleted the variant because the baked engine was UNREACHABLE: no
 # runtime, no --privileged, no socket mount, and nothing that started dockerd — 400 MB of dead
 # daemon. The engine only earns its place if it can actually run, so pin the wiring, not the
@@ -269,7 +269,7 @@ fi
 if has "$entrypoint_code" 'CLAUDE_DOCKER' && has "$entrypoint_code" '(^|[[:space:]])dockerd[[:space:]]*>>'; then
     ok  "the entrypoint actually STARTS the baked engine (CLAUDE_DOCKER=1 → dockerd)"
 else
-    bad "nothing starts dockerd — the baked engine is unreachable again (the exact defect CC-BINS deleted it for)"
+    bad "nothing starts dockerd — the baked engine is unreachable again (the exact defect it was once deleted for)"
 fi
 if has "$launch_code" 'runtime=sysbox-runc'; then
     ok  "claude-launch gives the engine a runtime it can start under (--runtime=sysbox-runc)"
@@ -299,7 +299,7 @@ else
 fi
 
 echo
-echo "== CC-BINS: entrypoint REFUSES CLAUDE_CONTROLLER=1 (never silently boots interactive) =="
+echo "== entrypoint REFUSES CLAUDE_CONTROLLER=1 (never silently boots interactive) =="
 
 # CLAUDE_CONTROLLER is NOT an inert leftover like the §0 vars — it is an ACTIVE request for
 # unattended operation. Warn-and-ignore would boot an unattended fleet container into an
@@ -349,7 +349,7 @@ if [[ -n "$CTRL_GUARD" ]]; then
         && ok  "CLAUDE_CONTROLLER=0 → no refusal (a stale .env line never blocks boot)" \
         || bad "CLAUDE_CONTROLLER=0 aborted the boot (exit $rc) — stale .env files would brick"
 else
-    bad "could not extract the CLAUDE_CONTROLLER refusal from entrypoint.sh (CC-BINS guard is missing)"
+    bad "could not extract the CLAUDE_CONTROLLER refusal from entrypoint.sh (the guard is missing)"
 fi
 
 echo
@@ -413,7 +413,7 @@ grep -q -- '-p /build-the-thing' "$APD/claude-invocations" \
     || bad "claude got the wrong prompt: $(cat "$APD/claude-invocations")"
 
 echo
-echo "== CC-BINS: a zero-turn 'Unknown command' is a FAILURE, not a healthy \$0 run =="
+echo "== a zero-turn 'Unknown command' is a FAILURE, not a healthy \$0 run =="
 
 # THE TRAP, verified by hand against the then-pinned CLI (2.1.207):
 #   $ claude -p "/typo" --output-format json ; echo $?
@@ -477,7 +477,7 @@ out="$(run_autopilot_unk 6 CLAUDE_AUTOPILOT_QUEUE=1 CLAUDE_AUTOPILOT_CMD=/typo \
     || bad "the bogus fallback kept firing ($(invocations)x) instead of being disabled"
 
 echo
-echo "== CC-BINS: the outcome checks FAIL CLOSED — stderr can't be merged into the JSON =="
+echo "== the outcome checks FAIL CLOSED — stderr can't be merged into the JSON =="
 
 # THE FAIL-OPEN this closes. The real pinned CLI writes to STDERR when stdin is an open pipe
 # with no data (verified: 157 bytes, "Warning: no stdin data received in 3s..."). The loop used
@@ -541,7 +541,7 @@ fi
     || bad "the unparseable log was not reported: $out"
 
 echo
-echo "== CC-BINS: ANY zero-turn run is a no-op — not just the 'Unknown command' typo =="
+echo "== ANY zero-turn run is a no-op — not just the 'Unknown command' typo =="
 
 # The predicate is `num_turns == 0` ALONE. It must NOT be narrowed to results whose text starts
 # with "Unknown command:", because on the then-pinned CLI (2.1.207) EVERY slash command that exists
@@ -610,7 +610,7 @@ zero_turn_stub_multiturn
     || bad "false positive: a genuine multi-turn run was failed because of its result text"
 
 echo
-echo "== CC-BINS: the check validates JSON *shape*, not just syntax (CLAUDE_EXTRA_ARGS=--verbose) =="
+echo "== the check validates JSON *shape*, not just syntax (CLAUDE_EXTRA_ARGS=--verbose) =="
 
 # THE SAME FAIL-OPEN, ONE LAYER UP. CLAUDE_EXTRA_ARGS is a documented, first-class tunable
 # (.env.example, README, `claude-launch --extra-args`). Adding `--verbose` makes the pinned CLI

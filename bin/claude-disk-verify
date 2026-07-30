@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # claude-disk-verify — prove disk-safety hygiene: docker-free, no root, no daemon needed.
 #
-# SC-5 removed the on-host proof this script used to run against a real Sysbox
+# The substrate strip removed the on-host proof this script used to run against a real Sysbox
 # nested-worker controller (the broker's per-launch disk-floor refusal, N sequential
 # worker cycles, worker-image reuse) — that whole substrate is retired; see
 # docs/legacy-sysbox-broker.md. What's left is the surviving, non-broker disk-hygiene
@@ -11,7 +11,7 @@
 #      forces the value loudly;
 #   2. claude-disk-gc's plan is exactly `system prune -f` + `builder prune -f` — never
 #      `-a`, never `--volumes`;
-#   3. the PKG-3 shared-cache trim is safe: cache_gc_plan reclaims only re-fetchable
+#   3. the shared-cache trim is safe: cache_gc_plan reclaims only re-fetchable
 #      download/registry caches (never an installs/shims/bin dir or bare /cache), and the
 #      idle guard gates on the cache VOLUME (covers every cache-mounting container, not
 #      just a subset).
@@ -50,7 +50,7 @@ else
     badp "the override seam must force disk_free_mib's return (got: ${got2:-nothing})"
 fi
 
-if disk_free_mib "/no/such/path/CC-5-verify" >/dev/null 2>&1; then
+if disk_free_mib "/no/such/path/disk-verify" >/dev/null 2>&1; then
     badp "disk_free_mib must fail (not silently succeed) on a nonexistent path"
 else
     okp "disk_free_mib fails closed on a nonexistent path"
@@ -71,7 +71,7 @@ else
     okp "the gc plan never includes -a/--all/--volumes"
 fi
 
-# --- phase 1b: the PKG-3 shared-cache trim is safe, re-fetchable-only, idle-gated -------
+# --- phase 1b: the shared-cache trim is safe, re-fetchable-only, idle-gated -------
 info "phase 1b — cache_gc_plan: re-fetchable caches only; the idle guard gates on the cache volume"
 
 cplan="$(bash -c 'source "'"$CLAUDE_DOCKER_ROOT"'/bin/claude-disk-gc" 2>/dev/null; cache_gc_plan')"
@@ -99,4 +99,4 @@ fi
 echo
 echo "== $PASS passed, $FAIL failed =="
 (( FAIL == 0 )) || { err "disk-safety NOT proven"; exit 1; }
-ok "disk-safety proven: disk_free_mib parsing + override, disk_gc_plan safety, PKG-3 cache-trim safety"
+ok "disk-safety proven: disk_free_mib parsing + override, disk_gc_plan safety, shared-cache-trim safety"

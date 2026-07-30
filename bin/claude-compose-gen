@@ -41,7 +41,7 @@
 #                       daemon address pool is nearly full). Create it first:
 #                       docker network create <name>.
 #     --cache <volume>  shared tool cache volume mounted at /cache on every service
-#                       (PKG-3; default: claude-cache). One volume shared stack-wide,
+#                       (default: claude-cache). One volume shared stack-wide,
 #                       so a mise/cargo/go/npm/uv install by one worker is a cache hit
 #                       for the rest and survives restarts.
 #     --no-cache        do not mount a shared cache (per-container installs).
@@ -184,7 +184,7 @@ PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
 WANT_FORKS=0 WANT_ARCHIVED=0 ALL_DORMANT=0
 NETWORK=""
-# Shared tool cache (PKG-3): ONE volume shared by every service, mounted at /cache.
+# Shared tool cache: ONE volume shared by every service, mounted at /cache.
 # Default = the CACHE_VOLUME name (claude-cache); --no-cache / --cache off disables it.
 CACHE_VOL="$CACHE_VOLUME"
 BUILD_CONTEXT=""
@@ -232,7 +232,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Shared tool cache (PKG-3): normalize the requested volume to its effective name
+# Shared tool cache: normalize the requested volume to its effective name
 # ("" / off / none disable it). One shared volume across all services = the
 # cross-worker cache hit; disabled = per-container installs.
 CACHE_NAME="$(cache_name "$CACHE_VOL")"
@@ -786,7 +786,7 @@ cat <<EOF
     name: ${SSHKEYS_VOLUME}
     external: true
 EOF
-# Shared tool cache (PKG-3): every service mounts it at /cache, so a mise/cargo/go/
+# Shared tool cache: every service mounts it at /cache, so a mise/cargo/go/
 # npm/uv install by one is a hit for the rest. It defaults to ONE name (claude-cache)
 # per host, so stacks share it — that's deliberate (a wider cache = more hits), and it
 # is why it must be external: otherwise a `down -v` on one stack wipes the cache out

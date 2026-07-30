@@ -45,7 +45,7 @@ github.com api.github.com codeload.github.com
 "
 EXTRA="${CLAUDE_EGRESS_EXTRA_HOSTS:-}"; EXTRA="${EXTRA//,/ }"
 
-# Opt-in package-registry profile (PKG-1). ADDITIVE to the default-deny base and IP-pinned exactly like
+# Opt-in package-registry profile. ADDITIVE to the default-deny base and IP-pinned exactly like
 # every other host below — it only ever ADDS the curated registry hosts, never broadens egress by any
 # other means, and does NOTHING unless CLAUDE_EGRESS_PACKAGES is explicitly on. This is a curated (not
 # open) allowlist by design: the supply-chain exfil path this container refuses is *open* egress, so a

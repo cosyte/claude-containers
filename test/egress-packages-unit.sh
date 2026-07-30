@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# egress-packages-unit.sh — pure-logic tests for the PKG-1 opt-in package-registry egress profile in
+# egress-packages-unit.sh — pure-logic tests for the opt-in package-registry egress profile in
 # bin/claude-egress-firewall. NO docker, NO NET_ADMIN, NO live iptables — safe for CI / scripts/verify.sh.
 #
-# The firewall's host-SELECTION (the part PKG-1 changes) is exercised via its CLAUDE_EGRESS_PRINT_HOSTS=1
+# The firewall's host-SELECTION (the part this profile changes) is exercised via its CLAUDE_EGRESS_PRINT_HOSTS=1
 # dry-run seam, which prints the composed allowlist host set and exits BEFORE touching iptables. The
 # live default-deny enforcement (that a non-allowlisted IP actually DROPs) needs NET_ADMIN and lives in
 # the on-host smoke/substrate proofs; here we prove the allowlist COMPOSITION is opt-in, additive, and
@@ -20,7 +20,7 @@ hosts() { env "$@" CLAUDE_EGRESS_PRINT_HOSTS=1 bash "$FW" 2>/dev/null; }
 
 PKG_HOSTS="pypi.org files.pythonhosted.org crates.io index.crates.io static.crates.io proxy.golang.org sum.golang.org mise.run ghcr.io"
 
-echo "PKG-1 package-registry egress profile"
+echo "package-registry egress profile"
 
 # ---- profile OFF (default) is byte-identical to the baked default set --------------------------------
 OFF="$(hosts)"
@@ -51,9 +51,9 @@ for h in api.anthropic.com github.com registry.npmjs.org; do
 done
 ok "profile ON: additive — the baked default hosts are all still present"
 
-# Debian/apt mirrors are deliberately NOT in this profile (they need the PKG-4 worker apt tier)
-grep -qiE 'debian|ubuntu|deb\.' <<<"$ON" && bad "profile ON wrongly included a Debian/apt mirror (PKG-4 scope)" \
-                                          || ok "profile ON: no Debian/apt mirror (correctly deferred to PKG-4)"
+# Debian/apt mirrors are deliberately NOT in this profile (they need the retired worker apt tier)
+grep -qiE 'debian|ubuntu|deb\.' <<<"$ON" && bad "profile ON wrongly included a Debian/apt mirror (retired-apt-tier scope)" \
+                                          || ok "profile ON: no Debian/apt mirror (correctly deferred to the retired apt tier)"
 
 # ---- a non-allowlisted host never appears, on or off ------------------------------------------------
 for set in "$OFF" "$ON"; do

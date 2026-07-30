@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# claude-deps-check — advisory linter for reproducible dependency manifests (PKG-5).
+# claude-deps-check — advisory linter for reproducible dependency manifests.
 #
 # Flags UNPINNED / `latest` specs in a repo's `mise.toml` (the [tools] table) and
 # `package.json` (dependencies / devDependencies / optionalDependencies /
 # peerDependencies), so an agent-committed manifest stays reproducibly pinned — the
-# reproducibility half of the PKG-5 supply-chain hardening (the other half is the
+# reproducibility half of the supply-chain hardening (the other half is the
 # baked `ignore-scripts=true` + mise `lockfile=true`). It reads manifests only; it
 # never installs, never touches the network, never mutates a file.
 #

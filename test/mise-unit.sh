@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# mise-unit.sh — pure-static tests for the PKG-2 baked `mise` toolchain provisioner.
+# mise-unit.sh — pure-static tests for the baked `mise` toolchain provisioner.
 # NO docker, NO network, NO image build — safe for CI / scripts/verify.sh.
 #
-# PKG-2 bakes mise into the image and wires it for the `claude` user. The live proof
+# The provisioner bakes mise into the image and wires it for the `claude` user. The live proof
 # ("mise use node@22 / aqua:owner/tool succeed as UID 1000 with no sudo; an untrusted
 # out-of-workspace mise.toml does not auto-apply") needs a full image build and is the
 # on-host smoke gate (docs/toolchain-provisioning.md). Here we prove the security-
@@ -19,7 +19,7 @@ PASS=0 FAIL=0
 ok()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 
-echo "PKG-2 baked mise toolchain provisioner"
+echo "baked mise toolchain provisioner"
 
 # ---- install is version-PINNED and SHA256-VERIFIED IN-REPO (not `curl | sh`) -----------------------
 MISE_ARG="$(grep -E '^ARG MISE_VERSION=' "$DOCKERFILE" | head -1 | cut -d= -f2-)"
@@ -56,7 +56,7 @@ grep -Eq 'sha256sum -c' "$DOCKERFILE" \
 
 # ---- non-interactive / agent shells resolve tools via the SHIMS dir on PATH ------------------------
 # The Claude Code process + its `bash -c "…"` tool calls never source ~/.bashrc, so tool resolution
-# for the AGENT depends entirely on the shims dir being baked onto PATH. PKG-3 relocated the mise
+# for the AGENT depends entirely on the shims dir being baked onto PATH. The shared cache relocated the mise
 # data dir (and so the shims) into the shared /cache tree, so the baked PATH must point there.
 if grep -Fq 'PATH=/cache/mise/shims:' "$DOCKERFILE" && grep -Fq ':${PATH}' "$DOCKERFILE"; then
   ok "mise shims dir (/cache/mise/shims) is PREPENDED to PATH preserving the existing PATH (non-interactive tool resolution)"

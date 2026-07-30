@@ -182,7 +182,7 @@ nothing else — no broker, no worker plane, no spool, no controller
 ([legacy-sysbox-broker.md](legacy-sysbox-broker.md)). It also inverts that
 design's central move: the broker chowned the socket to root and mediated every
 launch to keep the agent OFF the daemon; here the agent using Docker *is* the
-feature. Note `CC-BINS` had deleted `WITH_DOCKER` on the correct grounds that
+feature. Note the earlier prune had deleted `WITH_DOCKER` on the correct grounds that
 nothing could start the baked engine (no runtime, no privilege, no socket) — the
 Sysbox runtime is precisely the missing piece, and `test/unit.sh` now pins the
 wiring (entrypoint starts it, launcher supplies the runtime) instead of pinning
@@ -246,25 +246,25 @@ from `settings.json` and, if any were present, clears
 Trade-off accepted: this image cannot be fully telemetry-silent and also
 provide Remote Control; RC is the product, so telemetry stays on.
 
-## Retired: the nested-Sysbox worker-broker substrate (CC-1 through CC-7)
+## Retired: the nested-Sysbox worker-broker substrate
 
 An earlier revision of this repo ran a nested-Sysbox "worker broker" substrate so a
 controller container could spawn autonomous nested workers: a root-owned
-broker (CC-2) that launched hardened nested workers on an inner `dockerd` under Sysbox
-(CC-1), K-aware resource sizing (CC-3), a worker-lifecycle run/reap contract (CC-4),
-disk-safety floors + GC (CC-5), a controller mode wiring it to an external
-lease/scheduler control plane (CC-6), and per-worker spend/capacity
-observability (CC-7) — plus the PKG-4 (curated worker apt) and PKG-6 (pull-through
+broker that launched hardened nested workers on an inner `dockerd` under Sysbox,
+K-aware resource sizing, a worker-lifecycle run/reap contract,
+disk-safety floors + GC, a controller mode wiring it to an external
+lease/scheduler control plane, and per-worker spend/capacity
+observability — plus the curated worker `apt` and the pull-through
 cache proxy) supply-chain hardening built on top of it.
 
 That whole substrate was retired on 2026-07-12 in favor of Claude Code subagents in
-per-worktree git worktrees, and stripped from `main` (SC-5). A follow-up, **CC-BINS**
+per-worktree git worktrees, and stripped from `main`. A follow-up prune
 (2026-07-14), pruned the residue the strip left behind — `bin/claude-controller` (by then
 a pass-through to `claude-autopilot`; `CLAUDE_CONTROLLER=1` now refuses to boot),
 `bin/claude-reaper` (it pruned a spool nothing writes to), the `WITH_DOCKER` controller
 image variant (an unreachable `dockerd`), and the autopilot's default command
 (`CLAUDE_AUTOPILOT_CMD` is now required). The frozen implementation, the full rationale,
-and the CC-BINS resolution live in
+and the follow-up resolution live in
 [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md); nothing above or below this
 note describes it.
 

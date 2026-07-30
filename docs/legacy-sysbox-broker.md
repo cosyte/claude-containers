@@ -1,7 +1,7 @@
 # Legacy: Sysbox nested-broker path (frozen 2026-07-12)
 
-The nested-Sysbox worker-broker substrate — the CC-1 through CC-7 chain plus the
-PKG-1 through PKG-6 supply-chain hardening built on top of it — was retired on **2026-07-12** in favor of **Claude Code subagents in per-worktree git
+The nested-Sysbox worker-broker substrate — and the supply-chain hardening built on
+top of it — was retired on **2026-07-12** in favor of **Claude Code subagents in per-worktree git
 worktrees**. It existed to run parallel autonomous build workers for one consuming repo. The code is frozen (unchanged) on a
 preservation branch and a preservation tag on this repo:
 
@@ -13,7 +13,7 @@ preservation branch and a preservation tag on this repo:
 
 ## What's frozen on the branch
 
-All of the following live *only* on the preservation branch after `SC-5` strips
+All of the following live *only* on the preservation branch after the strip removes
 them from `main`. Any of them can be recovered by checking that branch out.
 
 - **Broker + worker plane** — `bin/claude-worker-broker`, `bin/claude-worker-request`,
@@ -27,11 +27,11 @@ them from `main`. Any of them can be recovered by checking that branch out.
 - **Broker tests** — `test/broker-unit.sh`, `test/broker-interactive-unit.sh`,
   `test/broker-claude-d-unit.sh`, `test/cache-proxy-unit.sh`,
   `test/apt-provision-unit.sh`, `test/worker-run-unit.sh`, `test/fleet-view-unit.sh`.
-  (`test/compose-gen-unit.sh` carried **no** broker cases — the `SC-5` `done:` line
+  (`test/compose-gen-unit.sh` carried **no** broker cases — the strip's `done:` line
   claimed it did; that was wrong, and the file was left untouched.)
 - **Broker-only launch/compose flags** — `--broker`, `--sysbox`, `--worker-tarball`
   on `bin/claude-launch` and `bin/claude-compose-gen`. Both now **reject** these
-  flags with a "removed in SC-5" error rather than ignoring them.
+  flags with a "removed" error rather than ignoring them.
 - **Broker-only env plumbing** — `CLAUDE_WORKER_*`, `CLAUDE_SYSBOX_*`,
   `CLAUDE_CACHE_PROXY*`, `CLAUDE_APT_PROVISION*`, and `CLAUDE_BROKER_*`
   **except `CLAUDE_BROKER_GIT_KEY`**.
@@ -43,7 +43,7 @@ them from `main`. Any of them can be recovered by checking that branch out.
   > the key bytes (`entrypoint.sh` §5; `README.md`; and §3.3 of
   > `docs/package-provisioning-security.md`, which names it as one of the two
   > controls that make package provisioning safe). A `CLAUDE_BROKER_*` glob applied
-  > naively in `SC-6`/`SC-7` would delete it — don't.
+  > naively in a later cleanup would delete it — don't.
 - **Controller-envelope sizing tier** — `bin/claude-controller-size`,
   `bin/claude-controller-verify`, `bin/claude-sizing-verify`. These sized and
   verified a controller for *K nested Sysbox workers*; with the workers gone
@@ -56,27 +56,27 @@ them from `main`. Any of them can be recovered by checking that branch out.
   content was the `SessionStart` hook that invoked it.
 
   > **Upgrade note.** That hook was persisted into every per-project **config
-  > volume** by pre-`SC-5` images, and §8b's merge lets existing user settings
+  > volume** by pre-strip images, and §8b's merge lets existing user settings
   > win — so removing the binary alone would have left the hook firing an ENOENT
   > at every session start on any upgraded volume. `entrypoint.sh` §8b therefore
   > carries a **self-heal** that drops a `SessionStart` hook pointing at
   > `/usr/local/bin/claude-md-fragments` (a user's own hooks are untouched),
   > mirroring the existing telemetry-kill migration. Covered by `test/unit.sh`.
-- **PKG-4 curated apt manifest** — `claude-config/apt-manifest.txt`.
-- **Broker-tier docs** — `docs/caching-proxy.md` (PKG-6) and `docs/substrate.md`
+- **The curated apt manifest** — `claude-config/apt-manifest.txt`.
+- **Broker-tier docs** — `docs/caching-proxy.md` and `docs/substrate.md`
   (the Sysbox substrate); this page replaces them.
-  `docs/package-provisioning-security.md` was **retained**, reduced to the PKG-1
-  / PKG-5 controls that are still live — only its PKG-4/PKG-6 sections were cut.
+  `docs/package-provisioning-security.md` was **retained**, reduced to the containment
+  and manifest-hardening controls that are still live — only its worker-apt and
+  cache-proxy sections were cut.
 
-`PKG-2`/`PKG-3`/`PKG-5` mechanisms (`mise` toolchain + shared `/cache` +
+the surviving mechanisms (`mise` toolchain + shared `/cache` +
 `ignore-scripts`/`lockfile=true`) are **not** broker-tied and stay on `main` —
-the strip is broker + Sysbox + PKG-4 (curated apt) + PKG-6 (pull-through cache
+the strip is broker + Sysbox + the curated apt tier + the pull-through cache
 proxy) only.
 
-## The follow-up strip: `CC-BINS` (2026-07-14) — resolving what `SC-5` left dangling
+## The follow-up strip (2026-07-14) — resolving what the first one left dangling
 
-`SC-5` deferred three things to a follow-up (it called it `SC-6`; it shipped as
-**`CC-BINS`**). All three turned out to be residue, and all three were removed:
+The first strip deferred three things to a follow-up. All three turned out to be residue, and all three were removed:
 
 - **`bin/claude-controller` — REMOVED.** With the broker-dispatch tier gone it was a
   byte-identical pass-through that `exec`'d `claude-autopilot`: a *mode whose only job
@@ -87,7 +87,7 @@ proxy) only.
   would boot an unattended fleet container into an *interactive* Remote-Control session that
   nobody is watching and that never runs the loop — a container that looks alive and does
   nothing. The refusal names `CLAUDE_AUTOPILOT=1`, which is the same loop and always was.
-  (`CLAUDE_CONTROLLER=0`, which every pre-`CC-BINS` `.env.example` carries, still boots
+  (`CLAUDE_CONTROLLER=0`, which every older `.env.example` carries, still boots
   cleanly — a stale line must never brick a container.)
 - **`bin/claude-reaper` — REMOVED.** Its worker-container-reaping duty went with the broker,
   leaving a generic pruner for a spool (`/run/claude/reaper-spool`) that **no surviving code
@@ -110,7 +110,7 @@ proxy) only.
   > cycle logged `run #N` and `cost: $0`, and a **queued task** would be filed to `done/` —
   > silently marking work that never ran as done, on the very `claude-scm-observer` → queue
   > path built to run a fleet unattended. A container that looks perfectly alive and does
-  > literally nothing is the worst failure this script can have. CC-BINS therefore also makes
+  > literally nothing is the worst failure this script can have. The prune therefore also makes
   > a zero-turn `Unknown command:` result a **FAILURE** (both conditions, so a legitimate run
   > that merely *discusses* an unknown command cannot trip it) — which closes the whole class,
   > not just that one command: an operator typo, a renamed skill, or a workspace whose `.claude/` never
@@ -119,11 +119,11 @@ proxy) only.
 **Also removed: the `WITH_DOCKER` "controller" image variant** (`make build-controller`,
 `CLAUDE_IMAGE_CONTROLLER`, `LABEL claude.controller`, ~400 MB of `dockerd` + CLI +
 `containerd`). It existed only to host the nested-Sysbox substrate. Nothing started `dockerd`
-after `SC-5` — and nothing *could*: `claude-launch`, `claude-compose-gen` and
+after the strip — and nothing *could*: `claude-launch`, `claude-compose-gen` and
 `docker-compose.yml` grant no `--privileged` and mount no Docker socket, so the baked engine
 was unreachable even in principle.
 
-> ⚠️ **`CLAUDE_BROKER_GIT_KEY` survived `CC-BINS` too, exactly as this page warned.** The
+> ⚠️ **`CLAUDE_BROKER_GIT_KEY` survived the follow-up prune too, exactly as this page warned.** The
 > `CLAUDE_BROKER_*` glob was checked hit-by-hit rather than swept. It stays.
 
 ## Why we retired it
@@ -199,7 +199,7 @@ is separate from the agent — do not bind on a `--docker` container. See
 [architecture.md](architecture.md) ("container workflows are an opt-in image variant on
 Sysbox").
 
-Worth recording for anyone reading the CC-BINS commit: it deleted `WITH_DOCKER` on the
+Worth recording for anyone reading that prune's commit: it deleted `WITH_DOCKER` on the
 correct grounds that the baked engine was unreachable — no runtime, no privilege, no
 socket, and nothing that started `dockerd`. The Sysbox runtime is exactly the missing
 piece, and `test/unit.sh` now pins the *wiring* rather than the absence, so the engine

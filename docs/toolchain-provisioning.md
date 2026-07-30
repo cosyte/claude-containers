@@ -1,10 +1,9 @@
 # claude-containers toolchain provisioning = baked `mise`, rootless, workspace-trusted
 
-**Status:** ACCEPTED — 2026-07-11 (PKG-2). This is the design record for how a session provisions
+**Status:** ACCEPTED — 2026-07-11. This is the design record for how a session provisions
 language toolchains and prebuilt CLIs. It builds directly on the containment in
-[`docs/package-provisioning-security.md`](package-provisioning-security.md) (PKG-1) and **inherits,
-never re-decides, it**. (`PKG-2` is an identifier from the maintainer's private planning repo; the
-design record is this file, and nothing here depends on reading that.)
+[`docs/package-provisioning-security.md`](package-provisioning-security.md) and **inherits,
+never re-decides, it**. The design record is this file.
 
 ## What shipped
 
@@ -57,7 +56,7 @@ agent immediately — no `sudo`, no image rebuild.
      profile **off**. If a particular tool's aqua metadata happens to dial a host outside the allowlist,
      add it with `CLAUDE_EGRESS_EXTRA_HOSTS`.
    - **Registry backends — `pipx:` / `cargo:` / `go:`.** Install tool binaries from PyPI / crates.io /
-     the Go module proxy → need `CLAUDE_EGRESS_PACKAGES=1` (PKG-1's opt-in, IP-pinned **registry**
+     the Go module proxy → need `CLAUDE_EGRESS_PACKAGES=1` (the containment's opt-in, IP-pinned **registry**
      allowlist). `pipx:` reuses the baked `uv` (point 3).
    - **Language toolchains — `node@` / `go@` / `rust`.** Download the *runtime* from the vendor's own
      hosts (`nodejs.org`, `go.dev`, `static.rust-lang.org`), which are **not** on the current allowlist.
@@ -67,7 +66,7 @@ agent immediately — no `sudo`, no image rebuild.
      lockdown as-is.
 
    System `.so` libraries are **out of scope** entirely — no self-service path provisions them (a
-   worker-tier `apt` used to close this gap, PKG-4, but was retired in SC-5 along with the Sysbox
+   worker-tier `apt` used to close this gap, but was retired along with the Sysbox
    substrate it depended on; see [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md)). A system
    library needs a base-image rebuild.
 
@@ -87,11 +86,11 @@ agent was launched to work on. This is a documented supply-chain trade:
 - **Refused:** a blanket `["/"]`. That would auto-trust a `mise.toml` **anywhere** the agent can reach
   — a downloaded tarball, a `/tmp` scratch dir, a transitively-cloned dependency — turning "read a
   config" into "auto-run whatever any config on the filesystem declares". That is exactly the implicit-
-  trust surface the PKG-1 threat model refuses, so we do not open it.
+  trust surface the containment's threat model refuses, so we do not open it.
 - **Still fail-safe outside `/workspace`:** a `mise.toml` anywhere else is untrusted → not auto-applied
   → no silent install. And trust is **not** execution: mise `[tasks]` still only run on an explicit
   `mise run`; auto-trust governs tool/env resolution, not arbitrary code execution. The egress DROP +
-  git-key broker + (PKG-5) `--ignore-scripts` layers from the PKG-1 model all still apply underneath.
+  git-key broker + `--ignore-scripts` layers from the containment model all still apply underneath.
 
 ## Verification
 
@@ -99,7 +98,7 @@ CI runs `test/mise-unit.sh` — a docker-free, network-free static gate assertin
 wiring is present and correctly scoped: the install is version-pinned **and SHA256-verified in-repo**
 (no `curl | sh`), the shims dir is on `PATH` for non-interactive shells, interactive activation is
 **appended** to the stock `~/.bashrc` and interactive-guarded, and `trusted_config_paths` is **exactly
-`/workspace`** — never a blanket `/` or `~`. (Same split as PKG-1: the composition/scoping is proven in
+`/workspace`** — never a blanket `/` or `~`. (Same split as the egress containment: the composition/scoping is proven in
 CI; the live behavior is the on-host smoke gate below.)
 
 The live proof needs a full image build and is a local/manual gate (like `make smoke`). In a plain leaf
@@ -125,16 +124,16 @@ additionally need their vendor hosts via `CLAUDE_EGRESS_EXTRA_HOSTS`.
 All three must hold: the language install and the CLI install both succeed with no `sudo`, and the
 out-of-workspace config does not silently provision.
 
-## Reproducible manifests — lockfile determinism (PKG-5)
+## Reproducible manifests — lockfile determinism
 
 The image bakes `lockfile = true` into the **global** mise config (`~/.config/mise/config.toml`), so a
 repo's committed `/workspace/mise.lock` is authoritative: `mise install`/`use` records and reuses the
 exact locked tool versions, and a pinned lock reinstalls **identical** versions — offline, from the
-PKG-3 shared `/cache` store, with no registry round-trip. The global config is always trusted (it is
+shared `/cache` store, with no registry round-trip. The global config is always trusted (it is
 mise's own, not a repo `mise.toml`), so this does **not** widen the `/workspace`-only config-trust
 decision above. A committed `mise.toml` + `mise.lock` is the reproducible way to pin a repo's toolchain;
 `claude-deps-check` (advisory; `--strict` refuses) flags any `latest`/unpinned spec that would defeat
-that. The install-script side of PKG-5 (baked `ignore-scripts=true` in the agent's `~/.npmrc`, with a
+that. The install-script side of the manifest hardening (baked `ignore-scripts=true` in the agent's `~/.npmrc`, with a
 per-repo `/workspace/.npmrc` opt-out) is documented in
 [`docs/package-provisioning-security.md`](package-provisioning-security.md) §3.2/§3.6.
 
@@ -142,14 +141,14 @@ per-repo `/workspace/.npmrc` opt-out) is documented in
 
 - **No system `.so` libraries.** mise provisions binaries and language toolchains, not arbitrary
   system libraries — those need a base-image rebuild (the worker-tier apt path that used to close
-  this gap, PKG-4, was retired in SC-5; see docs/legacy-sysbox-broker.md). (roadmap §II.9)
+  this gap has been retired; see docs/legacy-sysbox-broker.md).
 - **No blanket config trust.** `/workspace` only; never `/`. See above.
 - **Language toolchains are not reachable under egress lockdown yet.** `node@`/`go@`/`rust` fetch their
   runtimes from vendor hosts (`nodejs.org`, `go.dev`, `static.rust-lang.org`) not on the current
   allowlist, so under `CLAUDE_EGRESS_LOCKDOWN=1` they need those hosts added (`CLAUDE_EGRESS_EXTRA_HOSTS`)
-  — a candidate firewall follow-up, deliberately not bundled into PKG-2's scope. Default (lockdown off)
+  — a candidate firewall follow-up, deliberately not bundled into this provisioner's scope. Default (lockdown off)
   and `python@`/`github:`/`aqua:` under lockdown are unaffected. (How it's wired §4.)
-- **`mise use` is not a security boundary on its own.** It sits on top of the PKG-1 containment
-  (curated egress, credentials-unreachable-during-fetch) and the PKG-5 script hardening — it does
-  not replace them. (The `install-then-relock` window was PKG-4's apt mechanism, retired with the
-  Sysbox/broker substrate in `SC-5`; see `docs/legacy-sysbox-broker.md`.)
+- **`mise use` is not a security boundary on its own.** It sits on top of the egress containment
+  (curated egress, credentials-unreachable-during-fetch) and the script hardening — it does
+  not replace them. (The `install-then-relock` window was the apt tier's mechanism, retired with the
+  Sysbox/broker substrate; see `docs/legacy-sysbox-broker.md`.)

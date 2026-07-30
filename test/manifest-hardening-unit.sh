@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# manifest-hardening-unit.sh — pure-static + function-level tests for the PKG-5
+# manifest-hardening-unit.sh — pure-static + function-level tests for the
 # reproducible-manifest + install-script hardening. NO docker, NO network, NO build.
 #
-# PKG-5 bakes two supply-chain hardenings for AGENT-initiated installs — `ignore-scripts=true`
+# The manifest hardening bakes two supply-chain hardenings for AGENT-initiated installs — `ignore-scripts=true`
 # in the claude user's ~/.npmrc and mise `lockfile=true` in the global mise config — plus an
 # advisory `claude-deps-check` linter that flags unpinned/`latest` manifest specs. The LIVE
-# proof (a pinned mise.lock reinstalls identical versions offline from the PKG-3 cache with
+# proof (a pinned mise.lock reinstalls identical versions offline from the shared cache with
 # zero registry calls; a postinstall-script fixture does NOT execute under ignore-scripts)
 # needs a real image build and is the on-host gate. Here we prove the WIRING is present and
 # correctly scoped:
@@ -31,7 +31,7 @@ okp()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
 badp() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 TMPD="$(mktemp -d)"; trap 'rm -rf "$TMPD"' EXIT
 
-echo "PKG-5 reproducible manifest + install-script hardening"
+echo "reproducible manifest + install-script hardening"
 
 # ============================================================================
 echo "== Dockerfile: ignore-scripts + lockfile baked into the USER config (build untouched) =="
@@ -68,9 +68,9 @@ grep -Eq 'chown -R \$\{CLAUDE_UID\}:\$\{CLAUDE_GID\} /home/\$\{CLAUDE_USER\}/\.n
   && okp "claude-deps-check is COPYed onto PATH and chmod +x" \
   || badp "claude-deps-check is not installed + made executable in the image"
 
-# The /workspace-only mise config trust (PKG-2) must NOT be widened by PKG-5.
+# The /workspace-only mise config trust must NOT be widened by it.
 grep -Eq '^\s*MISE_TRUSTED_CONFIG_PATHS=/workspace(\s|\\|$)' "$DOCKERFILE" \
-  && okp "MISE_TRUSTED_CONFIG_PATHS is still /workspace-only (PKG-5 did not widen config trust)" \
+  && okp "MISE_TRUSTED_CONFIG_PATHS is still /workspace-only (the hardening did not widen config trust)" \
   || badp "MISE_TRUSTED_CONFIG_PATHS is no longer exactly /workspace"
 
 # ============================================================================

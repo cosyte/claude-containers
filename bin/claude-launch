@@ -35,11 +35,11 @@
 #   --plugin <name@mkt>        enable a plugin at runtime (repeatable)
 #                              e.g. --plugin software-engineering@claude-skills
 #   --cache <volume>           shared tool cache volume mounted at /cache
-#                              (PKG-3; default: claude-cache). Reused across restarts
+#                              (default: claude-cache). Reused across restarts
 #                              for mise/cargo/go/npm/uv installs.
 #   --no-cache                 disable the shared cache (per-container installs)
 #
-# --broker / --sysbox / --worker-tarball were REMOVED in SC-5 (the nested-Sysbox
+# --broker / --sysbox / --worker-tarball were REMOVED with the nested-Sysbox
 # worker-broker substrate was retired in favor of Claude Code subagents in git
 # worktrees — see docs/legacy-sysbox-broker.md). Passing any of them is a hard error.
 # The Sysbox RUNTIME is back, but as an implementation detail of --docker, not a flag.
@@ -63,7 +63,7 @@ MODEL="${CLAUDE_MODEL:-}"
 # CLAUDE_BROWSER` flag is omitted below so a browser image can self-detect.
 # BROWSER_EXPLICIT tracks a per-launch --browser/--no-browser CLI flag (vs an
 # ambient .env default) so only an explicit --browser hard-fails on a lean image.
-# CACHE_ARG: the shared tool cache (PKG-3). Empty = the CACHE_VOLUME default
+# CACHE_ARG: the shared tool cache. Empty = the CACHE_VOLUME default
 # (claude-cache) is mounted at /cache; --cache <vol> overrides the name;
 # --cache off / --no-cache disables it (per-container installs).
 # DOCKER mirrors BROWSER's tri-state ("" = off unless CLAUDE_DOCKER says otherwise,
@@ -289,7 +289,7 @@ fi
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 \
     || die "auth volume '$AUTH_VOLUME' missing. Run 'make login' once first."
 
-# Shared tool cache (PKG-3): mount the shared cache volume at /cache unless disabled.
+# Shared tool cache: mount the shared cache volume at /cache unless disabled.
 # Docker auto-creates the named volume (seeded from the image's /cache) on first use,
 # so this never blocks a launch; --no-cache / --cache off drops the mount entirely.
 CACHE_MOUNT_ARGS=()
