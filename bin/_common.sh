@@ -40,7 +40,7 @@ fi
 CLAUDE_IMAGE="${CLAUDE_IMAGE:-claude-code-box:latest}"
 AUTH_VOLUME="${AUTH_VOLUME:-claude-auth}"
 SSHKEYS_VOLUME="${SSHKEYS_VOLUME:-claude-sshkeys}"
-# Shared tool cache (PKG-3): ONE volume shared across every managed container,
+# Shared tool cache: ONE volume shared across every managed container,
 # mounted at /cache, holding mise's install store + the language package-manager
 # caches. Empty string ("" / "off"/"none" from a launcher flag) disables it —
 # the container then provisions per-container into its own layer (fail-safe).
@@ -283,7 +283,7 @@ docker_volume() { echo "claude-docker-$1"; }
 # keeps everything that grows in a volume for exactly that reason.
 scratch_volume() { echo "claude-scratch-$1"; }
 
-# --- Shared tool cache (PKG-3) -----------------------------------------------
+# --- Shared tool cache -----------------------------------------------
 # cache_name — the shared cache volume name, or "" when disabled. A launcher may
 # pass an override (its --cache value); "", "off", "none", "0", "false" all disable.
 cache_name() {

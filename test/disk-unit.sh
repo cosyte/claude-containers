@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Unit tests for disk-hygiene logic — NO docker, NO sysbox, NO root.
 #
-# SC-5 removed the broker's per-launch disk-floor refusal (broker_check_disk /
+# The substrate strip removed the broker's per-launch disk-floor refusal (broker_check_disk /
 # broker_check_disk_config, and the broker_process_request integration around it)
 # along with the nested-Sysbox worker-broker substrate it gated — see
 # docs/legacy-sysbox-broker.md. What survives, and what this covers:
@@ -37,7 +37,7 @@ else
     bad "disk_free_mib must succeed with a numeric MiB value on a real path (rc=$rc, got='$got')"
 fi
 
-if disk_free_mib "/no/such/path/CC-5-disk-unit" >/dev/null 2>&1; then
+if disk_free_mib "/no/such/path/disk-unit" >/dev/null 2>&1; then
     bad "disk_free_mib must fail on a nonexistent path (fail closed, never read as free space)"
 else
     ok  "disk_free_mib fails closed on a nonexistent path"

@@ -48,7 +48,7 @@ it will refuse; the fixes below never touch it.
   (ephemeral, no `mise use` required).
 - **Node.** `mise use node@22` first, then `pnpm add <pkg>` or `npm install <pkg>`
   in a repo that has a manifest. The agent-user `~/.npmrc` sets
-  `ignore-scripts=true` (PKG-5); if a repo legitimately needs lifecycle scripts,
+  `ignore-scripts=true`; if a repo legitimately needs lifecycle scripts,
   commit a per-repo `/workspace/.npmrc` with `ignore-scripts=false` to opt it back
   in.
 - **Rust.** `mise use rust` first, then `cargo add <crate>` in a Cargo project (or
@@ -60,7 +60,7 @@ it will refuse; the fixes below never touch it.
   new syslib means asking the operator for a base-image rebuild, not running
   `apt` yourself.
 - **Shared cache (`/cache`).** `mise`, `pip`, `cargo`, `go`, `npm`/`pnpm`, and
-  `uv` are all pointed at `/cache` (PKG-3), so a package fetched by one container
+  `uv` are all pointed at `/cache`, so a package fetched by one container
   is a cache hit for the next launch and for parallel workers on the same host.
   Nothing to configure — it is where every install above lands.
 

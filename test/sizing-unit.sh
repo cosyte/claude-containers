@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Unit tests for the surviving resource-sizing surface — NO docker, NO sysbox, NO root.
 #
-# SC-5 removed the K-aware Sysbox-controller-envelope sizing (controller_envelope,
+# The substrate strip removed the K-aware Sysbox-controller-envelope sizing (controller_envelope,
 # CLAUDE_WORKER_*/CLAUDE_CTRL_* profile, resolve_parallel_k, bin/claude-controller-size,
 # and the broker's capacity fail-safe) — that machinery existed solely to size a
 # controller for K nested Sysbox workers, which no longer exist; see

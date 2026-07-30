@@ -177,7 +177,7 @@ RUN npm install -g pnpm@${PNPM_VERSION} \
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     npm_config_manage_package_manager_versions=false
 
-# --- mise: rootless polyglot toolchain + CLI-binary provisioning (PKG-2) -------
+# --- mise: rootless polyglot toolchain + CLI-binary provisioning -------
 # Bake `mise` so a session can provision language toolchains and prebuilt CLIs
 # as UID 1000 with NO root:
 #   mise use node@22 / python@3.12 / go@1.23 / rust      (language toolchains)
@@ -185,7 +185,7 @@ ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
 # `pipx:` CLIs reuse the baked `uv` automatically — mise's `pipx.uvx` defaults
 # true whenever `uv` is on PATH (it is, baked above). System `.so` libraries are
 # NOT in scope for mise (the curated worker-apt tier that used to close that gap,
-# PKG-4, was retired in SC-5 along with the Sysbox substrate it was scoped to —
+# the worker-tier apt provisioner, was retired along with the Sysbox substrate it was scoped to —
 # see docs/legacy-sysbox-broker.md).
 #
 # Pinned + checksummed IN-REPO: this repo's whole thesis is supply-chain
@@ -214,7 +214,7 @@ RUN set -eux; \
     rm -f /tmp/mise; \
     mise --version
 
-# --- Shared, persistent tool cache (PKG-3) -----------------------------------
+# --- Shared, persistent tool cache -----------------------------------
 # One shared /cache tree holds mise's install store + the language package-manager
 # caches, so a toolchain/CLI provisioned once is reused across container restarts
 # AND across parallel workers (the ENV block below points MISE_DATA_DIR + CARGO_HOME
@@ -295,11 +295,11 @@ LABEL claude.browser="${WITH_BROWSER}"
 # compose stacks, testcontainers — as part of its normal work. ~400 MB delta; default OFF.
 #
 # History, because this ARG existed twice before under a different name: it originally
-# hosted the Sysbox nested-worker-BROKER substrate (retired in SC-5), then CC-BINS deleted
+# hosted the Sysbox nested-worker-BROKER substrate (since retired), then a later prune deleted
 # it outright, correctly observing that nothing started dockerd and nothing *could* — the
 # launchers grant no --privileged and mount no docker socket, so the baked engine was
 # unreachable. This variant is NOT that comeback: there is no broker, no worker plane, no
-# spool. What changed is the missing piece CC-BINS named. The container now runs under
+# spool. What changed is the missing piece that prune named. The container now runs under
 # `--runtime=sysbox-runc`, which puts the inner daemon in a USER NAMESPACE (container-root
 # → an unprivileged host uid), so nested Docker needs neither --privileged nor a host
 # socket mount — both remain FORBIDDEN, and both would hand a prompt-injectable agent the
@@ -377,14 +377,14 @@ COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
 # _common.sh rides along because claude-disk-gc sources it.
 COPY bin/_common.sh /usr/local/bin/_common.sh
 # Storage/disk safety: claude-disk-gc is a standalone maintenance tool (docker system +
-# builder prune, plus the PKG-3 shared-cache trim) — run it manually or on your own
+# builder prune, plus the shared-cache trim) — run it manually or on your own
 # cron/timer; no entrypoint path auto-starts it.
 COPY bin/claude-disk-gc /usr/local/bin/claude-disk-gc
-# Dependency manifest linter (PKG-5): warns on unpinned/`latest` specs in a repo's
+# Dependency manifest linter: warns on unpinned/`latest` specs in a repo's
 # mise.toml / package.json (or refuses under --strict), so an agent-committed manifest
 # stays reproducibly pinned. Advisory by default; never blocks a session.
 COPY bin/claude-deps-check /usr/local/bin/claude-deps-check
-# claude-reaper and claude-controller were REMOVED in CC-BINS: the reaper pruned a spool
+# claude-reaper and claude-controller were REMOVED: the reaper pruned a spool
 # only the retired broker ever wrote to, and the controller had collapsed to a
 # pass-through to claude-autopilot. See docs/legacy-sysbox-broker.md.
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
@@ -400,7 +400,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
 
-# mise interactive activation (PKG-2): APPEND to the user's stock ~/.bashrc
+# mise interactive activation: APPEND to the user's stock ~/.bashrc
 # (from /etc/skel via `useradd -m`) rather than overwriting it, so Debian's
 # interactive aliases / history control / colored prompt survive for humans who
 # SSH in to debug. A non-interactive shell already `return`s early in the stock
@@ -411,10 +411,10 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
 # base image shipped a stock ~/.bashrc.
 RUN printf '%s\n' \
       '' \
-      '# mise (PKG-2): activate for INTERACTIVE shells only. Agent / non-interactive' \
+      '# mise: activate for INTERACTIVE shells only. Agent / non-interactive' \
       '# shells use the shims dir baked onto PATH (see the Dockerfile ENV), not this.' \
       '[[ $- == *i* ]] || return' \
-      '# Shared tool cache (PKG-3): re-export the cache dirs so a fresh SSH shell that' \
+      '# Shared tool cache: re-export the cache dirs so a fresh SSH shell that' \
       '# did NOT inherit the Dockerfile ENV (e.g. a non-tmux fallback shell) still' \
       "# activates mise against the SHARED store, not the home default. Agent shells get" \
       '# these from the Dockerfile ENV; this keeps interactive shells consistent.' \
@@ -429,7 +429,7 @@ RUN printf '%s\n' \
       >> /home/${CLAUDE_USER}/.bashrc \
     && chown ${CLAUDE_UID}:${CLAUDE_GID} /home/${CLAUDE_USER}/.bashrc
 
-# --- Reproducible manifest + install-script hardening (PKG-5) ------------------
+# --- Reproducible manifest + install-script hardening ------------------
 # Two supply-chain hardenings for AGENT-initiated installs, both baked into the
 # `claude` USER's config so the BUILD (root, above) is untouched — the pinned
 # `npm install -g` layers ran before this and as root, so a tampered dependency's
@@ -442,7 +442,7 @@ RUN printf '%s\n' \
 #    (git-dependency `.npmrc` git-binary override runs even under ignore-scripts —
 #    PackageGate GHSA-wr8v-3jqh-9x36; native `binding.gyp`/node-gyp builds still
 #    compile; pnpm lockfile-integrity gaps for HTTP/git tarball deps — CVE-2025-69263).
-#    The residual is contained by PKG-1 (curated egress + creds-unreachable-during-
+#    The residual is contained by the egress containment (curated egress + creds-unreachable-during-
 #    fetch), not by this flag alone. See docs/package-provisioning-security.md.
 #    ESCAPE HATCH (npm-native, no flag): a repo that genuinely needs install
 #    scripts commits its own /workspace/.npmrc with `ignore-scripts=false` — a
@@ -450,9 +450,9 @@ RUN printf '%s\n' \
 # 2. mise lockfile=true in the global mise config — makes a committed
 #    /workspace/mise.lock authoritative: `mise install`/`use` records + reuses the
 #    exact locked tool versions, so a pinned lock reinstalls identical versions
-#    (from the PKG-3 shared cache) deterministically. Global config is always
+#    (from the shared cache) deterministically. Global config is always
 #    trusted (it is mise's own, not a repo config), so it does not widen the
-#    /workspace-only config-trust decision from PKG-2.
+#    /workspace-only config-trust decision from the mise provisioner.
 RUN set -eux; \
     printf 'ignore-scripts=true\n' > /home/${CLAUDE_USER}/.npmrc; \
     mkdir -p /home/${CLAUDE_USER}/.config/mise; \
@@ -467,9 +467,9 @@ RUN set -eux; \
 # Remote Control is the whole point of this image, so telemetry stays on.
 # DISABLE_AUTOUPDATER is unrelated to the flag fetch and is kept (pinned version).
 #
-# mise (PKG-2) + shared tool cache (PKG-3):
+# mise + shared tool cache:
 #  - MISE_DATA_DIR + CARGO_HOME/GOPATH/GOMODCACHE + npm/uv/pip caches point at the
-#    shared /cache tree (PKG-3), so a toolchain/CLI installed by one container is a
+#    shared /cache tree, so a toolchain/CLI installed by one container is a
 #    cache hit for the next and for parallel workers. With no cache volume mounted
 #    /cache is a plain image-layer dir → per-container installs (fail-safe).
 #  - PATH: prepend the mise shims dir (now /cache/mise/shims) so NON-interactive /

@@ -14,7 +14,7 @@
 # it previously ran only inside the now-retired Sysbox nested-worker broker/controller mode
 # — see docs/legacy-sysbox-broker.md).
 #
-# Shared tool cache (PKG-3): the /cache volume (mise installs + cargo/go/npm/uv caches) is
+# Shared tool cache: the /cache volume (mise installs + cargo/go/npm/uv caches) is
 # a NAMED volume, so the prunes above deliberately never touch it — but it still needs
 # bounding as containers come and go. Each cycle also runs a CACHE TRIM (cache_gc_once):
 # when the cache exceeds CLAUDE_CACHE_MAX_MIB it removes only the re-fetchable download/
@@ -24,7 +24,7 @@
 # Usage:
 #   bin/claude-disk-gc                 one-shot: docker prune + cache trim
 #   bin/claude-disk-gc --loop          every CLAUDE_DISK_GC_INTERVAL seconds, forever
-#   bin/claude-disk-gc --no-cache-trim docker prune only (skip the PKG-3 cache trim)
+#   bin/claude-disk-gc --no-cache-trim docker prune only (skip the shared-cache trim)
 #
 # Env:
 #   CLAUDE_DISK_GC_INTERVAL     seconds between --loop cycles (default 3600)
@@ -102,7 +102,7 @@ disk_gc_once() {
     return 0
 }
 
-# --- the cache trim: bound the shared tool cache (PKG-3) --------------------------------
+# --- the cache trim: bound the shared tool cache --------------------------------
 # The shared /cache volume (mise installs + cargo/go/npm/uv caches) is a NAMED volume, so
 # `system prune`/`builder prune` above deliberately never touch it. It still needs bounding
 # under K workers — that is this trim. It reclaims ONLY the re-fetchable download/registry
