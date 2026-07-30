@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# SCM event observer — the event-driven half of the autopilot queue.
+# SCM event observer: the event-driven half of the autopilot queue.
 #
 # Polls the workspace repo's GitHub PRs and routes actionable events into the
 # durable task queue (the autopilot loop consumes them). This closes the loop
 # from "blind timer" toward observe → derive → act: instead of only running
 # CLAUDE_AUTOPILOT_CMD on a clock, the fleet reacts to CI failures, change requests,
 # and merge conflicts as they appear. Polling (not webhooks) keeps the container's
-# outbound-only posture — no inbound port.
+# outbound-only posture: no inbound port.
 #
 # Started by the entrypoint in its own tmux window 'scm' when
 # CLAUDE_SCM_OBSERVER=1. Feeds the queue, so pair it with CLAUDE_AUTOPILOT=1 +
@@ -54,11 +54,11 @@ scm_events() {
 }
 
 # `events` dry-run: read `gh pr list` JSON on stdin and print the events that
-# would be routed. Pure transform — needs no /workspace, gh, or queue. Used to
+# would be routed. Pure transform: needs no /workspace, gh, or queue. Used to
 # preview what the observer would enqueue, and by the test suite.
 if [[ "${1:-}" == "events" ]]; then scm_events; exit 0; fi
 
-cd /workspace 2>/dev/null || { echo "[scm] no /workspace — nothing to observe"; exec bash -l; }
+cd /workspace 2>/dev/null || { echo "[scm] no /workspace: nothing to observe"; exec bash -l; }
 
 INTERVAL="${CLAUDE_SCM_INTERVAL:-300}"
 PR_FILTER="${CLAUDE_SCM_PR_FILTER:-}"
@@ -83,14 +83,14 @@ build_prompt() {
 echo "[scm] observer  : watching $EVENTS"
 echo "[scm] repo      : $(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo '(gh cannot resolve a GitHub repo from this workspace remote)')"
 echo "[scm] interval  : ${INTERVAL}s   queue: $QUEUE_DIR"
-[[ -z "${GH_TOKEN:-}" ]] && echo "[scm] WARNING: no GH_TOKEN — gh is unauthenticated; private repo data will be unavailable"
+[[ -z "${GH_TOKEN:-}" ]] && echo "[scm] WARNING: no GH_TOKEN, gh is unauthenticated; private repo data will be unavailable"
 echo
 
 poll() {
     local json events line key kind num title url n=0
     json="$(gh pr list --state open --limit "$PR_LIMIT" $PR_FILTER \
         --json number,title,url,headRefOid,mergeable,reviewDecision,statusCheckRollup 2>/dev/null)" || {
-        echo "[scm] gh pr list failed (auth? not a GitHub repo?) — will retry next poll"; return; }
+        echo "[scm] gh pr list failed (auth? not a GitHub repo?): will retry next poll"; return; }
     [[ -z "$json" || "$json" == "[]" ]] && { echo "[scm] no open PRs"; return; }
 
     events="$(echo "$json" | scm_events)"
@@ -98,7 +98,7 @@ poll() {
         [[ -z "$key" ]] && continue
         if grep -qxF "$key" "$SEEN"; then continue; fi          # already routed
         claude-enqueue --priority "$PRIORITY" "$(build_prompt "$kind" "$num" "$title" "$url")" >/dev/null \
-            && { echo "$key" >> "$SEEN"; n=$((n+1)); echo "[scm] enqueued $kind for PR #$num — $title"; }
+            && { echo "$key" >> "$SEEN"; n=$((n+1)); echo "[scm] enqueued $kind for PR #$num: $title"; }
     done <<< "$events"
     [[ "$n" -eq 0 ]] && echo "[scm] no new events"
     # Keep the seen-ledger bounded.

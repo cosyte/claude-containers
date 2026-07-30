@@ -1,6 +1,6 @@
 # claude-containers toolchain provisioning = baked `mise`, rootless, workspace-trusted
 
-**Status:** ACCEPTED — 2026-07-11. This is the design record for how a session provisions
+**Status:** ACCEPTED, 2026-07-11. This is the design record for how a session provisions
 language toolchains and prebuilt CLIs. It builds directly on the containment in
 [`docs/package-provisioning-security.md`](package-provisioning-security.md) and **inherits,
 never re-decides, it**. The design record is this file.
@@ -20,7 +20,7 @@ mise use github:cli/cli             # …or straight from a GitHub release
 ```
 
 Installed tools live under `~/.local/share/mise` (the `claude` user's home) and are on `PATH` for the
-agent immediately — no `sudo`, no image rebuild.
+agent immediately: no `sudo`, no image rebuild.
 
 ## How it's wired
 
@@ -28,63 +28,63 @@ agent immediately — no `sudo`, no image rebuild.
    mise is **not** installed by piping a remotely-served `mise.run` script into a shell. The Dockerfile
    downloads the pinned mise release binary directly from GitHub releases (`v2026.7.5` at time of
    writing) and verifies its **SHA256 against a digest hardcoded in the Dockerfile** (`MISE_SHA256_AMD64`
-   / `MISE_SHA256_ARM64`) before installing to a root-owned `/usr/local/bin/mise` — a tampered or
+   / `MISE_SHA256_ARM64`) before installing to a root-owned `/usr/local/bin/mise`: a tampered or
    wrong-served binary fails the build. Reproducible, not "latest". Bump `MISE_VERSION` **and both arch
    digests together**, from the release's published `SHASUMS256.txt` (the `-linux-x64` / `-linux-arm64`
    raw-binary rows).
 
 2. **Activated two ways, for two shell kinds.**
-   - **Interactive** (SSH logins, tmux panes): `~/.bashrc` runs `eval "$(mise activate bash)"` — full
+   - **Interactive** (SSH logins, tmux panes): `~/.bashrc` runs `eval "$(mise activate bash)"`, full
      activation with the `cd`-hook and env management. `~/.bash_profile` sources `~/.bashrc`, so login
      shells reach it too.
    - **Non-interactive / agent** (`bash -c "…"`, the Claude Code process itself, which never sources
      `~/.bashrc`): the image prepends the **mise shims directory**
      (`/home/claude/.local/share/mise/shims`) to `PATH` via a Dockerfile `ENV`. Shims are the
-     mise-recommended path for non-interactive use — a mise-installed `node`/`python`/CLI resolves
+     mise-recommended path for non-interactive use: a mise-installed `node`/`python`/CLI resolves
      with zero shell activation. The dir need not exist at build time; mise creates and populates it
      (as UID 1000) on the first `mise use` and reshims automatically.
 
 3. **`pipx:` reuses the baked `uv`.** mise's `pipx.uvx` setting defaults **true** whenever `uv` is on
-   `PATH` — and it is, baked in the layer above — so `mise use pipx:<tool>` installs via `uv`/`uvx`
+   `PATH`, and it is, baked in the layer above, so `mise use pipx:<tool>` installs via `uv`/`uvx`
    (much faster) with nothing extra to configure.
 
 4. **Egress.** The egress firewall is **opt-in** (`CLAUDE_EGRESS_LOCKDOWN=1`); **by default it is off,
    and every `mise use …` reaches the internet normally.** Under lockdown the allowlist is default-deny
-   and what works splits by *where mise fetches from* — this is the one subtlety worth internalizing:
-   - **Prebuilt CLIs — `github:` / `aqua:`.** Fetch from GitHub releases (aqua also resolves its
+   and what works splits by *where mise fetches from*: this is the one subtlety worth internalizing:
+   - **Prebuilt CLIs: `github:` / `aqua:`.** Fetch from GitHub releases (aqua also resolves its
      registry from GitHub), all on the baked **base** allowlist → work under lockdown with the package
      profile **off**. If a particular tool's aqua metadata happens to dial a host outside the allowlist,
      add it with `CLAUDE_EGRESS_EXTRA_HOSTS`.
-   - **Registry backends — `pipx:` / `cargo:` / `go:`.** Install tool binaries from PyPI / crates.io /
+   - **Registry backends: `pipx:` / `cargo:` / `go:`.** Install tool binaries from PyPI / crates.io /
      the Go module proxy → need `CLAUDE_EGRESS_PACKAGES=1` (the containment's opt-in, IP-pinned **registry**
      allowlist). `pipx:` reuses the baked `uv` (point 3).
-   - **Language toolchains — `node@` / `go@` / `rust`.** Download the *runtime* from the vendor's own
+   - **Language toolchains: `node@` / `go@` / `rust`.** Download the *runtime* from the vendor's own
      hosts (`nodejs.org`, `go.dev`, `static.rust-lang.org`), which are **not** on the current allowlist.
      Under lockdown these need those hosts added via `CLAUDE_EGRESS_EXTRA_HOSTS` (a candidate firewall
-     follow-up) — or just run with lockdown off. **`python@` is the exception:** mise installs it from
+     follow-up), or just run with lockdown off. **`python@` is the exception:** mise installs it from
      the GitHub-released python-build-standalone, which is on the base allowlist, so it works under
      lockdown as-is.
 
-   System `.so` libraries are **out of scope** entirely — no self-service path provisions them (a
+   System `.so` libraries are **out of scope** entirely: no self-service path provisions them (a
    worker-tier `apt` used to close this gap, but was retired along with the Sysbox
    substrate it depended on; see [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md)). A system
    library needs a base-image rebuild.
 
-## The deliberate trust decision — `trusted_config_paths = /workspace`, not `/`
+## The deliberate trust decision: `trusted_config_paths = /workspace`, not `/`
 
 mise reads a repo's `mise.toml` to know which toolchain to apply. By default it **prompts** before
-trusting an unseen config — but the agent runs non-interactively, where a prompt is effectively a
+trusting an unseen config, but the agent runs non-interactively, where a prompt is effectively a
 refusal, so an untrusted `mise.toml` would simply **not** auto-apply (fail-safe: it never silently
 runs).
 
-To make the sanctioned workflow work, the image sets `MISE_TRUSTED_CONFIG_PATHS=/workspace` — a
+To make the sanctioned workflow work, the image sets `MISE_TRUSTED_CONFIG_PATHS=/workspace`: a
 **deliberately scoped** trust: mise auto-trusts a `mise.toml` **only** under `/workspace`, the repo the
 agent was launched to work on. This is a documented supply-chain trade:
 
-- **Chosen:** `/workspace` — the one tree the session already operates on with full read/write. A
+- **Chosen:** `/workspace`, the one tree the session already operates on with full read/write. A
   `mise.toml` committed to that repo auto-applies its toolchain, which is the whole point.
-- **Refused:** a blanket `["/"]`. That would auto-trust a `mise.toml` **anywhere** the agent can reach
-  — a downloaded tarball, a `/tmp` scratch dir, a transitively-cloned dependency — turning "read a
+- **Refused:** a blanket `["/"]`. That would auto-trust a `mise.toml` **anywhere** the agent can reach.
+  A downloaded tarball, a `/tmp` scratch dir, a transitively-cloned dependency: turning "read a
   config" into "auto-run whatever any config on the filesystem declares". That is exactly the implicit-
   trust surface the containment's threat model refuses, so we do not open it.
 - **Still fail-safe outside `/workspace`:** a `mise.toml` anywhere else is untrusted → not auto-applied
@@ -94,11 +94,11 @@ agent was launched to work on. This is a documented supply-chain trade:
 
 ## Verification
 
-CI runs `test/mise-unit.sh` — a docker-free, network-free static gate asserting the security-relevant
+CI runs `test/mise-unit.sh`: a docker-free, network-free static gate asserting the security-relevant
 wiring is present and correctly scoped: the install is version-pinned **and SHA256-verified in-repo**
 (no `curl | sh`), the shims dir is on `PATH` for non-interactive shells, interactive activation is
 **appended** to the stock `~/.bashrc` and interactive-guarded, and `trusted_config_paths` is **exactly
-`/workspace`** — never a blanket `/` or `~`. (Same split as the egress containment: the composition/scoping is proven in
+`/workspace`**, never a blanket `/` or `~`. (Same split as the egress containment: the composition/scoping is proven in
 CI; the live behavior is the on-host smoke gate below.)
 
 The live proof needs a full image build and is a local/manual gate (like `make smoke`). In a plain leaf
@@ -106,10 +106,10 @@ container (egress lockdown **off** by default, so the runtime downloads reach th
 UID 1000, with no `sudo`:
 
 ```bash
-# language toolchain — works out of the box with the firewall off (its default)
+# language toolchain: works out of the box with the firewall off (its default)
 mise use node@22 && node --version
 
-# prebuilt CLI from a GitHub release — also works under lockdown on the base allowlist
+# prebuilt CLI from a GitHub release: also works under lockdown on the base allowlist
 mise use aqua:BurntSushi/ripgrep && rg --version
 
 # fail-safe: an untrusted mise.toml OUTSIDE /workspace does not auto-apply
@@ -124,11 +124,11 @@ additionally need their vendor hosts via `CLAUDE_EGRESS_EXTRA_HOSTS`.
 All three must hold: the language install and the CLI install both succeed with no `sudo`, and the
 out-of-workspace config does not silently provision.
 
-## Reproducible manifests — lockfile determinism
+## Reproducible manifests: lockfile determinism
 
 The image bakes `lockfile = true` into the **global** mise config (`~/.config/mise/config.toml`), so a
 repo's committed `/workspace/mise.lock` is authoritative: `mise install`/`use` records and reuses the
-exact locked tool versions, and a pinned lock reinstalls **identical** versions — offline, from the
+exact locked tool versions, and a pinned lock reinstalls **identical** versions: offline, from the
 shared `/cache` store, with no registry round-trip. The global config is always trusted (it is
 mise's own, not a repo `mise.toml`), so this does **not** widen the `/workspace`-only config-trust
 decision above. A committed `mise.toml` + `mise.lock` is the reproducible way to pin a repo's toolchain;
@@ -140,15 +140,15 @@ per-repo `/workspace/.npmrc` opt-out) is documented in
 ## Non-goals (inherited + new)
 
 - **No system `.so` libraries.** mise provisions binaries and language toolchains, not arbitrary
-  system libraries — those need a base-image rebuild (the worker-tier apt path that used to close
+  system libraries: those need a base-image rebuild (the worker-tier apt path that used to close
   this gap has been retired; see docs/legacy-sysbox-broker.md).
 - **No blanket config trust.** `/workspace` only; never `/`. See above.
 - **Language toolchains are not reachable under egress lockdown yet.** `node@`/`go@`/`rust` fetch their
   runtimes from vendor hosts (`nodejs.org`, `go.dev`, `static.rust-lang.org`) not on the current
-  allowlist, so under `CLAUDE_EGRESS_LOCKDOWN=1` they need those hosts added (`CLAUDE_EGRESS_EXTRA_HOSTS`)
-  — a candidate firewall follow-up, deliberately not bundled into this provisioner's scope. Default (lockdown off)
+  allowlist, so under `CLAUDE_EGRESS_LOCKDOWN=1` they need those hosts added (`CLAUDE_EGRESS_EXTRA_HOSTS`).
+  A candidate firewall follow-up, deliberately not bundled into this provisioner's scope. Default (lockdown off)
   and `python@`/`github:`/`aqua:` under lockdown are unaffected. (How it's wired §4.)
 - **`mise use` is not a security boundary on its own.** It sits on top of the egress containment
-  (curated egress, credentials-unreachable-during-fetch) and the script hardening — it does
+  (curated egress, credentials-unreachable-during-fetch) and the script hardening: it does
   not replace them. (The `install-then-relock` window was the apt tier's mechanism, retired with the
   Sysbox/broker substrate; see `docs/legacy-sysbox-broker.md`.)

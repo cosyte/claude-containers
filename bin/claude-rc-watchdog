@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
-# claude-rc-watchdog — recover Remote Control after the bridge gives up.
+# claude-rc-watchdog: recover Remote Control after the bridge gives up.
 #
-# Claude Code's Remote Control bridge (v2 — an SSE transport, not a websocket)
-# retries reconnection on its own. A transient network drop self-heals — the
-# transport retries until connectivity returns — so an outage is not, by
+# Claude Code's Remote Control bridge (v2, an SSE transport, not a websocket)
+# retries reconnection on its own. A transient network drop self-heals: the
+# transport retries until connectivity returns, so an outage is not, by
 # itself, something to recover from. But the bridge can also fail *terminally*
 # (it logs a give-up and stops): then the link is dead with no recovery while
 # the local `claude` process keeps running, healthy, and the mobile app shows
-# the session offline. Upstream context — anthropics/claude-code#34255, #29726.
+# the session offline. Upstream context: anthropics/claude-code#34255, #29726.
 #
 # Detection reads the RC debug log written by `claude-session`. Three decisive
 # states, by most-recent decisive line:
-#   dead  — `[remote-bridge] … recovery exhausted after N attempts` /
+#   dead: `[remote-bridge] … recovery exhausted after N attempts` /
 #           `[bridge:repl] notifyBridgeFailed`: terminal, restart to recover.
-#   auth  — `Login expired` / `Not logged in` / `requires a claude.ai
+#   auth: `Login expired` / `Not logged in` / `requires a claude.ai
 #           subscription`: the claude.ai login has expired, so the bridge
 #           refuses to enable. A restart only helps once fresh credentials
 #           exist, so the watchdog restarts on auth ONLY when the local
 #           credential is valid again (the entrypoint reconcile loop delivers it
 #           within ~30s of `make login`); otherwise it says what to do and waits
 #           rather than churning to MAX_RESTARTS against an empty credential.
-#   alive — `[remote-bridge] v2 transport connected`.
+#   alive: `[remote-bridge] v2 transport connected`.
 # On a dead/recoverable state the watchdog waits for the claude pane to go idle
 # (so an in-flight turn is never interrupted), then respawns the pane with
 # `claude-session --continue`. The Remote Control session name is unchanged, so
 # the app reconnects on its own.
 #
 # A `--continue` respawn of a large, stale session opens an interactive
-# "Resume from summary" menu and blocks on it — the bridge never registers until
+# "Resume from summary" menu and blocks on it: the bridge never registers until
 # a choice is made. dismiss_resume_menu takes the recommended option after a
 # restart so recovery stays unattended.
 #
@@ -64,7 +64,7 @@ rc_state() {
     esac
 }
 
-# True when the local credential holds a non-empty OAuth access token — i.e. a
+# True when the local credential holds a non-empty OAuth access token: i.e. a
 # restart could actually re-authenticate. Claude Code empties this field when a
 # refresh fails (a logout), so an empty token means "waiting for `make login`".
 login_valid() {
@@ -84,17 +84,17 @@ dismiss_resume_menu() {
     local i pane
     for ((i = 0; i < 20; i++)); do
         sleep 1
-        [[ "$(rc_state)" == alive ]] && return 0   # bridge already up — nothing to dismiss
+        [[ "$(rc_state)" == alive ]] && return 0   # bridge already up: nothing to dismiss
         pane="$(tmux capture-pane -p -t "$WINDOW" 2>/dev/null)" || return 0
         if is_resume_menu "$pane"; then
-            say "Resume menu detected after restart — selecting 'Resume from summary' to continue."
+            say "Resume menu detected after restart: selecting 'Resume from summary' to continue."
             tmux send-keys -t "$WINDOW" Enter 2>/dev/null || true
             return 0
         fi
     done
 }
 
-# True when the claude pane content is unchanged across IDLE_SECONDS — i.e. no
+# True when the claude pane content is unchanged across IDLE_SECONDS: i.e. no
 # turn is streaming output. Uses capture-pane so it works on any tmux version
 # (no dependency on the pane_activity format variable).
 pane_idle() {
@@ -108,7 +108,7 @@ pane_idle() {
 # Kill the stale RC process, then respawn the pane fresh with --continue.
 restart_session() {
     say "Restarting Claude session with --continue to restore Remote Control."
-    # The old `claude` process is alive but its RC bridge is dead — kill it
+    # The old `claude` process is alive but its RC bridge is dead: kill it
     # explicitly so the respawn doesn't leave a second --remote-control process.
     pkill -f 'remote-control' 2>/dev/null || true
     local i
@@ -121,23 +121,23 @@ restart_session() {
         say "Session respawned; Remote Control should re-register within ~30s."
         dismiss_resume_menu
     else
-        say "WARNING: 'tmux respawn-pane' failed — could not restart the session."
+        say "WARNING: 'tmux respawn-pane' failed, could not restart the session."
     fi
 }
 
 watch_loop() {
     if [[ -z "$LOG" ]]; then
-        say "CLAUDE_RC_DEBUG_LOG is empty — nothing to watch. Exiting."
+        say "CLAUDE_RC_DEBUG_LOG is empty: nothing to watch. Exiting."
         return 0
     fi
 
     local restarts=0 last_restart=0 auth_warned=0 now state
 
-    say "started — watching ${LOG} (tmux target ${WINDOW}, check every ${CHECK_INTERVAL}s)"
+    say "started: watching ${LOG} (tmux target ${WINDOW}, check every ${CHECK_INTERVAL}s)"
 
     while sleep "$CHECK_INTERVAL"; do
-        # Container shutting down — the entrypoint killed tmux.
-        tmux has-session -t "$SESSION" >/dev/null 2>&1 || { say "tmux session gone — exiting."; break; }
+        # Container shutting down: the entrypoint killed tmux.
+        tmux has-session -t "$SESSION" >/dev/null 2>&1 || { say "tmux session gone: exiting."; break; }
 
         now="$(date +%s)"
         state="$(rc_state)"
@@ -148,7 +148,7 @@ watch_loop() {
         if [[ "$state" == alive ]]; then
             auth_warned=0
             if (( restarts > 0 )) && (( now - last_restart > COOLDOWN )); then
-                say "Remote Control stable since the last restart — resetting restart counter."
+                say "Remote Control stable since the last restart: resetting restart counter."
                 restarts=0
             fi
         fi
@@ -158,17 +158,17 @@ watch_loop() {
             if login_valid; then
                 (( now - last_restart < COOLDOWN )) && continue
                 if (( restarts >= MAX_RESTARTS )); then
-                    say "Remote Control still down after ${restarts} restarts despite a valid credential — giving up auto-restart."
+                    say "Remote Control still down after ${restarts} restarts despite a valid credential: giving up auto-restart."
                     say "Investigate: 'claude remote-control --verbose' and RC eligibility (see troubleshooting.md)."
                     break
                 fi
-                say "Remote Control was down on an expired login; the local credential is valid again — restarting to reload it."
+                say "Remote Control was down on an expired login; the local credential is valid again: restarting to reload it."
                 while ! pane_idle; do [[ "$(rc_state)" == auth ]] || break; done
-                [[ "$(rc_state)" == auth ]] || { say "Recovered before restart — standing down."; continue; }
+                [[ "$(rc_state)" == auth ]] || { say "Recovered before restart: standing down."; continue; }
                 restarts=$((restarts + 1)); last_restart="$(date +%s)"; auth_warned=0
                 restart_session
             elif (( ! auth_warned )); then
-                say "Remote Control is DOWN: the claude.ai login has expired. Run 'make login' on the host — every session recovers automatically once fresh credentials reconcile in (~30s)."
+                say "Remote Control is DOWN: the claude.ai login has expired. Run 'make login' on the host: every session recovers automatically once fresh credentials reconcile in (~30s)."
                 auth_warned=1
             fi
             continue
@@ -178,7 +178,7 @@ watch_loop() {
         (( now - last_restart < COOLDOWN )) && continue   # let the last restart settle
 
         if (( restarts >= MAX_RESTARTS )); then
-            say "Remote Control still dead after ${restarts} restarts — giving up auto-restart."
+            say "Remote Control still dead after ${restarts} restarts: giving up auto-restart."
             say "Investigate: 'claude remote-control --verbose' and RC eligibility (see troubleshooting.md)."
             break
         fi
@@ -189,7 +189,7 @@ watch_loop() {
             # A manual /remote-control reconnect (or any recovery) clears the state.
             [[ "$(rc_state)" == dead ]] || break
         done
-        [[ "$(rc_state)" == dead ]] || { say "Remote Control recovered on its own — standing down."; continue; }
+        [[ "$(rc_state)" == dead ]] || { say "Remote Control recovered on its own: standing down."; continue; }
 
         restarts=$((restarts + 1))
         last_restart="$(date +%s)"

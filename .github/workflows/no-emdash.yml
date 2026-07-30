@@ -1,0 +1,76 @@
+name: Em-dash gate
+
+# The brand rule (founder directive 2026-07-24) bans U+2014 outright across every
+# cosyte surface, and names commit messages explicitly. This repo violated it
+# wholesale until 2026-07-30: 1,026 occurrences across 45 tracked files, plus the
+# GitHub repo description. This gate exists so that cannot come back.
+#
+# WHY A SEPARATE WORKFLOW, and not a step in ci.yml:
+#
+#   The PR-text half below needs the `edited` activity type, which is not a
+#   default. Without it a title or body edited after the last push is never
+#   re-checked, and because this repo squash-merges, the PR title and body ARE the
+#   commit message that lands on main. ci.yml's triggers drive the lint + eleven
+#   unit suites; re-running all of that every time someone fixes a typo in a PR
+#   description is a large cost for no extra safety.
+#
+#   Both halves live here rather than splitting the file scan into ci.yml: the file
+#   scan is a checkout and one grep, so it costs nothing to re-run on `edited`, and
+#   one file is one thing to read.
+#
+# Run it locally with `npm run check:no-emdash`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    # `edited` is deliberate and load-bearing. See the note above.
+    types: [opened, synchronize, reopened, edited]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  no-emdash:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Full history: the commit-message step below reads the PR's commit range,
+          # and the default shallow clone does not contain the base commit.
+          fetch-depth: 0
+
+      - name: Check tracked files
+        run: bash scripts/check-no-emdash.sh
+
+      # The rule names commit messages explicitly, and a squash merge composes its
+      # message from the PR title, the PR body, and the branch commits, so all three
+      # are checked. Pull requests only: on a push to main the message is already
+      # written, and this gate exists to stop it landing.
+      - name: Check PR title, body, and commit messages
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Collect first, scan second, and set the shell options here rather than
+          # trust the runner's default: piping the collection straight into the
+          # scanner would hide a failed `git log` behind a clean title and body, and
+          # the gate would print OK over commits it never read. The title and body
+          # arrive through env and are never interpolated into the script, so a PR
+          # description cannot inject shell.
+          set -euo pipefail
+          {
+            printf '%s\n' "$PR_TITLE"
+            printf '%s\n' "$PR_BODY"
+            git log --format=%B "$BASE_SHA..$HEAD_SHA"
+          } > "$RUNNER_TEMP/pr-messages.txt"
+          bash scripts/check-no-emdash.sh --stdin "the PR title, body, or commit messages" \
+            < "$RUNNER_TEMP/pr-messages.txt"

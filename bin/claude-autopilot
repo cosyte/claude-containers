@@ -6,16 +6,16 @@
 # Mirrors claude-dev's "run, then drop to a shell so the SSH/tmux window stays
 # usable" contract.
 #
-# CLAUDE_AUTOPILOT_CMD IS REQUIRED — it has NO DEFAULT. It used to default to a slash
+# CLAUDE_AUTOPILOT_CMD IS REQUIRED: it has NO DEFAULT. It used to default to a slash
 # command that only existed in the maintainer's own repo. That default was wrong twice
 # over. This image is a GENERIC container: it bakes no such command (see
-# claude-config/skills — only example-skill and frontend-debugging ship), and the
+# claude-config/skills: only example-skill and frontend-debugging ship), and the
 # workspace it is pointed at is arbitrary. So on almost every container the default
-# resolved to NOTHING — and, as the run loop below documents in detail, `claude -p`
+# resolved to NOTHING, and, as the run loop below documents in detail, `claude -p`
 # reports an unknown slash command as a zero-turn SUCCESS (exit 0, is_error:false),
 # which this loop used to count as a healthy run forever: a container that looks alive
 # and does nothing. And in the one workspace where it *did* resolve, it was an
-# explicitly human-driven command whose own contract said it must not be looped — so the
+# explicitly human-driven command whose own contract said it must not be looped, so the
 # default either quietly did nothing or violated the contract of the one thing it named.
 # Now: no command, no run. Fail loudly, never silently.
 #
@@ -30,7 +30,7 @@
 #   CLAUDE_AUTOPILOT_MAX_RUNS     stop after N runs, 0 = unlimited   (default: 0)
 #   CLAUDE_AUTOPILOT_BACKOFF_MAX  cap on failure backoff, seconds    (default: 21600)
 #   CLAUDE_AUTOPILOT_LOG_DIR      where per-run JSON logs go         (default: ~/.claude/autopilot-logs)
-#   CLAUDE_AUTOPILOT_RESUME       1 = resume the prior session each  (default: 0 — each run is a
+#   CLAUDE_AUTOPILOT_RESUME       1 = resume the prior session each  (default: 0, each run is a
 #                                 run via --resume <id> instead of   fresh session, which is right
 #                                 a fresh session                    for a command that recovers its
 #                                                                    own state from disk)
@@ -50,17 +50,17 @@ EXTRA="${CLAUDE_EXTRA_ARGS:-}"
 LOG_DIR="${CLAUDE_AUTOPILOT_LOG_DIR:-$HOME/.claude/autopilot-logs}"
 RESUME="${CLAUDE_AUTOPILOT_RESUME:-0}"
 PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
-# Model: the entrypoint normally exports this (default `opus`). Default it HERE TOO —
+# Model: the entrypoint normally exports this (default `opus`). Default it HERE TOO,
 # not cosmetic since CLI 2.1.197, where "no --model" means Claude Code's own default,
 # which is now **Sonnet 5**, not Opus. This script is reachable with CLAUDE_MODEL unset
-# or empty (a `docker exec <ctr> claude-autopilot`, or any sshd-originated shell — the
+# or empty (a `docker exec <ctr> claude-autopilot`, or any sshd-originated shell, the
 # entrypoint only bridges SSH_AUTH_SOCK into /etc/profile.d, not CLAUDE_MODEL; and
 # claude-launch passes a literal empty `-e CLAUDE_MODEL=` when it is unset). Without this
-# default those runs would silently execute on Sonnet 5 — the exact downgrade
+# default those runs would silently execute on Sonnet 5: the exact downgrade
 # CC-CLAUDE-CODE-UPGRADE exists to prevent. CLAUDE_MODEL is passed through to `--model`
 # VERBATIM: use an alias the pinned CLI actually ships (`opus`, `sonnet`, `haiku`, `opusplan`,
 # `fable`, `best`) or a full model id. NOTE: `default` is NOT in the pinned CLI's alias table and is
-# not verified — do not rely on it.
+# not verified: do not rely on it.
 MODEL="${CLAUDE_MODEL:-opus}"
 QUEUE="${CLAUDE_AUTOPILOT_QUEUE:-0}"
 QUEUE_DIR="${CLAUDE_AUTOPILOT_QUEUE_DIR:-$HOME/.claude/autopilot-queue}"
@@ -71,7 +71,7 @@ SESSION_FILE="$LOG_DIR/.session-id"   # persists on the per-container config vol
 # Durable task queue (opt-in). Queue beats a blind timer for fleet work: drop a
 # prompt file into pending/ (over SSH, a bind mount, or `claude-enqueue`) and the
 # loop claims the oldest one, runs it, and files it under done/ or failed/. When
-# pending/ is empty it falls back to CLAUDE_AUTOPILOT_CMD on the interval — or, if
+# pending/ is empty it falls back to CLAUDE_AUTOPILOT_CMD on the interval, or, if
 # no CLAUDE_AUTOPILOT_CMD is set, simply IDLES (a pure queue consumer). Atomic
 # mv-based claiming keeps it safe and the dirs live on the per-container config
 # volume so the queue survives restarts. Each task is a fresh session
@@ -89,7 +89,7 @@ if [[ -z "$PROMPT" && "$QUEUE" != 1 ]]; then
     echo "[autopilot] ERROR: CLAUDE_AUTOPILOT_CMD is not set, and there is nothing else to run."
     echo "[autopilot]"
     echo "[autopilot] It has NO DEFAULT (it used to default to a command this generic image"
-    echo "[autopilot] does not ship — see this script's header)."
+    echo "[autopilot] does not ship: see this script's header)."
     echo "[autopilot] Whatever you set it to must be a command YOUR workspace defines: an unknown"
     echo "[autopilot] slash command does not error, it just quietly runs nothing."
     echo "[autopilot]"
@@ -139,10 +139,10 @@ model_flags() { [[ -n "$MODEL" ]] && printf '%s %s' '--model' "$MODEL"; }
 #   seconds_until_reset <json-log> [<stderr-log>]
 #
 # Takes BOTH streams. The run used to be captured with `2>&1`, so one file held everything;
-# splitting them (so a stderr warning can't corrupt the JSON — see the run loop) would have
+# splitting them (so a stderr warning can't corrupt the JSON, see the run loop) would have
 # quietly cut this function off from stderr, where a human-readable reset hint is just as
-# likely to appear. Losing it is not a safety bug — the capped exponential backoff still
-# protects the shared quota — but it would silently trade "sleep exactly until reset" for
+# likely to appear. Losing it is not a safety bug: the capped exponential backoff still
+# protects the shared quota, but it would silently trade "sleep exactly until reset" for
 # "sleep blindly", which is worse throughput on a shared Max plan. So: scan both.
 seconds_until_reset() {
     local file="$1" errfile="${2:-}" now epoch target secs
@@ -159,7 +159,7 @@ seconds_until_reset() {
             (( secs > 0 )) && { echo "$secs"; return; }
         fi
     fi
-    # 2) Human string: "reset(s) at 3pm" / "reset at 23:00" (local tz) — in stdout OR stderr.
+    # 2) Human string: "reset(s) at 3pm" / "reset at 23:00" (local tz), in stdout OR stderr.
     local hint scan=("$file")
     [[ -n "$errfile" && -f "$errfile" ]] && scan+=("$errfile")
     hint="$(grep -hoiE 'reset[s]?[^0-9]{0,12}([0-9]{1,2}(:[0-9]{2})?\s*(am|pm)?)' "${scan[@]}" 2>/dev/null | head -n1)"
@@ -173,7 +173,7 @@ seconds_until_reset() {
     fi
 }
 
-echo "[autopilot] prompt   : ${PROMPT:-(none — pure queue consumer)}"
+echo "[autopilot] prompt   : ${PROMPT:-(none, pure queue consumer)}"
 echo "[autopilot] interval : ${INTERVAL}s   max_runs: $([ "$MAX_RUNS" = 0 ] && echo ∞ || echo "$MAX_RUNS")"
 echo "[autopilot] workspace: $(pwd)"
 echo "[autopilot] logs     : $LOG_DIR"
@@ -196,12 +196,12 @@ while :; do
     else
         task_path=""
         # Pure queue consumer: queue on, nothing pending, and no fallback command. IDLE.
-        # Never synthesize a prompt to fill the gap — firing an invented command headless
+        # Never synthesize a prompt to fill the gap: firing an invented command headless
         # under --dangerously-skip-permissions is precisely what the old default command did.
         # This burns no quota and is not a "run", so it does not advance the run counter or
         # touch the failure backoff.
         if [[ -z "$RUN_PROMPT" ]]; then
-            echo "[autopilot] queue empty, no CLAUDE_AUTOPILOT_CMD fallback — idling ${INTERVAL}s"
+            echo "[autopilot] queue empty, no CLAUDE_AUTOPILOT_CMD fallback: idling ${INTERVAL}s"
             sleep "$INTERVAL"
             continue
         fi
@@ -225,17 +225,17 @@ while :; do
         echo "[autopilot] resuming session $(cat "$SESSION_FILE")"
     fi
 
-    # stdin from /dev/null, and stderr to its OWN file — NEVER merged into $out. Both are
+    # stdin from /dev/null, and stderr to its OWN file, NEVER merged into $out. Both are
     # load-bearing, and this used to be `>"$out" 2>&1`:
     #
-    #   1. `claude -p` writes a warning to STDERR when stdin is an open pipe with no data —
+    #   1. `claude -p` writes a warning to STDERR when stdin is an open pipe with no data:
     #      "Warning: no stdin data received in 3s, proceeding without it..." (157 bytes,
     #      verified on the then-pinned 2.1.207). Any non-tty invocation gets it: `ssh <ctr>
     #      claude-autopilot`, `docker exec`, a cron. `</dev/null` is what that warning itself
     #      tells you to do, and it stops the warning at the source.
     #   2. Under `2>&1` that line lands in $out AHEAD of the JSON, so $out is no longer valid
-    #      JSON — and then EVERY jq read below returns empty. `.is_error` reads empty (not
-    #      "true"), the zero-turn check reads empty — and the run scores as a SUCCESS. That is
+    #      JSON, and then EVERY jq read below returns empty. `.is_error` reads empty (not
+    #      "true"), the zero-turn check reads empty, and the run scores as a SUCCESS. That is
     #      a fail-OPEN: ANY stderr output at all (a deprecation notice, an update nag, a token
     #      refresh) would silently turn this loop back into the healthy-looking no-op it exists
     #      to prevent. Keeping stderr out of the JSON is what makes the checks below trustworthy.
@@ -245,18 +245,18 @@ while :; do
     claude -p "$RUN_PROMPT" $(perm_flags) $(model_flags) --output-format json $resume_flags $EXTRA \
         </dev/null >"$out" 2>"$err" || ok=0
 
-    # FAIL CLOSED on a log we cannot read, and validate its SHAPE — not merely its syntax.
+    # FAIL CLOSED on a log we cannot read, and validate its SHAPE, not merely its syntax.
     # "Don't know what happened" must NEVER score as "success"; that inversion is the whole bug
     # class here, and every silent no-op this loop has had came from a check that could not read
     # its input and shrugged.
     #
     # Syntax alone is not enough, because CLAUDE_EXTRA_ARGS is a first-class documented tunable
     # (.env.example, README, `claude-launch --extra-args`) and adding `--verbose` to it makes the
-    # CLI emit a top-level ARRAY of stream messages instead of one object — whose LAST element is
+    # CLI emit a top-level ARRAY of stream messages instead of one object, whose LAST element is
     # that same result object. An array IS valid JSON, so a bare `jq -e .` check passes it; then
     # every field read against an array returns empty, `.is_error` reads "" (not "true") and
     # `.num_turns` reads "" (not "0"), and BOTH guards below silently disengage. Same fail-open,
-    # one layer up — and `--verbose` is precisely the flag an operator reaches for to debug "why
+    # one layer up, and `--verbose` is precisely the flag an operator reaches for to debug "why
     # is my autopilot doing nothing?", so the debugging flag would re-create the silence they
     # were chasing. (`jq -e .` also exits 0 on an EMPTY file, hence the `-s` test.)
     #
@@ -270,7 +270,7 @@ while :; do
     parsed=0
     if ! command -v jq >/dev/null 2>&1; then
         ok=0
-        echo "[autopilot] ERROR: jq is not on PATH — a run's outcome cannot be verified. Treating as FAILED."
+        echo "[autopilot] ERROR: jq is not on PATH, a run's outcome cannot be verified. Treating as FAILED."
     elif [[ -s "$out" ]] && jq -e '
             (if type == "array" then (map(select(.type? == "result")) | last) else . end)
             | select(type == "object" and has("num_turns") and has("is_error"))
@@ -279,7 +279,7 @@ while :; do
     else
         ok=0
         rm -f "$res" 2>/dev/null || true
-        echo "[autopilot] ERROR: the run log carries no readable result object — cannot verify this"
+        echo "[autopilot] ERROR: the run log carries no readable result object, cannot verify this"
         echo "[autopilot] ERROR: run, so treating it as FAILED (an unverifiable run is not a good one)."
         echo "[autopilot] ERROR: log head : $(head -c 200 "$out" 2>/dev/null)"
         [[ -s "$err" ]] && echo "[autopilot] ERROR: stderr   : $(head -c 200 "$err" 2>/dev/null)"
@@ -289,8 +289,8 @@ while :; do
         ok=0
     fi
 
-    # THE NO-OP GUARD. `num_turns == 0` means THE MODEL WAS NEVER INVOKED — nothing ran, $0
-    # spent — and `claude -p` reports that as a plain SUCCESS: exit 0, is_error:false, subtype
+    # THE NO-OP GUARD. `num_turns == 0` means THE MODEL WAS NEVER INVOKED: nothing ran, $0
+    # spent, and `claude -p` reports that as a plain SUCCESS: exit 0, is_error:false, subtype
     # "success". Probed by hand against the then-PINNED CLI (2.1.207, Dockerfile ARG
     # CLAUDE_CODE_VERSION); every one of these exits 0 with is_error:false:
     #
@@ -302,19 +302,19 @@ while :; do
     #   /clear    → num_turns:0  result:""
     #
     # So it is not just typos: EVERY slash command that exists but is unavailable headless lands
-    # here. Left alone the loop counts them as healthy runs FOREVER — `fails` stays 0 so backoff
+    # here. Left alone the loop counts them as healthy runs FOREVER: `fails` stays 0 so backoff
     # never engages, every cycle prints "run #N" and "cost: $0", and a queued task gets filed to
     # done/, silently marking work that never ran as done on the very claude-scm-observer →
     # queue path built to run a fleet unattended. A container that looks perfectly alive and
     # does literally nothing is the worst failure this script can have.
     #
     # The predicate is `num_turns == 0` ALONE, deliberately. It is tempting to also require the
-    # result text to start with "Unknown command:" — DON'T:
+    # result text to start with "Unknown command:", DON'T:
     #   - it buys no false-positive protection. A legitimate run that merely *discusses* an
     #     unknown command still invoked the model, so it has num_turns >= 1 and cannot trip this.
     #   - it misses every row above except the typo (/compact and /clear carry no text at all).
     #   - it would couple this guard to an English string from a CLI whose pin this repo bumps
-    #     routinely — a reworded message would silently reopen the hole with no test failing.
+    #     routinely: a reworded message would silently reopen the hole with no test failing.
     # Zero turns is zero work. That is the whole rule.
     unknown=0
     unknown_msg=""
@@ -341,7 +341,7 @@ while :; do
                 "$cost" "$total_cost" "${turns:-?}" "$(( ${dur:-0} / 1000 ))"
         fi
     else
-        # Unparseable (already reported + scored as a failure above) — show the raw tail so the
+        # Unparseable (already reported + scored as a failure above): show the raw tail so the
         # operator sees what actually came back.
         tail -n 5 "$out" 2>/dev/null
     fi
@@ -366,26 +366,26 @@ while :; do
         # (rate limits, flaky network). This is not transient: an unknown command will never
         # resolve on its own, so sleeping 2^n on it is just a slower way to do nothing.
         #
-        # `fails` is deliberately left ALONE in every branch here — neither reset nor bumped.
+        # `fails` is deliberately left ALONE in every branch here: neither reset nor bumped.
         # It is the transient-failure streak that drives the quota backoff, and an unresolvable
         # command is orthogonal to it. Resetting it would let poison queued tasks interleaved
         # with real rate-limit failures hold the backoff near its floor during a rate-limit
-        # storm — clawing at the shared Max quota the backoff exists to protect. Bumping it
+        # storm: clawing at the shared Max quota the backoff exists to protect. Bumping it
         # would back off over a condition backoff cannot fix. This branch sets its own
         # sleep_for, so the streak simply isn't its business.
-        echo "[autopilot] ERROR: nothing ran — 0 turns, \$0, the model was never invoked."
+        echo "[autopilot] ERROR: nothing ran, 0 turns, \$0, the model was never invoked."
         echo "[autopilot] ERROR: claude reported: $unknown_msg"
         echo "[autopilot] ERROR: '$RUN_PROMPT' is either not a command this workspace defines, or"
         echo "[autopilot] ERROR: not one that does anything headless (e.g. /help, /clear, /compact)."
         if [[ "$run_kind" = "task" ]]; then
-            # One bad task must not take the loop down — it is already filed under failed/
+            # One bad task must not take the loop down: it is already filed under failed/
             # above, and the next task may be perfectly good.
-            echo "[autopilot] ERROR: that queued task is filed under failed/ — draining the rest of the queue."
+            echo "[autopilot] ERROR: that queued task is filed under failed/, draining the rest of the queue."
             sleep_for="$QUEUE_DELAY"
         elif [ "$QUEUE" = 1 ]; then
             # The CLAUDE_AUTOPILOT_CMD *fallback* is broken, but the queue half of this
             # container still works. Disable the bogus fallback and carry on as a pure queue
-            # consumer rather than spinning on it every interval — killing the loop here would
+            # consumer rather than spinning on it every interval: killing the loop here would
             # throw away a working queue consumer over a bad fallback.
             echo "[autopilot] ERROR: disabling the CLAUDE_AUTOPILOT_CMD fallback; continuing as a pure"
             echo "[autopilot] ERROR: queue consumer. Fix CLAUDE_AUTOPILOT_CMD and restart to re-enable it."
@@ -420,17 +420,17 @@ while :; do
         reset_secs="$(seconds_until_reset "$out" "$err")"
         if [[ -n "$reset_secs" ]]; then
             sleep_for=$((reset_secs + 30))   # small buffer past the reset
-            echo "[autopilot] run FAILED (consecutive=$fails) — rate/usage limit; sleeping until reset (~${reset_secs}s). Log: $out"
+            echo "[autopilot] run FAILED (consecutive=$fails): rate/usage limit; sleeping until reset (~${reset_secs}s). Log: $out"
         else
             shift_by=$((fails > 4 ? 4 : fails))
             sleep_for=$((INTERVAL * (1 << shift_by)))
-            echo "[autopilot] run FAILED (consecutive=$fails) — backing off. Log: $out"
+            echo "[autopilot] run FAILED (consecutive=$fails): backing off. Log: $out"
         fi
         [ "$sleep_for" -gt "$BACKOFF_MAX" ] && sleep_for="$BACKOFF_MAX"
     fi
 
     if [ "$MAX_RUNS" != 0 ] && [ "$run" -ge "$MAX_RUNS" ]; then
-        echo "[autopilot] reached max_runs=$MAX_RUNS — stopping. Cumulative cost: \$$total_cost"
+        echo "[autopilot] reached max_runs=$MAX_RUNS: stopping. Cumulative cost: \$$total_cost"
         break
     fi
 

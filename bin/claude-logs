@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claude-logs <name> [-n <lines>] — tail container (entrypoint) logs.
+# claude-logs <name> [-n <lines>]: tail container (entrypoint) logs.
 # Note: this shows the entrypoint/sshd log, not the Claude session itself.
 # For the live Claude session, SSH in and attach to tmux.
 set -euo pipefail

@@ -2,10 +2,10 @@
 
 ## Reporting a vulnerability
 
-Report privately — **do not open a public issue**.
+Report privately: **do not open a public issue**.
 
 Use [GitHub private vulnerability reporting](https://github.com/cosyte/claude-containers/security/advisories/new)
-(Security → Report a vulnerability) — that is the channel that reaches the
+(Security → Report a vulnerability), that is the channel that reaches the
 maintainer directly. If it is unavailable to you, email `hello@cosyte.com` with
 `SECURITY: claude-containers` in the subject.
 
@@ -21,7 +21,7 @@ repo is the container that runs Claude Code, not Claude Code.
 
 ## What this project's security model actually claims
 
-Read this before filing — several plausible-sounding reports are documented
+Read this before filing: several plausible-sounding reports are documented
 non-goals rather than defects.
 
 **A container is not a security boundary against a fully weaponized agent.**
@@ -30,7 +30,7 @@ executes shell commands, often with `--dangerously-skip-permissions`. Everything
 below shrinks the blast radius of a *prompt-injected or misbehaving* agent. None
 of it is a claim that a determined attacker who achieves code execution inside
 the container cannot get further. **The single highest-leverage control is a
-patched host runtime** — the launcher warns when host runC is older than
+patched host runtime**: the launcher warns when host runC is older than
 1.2.8 / 1.3.3 (CVE-2025-31133 / -52565 / -52881).
 
 What the stack does enforce, and therefore what a bypass of *is* a valid report:
@@ -40,7 +40,7 @@ What the stack does enforce, and therefore what a bypass of *is* a valid report:
   unprivileged host uid. A path that obtains host root is in scope.
 - **Capability floor.** `--security-opt no-new-privileges`, plus (default)
   dropping all Linux capabilities and re-adding only the minimal set for sshd
-  and privilege-dropping — `NET_RAW`, `MKNOD` and `SETFCAP` are removed.
+  and privilege-dropping: `NET_RAW`, `MKNOD` and `SETFCAP` are removed.
 - **Credential isolation.** The shared `claude-auth` credential master is
   root-owned; the agent reaches only its own per-container session token.
   With `CLAUDE_BROKER_GIT_KEY=1` the git deploy key lives in a root-owned
@@ -49,7 +49,7 @@ What the stack does enforce, and therefore what a bypass of *is* a valid report:
   credential or the raw private key is in scope.
 - **Egress lockdown** (`CLAUDE_EGRESS_LOCKDOWN=1`) is enforced in netfilter,
   default-deny, IP-pinned, applied at boot before the agent starts and while it
-  is still unprivileged — so the agent cannot disable its own rules. A path that
+  is still unprivileged, so the agent cannot disable its own rules. A path that
   does is in scope. Note it **fails open by design**: if setup fails it logs
   loudly and leaves egress unrestricted rather than bricking connectivity.
 - **Secret guard** installs a git pre-commit hook blocking obvious secret
@@ -58,7 +58,7 @@ What the stack does enforce, and therefore what a bypass of *is* a valid report:
 
 Known and accepted, so **not** vulnerabilities in this project:
 
-- **`ANTHROPIC_API_KEY` is refused** — the entrypoint hard-fails if it is set.
+- **`ANTHROPIC_API_KEY` is refused**: the entrypoint hard-fails if it is set.
   That is deliberate billing protection, not a bug.
 - **Anyone who can read the `claude-auth` Docker volume can act as you.** It
   holds live OAuth credentials. Protect it with host permissions.
@@ -69,18 +69,18 @@ Known and accepted, so **not** vulnerabilities in this project:
 - **Egress is open by default.** Lockdown is opt-in.
 - **An IP-pinned allowlist goes stale** as CDNs rotate addresses, and
   `statsig.anthropic.com` is not publicly resolvable so it cannot be pinned.
-- **Under `--docker` the agent can reach root inside its own container** — that
+- **Under `--docker` the agent can reach root inside its own container**, that
   is what a Docker socket is. Sysbox keeps that root off the host. The launcher
   warns that `CLAUDE_BROKER_GIT_KEY` and `CLAUDE_EGRESS_LOCKDOWN` assume root is
   separate from the agent and therefore no longer bind in that mode.
 
-The full threat model — including the weaponized-agent supply-chain exfil case
-the package-provisioning tier is built against — is in
+The full threat model: including the weaponized-agent supply-chain exfil case
+the package-provisioning tier is built against: is in
 [docs/package-provisioning-security.md](docs/package-provisioning-security.md).
 
 ## Supported versions
 
 There are no releases. `main` is the supported version; fixes land there. The
 `legacy/sysbox-broker-2026-07-12` branch is a frozen historical artifact,
-retained for reference and **not maintained or patched** — see
+retained for reference and **not maintained or patched**: see
 [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md).

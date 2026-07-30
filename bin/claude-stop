@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claude-stop <name> — graceful stop. Workspace + .claude volumes preserved.
+# claude-stop <name>: graceful stop. Workspace + .claude volumes preserved.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 need_docker

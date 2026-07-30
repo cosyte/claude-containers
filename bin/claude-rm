@@ -26,7 +26,7 @@ CFG_VOL="$(cfg_volume "$PROJECT")"
 # is the one volume here that can be tens of GB, and deleting it means the next session
 # rebuilds/re-pulls from cold. It simply won't exist for an ordinary session.
 DOCKER_VOL="$(docker_volume "$PROJECT")"
-# Disk-backed TMPDIR (/scratch). Pure scratch — cleared on every boot — so it is purged
+# Disk-backed TMPDIR (/scratch). Pure scratch: cleared on every boot, so it is purged
 # without ceremony; it exists as a volume rather than a tmpfs precisely so it CAN be
 # reclaimed here instead of bloating the container's writable layer forever.
 SCRATCH_VOL="$(scratch_volume "$PROJECT")"
@@ -56,12 +56,12 @@ fi
 # entrypoint's TERM trap does that): force-killing PID 1 under it leaves the tree to be
 # SIGKILLed, and the exit event can arrive too late for Docker, which then fails the removal
 # with "tried to kill container, but did not receive an exit event". Under `set -e` that
-# aborted this script BEFORE the purge below, leaving volumes behind — the container was
+# aborted this script BEFORE the purge below, leaving volumes behind: the container was
 # gone but its data was not. A graceful stop makes that orderly; the -f rm is still the
 # backstop for a container that is already dead or wedged.
 if [[ "$(container_state "$CN")" == "running" ]]; then
     docker stop -t "$CLAUDE_STOP_TIMEOUT" "$CN" >/dev/null 2>&1 \
-        || warn "graceful stop of $CN failed or timed out — forcing removal"
+        || warn "graceful stop of $CN failed or timed out: forcing removal"
 fi
 if ! docker rm -f "$CN" >/dev/null 2>&1; then
     # It may have died anyway (the kill lands even when the event is late). Re-check before
@@ -69,7 +69,7 @@ if ! docker rm -f "$CN" >/dev/null 2>&1; then
     sleep 2
     docker rm -f "$CN" >/dev/null 2>&1 \
         || [[ "$(container_state "$CN")" == "absent" ]] \
-        || die "could not remove container $CN — remove it by hand, then re-run with --purge"
+        || die "could not remove container $CN: remove it by hand, then re-run with --purge"
 fi
 ok "Removed container $CN"
 
