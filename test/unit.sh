@@ -180,7 +180,7 @@ if [[ -n "$GUARD" ]]; then
         || bad "§0 exited $rc when warning — a stale .env line would brick the container"
 
     out="$(CLAUDE_CACHE_PROXY_HOST=cache.internal run_guard)"
-    [[ "$out" == *"RETIRED in SC-5"*   && "$out" == *"CLAUDE_CACHE_PROXY_HOST"* ]] \
+    [[ "$out" == *"were RETIRED"*       && "$out" == *"CLAUDE_CACHE_PROXY_HOST"* ]] \
         && ok  "a retired var (CLAUDE_CACHE_PROXY_HOST) is named in a loud warning" \
         || bad "retired var was silently ignored: $out"
     [[ "$out" == *"audited egress choke point"* ]] \
@@ -353,10 +353,10 @@ else
 fi
 
 echo
-echo "== CC-BINS: claude-autopilot never invents a prompt (the /next default is gone) =="
+echo "== claude-autopilot never invents a prompt (the removed default is gone) =="
 
-# The old CLAUDE_AUTOPILOT_CMD default was `/next` — a cosyte-cockpit command this generic image
-# does not ship, so on almost every container it resolved to nothing at all. (It did NOT reach the
+# The old CLAUDE_AUTOPILOT_CMD default was a slash command that existed only in the maintainer's
+# own repo, which this generic image does not ship, so on almost every container it resolved to nothing at all. (It did NOT reach the
 # model as a literal prompt: `claude -p` reports an unknown slash command as a zero-turn success
 # and never invokes the model — see the next section, which is where the real damage was.) The fix
 # is a hard rule: NO COMMAND, NO RUN. These tests prove `claude` is never invoked without one —
@@ -384,7 +384,7 @@ invocations() { wc -l < "$APD/claude-invocations" | tr -d ' '; }
 out="$(run_autopilot 10 CLAUDE_AUTOPILOT_INTERVAL=1)"
 [[ "$(invocations)" == "0" ]] \
     && ok  "no CLAUDE_AUTOPILOT_CMD + no queue → claude is NEVER invoked (no invented prompt)" \
-    || bad "the autopilot invoked claude with no command set — the /next class of bug is back"
+    || bad "the autopilot invoked claude with no command set — that class of bug is back"
 [[ "$out" == *"CLAUDE_AUTOPILOT_CMD is not set"* && "$out" == *"NO DEFAULT"* ]] \
     && ok  "it says WHY it refused (CLAUDE_AUTOPILOT_CMD unset, no default)" \
     || bad "the refusal is not explained: $out"

@@ -262,7 +262,7 @@ per-worktree git worktrees, and stripped from `main` (SC-5). A follow-up, **CC-B
 (2026-07-14), pruned the residue the strip left behind — `bin/claude-controller` (by then
 a pass-through to `claude-autopilot`; `CLAUDE_CONTROLLER=1` now refuses to boot),
 `bin/claude-reaper` (it pruned a spool nothing writes to), the `WITH_DOCKER` controller
-image variant (an unreachable `dockerd`), and the autopilot's `/next` default
+image variant (an unreachable `dockerd`), and the autopilot's default command
 (`CLAUDE_AUTOPILOT_CMD` is now required). The frozen implementation, the full rationale,
 and the CC-BINS resolution live in
 [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md); nothing above or below this

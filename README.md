@@ -16,18 +16,17 @@ token.
 > and of your Claude subscription remains subject to Anthropic's own terms.
 > Report Claude Code bugs to Anthropic, not here.
 
-> **Substrate change (2026-07-12).** This repo used to run a nested-Sysbox
-> worker-broker path (`--broker`/`--sysbox`, controller dispatch, curated worker
-> `apt`, a pull-through cache proxy — the `CC-*` and `PKG-4`/`PKG-6` work) so a
-> controller container could spawn autonomous nested `/work-on` workers. It was
-> retired in favor of Claude Code subagents in per-worktree git worktrees and
-> stripped from `main`. The frozen implementation is preserved at branch
-> `legacy/sysbox-broker-2026-07-12` + tag `legacy-sysbox-broker-2026-07-12` — see
-> [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md). The Remote-Control
-> core, the autopilot loop, launch/compose-gen (sans broker flags), housekeeping,
-> baked config, and the security floor all stay on `main`. A follow-up, **CC-BINS**,
-> then pruned the residue the strip left behind: `claude-controller`, `claude-reaper`,
-> the `WITH_DOCKER` image variant, and the autopilot's `/next` default.
+> **A retired feature you may find references to.** An earlier version ran a
+> nested-Sysbox **worker broker** — a controller container that spawned autonomous
+> nested worker containers (`--broker`/`--sysbox`). It was retired on 2026-07-12 in
+> favour of Claude Code subagents in git worktrees, and is frozen on branch
+> `legacy/sysbox-broker-2026-07-12` (tag `legacy-sysbox-broker-2026-07-12`), which
+> is **not maintained**. Removed flags now *refuse* with an error naming their
+> replacement rather than silently doing nothing. Background:
+> [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md). Nothing described
+> below depends on it — and note that the **`--docker` per-session Docker engine
+> is a separate, current feature** ([below](#container-workflows-optional)) that
+> reuses only the Sysbox runtime.
 
 ## Quick start
 
@@ -107,11 +106,12 @@ A container has two modes, selected by `CLAUDE_AUTOPILOT`:
   you can watch it. Each run is a fresh session — which suits a session-independent
   command that recovers its state from disk.
 
-> **`CLAUDE_AUTOPILOT_CMD` is required and has no default.** It used to default to
-> `/next`. That was wrong: this is a *generic* image — it bakes no `/next`, and the
-> workspace you mount is arbitrary, so on almost every container the default resolved
-> to nothing at all. With no command set, the autopilot now refuses to run (or idles,
-> if it is a queue consumer). **No command, no run.**
+> **`CLAUDE_AUTOPILOT_CMD` is required and has no default.** It used to default to a
+> slash command that existed only in the maintainer's own repo. That was wrong: this
+> is a *generic* image — it bakes no such command, and the workspace you mount is
+> arbitrary, so on almost every container the default resolved to nothing at all.
+> With no command set, the autopilot now refuses to run (or idles, if it is a queue
+> consumer). **No command, no run.**
 >
 > **Set it to a command your workspace actually defines.** On the pinned CLI, `claude -p`
 > does *not* error on an unknown slash command — it returns a **zero-turn "success"**
@@ -192,17 +192,14 @@ shared across all running containers via the converged `claude-auth` volume, so
 mind the plan's 5-hour and weekly limits when choosing the interval and how many
 autopilot containers run at once — a too-tight cadence exhausts the subscription.
 
-**Controller mode is gone.** `CLAUDE_CONTROLLER=1` used to be a third main-pane mode,
-wiring a Sysbox-nested controller to a lease/scheduler/bump-worker control plane and
-dispatching nested workers. SC-5 retired that dispatch tier (see
-[docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md)), which left the mode a
-byte-identical pass-through to `CLAUDE_AUTOPILOT=1` — a mode whose only job was
-selecting another mode. CC-BINS removed it, along with `bin/claude-controller`, the
-`WITH_DOCKER` image variant it ran in, and `claude-reaper` (which pruned a spool only
-the retired broker ever wrote to). **Setting `CLAUDE_CONTROLLER=1` now refuses to boot**,
-with a message pointing at `CLAUDE_AUTOPILOT=1` — rather than silently starting an
-interactive session in an unattended container nobody is watching. Use
-`CLAUDE_AUTOPILOT=1`; it is the same loop, and always was.
+**Controller mode is gone.** `CLAUDE_CONTROLLER=1` used to be a third main-pane mode
+that dispatched nested worker containers. When that dispatch tier was retired the mode
+became a byte-identical pass-through to `CLAUDE_AUTOPILOT=1` — a mode whose only job was
+selecting another mode — so it was removed along with `bin/claude-controller` and
+`claude-reaper`. **Setting `CLAUDE_CONTROLLER=1` now refuses to boot**, pointing at
+`CLAUDE_AUTOPILOT=1`, rather than silently starting an *interactive* session in an
+unattended container nobody is watching. Use `CLAUDE_AUTOPILOT=1`; it is the same loop,
+and always was.
 
 ## Environment variables
 
@@ -221,7 +218,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `acceptEdits`/`auto`/`bypassPermissions`/`manual`/`dontAsk`/`plan` — the choice set the pinned CLI accepts. Honored by both the interactive session and autopilot; `acceptEdits` is the safer fleet posture (gates shell/network). **`default` was renamed `manual` upstream in CLI 2.1.200** and no longer appears in `claude --help`; it is still accepted for now (re-verified on 2.1.220 — a bogus mode is rejected with the allowed-choices list, `default` is not), so existing `.env` files keep working — but prefer `manual`, since an undocumented alias can be dropped |
 | `CLAUDE_SECRET_GUARD` | `1` | `1` installs a fleet-wide git pre-commit hook that blocks committing secrets (`.env`, `*.pem`, `*.key`, `id_rsa`, PRIVATE KEY blocks). Bypass once with `git commit --no-verify`; extend via `CLAUDE_SECRET_GUARD_EXTRA` |
 | `CLAUDE_AUTOPILOT` | `0` | `1` = unattended mode: main pane runs a headless `claude -p` loop instead of Remote Control (see [Unattended autopilot](#unattended-autopilot)) |
-| `CLAUDE_AUTOPILOT_CMD` | **none — required** | What the autopilot loop runs each cycle. **No default** (it used to be `/next`, which this generic image does not ship). Unset + no queue = the autopilot refuses to run |
+| `CLAUDE_AUTOPILOT_CMD` | **none — required** | What the autopilot loop runs each cycle. **No default** — it must be a command the workspace you mount actually defines. Unset + no queue = the autopilot refuses to run |
 | `CLAUDE_AUTOPILOT_INTERVAL` | `3600` | Seconds between successful autopilot runs |
 | `CLAUDE_AUTOPILOT_MAX_RUNS` | `0` | Stop after N autopilot runs (`0` = unlimited) |
 | `CLAUDE_AUTOPILOT_RESUME` | `0` | `1` = carry the conversation forward via `--resume <session_id>` each cycle instead of a fresh session |
@@ -232,6 +229,9 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_MCP_ENABLED` | — | CSV of baked MCP servers to load (empty = all) |
 | `WITH_BROWSER` | `0` | Build arg: 1 bakes Chromium + chrome-devtools-mcp (+~200 MB). `make build-browser` flips it. |
 | `CLAUDE_BROWSER` | auto | Tri-state for the chrome-devtools MCP: unset = auto (a browser image self-enables it), `1`/`--browser` = force on (fails loud on a lean image), `0`/`--no-browser` = opt out. |
+| `WITH_DOCKER` | `0` | Build arg: 1 bakes a Docker engine for per-session container workflows. `make build-docker` flips it (`make build-docker-browser` for both variants). See [Container workflows](#container-workflows-optional) |
+| `CLAUDE_DOCKER` | `0` | `1`/`--docker` gives the session its **own** Docker engine. Requires a `WITH_DOCKER=1` image **and** the Sysbox runtime on the host — the launcher refuses rather than falling back to something unsafe. Never `--privileged`, never a host docker-socket mount. Raise `CLAUDE_MEM_LIMIT` (8g+): inner containers share this container's cgroup |
+| `CLAUDE_DOCKERD_WAIT` | `60` | Seconds to wait for the inner daemon before failing the boot |
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` | — | Clone source (or use `--repo`/`--branch`/`--depth`) |
 | `GIT_AUTHOR_NAME`/`_EMAIL` (+`COMMITTER`) | host git config | Commit identity |
 | `GIT_SSH_KEY` | `~/.ssh/claude-git-key` | Host SSH key for git, mounted read-only |
@@ -249,7 +249,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_BROKER_GIT_KEY` | `0` | `1` = hold the SSH deploy key in a root ssh-agent (agent signs/pushes but can't read the key bytes) instead of a readable `~/.ssh/id_ed25519` |
 | `CLAUDE_DISK_DATA_ROOT` | `/var/lib/docker` | Path whose free space `claude-disk-gc` reports before/after each cycle |
 | `CLAUDE_DISK_GC_INTERVAL` | `3600` | Seconds between `claude-disk-gc --loop` cycles (standalone tool; nothing auto-starts it) |
-| `CLAUDE_CONTROLLER` | *removed* | **Removed in CC-BINS — setting it to `1` now refuses to boot.** It had collapsed to a byte-identical pass-through to `CLAUDE_AUTOPILOT=1`. Use that instead |
+| `CLAUDE_CONTROLLER` | *removed* | **Removed — setting it to `1` now refuses to boot.** It had collapsed to a byte-identical pass-through to `CLAUDE_AUTOPILOT=1`. Use that instead |
 | `CLAUDE_STOP_TIMEOUT` | `20` | Graceful stop timeout (s) |
 | `AUTH_VOLUME`/`SSHKEYS_VOLUME` | `claude-auth`/`claude-sshkeys` | Shared volume names |
 | `ANTHROPIC_API_KEY` | unset | **Must stay unset** — entrypoint hard-fails otherwise |
@@ -295,9 +295,9 @@ claude-disk-gc [--loop]           GC docker image/build-cache layers + trim the 
 claude-disk-verify                prove disk-hygiene logic (docker-free, safe anywhere)
 ```
 
-A nested-Sysbox worker-broker substrate used to run alongside `claude-launch --broker`,
-spawning autonomous nested workers via a root-owned broker. It was retired in SC-5 — see
-[docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md).
+`claude-launch --broker` used to spawn autonomous nested workers via a root-owned broker.
+That substrate is retired — see [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md).
+The flag now errors rather than silently doing nothing.
 
 Inside an autopilot container (over SSH), `claude-enqueue "<prompt>"` adds a task
 to the durable queue (`CLAUDE_AUTOPILOT_QUEUE=1`); `--priority N` orders it
@@ -551,7 +551,7 @@ binary is downloaded from GitHub and checked against a hardcoded digest, no
 `curl | sh` (bump `MISE_VERSION` + the two digests together). `pipx:` installs
 reuse the baked `uv` automatically.
 
-**Shared, persistent tool cache (PKG-3).** mise's install store **and** the
+**Shared, persistent tool cache.** mise's install store **and** the
 `cargo`/`go`/`npm`/`uv`/`pip` caches live on **one shared docker volume**
 (`claude-cache`) mounted at `/cache`, so a toolchain or CLI provisioned by one
 container is a **cache hit** for the next launch of that project and for every
@@ -570,15 +570,15 @@ idle-only and fail-safe. Full design + verification:
   their runtime from vendor hosts (nodejs.org, go.dev, static.rust-lang.org) not
   yet on the allowlist, so they need those hosts via `CLAUDE_EGRESS_EXTRA_HOSTS`.
 - **System libraries (`apt`) are not available** — the agent is rootless, and the
-  worker-tier `apt` path that used to close that gap (PKG-4) was retired in SC-5
-  along with the Sysbox substrate it depended on (see
+  worker-tier `apt` path that used to close that gap was retired along with the
+  Sysbox worker-broker substrate it depended on (see
   [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md)). A system library
   needs a base-image rebuild today.
 - The image sets `trusted_config_paths` to **`/workspace` only** — a deliberately
   scoped supply-chain trade so a repo's own `mise.toml` auto-applies while a config
   anywhere else stays untrusted (never a blanket `/`). Full design + verification:
   [docs/toolchain-provisioning.md](docs/toolchain-provisioning.md).
-- **Reproducible + script-hardened installs (PKG-5).** Agent-initiated `npm`/`pnpm`
+- **Reproducible + script-hardened installs.** Agent-initiated `npm`/`pnpm`
   installs run with **`ignore-scripts=true`** (baked into the `claude` user's
   `~/.npmrc`, so build-time root installs are untouched; a repo opts back in with its
   own `/workspace/.npmrc`). mise **`lockfile=true`** makes a committed
@@ -648,7 +648,7 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   `test/sizing-unit.sh` (CI); one-command sanity pass: `bin/claude-disk-verify`.
   (A nested-Sysbox worker-broker substrate used to run alongside this — a
   root-owned broker spawning autonomous nested workers with a K-aware resource
-  envelope and a per-launch disk-pressure refusal. It was retired in SC-5; see
+  envelope and a per-launch disk-pressure refusal. It is retired; see
   [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md).)
 - **Secret brokering (git key + credentials).** By default the SSH deploy key is
   copied to a `claude`-readable `~/.ssh/id_ed25519`, so a prompt-injected agent

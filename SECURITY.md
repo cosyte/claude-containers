@@ -5,8 +5,9 @@
 Report privately — **do not open a public issue**.
 
 Use [GitHub private vulnerability reporting](https://github.com/cosyte/claude-containers/security/advisories/new)
-(Security → Report a vulnerability). If that is unavailable to you, email
-`security@cosyte.com` with `claude-containers` in the subject.
+(Security → Report a vulnerability) — that is the channel that reaches the
+maintainer directly. If it is unavailable to you, email `hello@cosyte.com` with
+`SECURITY: claude-containers` in the subject.
 
 Please include the version or commit, your host OS and Docker/runc versions, the
 flags or env vars in play, and the smallest reproduction you can manage. A first

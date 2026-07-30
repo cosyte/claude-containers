@@ -103,11 +103,11 @@ small descriptive commits as you change things.
 | `Makefile` | `build` (host arch, loaded), `build-all`/`push` (amd64+arm64 via buildx), `login`, `launch/list/attach/stop/rm/logs`, `lint`, `smoke` (build + smoke test), `clean`. |
 | `.env.example` | Every tunable, documented. Copy to `.env`. |
 | `test/smoke.sh` | Automated acceptance for everything that doesn't need real OAuth/phone. |
-| `test/unit.sh` | Docker-free unit tests (version-floor helper, warn-only runc posture, the §0 retired-env guard, and the CC-BINS gates: the pruned bins stay pruned, `CLAUDE_CONTROLLER=1` is refused, and the autopilot never invokes `claude` without a command). Also pins the `--docker` WIRING — engine baked + entrypoint starts it + launcher supplies the runtime — since CC-BINS deleted the engine precisely because nothing could start it. |
+| `test/unit.sh` | Docker-free unit tests (version-floor helper, warn-only runc posture, the §0 retired-env guard, and the prune gates: the removed bins stay removed, `CLAUDE_CONTROLLER=1` is refused, and the autopilot never invokes `claude` without a command). Also pins the `--docker` WIRING — engine baked + entrypoint starts it + launcher supplies the runtime — since the engine was once deleted precisely because nothing could start it. |
 | `test/docker-unit.sh` | Docker-free tests for `--docker`: the cap-drop is skipped ONLY in docker mode (a lean sibling in the same compose stack keeps it), `preflight_sysbox` fails closed, the per-service compose emission, and the standing assertion that nothing ever reaches for `--privileged` or the host docker socket — CI. |
-| `test/sizing-unit.sh` | Docker-free sizing tests (size/reservation math, K resolution from the umbrella config, compose reservation/pids emission) — CI. |
+| `test/sizing-unit.sh` | Docker-free sizing tests (size/reservation math, K resolution from config, compose reservation/pids emission) — CI. |
 | `test/disk-unit.sh` | Docker-free disk tests (`disk_free_mib` parse/fail-closed, `claude-disk-gc`'s plan safety) — CI. |
-| `bin/claude-disk-gc` | Standalone maintenance tool: `docker system prune -f` + `docker builder prune -f` (a fixed plan — never `-a`/`--volumes`), plus the PKG-3 shared-cache trim; one-shot or `--loop`; fail-safe. No entrypoint path auto-starts it. |
+| `bin/claude-disk-gc` | Standalone maintenance tool: `docker system prune -f` + `docker builder prune -f` (a fixed plan — never `-a`/`--volumes`), plus the shared-cache trim; one-shot or `--loop`; fail-safe. No entrypoint path auto-starts it. |
 | `bin/claude-disk-verify` | Docker-free sanity pass re-running the disk-hygiene logic (free-space parsing, gc-plan safety, cache-trim safety) — safe anywhere, no docker needed. |
 | `docs/` | `architecture.md` (decisions + acceptance map), `legacy-sysbox-broker.md` (the retired nested-Sysbox worker-broker substrate — frozen implementation + rationale), `customizing-bakeins.md`, `troubleshooting.md`. |
 

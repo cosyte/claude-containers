@@ -112,7 +112,7 @@ echo "== claude-compose-gen: mem_reservation + pids_limit ride every service =="
 
 OUT="$TMPD/out/compose.yml"
 if env CLAUDE_MEM_LIMIT=4g CLAUDE_PIDS_LIMIT=2048 \
-    "$HERMETIC_ROOT/bin/claude-compose-gen" --out "$OUT" cosyte/hl7 cosyte/mllp:main >/dev/null 2>&1; then
+    "$HERMETIC_ROOT/bin/claude-compose-gen" --out "$OUT" acme/api acme/worker:main >/dev/null 2>&1; then
     if grep -q "mem_reservation: 3072m" "$OUT" && grep -q "pids_limit: 2048" "$OUT"; then
         ok "services carry the derived mem_reservation (3072m) + pids_limit (2048)"
     else
@@ -123,7 +123,7 @@ else
 fi
 rm -f "$OUT"
 if env CLAUDE_MEM_LIMIT=4g \
-    "$HERMETIC_ROOT/bin/claude-compose-gen" --out "$OUT" --mem hl7=2g cosyte/hl7 >/dev/null 2>&1; then
+    "$HERMETIC_ROOT/bin/claude-compose-gen" --out "$OUT" --mem api=2g acme/api >/dev/null 2>&1; then
     if grep -q "mem_limit: 2g" "$OUT" && grep -q "mem_reservation: 1536m" "$OUT"; then
         ok "a per-repo --mem override derives its own 75% reservation (2g → 1536m, never inverted)"
     else
