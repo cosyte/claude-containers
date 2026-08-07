@@ -22,18 +22,18 @@ log()  { echo "[entrypoint] $*"; }
 die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
 asclaude() { gosu "$CLAUDE_USER" env CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" "$@"; }
 
-# --- 0. Refuse retired broker/Sysbox env (SC-5) -------------------------------
+# --- 0. Refuse retired broker/Sysbox env -------------------------------
 # bin/claude-launch and bin/claude-compose-gen already REFUSE the removed --broker /
 # --sysbox / --worker-tarball flags. The env vars those flags used to set are now simply
 # UNREAD, and silence there is not safe: an operator running CLAUDE_CACHE_PROXY_HOST with
 # CLAUDE_EGRESS_LOCKDOWN=1 had a single audited egress choke point (public npm blocked, all
-# package traffic through their proxy). Post-SC-5 the var means nothing, the firewall
-# composes its default allowlist, and registry.npmjs.org is directly reachable again — a
+# package traffic through their proxy). Since the strip the var means nothing, the firewall
+# composes its default allowlist, and registry.npmjs.org is directly reachable again: a
 # real, silent loosening of their posture. So say so, loudly, at boot.
 #
 # WARN (not die) because these are inert leftovers in a .env, not an active request: a
 # container that refused to boot on a stale .env line would be a worse regression than the
-# one we are warning about. CLAUDE_BROKER_GIT_KEY is deliberately NOT in this list — it is
+# one we are warning about. CLAUDE_BROKER_GIT_KEY is deliberately NOT in this list: it is
 # the git-key broker, a LIVE credential-isolation control, unrelated to the worker broker.
 RETIRED_VARS=(
     CLAUDE_WORKER_BROKER CLAUDE_WORKER_TARBALL CLAUDE_BROKER_DIR CLAUDE_BROKER_SPOOL
@@ -47,9 +47,9 @@ for _v in "${RETIRED_VARS[@]}"; do
     [[ -n "${!_v:-}" ]] && _retired_set+=("$_v")
 done
 if (( ${#_retired_set[@]} > 0 )); then
-    log "WARNING: these env vars were RETIRED in SC-5 and are now IGNORED: ${_retired_set[*]}"
-    log "WARNING: the Sysbox worker-broker, PKG-4 curated apt, and the PKG-6 pull-through"
-    log "WARNING: cache proxy were removed — see docs/legacy-sysbox-broker.md."
+    log "WARNING: these env vars were RETIRED with the worker-broker substrate and are now IGNORED: ${_retired_set[*]}"
+    log "WARNING: the Sysbox worker-broker, the curated apt tier, and the pull-through"
+    log "WARNING: cache proxy were removed, see docs/legacy-sysbox-broker.md."
     for _v in "${_retired_set[@]}"; do
         case "$_v" in
             CLAUDE_CACHE_PROXY_HOST|CLAUDE_CACHE_PROXY|CLAUDE_CACHE_PROXY_PORT)
@@ -58,36 +58,36 @@ if (( ${#_retired_set[@]} > 0 )); then
                 log "WARNING: composes its default allowlist and registry.npmjs.org is reachable"
                 log "WARNING: directly. Re-establish the choke point outside this container." ;;
             CLAUDE_EGRESS_APT|CLAUDE_APT_PROVISION)
-                log "WARNING: $_v is inert — there is no in-session system-package install path at"
+                log "WARNING: $_v is inert, there is no in-session system-package install path at"
                 log "WARNING: all now (a base-image rebuild is the only route to a new syslib)." ;;
         esac
     done
 fi
 unset _v _retired_set RETIRED_VARS
 
-# --- 0b. Refuse the retired CLAUDE_CONTROLLER mode (CC-BINS) ------------------
-# SC-5 deleted the broker-dispatch tier this mode existed to drive, leaving
-# bin/claude-controller a byte-identical pass-through to claude-autopilot — a mode whose only
-# job was selecting another mode. CC-BINS removed it.
+# --- 0b. Refuse the retired CLAUDE_CONTROLLER mode ------------------
+# The substrate strip deleted the broker-dispatch tier this mode existed to drive, leaving
+# bin/claude-controller a byte-identical pass-through to claude-autopilot: a mode whose only
+# job was selecting another mode, so it was removed.
 #
 # This DIES where §0 above merely WARNS, and the difference is the point. Those vars are inert
 # leftovers in a .env: nothing reads them, so warning is enough and refusing to boot on a stale
-# line would be the worse bug. CLAUDE_CONTROLLER=1 is not inert — it is an ACTIVE request for
+# line would be the worse bug. CLAUDE_CONTROLLER=1 is not inert: it is an ACTIVE request for
 # UNATTENDED operation. Warn-and-ignore would fall through to interactive mode and boot a fleet
 # container into a Remote-Control session that nobody is watching and that never runs the loop:
 # a container that looks alive and does nothing, which is the worst state this image can be in.
 # So refuse, and name the replacement. It costs the operator one character.
 #
-# Fails FAST — here, not at mode selection ~500 lines down — so a `--restart unless-stopped`
+# Fails FAST: here, not at mode selection ~500 lines down, so a `--restart unless-stopped`
 # container doesn't crashloop through sshd, volume chown and a repo clone before saying why.
-# (CLAUDE_CONTROLLER=0, which every pre-CC-BINS .env.example carries, matches nothing and boots
+# (CLAUDE_CONTROLLER=0, which every older .env.example carries, matches nothing and boots
 # clean: a stale line must never brick a container.)
 case "${CLAUDE_CONTROLLER:-0}" in
     1|true|yes|on)
-        die "CLAUDE_CONTROLLER was REMOVED in CC-BINS. It had been a byte-identical pass-through
-       to CLAUDE_AUTOPILOT=1 ever since SC-5 retired the Sysbox nested-worker-broker
+        die "CLAUDE_CONTROLLER was REMOVED. It had been a byte-identical pass-through
+       to CLAUDE_AUTOPILOT=1 ever since the strip retired the Sysbox nested-worker-broker
        dispatch tier it existed to drive (see docs/legacy-sysbox-broker.md). Set
-       CLAUDE_AUTOPILOT=1 instead — it is the same loop, and always was." ;;
+       CLAUDE_AUTOPILOT=1 instead: it is the same loop, and always was." ;;
 esac
 
 # --- 1. Refuse API-key auth --------------------------------------------------
@@ -114,7 +114,7 @@ fi
 # --- 1b. Multi-account mode (opt-in) ------------------------------------------
 # CLAUDE_ACCOUNTS (comma-separated names) redirects AUTH_DIR from the single
 # shared /auth volume to one of several named /auth-accounts/<name> volumes
-# mounted by `claude-launch --accounts` — each created by `claude-account-login
+# mounted by `claude-launch --accounts`: each created by `claude-account-login
 # <name>`. Works with any account count >= 1: a single account still benefits
 # (bin/claude-usage-watchdog auto-resumes it once its usage window resets), and
 # unset (the default) leaves AUTH_DIR="/auth" with every line below unchanged.
@@ -125,7 +125,7 @@ if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
     IFS=',' read -ra ACCOUNT_NAMES <<< "$CLAUDE_ACCOUNTS"
     (( ${#ACCOUNT_NAMES[@]} > 0 )) || die "CLAUDE_ACCOUNTS is set but empty"
     for n in "${ACCOUNT_NAMES[@]}"; do
-        [[ -d "/auth-accounts/$n" ]] || die "account '$n' listed in CLAUDE_ACCOUNTS has no volume mounted at /auth-accounts/$n — check claude-launch --accounts wiring"
+        [[ -d "/auth-accounts/$n" ]] || die "account '$n' listed in CLAUDE_ACCOUNTS has no volume mounted at /auth-accounts/$n: check claude-launch --accounts wiring"
     done
     mkdir -p "$CLAUDE_CONFIG_DIR"
     ACTIVE_FILE="$CLAUDE_CONFIG_DIR/.active-account"
@@ -133,7 +133,7 @@ if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
     ACTIVE_ACCOUNT="$(cat "$ACTIVE_FILE")"
     case ",${CLAUDE_ACCOUNTS}," in
         *",${ACTIVE_ACCOUNT},"*) ;;
-        *) log "WARNING: previously-active account '$ACTIVE_ACCOUNT' is no longer in CLAUDE_ACCOUNTS — falling back to '${ACCOUNT_NAMES[0]}'"
+        *) log "WARNING: previously-active account '$ACTIVE_ACCOUNT' is no longer in CLAUDE_ACCOUNTS: falling back to '${ACCOUNT_NAMES[0]}'"
            ACTIVE_ACCOUNT="${ACCOUNT_NAMES[0]}"
            echo "$ACTIVE_ACCOUNT" > "$ACTIVE_FILE" ;;
     esac
@@ -149,8 +149,8 @@ chmod 700 "$CLAUDE_HOME/.ssh"
 
 # --- 2a. Disk-backed scratch (TMPDIR) ----------------------------------------
 # /tmp is a tmpfs: RAM, ~1g, charged to the memory cgroup. With TMPDIR unset everything
-# large lands there — pip/uv wheel builds, `docker save|load` tarballs, the inner
-# containerd's mount dirs — and dies at the cap with an ENOSPC that reads like a bug, while
+# large lands there: pip/uv wheel builds, `docker save|load` tarballs, the inner
+# containerd's mount dirs, and dies at the cap with an ENOSPC that reads like a bug, while
 # the host has terabytes free. So point TMPDIR at a disk-backed volume. TMPDIR is exported
 # by the launcher/compose (so dockerd, containerd and every child inherit it); this block
 # just makes the directory usable, and tolerates its absence so an older container (or a
@@ -168,7 +168,7 @@ if [[ -n "$SCRATCH_DIR" && "$SCRATCH_DIR" != "/tmp" ]]; then
         find "$SCRATCH_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
         log "Scratch (TMPDIR)    : $SCRATCH_DIR (disk-backed; cleared on boot)"
     else
-        log "WARNING: TMPDIR=$SCRATCH_DIR is not creatable — falling back to /tmp (a 1g tmpfs)."
+        log "WARNING: TMPDIR=$SCRATCH_DIR is not creatable, falling back to /tmp (a 1g tmpfs)."
         log "WARNING: Large installs/builds may fail with ENOSPC. Mount a scratch volume there."
         unset TMPDIR
     fi
@@ -231,7 +231,7 @@ EOF
             git_brokered=1
             log "Git SSH key broker  : key held in a root ssh-agent (claude signs via relay, cannot read it)"
         else
-            log "Git SSH key broker  : WARNING — ssh-agent/relay setup failed; falling back to a readable key file"
+            log "Git SSH key broker  : WARNING, ssh-agent/relay setup failed; falling back to a readable key file"
         fi
     fi
     if [[ "$git_brokered" == 0 ]]; then
@@ -262,7 +262,7 @@ asclaude git config --global --get-all safe.directory 2>/dev/null \
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 
 # Secret guard: a fleet-wide pre-commit hook (global core.hooksPath) that blocks
-# committing obvious secrets/credentials — important because the agent commits
+# committing obvious secrets/credentials: important because the agent commits
 # and pushes autonomously with a mounted key and one shared credential volume.
 # Disable with CLAUDE_SECRET_GUARD=0. The hook chains to a repo's own pre-commit.
 HOOKS_DIR="$CLAUDE_HOME/.claude-hooks"
@@ -300,16 +300,16 @@ fi
 # The daemon runs INSIDE this container. It is never the host daemon: mounting the host's
 # /var/run/docker.sock, or running --privileged, would each hand a prompt-injectable agent
 # root on the host, and both stay FORBIDDEN. What makes an inner daemon safe *without*
-# privilege is the runtime — under Sysbox (--runtime=sysbox-runc) this container's root is
+# privilege is the runtime: under Sysbox (--runtime=sysbox-runc) this container's root is
 # mapped into a user namespace onto an unprivileged host uid, so dockerd gets the caps it
 # needs over its OWN namespace and none over the host. bin/claude-launch --docker selects it.
 #
-# NOTE — this deliberately INVERTS the retired worker-broker (docs/legacy-sysbox-broker.md),
+# NOTE: this deliberately INVERTS the retired worker-broker (docs/legacy-sysbox-broker.md),
 # which chowned the socket to root and brokered every launch to keep the agent OFF the inner
 # daemon. Here the agent using Docker IS the feature, so we put it in the `docker` group and
 # hand it the socket. The honest consequence: socket access is a path to root INSIDE this
 # container (`docker run -v /:/rootfs …`). Under Sysbox that root is still an unprivileged
-# nobody on the host — the boundary that matters holds — but it does mean in-container
+# nobody on the host: the boundary that matters holds, but it does mean in-container
 # controls that assume "root is separate from the agent" no longer bind. Two exist:
 # CLAUDE_BROKER_GIT_KEY (§5, root-owned ssh-agent hiding the deploy key) and
 # CLAUDE_EGRESS_LOCKDOWN (root-owned iptables). claude-launch warns when either is combined
@@ -328,7 +328,7 @@ if [[ "${CLAUDE_DOCKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
     usermod -aG docker "$CLAUDE_USER"
 
     if docker info >/dev/null 2>&1; then
-        log "Inner dockerd       : already reachable — reusing it (not starting a second daemon)"
+        log "Inner dockerd       : already reachable, reusing it (not starting a second daemon)"
     else
         DOCKERD_WAIT="${CLAUDE_DOCKERD_WAIT:-60}"
         # A POSITIVE integer with no leading zero: `(( … ))` reads a leading-zero value as
@@ -344,7 +344,7 @@ if [[ "${CLAUDE_DOCKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
         dwaited=0
         until docker info >/dev/null 2>&1; do
             if (( dwaited >= DOCKERD_WAIT )); then
-                log "inner dockerd did not become ready within ${DOCKERD_WAIT}s — last log lines:"
+                log "inner dockerd did not become ready within ${DOCKERD_WAIT}s: last log lines:"
                 tail -n 20 /var/log/inner-dockerd.log 2>/dev/null | sed 's/^/    /' >&2 || true
                 die "inner dockerd failed to start. The usual cause is a missing
        --runtime=sysbox-runc: without the user namespace Sysbox provides, an unprivileged
@@ -380,10 +380,10 @@ fi
 # Defense-in-depth: lock the SHARED fleet-wide credential master to root-only so
 # a prompt-injected agent can't read or even list it. The agent keeps its OWN
 # per-container session token ($CLAUDE_CONFIG_DIR/.credentials.json, claude:600,
-# unavoidable — Claude Code authenticates with it), but cannot reach the master
+# unavoidable: Claude Code authenticates with it), but cannot reach the master
 # that backs every other container. `make login` (root-chowns /auth) is separate.
 if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
-    # Every account dir gets the same lockdown, not just the active one — the
+    # Every account dir gets the same lockdown, not just the active one: the
     # agent must never read a not-currently-active account's credential either.
     for n in "${ACCOUNT_NAMES[@]}"; do
         d="/auth-accounts/$n"
@@ -399,10 +399,10 @@ fi
 
 # A .credentials.json is USABLE only if it carries a non-empty OAuth access
 # token. When a token refresh fails, Claude Code rewrites the file in place with
-# EMPTY token fields (accessToken/refreshToken => "") — i.e. it logs the session
+# EMPTY token fields (accessToken/refreshToken => ""): i.e. it logs the session
 # out but leaves a well-formed, freshly-mtimed JSON behind. Without this guard
 # the reconcile loop treated that tokenless file as the "newest wins" copy and
-# published it to the shared /auth master and thence to every other container —
+# published it to the shared /auth master and thence to every other container:
 # turning one account's token expiry into a fleet-wide "Login expired" blackout
 # (observed 2026-07-15). The guard makes the loop refuse to propagate a tokenless
 # credential and instead REPAIR a tokenless/absent copy from whichever side still
@@ -415,7 +415,7 @@ creds_have_token() {  # creds_have_token <file>  -> 0 if it holds a non-empty ac
 
 # Publish SRC over DST atomically: a unique tmp in DST's own dir (so a shared
 # /auth is never left with a half-written file, and no fixed tmp name can be
-# picked up by a concurrent container), then rename. Ownership follows DST — the
+# picked up by a concurrent container), then rename. Ownership follows DST: the
 # shared master stays root:600, the per-container copy claude:600.
 publish_creds() {  # publish_creds <src> <dst>
     local src="$1" dst="$2" t
@@ -453,7 +453,7 @@ reconcile_creds() {
             # both good, master refreshed more recently -> pull the refresh down
             publish_creds "$a" "$b"
         fi
-        # both tokenless (a real refresh-token expiry): nothing to do — the loop
+        # both tokenless (a real refresh-token expiry): nothing to do, the loop
         # never invents a token; recovery is `make login` on the host.
     done
 }
@@ -464,7 +464,7 @@ RECONCILE_PID=$!
 # bin/claude-usage-watchdog runs as the unprivileged `claude` user, so it
 # cannot itself read a NON-active account's locked-down master (each
 # /auth-accounts/<name> is root:700 / root:600, same lockdown as the
-# single-account master above) — it requests a swap here instead. Runs as
+# single-account master above): it requests a swap here instead. Runs as
 # root specifically so it CAN read every account, unlike the watchdog.
 # Request/done files live inside $CLAUDE_CONFIG_DIR: root can read/write there
 # regardless of its claude:700 ownership, so no separate shared directory or
@@ -475,7 +475,7 @@ account_switch_listener() {
     while sleep 2; do
         [[ -s "$req_file" ]] || continue
         local req; req="$(cat "$req_file" 2>/dev/null)"; rm -f "$req_file"
-        # Validate against CLAUDE_ACCOUNTS before touching any path — an
+        # Validate against CLAUDE_ACCOUNTS before touching any path: an
         # unvalidated name interpolated into /auth-accounts/$req/... would be a
         # path-traversal risk if a request were ever forged.
         case ",${CLAUDE_ACCOUNTS}," in
@@ -503,7 +503,7 @@ fi
 # With CLAUDE_CONFIG_DIR set, Claude stores .claude.json *inside* it. Pre-accept
 # the workspace trust dialog and onboarding non-interactively, and lift the
 # oauthAccount written by `make login` so the account shows correctly. Only
-# fills missing keys — never clobbers existing per-container state.
+# fills missing keys, never clobbers existing per-container state.
 CJSON="$CLAUDE_CONFIG_DIR/.claude.json"
 [[ -s "$CJSON" ]] || echo '{}' > "$CJSON"
 OAUTH_ACCOUNT='{}'
@@ -533,7 +533,7 @@ if [[ -f "$BAKE_DIR/CLAUDE.md" && ! -e "$CLAUDE_CONFIG_DIR/CLAUDE.md" ]]; then
     log "Installed global CLAUDE.md"
 fi
 
-# 8b. settings.json — baked file is the base, existing user settings win on
+# 8b. settings.json: baked file is the base, existing user settings win on
 #     conflict (recursive merge). Also injects unattended-operation defaults.
 #     NOTE: env intentionally does NOT include DISABLE_TELEMETRY/DO_NOT_TRACK.
 #     Those (and CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) make Claude Code skip
@@ -557,11 +557,11 @@ EXISTING_SETTINGS='{}'
 # were present, drop the cached GrowthBook flags + statsig cache so the next
 # Claude run re-fetches them and RC eligibility resolves correctly.
 #
-# Self-heal 2 (SC-5): drop the stale `claude-md-fragments` SessionStart hook.
-# Images built before SC-5 baked a settings.json whose only content was a
+# Self-heal 2: drop the stale `claude-md-fragments` SessionStart hook.
+# Older images baked a settings.json whose only content was a
 # SessionStart hook invoking /usr/local/bin/claude-md-fragments (the CLAUDE.d
-# per-mode fragment loader). SC-5 deleted that binary, but the hook was already
-# persisted into every per-project config VOLUME — and this merge lets existing
+# per-mode fragment loader). That binary was deleted, but the hook was already
+# persisted into every per-project config VOLUME, and this merge lets existing
 # user settings win, so it would survive forever and fire an ENOENT at every
 # session start. Same class of residue, same fix, as the telemetry strip above.
 STALE_HOOK_CMD="/usr/local/bin/claude-md-fragments"
@@ -570,7 +570,7 @@ jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") <(echo "$EXISTING_SETTINGS") \
     | jq --arg stale "$STALE_HOOK_CMD" '
         # Type-guard every level: a hand-corrupted settings.json (.hooks a string,
         # a SessionStart group that is not an object, ...) must pass through untouched
-        # rather than error — a jq failure here would leave the `>` redirect below
+        # rather than error: a jq failure here would leave the `>` redirect below
         # having truncated settings.json to 0 bytes.
         (if (.hooks | type) == "object" and (.hooks.SessionStart | type) == "array" then
              .hooks.SessionStart |= (
@@ -592,7 +592,7 @@ if echo "$EXISTING_SETTINGS" \
     | jq -e --arg stale "$STALE_HOOK_CMD" \
         '[.hooks.SessionStart // [] | .[] | .hooks // [] | .[] | select((.command // "") == $stale)] | length > 0' \
         >/dev/null 2>&1; then
-    log "Migrated settings.json: removed the stale '$STALE_HOOK_CMD' SessionStart hook (CLAUDE.d fragment loader, removed in SC-5)"
+    log "Migrated settings.json: removed the stale '$STALE_HOOK_CMD' SessionStart hook (CLAUDE.d fragment loader, since removed)"
 fi
 chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
 if echo "$EXISTING_SETTINGS" | jq -e '.env // {} | (.DISABLE_TELEMETRY // .DO_NOT_TRACK // .CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) != null' >/dev/null 2>&1; then
@@ -602,7 +602,7 @@ if echo "$EXISTING_SETTINGS" | jq -e '.env // {} | (.DISABLE_TELEMETRY // .DO_NO
     rm -rf "$CLAUDE_CONFIG_DIR/statsig" 2>/dev/null || true
 fi
 
-# 8c. Plugins — declarative. Claude Code installs/syncs the marketplaces and
+# 8c. Plugins: declarative. Claude Code installs/syncs the marketplaces and
 #     enabled plugins from settings.json on startup (idempotent). We union the
 #     two plugin keys into existing settings; existing entries win on conflict.
 if [[ -f "$BAKE_DIR/plugins/plugins.json" ]]; then
@@ -618,7 +618,7 @@ if [[ -f "$BAKE_DIR/plugins/plugins.json" ]]; then
     log "Merged baked-in plugin marketplaces/plugins into settings.json"
 fi
 
-# 8c-bis. Runtime plugin injection — no rebuild required.
+# 8c-bis. Runtime plugin injection: no rebuild required.
 # CLAUDE_EXTRA_MARKETPLACES: "name=url[,name=url,...]"  (git source, autoUpdate=true)
 # CLAUDE_EXTRA_PLUGINS:      "plugin@marketplace[,...]"
 # Existing settings.json entries always win (same semantics as the baked merge above).
@@ -733,14 +733,14 @@ fi
 # inspect console/network, take screenshots, run Lighthouse, etc. against any
 # frontend the agent spins up in /workspace.
 #
-# CLAUDE_BROWSER is TRI-STATE — the browser image is meant to "just work", so a
+# CLAUDE_BROWSER is TRI-STATE: the browser image is meant to "just work", so a
 # baked variant auto-enables the MCP with no second flag:
 #   • unset / empty / other  → AUTO: register iff the browser variant is baked
-#     (both chrome-devtools-mcp AND chromium on PATH — the functional signal a
+#     (both chrome-devtools-mcp AND chromium on PATH, the functional signal a
 #     registration actually needs; the image also carries a `claude.browser`
 #     LABEL the launcher pre-flight reads). A lean image stays silent.
 #   • 1|true|yes|on          → FORCE ON: register; if the binaries are NOT baked,
-#     fail LOUD + actionable (rebuild hint) — never a silent no-op.
+#     fail LOUD + actionable (rebuild hint), never a silent no-op.
 #   • 0|false|no|off         → OPT OUT: skip even on a browser image.
 # Registration is idempotent (the `claude mcp get` guard below), so re-runs and
 # a resumed session never double-register. Headless, isolated profile (clean per
@@ -759,7 +759,7 @@ _register_chrome_devtools_mcp() {
         return 0
     fi
     # Resolve the SAME chromium the detection probe found, rather than hardcoding
-    # /usr/bin/chromium — so a variant that installs chromium elsewhere (or as a
+    # /usr/bin/chromium, so a variant that installs chromium elsewhere (or as a
     # differently-named binary on PATH) can't auto-register a config that then
     # points at a missing executable. Fall back to /usr/bin/chromium if unresolved.
     local chromium_path cdt_json
@@ -785,30 +785,30 @@ _register_chrome_devtools_mcp() {
     fi
 }
 # Normalize: strip surrounding whitespace / a trailing CR (a CRLF-authored .env
-# yields `1\r`, which must still match "1" — not silently fall through to auto)
+# yields `1\r`, which must still match "1", not silently fall through to auto)
 # and lowercase, so the tri-state match is robust to how the value was set.
 _cb="$(printf '%s' "${CLAUDE_BROWSER:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
 case "$_cb" in
     1|true|yes|on)
-        # Explicit request — must be satisfiable, else fail loud (never silent).
+        # Explicit request: must be satisfiable, else fail loud (never silent).
         if _browser_baked; then
             _register_chrome_devtools_mcp
         else
             log "ERROR: CLAUDE_BROWSER=1 (or --browser) requested, but this image has no"
-            log "       chrome-devtools-mcp / chromium baked in — the MCP cannot be enabled."
+            log "       chrome-devtools-mcp / chromium baked in: the MCP cannot be enabled."
             log "       Rebuild the browser variant:  make build-browser"
             log "       (or:  make build WITH_BROWSER=1 CLAUDE_IMAGE=<tag>)."
             log "       Frontend debugging is UNAVAILABLE in this container until you do."
         fi
         ;;
     0|false|no|off)
-        # Explicit opt-out — honored even on a browser image.
+        # Explicit opt-out: honored even on a browser image.
         _browser_baked && log "chrome-devtools MCP disabled (CLAUDE_BROWSER=off); skipping"
         ;;
     *)
         # Auto: a browser image enables the MCP by itself; a lean image is silent.
         if _browser_baked; then
-            log "Browser image detected (chromium + chrome-devtools-mcp present) — auto-registering chrome-devtools MCP"
+            log "Browser image detected (chromium + chrome-devtools-mcp present): auto-registering chrome-devtools MCP"
             _register_chrome_devtools_mcp
         fi
         ;;
@@ -823,14 +823,14 @@ CLAUDE_PROJECT_NAME="${CLAUDE_PROJECT_NAME:-claude}"
 # RC debug log path: claude-session writes Remote Control events here; the
 # watchdog and the Docker healthcheck read it. Exported so the tmux server (and
 # anything respawned in it) inherits it; CLAUDE_RC_DEBUG_LOG is also a baked ENV
-# so the healthcheck — a separate process spawned by dockerd — sees it too.
+# so the healthcheck, a separate process spawned by dockerd, sees it too.
 export CLAUDE_RC_DEBUG_LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
 export CLAUDE_PROJECT_NAME CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}" \
        CLAUDE_DEV_CMD="${CLAUDE_DEV_CMD:-}"
 
 # Model selection: default to the best available model. The `opus` alias always
 # resolves to the latest Opus, so the fleet tracks the strongest model without a
-# code change when a newer one ships. Override per-container with CLAUDE_MODEL —
+# code change when a newer one ships. Override per-container with CLAUDE_MODEL:
 # any Claude Code alias (opus, sonnet, haiku, opusplan, default) or a full model
 # id (e.g. claude-opus-4-8). Both the interactive session and the autopilot loop
 # read it and pass `--model`. To defer to Claude Code's own default, set
@@ -839,13 +839,13 @@ export CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
 log "Model               : $CLAUDE_MODEL (override with CLAUDE_MODEL; 'default' = Claude Code's pick)"
 
 # Two modes:
-#   interactive (default)      — main pane is claude-session (Remote Control + SSH).
-#   autopilot (CLAUDE_AUTOPILOT=1) — main pane is claude-autopilot, a headless Claude
+#   interactive (default): main pane is claude-session (Remote Control + SSH).
+#   autopilot (CLAUDE_AUTOPILOT=1): main pane is claude-autopilot, a headless Claude
 #                           loop running CLAUDE_AUTOPILOT_CMD for unattended build-out;
 #                           there is no Remote Control link, so the RC watchdog is
 #                           skipped.
 # Either way SSH attaches to the live tmux pane. The third mode, CLAUDE_CONTROLLER, was
-# removed in CC-BINS and is refused up in §0b — long before we get here.
+# removed and is refused up in §0b: long before we get here.
 case "${CLAUDE_AUTOPILOT:-0}" in
     1|true|yes|on) CLAUDE_MODE=autopilot;   MAIN_PANE_CMD=/usr/local/bin/claude-autopilot ;;
     *)             CLAUDE_MODE=interactive; MAIN_PANE_CMD=/usr/local/bin/claude-session ;;
@@ -871,7 +871,7 @@ export CLAUDE_MODE \
 # OpenTelemetry: opt-in fleet observability. Claude Code reads OTEL_* + the
 # enable flag straight from the process environment (env > settings.json), and
 # the tmux panes inherit this exported env, so we just compose sane defaults and
-# a per-container resource tag — no settings.json surgery, and the auth header (a
+# a per-container resource tag: no settings.json surgery, and the auth header (a
 # secret) stays in process env, never persisted to the config volume. Enabled by
 # CLAUDE_OTEL_ENABLED=1 or simply by supplying an OTLP endpoint. Orthogonal to
 # the Remote-Control telemetry concern above (that's nonessential-traffic, not
@@ -895,18 +895,18 @@ if [[ "${CLAUDE_OTEL_ENABLED:-0}" =~ ^(1|true|yes|on)$ || -n "${OTEL_EXPORTER_OT
     # already exported into this environment, so the panes inherit them as-is.
     log "OpenTelemetry        : on → ${OTEL_EXPORTER_OTLP_ENDPOINT:-<no endpoint set!>} (${OTEL_EXPORTER_OTLP_PROTOCOL})$([[ -n "${OTEL_EXPORTER_OTLP_HEADERS:-}" ]] && echo ' +auth')"
     [[ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]] && \
-        log "OpenTelemetry        : WARNING — enabled but OTEL_EXPORTER_OTLP_ENDPOINT is empty; nothing will be exported"
+        log "OpenTelemetry        : WARNING, enabled but OTEL_EXPORTER_OTLP_ENDPOINT is empty; nothing will be exported"
 fi
 
 # Native Claude Code CLI tuning knobs (real upstream env vars the `claude`
-# binary reads directly — see .env.example). Nothing to translate here, just
+# binary reads directly, see .env.example). Nothing to translate here, just
 # surface non-default values in the boot log for operator visibility; a
 # default fleet (all unset) stays quiet.
 for _v in CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION BASH_DEFAULT_TIMEOUT_MS BASH_MAX_TIMEOUT_MS API_TIMEOUT_MS; do
     [[ -n "${!_v:-}" ]] && log "CLI tuning           : ${_v}=${!_v}"
 done
 
-# Egress lockdown (opt-in): apply a default-deny firewall NOW — after the
+# Egress lockdown (opt-in): apply a default-deny firewall NOW, after the
 # entrypoint's own setup (clone, plugin install) has finished with open egress,
 # and as root (we still hold NET_ADMIN) before the unprivileged agent starts, so
 # the agent runs sealed and cannot alter its own rules. Fail-open by design.
@@ -914,7 +914,7 @@ if [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]]; then
     if /usr/local/bin/claude-egress-firewall; then
         log "Egress lockdown      : default-deny active (allowlist + CLAUDE_EGRESS_EXTRA_HOSTS)"
     else
-        log "Egress lockdown      : FAILED to apply — egress left OPEN (see [egress] lines above)"
+        log "Egress lockdown      : FAILED to apply, egress left OPEN (see [egress] lines above)"
     fi
 fi
 
@@ -940,19 +940,19 @@ if [[ "${CLAUDE_SCM_OBSERVER:-0}" =~ ^(1|true|yes|on)$ ]]; then
     asclaude tmux new-window -t claude -n scm /usr/local/bin/claude-scm-observer
     log "SCM observer         : routing repo events into the queue (tmux window 'scm')"
     [[ "${CLAUDE_AUTOPILOT_QUEUE:-0}" =~ ^(1|true|yes|on)$ ]] || \
-        log "SCM observer         : NOTE — enqueues tasks, but nothing consumes them without CLAUDE_AUTOPILOT=1 + CLAUDE_AUTOPILOT_QUEUE=1"
+        log "SCM observer         : NOTE, enqueues tasks, but nothing consumes them without CLAUDE_AUTOPILOT=1 + CLAUDE_AUTOPILOT_QUEUE=1"
 fi
 
 # --- 12b. Remote Control watchdog -------------------------------------------
-# Claude Code's RC bridge retries reconnection on its own — a transient network
-# drop self-heals — but it can also fail terminally (logs a give-up and stops):
+# Claude Code's RC bridge retries reconnection on its own: a transient network
+# drop self-heals, but it can also fail terminally (logs a give-up and stops):
 # the link then dies silently with no recovery while the `claude` process stays
 # alive and the phone session goes dark (see docs/troubleshooting.md). The
 # watchdog detects that terminal state from the RC debug log and respawns the
 # session with --continue once the pane is idle.
 RC_WATCHDOG_PID=""
 if [[ "$CLAUDE_MODE" == "autopilot" ]]; then
-    log "Remote Control watchdog skipped ($CLAUDE_MODE mode — no Remote Control session)"
+    log "Remote Control watchdog skipped ($CLAUDE_MODE mode, no Remote Control session)"
 elif [[ "${CLAUDE_RC_WATCHDOG:-1}" != "0" ]]; then
     asclaude /usr/local/bin/claude-rc-watchdog &
     RC_WATCHDOG_PID=$!
@@ -982,7 +982,7 @@ if [[ "$CLAUDE_MODE" == "autopilot" ]]; then
     if [[ -n "${CLAUDE_AUTOPILOT_CMD:-}" ]]; then
         log "Autopilot           : headless loop running '${CLAUDE_AUTOPILOT_CMD}' in tmux window 'main'"
     else
-        log "Autopilot           : queue consumer in tmux window 'main' (no CLAUDE_AUTOPILOT_CMD — idles when the queue is empty)"
+        log "Autopilot           : queue consumer in tmux window 'main' (no CLAUDE_AUTOPILOT_CMD, idles when the queue is empty)"
     fi
 else
     log "Remote Control name : $CLAUDE_PROJECT_NAME  (look for it in the Claude app Code tab)"
@@ -1004,7 +1004,7 @@ shutdown() {
     # Tear the inner Docker down BEFORE PID 1 exits (docker mode only). Without this, the
     # inner containers and their containerd-shims are still alive when the container dies;
     # the runtime then SIGKILLs the tree and the exit event can arrive after Docker has
-    # stopped waiting for it — surfacing on the host as
+    # stopped waiting for it: surfacing on the host as
     #   "could not kill container: tried to kill container, but did not receive an exit event"
     # which aborts `docker rm -f` (observed: claude-rm --purge died mid-way, leaking volumes).
     # Stopping the children first makes the teardown orderly and the exit event prompt.
@@ -1012,7 +1012,7 @@ shutdown() {
     if [[ "${CLAUDE_DOCKER:-0}" =~ ^(1|true|yes|on)$ ]] && command -v docker >/dev/null 2>&1; then
         log "Inner dockerd       : stopping inner containers, then the daemon"
         # Bound this hard. The whole trap must finish inside the OUTER stop timeout
-        # (CLAUDE_STOP_TIMEOUT, default 20s) — overrun it and Docker SIGKILLs PID 1, which is
+        # (CLAUDE_STOP_TIMEOUT, default 20s): overrun it and Docker SIGKILLs PID 1, which is
         # the very failure this trap exists to prevent. `-t 5` caps each inner container
         # (Docker's default is 10s, and a process that ignores SIGTERM burns all of it), and
         # `timeout 15` caps the batch.
@@ -1028,8 +1028,30 @@ trap shutdown TERM INT
 
 # Keep PID 1 alive while the container should run. If the tmux server dies
 # entirely (rare), exit so Docker's restart policy can recover it.
-while asclaude tmux has-session -t claude >/dev/null 2>&1; do
+#
+# Require several CONSECUTIVE failures, not one. This probe is not a pure read:
+# `asclaude` is gosu + env + tmux, so every check costs three forks. When the container
+# is out of PIDs: the cgroup pids.max counts THREADS, so a browser or inner-dockerd
+# session reaches it long before the process count suggests: fork returns EAGAIN and
+# the probe fails against a tmux that is perfectly alive. Treating that one failure as
+# "tmux died" tore a healthy container down, and the restart policy then brought it back
+# with an empty session, losing the user's work. Observed twice in 16h on a real host:
+# the entrypoint logged `fork: retry: Resource temporarily unavailable` four seconds
+# after it reported "tmux session ended". Retrying costs a few extra seconds when tmux is genuinely gone;
+# not retrying costs a live session on any transient resource blip.
+LIVENESS_MAX_FAILURES="${CLAUDE_LIVENESS_MAX_FAILURES:-3}"
+liveness_failures=0
+while :; do
+    if asclaude tmux has-session -t claude >/dev/null 2>&1; then
+        liveness_failures=0
+    else
+        liveness_failures=$(( liveness_failures + 1 ))
+        if (( liveness_failures >= LIVENESS_MAX_FAILURES )); then
+            break
+        fi
+        log "tmux liveness probe failed (${liveness_failures}/${LIVENESS_MAX_FAILURES}): retrying in 5s"
+    fi
     sleep 5 & wait $!
 done
-log "tmux session ended"
+log "tmux session ended (liveness probe failed ${LIVENESS_MAX_FAILURES}x consecutively)"
 shutdown

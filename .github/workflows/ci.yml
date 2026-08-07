@@ -1,6 +1,6 @@
 name: ci
 
-# Lint + unit tests — everything provable on a hosted runner. The image smoke test
+# Lint + unit tests: everything provable on a hosted runner. The image smoke test
 # (make smoke) needs a full image build and stays a local/manual gate.
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
         run: make lint
       - name: unit tests (version-floor helper + warn-only runc posture)
         run: test/unit.sh
-      - name: CLI-version unit tests (pin consistent across all 6 declarations — Opus 4.8 + Remote Control floors)
+      - name: CLI-version unit tests (pin consistent across all 6 declarations, Opus 4.8 + Remote Control floors)
         run: test/cli-version-unit.sh
       - name: sizing unit tests (size/reservation math)
         run: test/sizing-unit.sh
@@ -27,15 +27,15 @@ jobs:
         run: test/disk-unit.sh
       - name: compose-gen unit tests (scenario .conf expansion + env layering + cross-stack port reservation)
         run: test/compose-gen-unit.sh
-      - name: docker unit tests (--docker inner engine — cap-drop skipped ONLY in docker mode, sysbox preflight fails closed, no --privileged / no host socket)
+      - name: docker unit tests (--docker inner engine, cap-drop skipped ONLY in docker mode, sysbox preflight fails closed, no --privileged / no host socket)
         run: test/docker-unit.sh
-      - name: egress-packages unit tests (PKG-1 opt-in package-registry allowlist — additive, opt-in, leak-free)
+      - name: egress-packages unit tests (opt-in package-registry allowlist, additive, opt-in, leak-free)
         run: test/egress-packages-unit.sh
-      - name: mise unit tests (PKG-2 baked toolchain provisioner — pinned install, shims on PATH, /workspace-only trust)
+      - name: mise unit tests (baked toolchain provisioner, pinned install, shims on PATH, /workspace-only trust)
         run: test/mise-unit.sh
-      - name: cache unit tests (PKG-3 shared tool cache — /cache relocation, fail-safe, idle-only re-fetchable trim, launch/compose mounts)
+      - name: cache unit tests (shared tool cache, /cache relocation, fail-safe, idle-only re-fetchable trim, launch/compose mounts)
         run: test/cache-unit.sh
-      - name: manifest hardening unit tests (PKG-5 — user-scoped ignore-scripts + mise lockfile baked into build; claude-deps-check pin linter)
+      - name: manifest hardening unit tests (user-scoped ignore-scripts + mise lockfile baked into build; claude-deps-check pin linter)
         run: test/manifest-hardening-unit.sh
-      - name: pkg-install-guide unit tests (CC-PKG-INSTALL-GUIDE — content contract on the baked global CLAUDE.md — mise-first per ecosystem, PEP-668 dead-ends, PKG-3 /cache, no-sudo/no-break-system-packages refusal)
+      - name: pkg-install-guide unit tests (content contract on the baked global CLAUDE.md, mise-first per ecosystem, PEP-668 dead-ends, the shared /cache, no-sudo/no-break-system-packages refusal)
         run: test/pkg-install-guide-unit.sh

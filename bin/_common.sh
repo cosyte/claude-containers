@@ -11,7 +11,7 @@ export CLAUDE_DOCKER_ROOT
 # --- Load env: base .env, then an optional scenario override layer -----------
 # Precedence (weakest first): ambient env < base .env < CLAUDE_ENV_FILE < CLI.
 # (`set -a; source` means a bare VAR= in .env overrides the ambient env, so the
-# old "real env still wins" comment was inaccurate — ambient is the weakest.)
+# old "real env still wins" comment was inaccurate: ambient is the weakest.)
 # The scenario override is loaded HERE, before the defaults/derivations below,
 # so a scenario that overrides e.g. CLAUDE_MEM_LIMIT also drives the derived
 # CLAUDE_MEM_RESERVATION. die() isn't defined yet, so this fails closed inline.
@@ -23,11 +23,11 @@ if [[ -f "$CLAUDE_DOCKER_ROOT/.env" ]]; then
 fi
 # CLAUDE_ENV_FILE points at a per-scenario/per-stack env file (set by
 # claude-compose-gen's --scenario/--env-file). Values here win over the base
-# .env. A set-but-missing path is a hard error (fail closed) — an explicitly
+# .env. A set-but-missing path is a hard error (fail closed): an explicitly
 # named env file must never be silently ignored.
 if [[ -n "${CLAUDE_ENV_FILE:-}" ]]; then
     [[ -f "$CLAUDE_ENV_FILE" ]] || {
-        echo "claude: CLAUDE_ENV_FILE='$CLAUDE_ENV_FILE' does not exist — refusing (fail closed)" >&2
+        echo "claude: CLAUDE_ENV_FILE='$CLAUDE_ENV_FILE' does not exist, refusing (fail closed)" >&2
         exit 1
     }
     set -a
@@ -40,9 +40,9 @@ fi
 CLAUDE_IMAGE="${CLAUDE_IMAGE:-claude-code-box:latest}"
 AUTH_VOLUME="${AUTH_VOLUME:-claude-auth}"
 SSHKEYS_VOLUME="${SSHKEYS_VOLUME:-claude-sshkeys}"
-# Shared tool cache (PKG-3): ONE volume shared across every managed container,
+# Shared tool cache: ONE volume shared across every managed container,
 # mounted at /cache, holding mise's install store + the language package-manager
-# caches. Empty string ("" / "off"/"none" from a launcher flag) disables it —
+# caches. Empty string ("" / "off"/"none" from a launcher flag) disables it:
 # the container then provisions per-container into its own layer (fail-safe).
 CACHE_VOLUME="${CLAUDE_CACHE_VOLUME:-claude-cache}"
 CACHE_MOUNT="/cache"
@@ -58,7 +58,7 @@ CLAUDE_STOP_TIMEOUT="${CLAUDE_STOP_TIMEOUT:-20}"
 # Escape hardening: drop ALL Linux capabilities and re-add only the minimal set
 # the container needs (sshd binding :22 + dropping privileges to the claude user,
 # plus the entrypoint's chown/setup). This removes the Docker defaults NET_RAW,
-# MKNOD, and SETFCAP — the ones a compromised/ injected agent would reach for.
+# MKNOD, and SETFCAP: the ones a compromised/ injected agent would reach for.
 # CLAUDE_HARDEN_CAPS=0 falls back to Docker's default cap set if a workload needs
 # more. no-new-privileges is applied regardless.
 CLAUDE_HARDEN_CAPS="${CLAUDE_HARDEN_CAPS:-1}"
@@ -86,19 +86,19 @@ need_docker() {
 # space-separated string the launcher reads into an array. Used by claude-launch;
 # claude-compose-gen emits the equivalent YAML.
 #
-# harden_run_args [docker_mode] — pass 1 for a --docker (Sysbox) container.
+# harden_run_args [docker_mode]: pass 1 for a --docker (Sysbox) container.
 #
 # In docker mode the cap-drop is SKIPPED, because an inner dockerd cannot run under
 # the minimal set (it needs NET_ADMIN for its bridge/iptables and SYS_ADMIN to mount
 # layers; neither is even in Docker's *default* set). This is not the loss it looks
-# like. Measured on this host — `docker run --runtime=sysbox-runc alpine cat
+# like. Measured on this host: `docker run --runtime=sysbox-runc alpine cat
 # /proc/self/status,/proc/self/uid_map`:
 #
 #   runc         CapEff 00000000a80425fb   uid_map 0 0 4294967295  → container-root IS host root
 #   sysbox-runc  CapEff 000001ffffffffff   uid_map 0 165536 65536  → container-root is host uid 165536
 #
 # Sysbox hands container-root the FULL capability set, but inside a user namespace whose
-# root maps to an unprivileged host uid — so those caps are powers over the container's
+# root maps to an unprivileged host uid, so those caps are powers over the container's
 # own namespace, not the host. Dropping them would break the daemon while buying nothing
 # the userns isn't already buying. no-new-privileges is kept either way (verified: nested
 # build+run works with it on); its one real cost is that setuid binaries inside an INNER
@@ -119,7 +119,7 @@ harden_run_args() {
 
 # Refuse --docker on a host with no Sysbox runtime. Without it the inner daemon has no
 # user namespace to live in and dies ~60s later inside the container, surfacing as an
-# opaque entrypoint timeout — so fail here instead, loudly, with the fix. The ONLY
+# opaque entrypoint timeout, so fail here instead, loudly, with the fix. The ONLY
 # alternatives to Sysbox are --privileged and a host-socket mount, and both hand a
 # prompt-injectable agent the host, so neither is offered as a fallback.
 preflight_sysbox() {
@@ -136,13 +136,13 @@ preflight_sysbox() {
 # Warn (don't block) if the host's runC is vulnerable to the Nov-2025 container-
 # escape CVEs (CVE-2025-31133 / 52565 / 52881), fixed in runC 1.2.8 / 1.3.3 /
 # 1.4.0-rc.3. A weaponized in-container agent could escape an unpatched runtime,
-# defeating every other control here — so this is the highest-leverage check.
+# defeating every other control here, so this is the highest-leverage check.
 preflight_runc() {
     local rv base M m p
     rv="$(runc --version 2>/dev/null | awk '/^runc version/{print $3; exit}')"
     [[ -z "$rv" ]] && rv="$(docker info 2>/dev/null | sed -n 's/.*[Rr]unc version[: ]*v\?\([0-9][^ ,]*\).*/\1/p' | head -1)"
     if [[ -z "$rv" ]]; then
-        warn "could not determine host runC version — ensure it is >= 1.2.8 / 1.3.3 (CVE-2025-31133/52565/52881 escapes)"
+        warn "could not determine host runC version: ensure it is >= 1.2.8 / 1.3.3 (CVE-2025-31133/52565/52881 escapes)"
         return 0
     fi
     base="${rv#v}"; base="${base%%-*}"
@@ -162,11 +162,11 @@ preflight_runc() {
     if (( safe == 0 )); then
         warn "host runC $rv is vulnerable to the Nov-2025 container-escape CVEs (CVE-2025-31133/52565/52881)."
         warn "  Patch runC to >= 1.2.8 (1.2.x) / >= 1.3.3 (1.3.x) / >= 1.4.0-rc.3, then restart Docker."
-        warn "  Until then, container isolation can be escaped by a weaponized agent — treat each container as fully trusted."
+        warn "  Until then, container isolation can be escaped by a weaponized agent: treat each container as fully trusted."
     fi
 }
 
-# version_ge A B — true iff dotted-numeric version A >= B (first three components).
+# version_ge A B: true iff dotted-numeric version A >= B (first three components).
 # Both must be numeric triples (missing parts default to 0); anything non-numeric is an
 # ERROR (return 2) so security-minded callers can fail CLOSED instead of comparing
 # garbage as 0. Base-10 forced (10#) so a leading zero can't trip octal arithmetic.
@@ -181,9 +181,9 @@ version_ge() {
 # Flat-session fork-bomb guard (claude-launch / compose services).
 CLAUDE_PIDS_LIMIT="${CLAUDE_PIDS_LIMIT:-2048}"
 
-# size_to_mib <docker-size> — print a docker size string (4g / 3072m / 512k /
+# size_to_mib <docker-size>: print a docker size string (4g / 3072m / 512k /
 # plain bytes) as integer MiB, rounded UP so a requirement is never
-# under-counted. Fails (return 2) on anything unparseable — sizing is a safety
+# under-counted. Fails (return 2) on anything unparseable: sizing is a safety
 # calculation, so garbage must refuse, never read as 0.
 size_to_mib() {
     local n u
@@ -197,7 +197,7 @@ size_to_mib() {
     esac
 }
 
-# mem_reservation_for <limit> — the derived soft floor for a hard memory limit:
+# mem_reservation_for <limit>: the derived soft floor for a hard memory limit:
 # 75% (4g → 3072m, the same ratio as the worker profile). Keeps a per-repo /
 # per-host limit override from ever inverting reservation > limit, which the
 # daemon rejects. Fails (return 2) on an unparseable limit.
@@ -210,27 +210,27 @@ mem_reservation_for() {
 # derive 75% of the (possibly .env-overridden) CLAUDE_MEM_LIMIT.
 if [[ -z "${CLAUDE_MEM_RESERVATION:-}" ]]; then
     CLAUDE_MEM_RESERVATION="$(mem_reservation_for "$CLAUDE_MEM_LIMIT")" \
-        || die "unparseable CLAUDE_MEM_LIMIT '$CLAUDE_MEM_LIMIT' — cannot derive a memory reservation (fail closed)"
+        || die "unparseable CLAUDE_MEM_LIMIT '$CLAUDE_MEM_LIMIT': cannot derive a memory reservation (fail closed)"
 fi
 
 # --- Disk-space safety --------------------------------------------------------
-# disk_free_mib <path> — print the free space, in integer MiB, on the
+# disk_free_mib <path>: print the free space, in integer MiB, on the
 # filesystem holding <path>. Backs bin/claude-disk-gc's before/after reporting.
 #
 # `df -P -B1M <path>` gives POSIX-format, 1-MiB-block output regardless of
 # locale/column-width quirks; the "Available" column is the 4th field of the
-# second (data) line. Parsed robustly — an unreadable/missing path, a `df`
+# second (data) line. Parsed robustly: an unreadable/missing path, a `df`
 # that errors, or non-numeric output all FAIL CLOSED (return 1, print
 # nothing): a blind disk check must never be misread as "plenty of free
 # space", which is the one failure mode that could wedge the host by letting
 # a launch through.
 #
-# Test seam — UNIT TESTS ONLY, loudly warned when active:
+# Test seam: UNIT TESTS ONLY, loudly warned when active:
 #   CLAUDE_DISK_FREE_MIB_OVERRIDE   forces the returned value (skips `df`)
 disk_free_mib() {
     local path="$1" line avail
     if [[ -n "${CLAUDE_DISK_FREE_MIB_OVERRIDE:-}" ]]; then
-        warn "TEST SEAM ACTIVE: CLAUDE_DISK_FREE_MIB_OVERRIDE='${CLAUDE_DISK_FREE_MIB_OVERRIDE}' — the real free disk space is NOT being checked"
+        warn "TEST SEAM ACTIVE: CLAUDE_DISK_FREE_MIB_OVERRIDE='${CLAUDE_DISK_FREE_MIB_OVERRIDE}', the real free disk space is NOT being checked"
         [[ "$CLAUDE_DISK_FREE_MIB_OVERRIDE" =~ ^[0-9]+$ ]] || return 1
         echo "$CLAUDE_DISK_FREE_MIB_OVERRIDE"
         return 0
@@ -269,14 +269,14 @@ cfg_volume() { echo "claude-config-$1"; }
 # (bin/claude-usage-watchdog) without a recreate.
 account_auth_volume() { echo "claude-auth-$1"; }
 # Per-container /var/lib/docker for --docker sessions. Sysbox gives each container its own
-# inner image store, but that store dies WITH the container — so without this volume every
+# inner image store, but that store dies WITH the container, so without this volume every
 # recreate re-pulls every base image and rebuilds every layer from cold. Per-container (not
 # shared): two daemons must never write one image store. claude-rm --purge deletes it; it is
 # the one volume here that can reach tens of GB, so it is called out in the purge prompt.
 docker_volume() { echo "claude-docker-$1"; }
 # Per-container disk-backed scratch, mounted at /scratch and used as TMPDIR.
 #
-# Why this exists: /tmp is a TMPFS — RAM, capped at CLAUDE_TMPFS_SIZE (1g), charged to the
+# Why this exists: /tmp is a TMPFS, RAM, capped at CLAUDE_TMPFS_SIZE (1g), charged to the
 # container's memory cgroup. With TMPDIR unset, everything defaults there: pip/uv building
 # wheels, `docker save|load` tarballs, and the inner containerd's mount dirs. A large package
 # install therefore dies at 1 GiB with a confusing ENOSPC while 1.5 TB sits free on disk.
@@ -288,8 +288,8 @@ docker_volume() { echo "claude-docker-$1"; }
 # keeps everything that grows in a volume for exactly that reason.
 scratch_volume() { echo "claude-scratch-$1"; }
 
-# --- Shared tool cache (PKG-3) -----------------------------------------------
-# cache_name — the shared cache volume name, or "" when disabled. A launcher may
+# --- Shared tool cache -----------------------------------------------
+# cache_name: the shared cache volume name, or "" when disabled. A launcher may
 # pass an override (its --cache value); "", "off", "none", "0", "false" all disable.
 cache_name() {
     local v="${1-$CACHE_VOLUME}"
@@ -297,22 +297,22 @@ cache_name() {
     echo "$v"
 }
 
-# cache_mount_args <volname-or-override> — echo the `-v <vol>:/cache` docker arg
+# cache_mount_args <volname-or-override>: echo the `-v <vol>:/cache` docker arg
 # for the shared cache, or nothing when disabled. Docker auto-creates the named
 # volume on first use (seeded from the image's /cache), so this NEVER errors a
-# launch — a missing cache degrades to per-container installs, it does not fail.
+# launch: a missing cache degrades to per-container installs, it does not fail.
 cache_mount_args() {
     local n; n="$(cache_name "${1-$CACHE_VOLUME}")"
     [[ -n "$n" ]] && printf -- '-v\n%s\n' "$n:$CACHE_MOUNT"
 }
 
-# dir_size_mib <path> — integer MiB used by a directory subtree, or "" if it
+# dir_size_mib <path>: integer MiB used by a directory subtree, or "" if it
 # cannot be determined (fail-soft: callers treat unknown as "do not trim").
 # `du -s -B1M` gives 1-MiB-block totals; the TEST SEAM forces the value.
 dir_size_mib() {
     local path="$1" line
     if [[ -n "${CLAUDE_CACHE_SIZE_MIB_OVERRIDE:-}" ]]; then
-        warn "TEST SEAM ACTIVE: CLAUDE_CACHE_SIZE_MIB_OVERRIDE='${CLAUDE_CACHE_SIZE_MIB_OVERRIDE}' — real cache size is NOT being measured"
+        warn "TEST SEAM ACTIVE: CLAUDE_CACHE_SIZE_MIB_OVERRIDE='${CLAUDE_CACHE_SIZE_MIB_OVERRIDE}', real cache size is NOT being measured"
         [[ "$CLAUDE_CACHE_SIZE_MIB_OVERRIDE" =~ ^[0-9]+$ ]] || return 1
         echo "$CLAUDE_CACHE_SIZE_MIB_OVERRIDE"; return 0
     fi
@@ -349,7 +349,7 @@ host_port_free() {  # 1 if free, 0 if taken
 }
 
 ports_used_by_claude() {
-    # Test seam — UNIT TESTS ONLY: CLAUDE_PORTS_USED_OVERRIDE forces the list
+    # Test seam: UNIT TESTS ONLY: CLAUDE_PORTS_USED_OVERRIDE forces the list
     # (space/newline-separated; may be empty = "none in use") so cross-stack
     # port reservation is testable without a live docker. Triggers when SET,
     # even to empty; inert (real docker) when unset.

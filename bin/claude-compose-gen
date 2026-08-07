@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claude-compose-gen — generate a multi-service docker-compose.yml that runs
+# claude-compose-gen: generate a multi-service docker-compose.yml that runs
 # one Claude Code session container per repo in a GitHub org.
 #
 #   claude-compose-gen --org <name> --out <file> [options]
@@ -7,7 +7,7 @@
 #     --org <name>      GitHub org/owner to enumerate (required unless repos
 #                       are passed as arguments)
 #     --out <file>      output compose path (required; must be OUTSIDE this
-#                       repo — e.g. a deploy dir like /srv/claude/compose.yml)
+#                       repo: e.g. a deploy dir like /srv/claude/compose.yml)
 #     --scenario <file> read generator flags from a scenario .conf: one
 #                       "--flag value" per line, # comments and blank lines
 #                       skipped; the value is the literal rest-of-line (no
@@ -19,7 +19,7 @@
 #     --env-file <file> source this env ON TOP of the repo .env at generation
 #                       time (SSH_PORT_RANGE, image, resources...). Point it at
 #                       the SAME .env that sits beside --out so docker compose
-#                       auto-loads it at `up` too — that is how each stack gets
+#                       auto-loads it at `up` too, that is how each stack gets
 #                       its own GH_TOKEN. A CLI --env-file beats a .conf's.
 #     --port-base <n>   first SSH host port (default: SSH_PORT_RANGE_START)
 #     --include <glob>  only repos whose name matches (repeatable)
@@ -37,11 +37,11 @@
 #     --network <name>  attach every service to a pre-existing EXTERNAL docker
 #                       network instead of this project's own "<project>_default".
 #                       Lets multiple stacks on one host share ONE network (so a
-#                       stack split costs zero extra networks — matters when the
+#                       stack split costs zero extra networks: matters when the
 #                       daemon address pool is nearly full). Create it first:
 #                       docker network create <name>.
 #     --cache <volume>  shared tool cache volume mounted at /cache on every service
-#                       (PKG-3; default: claude-cache). One volume shared stack-wide,
+#                       (default: claude-cache). One volume shared stack-wide,
 #                       so a mise/cargo/go/npm/uv install by one worker is a cache hit
 #                       for the rest and survives restarts.
 #     --no-cache        do not mount a shared cache (per-container installs).
@@ -72,7 +72,7 @@
 #                       runtime (runtime: sysbox-runc) so the inner daemon needs no
 #                       --privileged and no host socket, keeps its image store in a
 #                       claude-docker-<repo> volume, and uses CLAUDE_IMAGE_DOCKER
-#                       (default claude-code-box:docker; `make build-docker`) — or
+#                       (default claude-code-box:docker; `make build-docker`), or
 #                       CLAUDE_IMAGE_DOCKER_BROWSER when combined with --browser.
 #     --marketplace <map>  add a git plugin marketplace to a repo at runtime.
 #                       Format REPO=NAME=URL (repeatable). The repo's service
@@ -86,10 +86,10 @@
 #     --mount <map>     mount an EXISTING named volume into a repo's service at an
 #                       extra path. Format REPO=VOLUME:/PATH[:ro] (repeatable).
 #                       Use it to give one session read access to another's
-#                       checkout, e.g. --mount cosyte=claude-ws-super:/super:ro
+#                       checkout, e.g. --mount myrepo=claude-ws-shared:/shared:ro
 #                       The volume is declared `external: true` (it belongs to
 #                       another stack), so `up` fails fast if it doesn't exist and
-#                       a `down -v` here can never delete it. Prefer :ro — two live
+#                       a `down -v` here can never delete it. Prefer :ro, two live
 #                       Claude sessions writing one git tree race on the index.
 #     --accounts <map>  let a repo's session rotate between named OAuth accounts
 #                       when the active one hits its usage limit (auto-resumes the
@@ -98,12 +98,12 @@
 #                       Each name must already exist: `claude-account-login <name>`
 #                       (or `make accounts-login ARGS=<name>`) once. Works with any
 #                       count >= 1. The claude-auth-<name> volumes are external and
-#                       shared like claude-auth itself — several repos or stacks can
+#                       shared like claude-auth itself: several repos or stacks can
 #                       name the same account.
 #     --build-context <dir>  build.context for every service (default: the checkout
 #                       this script runs from). Pin it in the scenario when the
 #                       deployment builds from a DIFFERENT clone than the one you
-#                       regenerate from — otherwise every service's build.context
+#                       regenerate from: otherwise every service's build.context
 #                       silently follows whichever checkout ran the generator.
 #     --forks           include forks (default: source repos only)
 #     --archived        include archived repos (default: skip)
@@ -119,7 +119,7 @@ set -euo pipefail
 
 # --- Pre-scan for --scenario / --env-file (BEFORE sourcing _common.sh) --------
 # _common.sh sources the base .env and (if CLAUDE_ENV_FILE is set) layers a
-# scenario env on top — so we must resolve the scenario .conf and the effective
+# scenario env on top, so we must resolve the scenario .conf and the effective
 # env file HERE, before that source. die()/colours aren't defined yet, so any
 # error fails inline. The real "$@" is only READ (never shifted); the scenario
 # flags are prepended to it after _common.sh is loaded.
@@ -148,7 +148,7 @@ if [[ -n "$_scenario" ]]; then
     elif [[ -n "${CLAUDE_SCENARIOS_DIR:-}" ]]; then
         _conf="${CLAUDE_SCENARIOS_DIR%/}/${_scenario}.conf"
     else
-        _prescan_fail "--scenario '$_scenario' is a bare name but CLAUDE_SCENARIOS_DIR is unset — pass a path to the .conf, or export CLAUDE_SCENARIOS_DIR"
+        _prescan_fail "--scenario '$_scenario' is a bare name but CLAUDE_SCENARIOS_DIR is unset: pass a path to the .conf, or export CLAUDE_SCENARIOS_DIR"
     fi
     [[ -f "$_conf" ]] || _prescan_fail "scenario file not found: $_conf"
     # Expand the .conf into SCENARIO_ARGS: one "--flag [value]" per line. The
@@ -193,7 +193,7 @@ PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
 WANT_FORKS=0 WANT_ARCHIVED=0 ALL_DORMANT=0
 NETWORK=""
-# Shared tool cache (PKG-3): ONE volume shared by every service, mounted at /cache.
+# Shared tool cache: ONE volume shared by every service, mounted at /cache.
 # Default = the CACHE_VOLUME name (claude-cache); --no-cache / --cache off disables it.
 CACHE_VOL="$CACHE_VOLUME"
 BUILD_CONTEXT=""
@@ -220,7 +220,7 @@ while [[ $# -gt 0 ]]; do
         --browser)         BROWSER_RAW+=("$2"); shift 2 ;;
         --docker)          DOCKER_RAW+=("$2"); shift 2 ;;
         --broker|--worker-tarball)
-            die "claude-compose-gen: $1 was removed in SC-5 (legacy Sysbox/broker substrate retired; see docs/legacy-sysbox-broker.md)" ;;
+            die "claude-compose-gen: $1 was removed (the legacy Sysbox worker-broker substrate is retired; see docs/legacy-sysbox-broker.md)" ;;
         --marketplace)     MKTS_RAW+=("$2"); shift 2 ;;
         --plugin)          PLUGINS_RAW+=("$2"); shift 2 ;;
         --mount)           MOUNTS_RAW+=("$2"); shift 2 ;;
@@ -242,7 +242,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Shared tool cache (PKG-3): normalize the requested volume to its effective name
+# Shared tool cache: normalize the requested volume to its effective name
 # ("" / off / none disable it). One shared volume across all services = the
 # cross-worker cache hit; disabled = per-container installs.
 CACHE_NAME="$(cache_name "$CACHE_VOL")"
@@ -256,9 +256,9 @@ if [[ ${#REPO_ARGS[@]} -eq 0 && -z "$ORG" ]]; then
 fi
 
 # Active set: sanitized service names that start by default. Empty = all
-# active (no profiles emitted — backward compatible). --all-dormant forces
+# active (no profiles emitted, backward compatible). --all-dormant forces
 # the opposite pole: EVERY service behind the dormant profile (so a plain
-# `up -d` starts nothing and you bring services up on demand) — the faithful
+# `up -d` starts nothing and you bring services up on demand): the faithful
 # default for a stack whose services are all dormant today.
 declare -A ACTIVE=()
 HAVE_ACTIVE=0
@@ -341,7 +341,7 @@ done
 (( ${#DOCKER[@]} > 0 )) && preflight_sysbox
 
 # Runtime plugin marketplaces per service: svc -> comma-separated "name=url" list.
-# Each --marketplace value is REPO=NAME=URL — split on the FIRST = to peel off
+# Each --marketplace value is REPO=NAME=URL: split on the FIRST = to peel off
 # the repo, keep the rest verbatim (URLs commonly contain =, : and @).
 declare -A MKTS=()
 for tok in "${MKTS_RAW[@]:-}"; do
@@ -376,7 +376,7 @@ for tok in "${MOUNTS_RAW[@]:-}"; do
     us="$(sanitize "${tok%%=*}")"
     uv="${tok#*=}"
     IFS=: read -r mvol mpath mopt <<<"$uv"
-    # A named volume only — a host path here would punch a hole out of the
+    # A named volume only: a host path here would punch a hole out of the
     # container's filesystem, which is not what this flag is for.
     [[ "$mvol" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
         || die "--mount volume must be a named volume, not a path (got '$mvol' in '$tok')"
@@ -384,7 +384,7 @@ for tok in "${MOUNTS_RAW[@]:-}"; do
         || die "--mount path must be absolute (got '$mpath' in '$tok')"
     [[ -z "$mopt" || "$mopt" == "ro" || "$mopt" == "rw" ]] \
         || die "--mount option must be ro or rw (got '$mopt' in '$tok')"
-    # Refuse to shadow a mount the service already owns — silently masking the
+    # Refuse to shadow a mount the service already owns: silently masking the
     # workspace or config volume would be near-impossible to debug from inside.
     case "$mpath" in
         /workspace|/home/claude/.claude|/auth|/cache|/etc/ssh/host-keys|/etc/claude/*)
@@ -396,7 +396,7 @@ done
 
 # Named-account rotation per service: svc -> comma-separated account names.
 # Each name's physical claude-auth-<name> volume (account_auth_volume, _common.sh)
-# is SHARED/external like claude-auth itself, not owned by any one service — several
+# is SHARED/external like claude-auth itself, not owned by any one service: several
 # repos (or stacks) can reference the same account, so ACCOUNT_VOLS just collects
 # the distinct set for one external declaration each, not an ownership check like
 # MOUNT_VOLS above.
@@ -416,7 +416,7 @@ for tok in "${ACCOUNTS_RAW[@]:-}"; do
 done
 
 # The generated multi-repo compose is deployment config, not part of this
-# project — refuse to write it anywhere inside the repo so it can't be
+# project: refuse to write it anywhere inside the repo so it can't be
 # committed here by accident. Resolve paths without requiring them to exist.
 abspath() {
     if command -v realpath >/dev/null 2>&1; then realpath -m -- "$1"
@@ -428,20 +428,20 @@ REPO_ABS="$(abspath "$CLAUDE_DOCKER_ROOT")"
 case "$OUT_ABS/" in
     "$REPO_ABS"/*)
         die "refusing to write inside the repo ($REPO_ABS).
-       This is deployment config — point --out at a path outside the repo,
+       This is deployment config: point --out at a path outside the repo,
        e.g. --out /srv/claude/docker-compose.yml" ;;
 esac
 
 # Build context defaults to the checkout the generator runs from, but a stack is
 # often regenerated from a DIFFERENT clone of this repo than the one the deployment
-# builds from — which silently rewrites build.context on every service. Pin it in
+# builds from, which silently rewrites build.context on every service. Pin it in
 # the scenario (--build-context) so regen is reproducible from any checkout.
 ABS_CONTEXT="${BUILD_CONTEXT:-$CLAUDE_DOCKER_ROOT}"
 # Shared, host-wide, external volumes the operator must create once. claude-auth is
 # listed separately in the header (it's `make login`'s job, not a bare create).
 SHARED_VOL_LIST="${SSHKEYS_VOLUME}${CACHE_NAME:+ $CACHE_NAME}"
 [[ -d "$ABS_CONTEXT" ]] || die "--build-context '$ABS_CONTEXT' is not a directory"
-# Compose has no ~ expansion — resolve host SSH paths to absolute now.
+# Compose has no ~ expansion: resolve host SSH paths to absolute now.
 AK="${SSH_AUTHORIZED_KEYS/#\~/$HOME}"
 GK="${GIT_SSH_KEY/#\~/$HOME}"
 # Optional: bind every SSH port to one host interface (CLAUDE_SSH_BIND).
@@ -537,12 +537,12 @@ fi
 # (other stacks + standalone launches like `super`), so a new repo in THIS
 # stack never collides across stacks. Additive to the same-file readback above;
 # SVCPORT (stable per-repo ports) is untouched. Fails safe if docker is
-# unreachable — ports_used_by_claude ends in `|| true` and prints nothing.
+# unreachable: ports_used_by_claude ends in `|| true` and prints nothing.
 while IFS= read -r pport; do
     [[ "$pport" =~ ^[0-9]+$ ]] && USEDPORT[$pport]=1
 done < <(ports_used_by_claude)
 # next_port marks USEDPORT and reports the chosen port in the global NEXT_PORT.
-# It must NOT be called via $(...) — a command-substitution subshell would
+# It must NOT be called via $(...): a command-substitution subshell would
 # discard the USEDPORT updates, so every new repo would get the same port.
 NEXT_PORT=""
 next_port() {
@@ -565,7 +565,7 @@ mkdir -p "$(dirname "$OUT")"
 TMP="$(mktemp)"
 {
 cat <<EOF
-# GENERATED by bin/claude-compose-gen — do not hand-edit; regenerate instead.
+# GENERATED by bin/claude-compose-gen: do not hand-edit; regenerate instead.
 # One Claude Code session container per ${ORG}/* repo. Each is reachable by SSH
 # (its own host port) and in the Claude mobile app (Remote Control), and shows
 # up in \`claude-list\` (shares the claude.managed labels).
@@ -573,7 +573,7 @@ cat <<EOF
 # Prerequisites (once):
 #   1. Build the image:        make build           # in ${ABS_CONTEXT}
 #   2. One-time OAuth login:    make login           # writes the claude-auth volume
-#   3. Shared host-wide volumes — create once (empty is fine, they self-seed):
+#   3. Shared host-wide volumes: create once (empty is fine, they self-seed):
 #        for v in ${SHARED_VOL_LIST}; do docker volume create "\$v"; done
 #      These are declared external because EVERY stack and standalone container
 #      mounts the same ones: a 'down -v' on one stack would otherwise rotate the
@@ -605,7 +605,7 @@ for row in "${FINAL[@]}"; do
     svc_cpu="${CPU[$svc]:-$CLAUDE_CPU_LIMIT}"
     svc_mem="${MEM[$svc]:-$CLAUDE_MEM_LIMIT}"
     # Soft memory floor rides the effective limit: the global reservation for the
-    # global limit, a derived 75% for a per-repo --mem override — so an override
+    # global limit, a derived 75% for a per-repo --mem override, so an override
     # can never invert reservation > limit (the daemon rejects that).
     if [[ "$svc_mem" == "$CLAUDE_MEM_LIMIT" ]]; then svc_res="$CLAUDE_MEM_RESERVATION"
     else svc_res="$(mem_reservation_for "$svc_mem")" \
@@ -624,7 +624,7 @@ for row in "${FINAL[@]}"; do
         svc_scratch_vol=$'\n      - claude-scratch-'"${svc}"':/scratch'
     fi
     # Auth mount: either the single shared claude-auth volume (default), or one
-    # read-write mount per named account (--accounts) at /auth-accounts/<name> —
+    # read-write mount per named account (--accounts) at /auth-accounts/<name>:
     # mutually exclusive per service, mirroring claude-launch --accounts. Read-write:
     # the credential reconcile loop writes refreshed tokens back into whichever
     # account volume is active.
@@ -638,7 +638,7 @@ for row in "${FINAL[@]}"; do
     fi
     # Per-repo --model override emits a literal; otherwise emit a compose
     # interpolation so a fleet-wide CLAUDE_MODEL (env/.env) wins, defaulting to
-    # opus — the best available model — when nothing is set.
+    # opus, the best available model, when nothing is set.
     if [[ -n "${MODEL[$svc]:-}" ]]; then svc_model="${MODEL[$svc]}"
     else svc_model='${CLAUDE_MODEL:-opus}'; fi
     # Image selection. --browser and --docker are orthogonal capabilities but they are
@@ -664,7 +664,7 @@ for row in "${FINAL[@]}"; do
         # The variant build args MUST ride along, because \`image:\` and \`build:\` are both
         # set: compose builds from this context whenever the tagged image is MISSING (and on
         # \`build\` / \`up --build\`), then tags the result with that name. Omitting these
-        # silently produced a LEAN image wearing the :browser/:docker tag — a --browser
+        # silently produced a LEAN image wearing the :browser/:docker tag, a --browser
         # service would come up with no chrome-devtools MCP, and a --docker service would
         # fail to boot outright ("dockerd is not in this image"), with the tag insisting
         # otherwise. Emit them per service so the built image matches the tag it is given.
@@ -690,7 +690,7 @@ for row in "${FINAL[@]}"; do
     ports:
       - "${BIND_PREFIX}${port}:22"
 EOF
-    # Extra published ports (dev servers) belong to the ports: list — emit them
+    # Extra published ports (dev servers) belong to the ports: list, emit them
     # HERE, right after the SSH port. Emitting them after cap_add (as an earlier
     # version did) made YAML attach them to the cap_add list, so the mapping was
     # silently parsed as a bogus capability instead of a published port.
@@ -711,7 +711,7 @@ EOF
     # A --docker service SKIPS the cap-drop: an inner daemon cannot run under the minimal
     # set (it needs NET_ADMIN for its bridge/iptables and SYS_ADMIN to mount layers, and
     # neither is even in Docker's default set). Sysbox grants container-root the full set
-    # anyway — measured CapEff 000001ffffffffff with uid_map 0→165536 — but those caps are
+    # anyway: measured CapEff 000001ffffffffff with uid_map 0→165536, but those caps are
     # powers over the container's own userns, not the host. Same trade as claude-launch's
     # harden_run_args, kept per-service so a lean sibling in the same stack stays hardened.
     echo "    security_opt:"
@@ -742,7 +742,7 @@ EOF
       OTEL_EXPORTER_OTLP_PROTOCOL: "\${OTEL_EXPORTER_OTLP_PROTOCOL:-}"
       OTEL_EXPORTER_OTLP_HEADERS: "\${OTEL_EXPORTER_OTLP_HEADERS:-}"
       OTEL_RESOURCE_ATTRIBUTES: "\${OTEL_RESOURCE_ATTRIBUTES:-}"
-      # Native Claude Code CLI tuning (real upstream env vars, not a wrapper —
+      # Native Claude Code CLI tuning (real upstream env vars, not a wrapper,
       # see .env.example). Unset by default = upstream's own defaults.
       CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION: "\${CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION:-}"
       BASH_DEFAULT_TIMEOUT_MS: "\${BASH_DEFAULT_TIMEOUT_MS:-}"
@@ -759,11 +759,11 @@ EOF
     [[ -n "${BROWSER[$svc]:-}" ]] && echo '      CLAUDE_BROWSER: "1"'
     [[ -n "${DOCKER[$svc]:-}" ]]  && echo '      CLAUDE_DOCKER: "1"'
     # Account names come only from sanitize() (charset [a-z0-9._-]), so no
-    # quoting hazard — unlike CLAUDE_DEV_CMD/MKTS/PLUGINS, no escaping needed.
+    # quoting hazard, unlike CLAUDE_DEV_CMD/MKTS/PLUGINS: no escaping needed.
     [[ -n "${ACCOUNTS[$svc]:-}" ]] && echo "      CLAUDE_ACCOUNTS: \"${ACCOUNTS[$svc]}\""
     # Disk-backed TMPDIR. Without it everything temp (pip/uv wheel builds, docker
-    # save|load tarballs, the inner containerd's mount dirs) defaults to /tmp — a 1g
-    # tmpfs in RAM — and a big install dies with ENOSPC while the pool sits mostly empty.
+    # save|load tarballs, the inner containerd's mount dirs) defaults to /tmp: a 1g
+    # tmpfs in RAM, and a big install dies with ENOSPC while the pool sits mostly empty.
     echo '      TMPDIR: "/scratch"'
     # Marketplace/plugin lists: quote and escape \, ", and $ the same way as
     # CLAUDE_DEV_CMD so compose doesn't interpolate URL fragments like $foo.
@@ -789,7 +789,7 @@ EOF
       - claude-ws-${svc}:/workspace${svc_scratch_vol}${CACHE_NAME:+
       - claude-cache:/cache}
 EOF
-    # Extra foreign volumes (--mount) — another stack's workspace, usually :ro.
+    # Extra foreign volumes (--mount): another stack's workspace, usually :ro.
     # Emitted INSIDE the volumes list, before the key binds.
     if [[ -n "${MOUNTS[$svc]:-}" ]]; then
         while IFS= read -r m; do
@@ -802,7 +802,7 @@ EOF
       - ${GK}:/etc/claude/git-key:ro
 EOF
     # Inner Docker image store. Sysbox gives the container its own /var/lib/docker, but it
-    # dies WITH the container — so without this volume every recreate re-pulls every base
+    # dies WITH the container, so without this volume every recreate re-pulls every base
     # image and rebuilds every layer cold. Per-service, never shared: two daemons must not
     # write one image store.
     [[ -n "${DOCKER[$svc]:-}" ]] && echo "      - claude-docker-${svc}:/var/lib/docker"
@@ -821,7 +821,7 @@ EOF
 done
 
 # top-level volumes.
-# claude-auth and claude-sshkeys are SHARED HOST-WIDE — every stack and every
+# claude-auth and claude-sshkeys are SHARED HOST-WIDE: every stack and every
 # standalone container mounts the same two. They are external so a `docker compose
 # down -v` on ONE stack cannot delete them out from under the others: losing
 # claude-auth means re-running `make login`, and losing claude-sshkeys rotates the
@@ -841,14 +841,14 @@ EOF
 # Named accounts (--accounts / multi-account OAuth rotation): each
 # claude-auth-<name> volume is created once via `claude-account-login <name>`,
 # outside this generator, then can be referenced by any number of repos or
-# stacks — external for the same reason claude-auth is: a `down -v` on one
+# stacks, external for the same reason claude-auth is: a `down -v` on one
 # stack must never delete a credential another stack rotates through.
 for avol in "${!ACCOUNT_VOLS[@]}"; do
     printf '  %s:\n    name: %s\n    external: true\n' "$avol" "$avol"
 done
-# Shared tool cache (PKG-3): every service mounts it at /cache, so a mise/cargo/go/
+# Shared tool cache: every service mounts it at /cache, so a mise/cargo/go/
 # npm/uv install by one is a hit for the rest. It defaults to ONE name (claude-cache)
-# per host, so stacks share it — that's deliberate (a wider cache = more hits), and it
+# per host, so stacks share it: that's deliberate (a wider cache = more hits), and it
 # is why it must be external: otherwise a `down -v` on one stack wipes the cache out
 # from under every other stack. Docker still seeds an empty external volume from the
 # image's /cache on first mount, so `docker volume create` + `up` behaves as before.
@@ -871,7 +871,7 @@ for row in "${FINAL[@]}"; do
     fi
     # Only --docker services get an image store; declaring it for every service would
     # create empty volumes for sessions that will never run a daemon. It is OWNED by this
-    # stack like the config/ws volumes, so register it too — otherwise a --mount naming it
+    # stack like the config/ws volumes, so register it too: otherwise a --mount naming it
     # would slip past the guard below and get declared a SECOND time as external (a
     # duplicate YAML key), and a `down -v` here would delete an image store another stack
     # believed it had mounted read-only.
@@ -885,14 +885,14 @@ done
 # fast when one is missing and `down -v` here can never delete them.
 for mvol in "${!MOUNT_VOLS[@]}"; do
     [[ -z "${OWNED_VOLS[$mvol]:-}" ]] \
-        || die "--mount volume '$mvol' is already managed by this stack — mount a volume from a DIFFERENT stack"
+        || die "--mount volume '$mvol' is already managed by this stack: mount a volume from a DIFFERENT stack"
     printf '  %s:\n    name: %s\n    external: true\n' "$mvol" "$mvol"
 done
 
 # Shared external network: point this stack's default network at a pre-existing
 # external network instead of a per-project "<project>_default". Lets several
 # stacks on one host share ONE Docker network, so splitting a stack in two costs
-# ZERO extra networks — critical where the daemon's address pool is nearly full.
+# ZERO extra networks: critical where the daemon's address pool is nearly full.
 # Create it once (docker network create ${NETWORK}) before `up`.
 if [[ -n "$NETWORK" ]]; then
     cat <<EOF
@@ -943,13 +943,13 @@ for r in "${FINAL[@]}"; do
 done
 
 echo
-[[ -f "$AK" ]] || warn "authorized_keys not found at $AK — create it (your SSH pubkey) before 'up'"
-[[ -f "$GK" ]] || warn "git deploy key not found at $GK — create it and add the .pub to ${ORG} before 'up'"
-docker image inspect "$CLAUDE_IMAGE" >/dev/null 2>&1 || warn "image $CLAUDE_IMAGE not built yet — run 'make build'"
+[[ -f "$AK" ]] || warn "authorized_keys not found at $AK: create it (your SSH pubkey) before 'up'"
+[[ -f "$GK" ]] || warn "git deploy key not found at $GK: create it and add the .pub to ${ORG} before 'up'"
+docker image inspect "$CLAUDE_IMAGE" >/dev/null 2>&1 || warn "image $CLAUDE_IMAGE not built yet: run 'make build'"
 # Warn if --browser was used but the browser image isn't built/labeled.
 if (( ${#BROWSER[@]} > 0 )); then
     img_browser="$(docker image inspect -f '{{ index .Config.Labels "claude.browser" }}' "$BROWSER_IMAGE" 2>/dev/null || true)"
-    [[ "$img_browser" == "1" ]] || warn "image $BROWSER_IMAGE was not built with WITH_BROWSER=1 — run 'make build-browser' before 'up' (--browser services won't get the chrome-devtools MCP otherwise)"
+    [[ "$img_browser" == "1" ]] || warn "image $BROWSER_IMAGE was not built with WITH_BROWSER=1: run 'make build-browser' before 'up' (--browser services won't get the chrome-devtools MCP otherwise)"
 fi
 # Same for --docker. Check the image each docker service will actually use: a service that
 # is both --docker and --browser gets the combined image, and a missing engine there is a
@@ -961,23 +961,23 @@ if (( ${#DOCKER[@]} > 0 )); then
         img_docker="$(docker image inspect -f '{{ index .Config.Labels "claude.docker" }}' "$img" 2>/dev/null || true)"
         [[ "$img_docker" == "1" ]] && continue
         if [[ "$img" == "$DOCKER_BROWSER_IMAGE" ]]; then
-            warn "image $img was not built with WITH_DOCKER=1 — run 'make build-docker-browser' before 'up' (a service that is both --docker and --browser needs the combined image)"
+            warn "image $img was not built with WITH_DOCKER=1: run 'make build-docker-browser' before 'up' (a service that is both --docker and --browser needs the combined image)"
         else
-            warn "image $img was not built with WITH_DOCKER=1 — run 'make build-docker' before 'up' (--docker services will fail to boot otherwise)"
+            warn "image $img was not built with WITH_DOCKER=1: run 'make build-docker' before 'up' (--docker services will fail to boot otherwise)"
         fi
     done
     warn "--docker services can reach root INSIDE their own container (Sysbox keeps that off the host)."
-    warn "  CLAUDE_BROKER_GIT_KEY and CLAUDE_EGRESS_LOCKDOWN do not bind on them — see docs/architecture.md."
+    warn "  CLAUDE_BROKER_GIT_KEY and CLAUDE_EGRESS_LOCKDOWN do not bind on them: see docs/architecture.md."
 fi
 
-docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing — run 'make login'"
+docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing: run 'make login'"
 for avol in "${!ACCOUNT_VOLS[@]}"; do
     docker volume inspect "$avol" >/dev/null 2>&1 \
-        || warn "account volume '$avol' missing — run 'claude-account-login ${avol#claude-auth-}' before 'up'"
+        || warn "account volume '$avol' missing: run 'claude-account-login ${avol#claude-auth-}' before 'up'"
 done
 # The shared volumes are external now, so a missing one is a hard 'up' failure.
 for v in $SHARED_VOL_LIST; do
     docker volume inspect "$v" >/dev/null 2>&1 \
-        || warn "shared volume '$v' missing — run 'docker volume create $v' before 'up' (it's external; empty is fine, it self-seeds)"
+        || warn "shared volume '$v' missing: run 'docker volume create $v' before 'up' (it's external; empty is fine, it self-seeds)"
 done
 info "Validate:  docker compose -f $OUT config >/dev/null && echo OK"

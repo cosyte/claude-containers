@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# claude-deps-check — advisory linter for reproducible dependency manifests (PKG-5).
+# claude-deps-check: advisory linter for reproducible dependency manifests.
 #
 # Flags UNPINNED / `latest` specs in a repo's `mise.toml` (the [tools] table) and
 # `package.json` (dependencies / devDependencies / optionalDependencies /
-# peerDependencies), so an agent-committed manifest stays reproducibly pinned — the
-# reproducibility half of the PKG-5 supply-chain hardening (the other half is the
+# peerDependencies), so an agent-committed manifest stays reproducibly pinned: the
+# reproducibility half of the supply-chain hardening (the other half is the
 # baked `ignore-scripts=true` + mise `lockfile=true`). It reads manifests only; it
 # never installs, never touches the network, never mutates a file.
 #
 # By default it is ADVISORY: it prints findings and exits 0 (never blocks a session).
 # Under --strict it also treats npm caret/tilde ranges (^/~) as unpinned AND exits 1
-# when anything is unpinned — the form a pre-commit / CI gate would call.
+# when anything is unpinned: the form a pre-commit / CI gate would call.
 #
 # SCOPE: it classifies SEMVER specs (exact pins, prerelease pins, ranges, `latest`/tags).
 # It does NOT resolve git dependencies (`github:org/repo`, `git+https://…`) or raw tarball
-# URLs — those can still float on a branch / mutable URL; prefer a pinned `#<sha>` or a
+# URLs: those can still float on a branch / mutable URL; prefer a pinned `#<sha>` or a
 # registry dep with an integrity hash (see docs/package-provisioning-security.md §3.2).
 #
 # FAIL-SAFE: a missing manifest, an empty file, or an unparseable one is a no-op
-# (reported, exit 0) — a linter must never be the thing that breaks a container.
+# (reported, exit 0): a linter must never be the thing that breaks a container.
 #
 # Usage:
 #   claude-deps-check [--strict] [path]     path = a repo dir (default .) or a manifest file
@@ -31,7 +31,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 STRICT=0
 
-# is_unpinned <spec> — 0 (true) iff the version spec is NOT a reproducible pin.
+# is_unpinned <spec>: 0 (true) iff the version spec is NOT a reproducible pin.
 # Clearly-unpinned tokens and range operators are always flagged; caret/tilde npm
 # ranges are flagged only under --strict (they pin reproducibly *with* a lockfile).
 #
@@ -51,7 +51,7 @@ is_unpinned() {
     case "$s" in
         *@latest|*@next|*@x|*@X|*@\*) return 0 ;;
     esac
-    # a semver hyphen RANGE — spaces around the hyphen are required, so check the raw spec
+    # a semver hyphen RANGE: spaces around the hyphen are required, so check the raw spec
     case "$raw" in
         *" - "*) return 0 ;;
     esac
@@ -59,7 +59,7 @@ is_unpinned() {
     case "$s" in
         *"||"*|*">"*|*"<"*) return 0 ;;
     esac
-    # trailing wildcard component — `1.x` / `1.2.X` / `1.2.*`. Guard against a PINNED
+    # trailing wildcard component: `1.x` / `1.2.X` / `1.2.*`. Guard against a PINNED
     # prerelease/build whose final identifier merely ends in x/X (`1.2.3-alpha.x`,
     # `1.2.3+build.x`): a real wildcard range carries no prerelease/build metadata, so a
     # spec containing `-` or `+` is an exact pin, not a wildcard.
@@ -75,14 +75,14 @@ is_unpinned() {
     return 1
 }
 
-# emit_finding <manifest> <name> <spec> — record + print one unpinned finding.
+# emit_finding <manifest> <name> <spec>: record + print one unpinned finding.
 FOUND=0
 emit_finding() {
     FOUND=$((FOUND + 1))
     warn "unpinned: $1 → $2 = \"$3\""
 }
 
-# check_mise_toml <file> — scan the [tools] table for unpinned version specs. Extracts
+# check_mise_toml <file>: scan the [tools] table for unpinned version specs. Extracts
 # the quoted RHS token(s) of each `key = …` line inside [tools] (handles "v", ["v1","v2"],
 # and {version="v"}). Fail-soft: an unreadable/format-surprising file yields no findings.
 check_mise_toml() {
@@ -114,7 +114,7 @@ check_mise_toml() {
     done < "$file"
 }
 
-# check_package_json <file> — scan the dependency maps for unpinned specs. Uses node
+# check_package_json <file>: scan the dependency maps for unpinned specs. Uses node
 # (always present in this image) to emit `name<TAB>spec` for every dependency map; a
 # parse error is swallowed (fail-soft, no findings) rather than crashing.
 check_package_json() {
@@ -166,7 +166,7 @@ deps_check_main() {
     fi
 
     if [[ -z "${mise_file:-}" && -z "${pkg_file:-}" ]]; then
-        ok "no mise.toml / package.json under '$target' — nothing to check"
+        ok "no mise.toml / package.json under '$target': nothing to check"
         return 0
     fi
 
@@ -178,9 +178,9 @@ deps_check_main() {
         return 0
     fi
 
-    warn "claude-deps-check: $FOUND unpinned spec(s)$( ((STRICT)) && echo ' [strict]' ) — pin to exact versions + commit a lockfile for reproducibility"
+    warn "claude-deps-check: $FOUND unpinned spec(s)$( ((STRICT)) && echo ' [strict]' ), pin to exact versions + commit a lockfile for reproducibility"
     if (( STRICT )); then
-        err "claude-deps-check: --strict — refusing (unpinned dependencies are not reproducible)"
+        err "claude-deps-check: --strict, refusing (unpinned dependencies are not reproducible)"
         return 1
     fi
     return 0

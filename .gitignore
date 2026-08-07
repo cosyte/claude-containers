@@ -1,4 +1,4 @@
-# Local config / secrets — never commit
+# Local config / secrets, never commit
 .env
 # Real scenario files live with the deployed compose (outside this repo); if one
 # is dropped here, keep it out of git. The tracked template is *.conf.example.
@@ -8,5 +8,5 @@ scenarios/*.conf
 *.log
 workspace/
 
-# npm task-runner shim (zero deps) — npm ci leaves only a marker here
+# npm task-runner shim (zero deps): npm ci leaves only a marker here
 node_modules/

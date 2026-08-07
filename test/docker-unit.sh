@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Unit tests for the --docker (inner Docker engine) surface — NO docker, NO sysbox, NO root.
+# Unit tests for the --docker (inner Docker engine) surface: NO docker, NO sysbox, NO root.
 #
 # The feature: a session with its own Docker engine, so the agent can build images and run
 # containers/compose stacks. The container runs under Sysbox, whose user namespace maps
-# container-root to an unprivileged host uid — which is what makes an inner daemon safe with
+# container-root to an unprivileged host uid, which is what makes an inner daemon safe with
 # no --privileged and no host-socket mount (both remain forbidden: either would hand a
 # prompt-injectable agent the host).
 #
@@ -33,7 +33,7 @@ bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 
 # --- harden_run_args ------------------------------------------------------------------
 # The crux of the whole design. An inner dockerd cannot run under the minimal cap set (it
-# needs NET_ADMIN for its bridge/iptables and SYS_ADMIN to mount layers — neither is even
+# needs NET_ADMIN for its bridge/iptables and SYS_ADMIN to mount layers: neither is even
 # in Docker's DEFAULT set), so docker mode must not cap-drop. That is safe only because
 # Sysbox userns-scopes the caps; if someone ever drops the sysbox runtime while keeping
 # this branch, they hand the agent real host caps. These tests pin both halves.
@@ -56,7 +56,7 @@ dock="$(harden_run_args 1)"
     && ok "no-new-privileges is applied in BOTH modes (verified: nested build+run works with it)" \
     || bad "no-new-privileges must be applied in both modes"
 
-# Explicit falsy values must behave like ordinary mode — a stray "0"/"" must never be read
+# Explicit falsy values must behave like ordinary mode: a stray "0"/"" must never be read
 # as "docker mode" and silently disarm the cap-drop.
 for falsy in "" 0 no off false; do
     got="$(harden_run_args "$falsy")"
@@ -118,7 +118,7 @@ grep -qE -- '--docker\)' "$LAUNCH" \
 grep -qE -- '--no-docker\)' "$LAUNCH" \
     && ok "--no-docker opts out of an ambient CLAUDE_DOCKER=1" || bad "--no-docker is not parsed"
 
-# --sysbox was the BROKER's flag and stays dead — but its error must point at the live
+# --sysbox was the BROKER's flag and stays dead, but its error must point at the live
 # feature rather than dead-ending, since the runtime it named is exactly what --docker uses.
 out="$("$LAUNCH" --sysbox x 2>&1)"; rc=$?
 (( rc != 0 )) && [[ "$out" == *"--docker"* ]] \
@@ -173,9 +173,9 @@ PATH="$PATH_STUB:$PATH" "$REPO_ROOT/bin/claude-compose-gen" \
     acme/api acme/web acme/plain >/dev/null 2>&1
 
 if [[ ! -s "$OUT" ]]; then
-    bad "compose-gen produced no file — the rest of this section is void"
+    bad "compose-gen produced no file: the rest of this section is void"
 else
-    svc_block() {  # svc_block <service> — that service's YAML only
+    svc_block() {  # svc_block <service>, that service's YAML only
         awk -v s="  $1:" 'index($0,s)==1{f=1;next} f && /^  [a-z0-9-]+:$/{exit} f{print}' "$OUT"
     }
     api="$(svc_block api)"; web="$(svc_block web)"; plain="$(svc_block plain)"
@@ -225,7 +225,7 @@ else
 fi
 
     # `image:` and `build:` are BOTH set, so compose builds from the context whenever the
-    # tagged image is missing — and then tags the result with that name. If the variant build
+    # tagged image is missing, and then tags the result with that name. If the variant build
     # args don't ride along, that produces a LEAN image wearing the :docker/:docker-browser
     # tag: the --docker service then fails to boot ("dockerd is not in this image") while the
     # tag claims otherwise. Pin the args to the image each service is actually given.
@@ -250,8 +250,8 @@ fi
 
 
 # --- Disk-backed scratch (TMPDIR) ------------------------------------------------------
-# /tmp is a tmpfs: RAM, 1g, charged to the memory cgroup. Anything honoring TMPDIR — pip/uv
-# wheel builds, `docker save|load`, the inner containerd's mount dirs — hits that wall and
+# /tmp is a tmpfs: RAM, 1g, charged to the memory cgroup. Anything honoring TMPDIR: pip/uv
+# wheel builds, `docker save|load`, the inner containerd's mount dirs: hits that wall and
 # dies with ENOSPC while the pool has terabytes free. These pin the fix: temp goes to disk.
 echo "== scratch volume: TMPDIR is disk-backed, not the RAM tmpfs =="
 
@@ -279,9 +279,9 @@ if [[ -s "$OUT" ]]; then
         && ok "the scratch volume is declared top-level" \
         || bad "claude-scratch-api must be declared under volumes:"
     # Stack-owned, so a --mount naming it must be refused (else it is declared twice: once by
-    # us, once as external — a duplicate YAML key — and `down -v` could delete another
+    # us, once as external: a duplicate YAML key, and `down -v` could delete another
     # stack's scratch).
-    # Capture, don't pipe: the generator DIES here (exit 1) — that is the pass condition — and
+    # Capture, don't pipe: the generator DIES here (exit 1), that is the pass condition, and
     # under `pipefail` a `cmd | grep -q` pipeline would report that exit as failure even though
     # grep matched. Same trap that made test/unit.sh flaky.
     dup_out="$("$REPO_ROOT/bin/claude-compose-gen" --out "$TMPD/dup.yml" \

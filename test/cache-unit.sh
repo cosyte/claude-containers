@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# cache-unit.sh — pure-static + function-level tests for the PKG-3 shared tool cache.
-# NO docker, NO network, NO image build — safe for CI / scripts/verify.sh.
+# cache-unit.sh: pure-static + function-level tests for the shared tool cache.
+# NO docker, NO network, NO image build: safe for CI / scripts/verify.sh.
 #
-# PKG-3 points mise's install store + the cargo/go/npm/uv/pip caches at ONE shared /cache
+# The shared cache points mise's install store + the cargo/go/npm/uv/pip caches at ONE shared /cache
 # volume, so a toolchain/CLI provisioned by one container is a cache hit for the next and
 # for parallel workers, bounded by a fail-safe trim. The LIVE proof (two sessions reuse a
 # cached install, real trim reclaim, no cross-worker corruption, a missing cache degrades
@@ -19,7 +19,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCKERFILE="$REPO_ROOT/Dockerfile"
 
-# Source claude-disk-gc ONCE — it pulls in bin/_common.sh transitively, so the cache_*
+# Source claude-disk-gc ONCE: it pulls in bin/_common.sh transitively, so the cache_*
 # helpers AND the disk-gc cache trim are all defined in this one process. Sourcing
 # _common.sh a SECOND time in the same process is fatal (a repeated `readonly` under
 # set -e), so everything that needs those functions rides this single source; anything
@@ -32,20 +32,20 @@ PASS=0 FAIL=0
 ok()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 
-echo "PKG-3 shared tool cache"
+echo "shared tool cache"
 
 # ============================================================================
 echo "== Dockerfile: caches relocated to the shared /cache tree, fail-safe =="
 # ============================================================================
 # The /cache tree is baked + chowned to the claude uid so it works as a mounted shared
 # volume (docker seeds a fresh named volume from it) AND as a plain image-layer dir when
-# no volume is mounted (per-container installs — the fail-safe).
+# no volume is mounted (per-container installs, the fail-safe).
 grep -Eq 'mkdir -p /cache/mise' "$DOCKERFILE" \
   && ok "the /cache tree (mise/cargo/go/npm/uv) is created in the image" \
-  || bad "no 'mkdir -p /cache/mise …' — /cache would not exist for the unmounted (fail-safe) case"
+  || bad "no 'mkdir -p /cache/mise …': /cache would not exist for the unmounted (fail-safe) case"
 grep -Eq 'chown -R \$\{CLAUDE_UID\}:\$\{CLAUDE_GID\} /cache' "$DOCKERFILE" \
   && ok "/cache is chowned to the claude uid (writable rootless; volume seed keeps ownership)" \
-  || bad "/cache is not chowned to the claude uid — a mounted volume/per-container dir would be root-owned"
+  || bad "/cache is not chowned to the claude uid: a mounted volume/per-container dir would be root-owned"
 
 # The install store + language caches must point INTO /cache (the shared surface).
 for kv in \
@@ -56,19 +56,19 @@ for kv in \
   'npm_config_cache=/cache/npm' \
   'UV_CACHE_DIR=/cache/uv' \
   'PIP_CACHE_DIR=/cache/pip'; do
-  if grep -Fq "$kv" "$DOCKERFILE"; then ok "ENV $kv → shared cache"; else bad "ENV $kv missing — that cache would not be shared"; fi
+  if grep -Fq "$kv" "$DOCKERFILE"; then ok "ENV $kv → shared cache"; else bad "ENV $kv missing, that cache would not be shared"; fi
 done
 
 # shims (now under /cache) prepended to PATH for the non-interactive agent; PATH preserved.
 grep -Fq 'PATH=/cache/mise/shims:' "$DOCKERFILE" && grep -Fq ':${PATH}' "$DOCKERFILE" \
   && ok "the /cache/mise/shims dir is prepended to PATH (agent resolves cached tools), PATH preserved" \
-  || bad "/cache/mise/shims is not prepended to PATH — the agent would not find cached tools"
+  || bad "/cache/mise/shims is not prepended to PATH: the agent would not find cached tools"
 
 # interactive consistency: a fresh SSH shell that did NOT inherit the Dockerfile ENV must
 # still activate mise against the SHARED store (bashrc re-exports before `mise activate`).
 grep -Eq 'export MISE_DATA_DIR="\$\{MISE_DATA_DIR:-/cache/mise\}"' "$DOCKERFILE" \
   && ok "~/.bashrc re-exports MISE_DATA_DIR=/cache/mise (interactive shells share the store too)" \
-  || bad "~/.bashrc does not re-export MISE_DATA_DIR — a non-tmux interactive shell would diverge from the cache"
+  || bad "~/.bashrc does not re-export MISE_DATA_DIR: a non-tmux interactive shell would diverge from the cache"
 
 # ============================================================================
 echo "== _common.sh: cache name / mount-arg / size helpers =="
@@ -94,7 +94,7 @@ got="$(CLAUDE_CACHE_SIZE_MIB_OVERRIDE=4096 dir_size_mib /nonexistent 2>/dev/null
 [[ "$got" == "4096" ]] \
   && ok "dir_size_mib honors the CLAUDE_CACHE_SIZE_MIB_OVERRIDE test seam" \
   || bad "dir_size_mib override seam broken (got '$got')"
-if dir_size_mib "/no/such/cache/path/PKG-3" >/dev/null 2>&1; then
+if dir_size_mib "/no/such/cache/path/nope" >/dev/null 2>&1; then
   bad "dir_size_mib must fail on a missing path (fail-soft: unknown size ⇒ do not trim)"
 else
   ok "dir_size_mib fails on a missing path (unknown size ⇒ trim is skipped)"
@@ -103,7 +103,7 @@ fi
 # ============================================================================
 echo "== claude-disk-gc: the cache trim is fixed, re-fetchable-only, idle-only, fail-safe =="
 # ============================================================================
-# GOLDEN: the trim plan must stay exactly the re-fetchable download/registry caches —
+# GOLDEN: the trim plan must stay exactly the re-fetchable download/registry caches,
 # never an installs/ dir, never /cache itself, never a shims dir (those would un-provision
 # a tool or wipe the whole shared store).
 mapfile -t PLAN < <(cache_gc_plan)
@@ -124,12 +124,12 @@ else
 fi
 # safety: the plan must NEVER contain an installs dir, a bare /cache, or a shims dir
 if printf '%s\n' "${PLAN[@]}" | grep -Eq '(^/cache$|/installs(/|$)|/shims(/|$)|/cargo/bin|/go/bin)'; then
-  bad "cache_gc_plan includes an installed-toolchain / shims / bare-/cache path — a trim would un-provision tools"
+  bad "cache_gc_plan includes an installed-toolchain / shims / bare-/cache path: a trim would un-provision tools"
 else
   ok "cache_gc_plan never touches installs/, shims/, cargo|go/bin, or bare /cache (installed tools survive a trim)"
 fi
 
-# cache_gc_once branches — stub gc_docker so nothing real runs. cache_gc_once calls
+# cache_gc_once branches: stub gc_docker so nothing real runs. cache_gc_once calls
 # gc_docker for `ps`/`volume inspect` INSIDE $(...) command substitutions, so a shell-var
 # recorder would be lost in the subshell; record to a FILE (survives subshells) instead.
 RANFILE="$(mktemp)"; trap 'rm -f "$RANFILE"' EXIT
@@ -164,7 +164,7 @@ out="$(CLAUDE_CACHE_SIZE_MIB_OVERRIDE=30000 CLAUDE_CACHE_MAX_MIB=20480 cache_gc_
 if grep -Eq 'ps -q --filter volume=claude-cache' "$RANFILE"; then
   ok "the idle guard filters on the CACHE VOLUME (covers workers AND launch/compose containers)"
 else
-  bad "the idle guard does not filter on --filter volume=<vol> — a launch/compose mid-install could be missed (ran='$(ran)')"
+  bad "the idle guard does not filter on --filter volume=<vol>: a launch/compose mid-install could be missed (ran='$(ran)')"
 fi
 STUB_PS=""
 
@@ -178,7 +178,7 @@ STUB_MNT="/var/lib/docker/volumes/claude-cache/_data"
 
 # cache disabled → immediate no-op (never even queries docker). cache_gc_once reads the
 # resolved CACHE_VOLUME (set from CLAUDE_CACHE_VOLUME when _common.sh was sourced), so
-# disable it via CACHE_VOLUME here — exactly what a CLAUDE_CACHE_VOLUME=off process yields.
+# disable it via CACHE_VOLUME here: exactly what a CLAUDE_CACHE_VOLUME=off process yields.
 ranfile_reset
 out="$(CACHE_VOLUME=off CLAUDE_CACHE_SIZE_MIB_OVERRIDE=30000 cache_gc_once 2>&1)"
 [[ ! -s "$RANFILE" ]] \
@@ -222,7 +222,7 @@ echo "== claude-compose-gen: emits the shared cache, honors --no-cache =="
 # ============================================================================
 GEN="$REPO_ROOT/bin/claude-compose-gen"
 OUT="$(mktemp -u)"; trap 'rm -f "$OUT" "$RANFILE"' EXIT
-run_gen() { "$GEN" --out "$OUT" "$@" cosyte/repo-a cosyte/repo-b >/dev/null 2>&1; }
+run_gen() { "$GEN" --out "$OUT" "$@" acme/repo-a acme/repo-b >/dev/null 2>&1; }
 
 if run_gen; then
   { grep -q 'claude-cache:/cache' "$OUT" && grep -Eq '^  claude-cache:' "$OUT" && grep -q 'name: claude-cache' "$OUT"; } \

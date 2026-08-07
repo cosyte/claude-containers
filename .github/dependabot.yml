@@ -1,0 +1,32 @@
+# Dependabot: only the two ecosystems this repo actually has.
+#
+# There is deliberately NO `npm` entry. package.json is a task-runner shim with
+# zero dependencies, so an npm entry would watch nothing and imply coverage that
+# does not exist.
+#
+# The Claude Code CLI version is NOT watched either: it is pinned as a Docker
+# build arg / env default in several places at once (Dockerfile, Makefile,
+# .env.example), which Dependabot cannot see, and `test/cli-version-unit.sh`
+# enforces that those declarations agree. Bumping it is a deliberate act with a
+# model-selection consequence: from CLI 2.1.219 the `opus` alias resolves to
+# Opus 5, so the pin decides which model every session runs. Bump it by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+
+  # The base image (node:*-bookworm-slim) only. Dependabot rewrites the FROM tag;
+  # it does not touch anything installed inside the image.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build

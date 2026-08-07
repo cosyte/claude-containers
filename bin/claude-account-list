@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claude-account-list — show every named account created by claude-account-login
+# claude-account-list: show every named account created by claude-account-login
 # (plus the bare single-account `claude-auth` volume from `make login`, if any),
 # with token/email status for each.
 set -euo pipefail

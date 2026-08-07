@@ -5,8 +5,8 @@
 #   --depth <n>                shallow-clone depth
 #   --workspace <path>         bind-mount a local checkout instead of cloning
 #   --image <ref>              container image to run (overrides CLAUDE_IMAGE/.env;
-#                              default claude-code-box:latest). Must exist locally
-#                              — only the default image auto-builds. e.g. …:browser
+#                              default claude-code-box:latest). Must exist locally.
+#                              Only the default image auto-builds. e.g. …:browser
 #   --port <ssh-port>          explicit host SSH port (default: auto 2200-2299)
 #   --model <name>             model the session uses (default: opus = best
 #                              available). Any Claude Code alias (opus, sonnet,
@@ -21,7 +21,7 @@
 #   --docker                   give the session its own Docker engine, so it can build
 #                              images and run containers/compose stacks. Requires an
 #                              image built with WITH_DOCKER=1 (`make build-docker`) and
-#                              the Sysbox runtime on the host — the container then runs
+#                              the Sysbox runtime on the host: the container then runs
 #                              under --runtime=sysbox-runc, which contains the inner
 #                              daemon in a user namespace (no --privileged, no host
 #                              socket mount). The inner image store persists in the
@@ -35,19 +35,19 @@
 #   --plugin <name@mkt>        enable a plugin at runtime (repeatable)
 #                              e.g. --plugin software-engineering@claude-skills
 #   --cache <volume>           shared tool cache volume mounted at /cache
-#                              (PKG-3; default: claude-cache). Reused across restarts
+#                              (default: claude-cache). Reused across restarts
 #                              for mise/cargo/go/npm/uv installs.
 #   --no-cache                 disable the shared cache (per-container installs)
 #   --accounts <name[,...]>    named OAuth accounts (from claude-account-login) this
 #                              container can rotate between on a usage-limit hit
 #                              (bin/claude-usage-watchdog). Repeatable/comma-list, works
 #                              with any count >= 1 (a single account just gets auto-resume
-#                              once its usage window resets — no rotation needed for that).
+#                              once its usage window resets, no rotation needed for that).
 #                              Mutually exclusive with the default single AUTH_VOLUME mount.
 #
-# --broker / --sysbox / --worker-tarball were REMOVED in SC-5 (the nested-Sysbox
+# --broker / --sysbox / --worker-tarball were REMOVED with the nested-Sysbox
 # worker-broker substrate was retired in favor of Claude Code subagents in git
-# worktrees — see docs/legacy-sysbox-broker.md). Passing any of them is a hard error.
+# worktrees: see docs/legacy-sysbox-broker.md). Passing any of them is a hard error.
 # The Sysbox RUNTIME is back, but as an implementation detail of --docker, not a flag.
 set -euo pipefail
 LAUNCH_BIN_DIR="$(dirname "${BASH_SOURCE[0]}")"
@@ -62,7 +62,7 @@ PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
 EXTRA="${CLAUDE_EXTRA_ARGS:-}" MCP_LIST="${CLAUDE_MCP_ENABLED:-}" DEVCMD="${CLAUDE_DEV_CMD:-}"
 MKTS="${CLAUDE_EXTRA_MARKETPLACES:-}" PLUGINS="${CLAUDE_EXTRA_PLUGINS:-}"
 ACCOUNTS="${CLAUDE_ACCOUNTS:-}"
-# Empty here means "unset" — the container's entrypoint then defaults it to opus
+# Empty here means "unset": the container's entrypoint then defaults it to opus
 # (best available). A value from .env/env seeds the default; --model overrides.
 MODEL="${CLAUDE_MODEL:-}"
 # BROWSER is TRI-STATE: "" = auto (a browser image auto-enables the MCP; a lean
@@ -70,7 +70,7 @@ MODEL="${CLAUDE_MODEL:-}"
 # CLAUDE_BROWSER` flag is omitted below so a browser image can self-detect.
 # BROWSER_EXPLICIT tracks a per-launch --browser/--no-browser CLI flag (vs an
 # ambient .env default) so only an explicit --browser hard-fails on a lean image.
-# CACHE_ARG: the shared tool cache (PKG-3). Empty = the CACHE_VOLUME default
+# CACHE_ARG: the shared tool cache. Empty = the CACHE_VOLUME default
 # (claude-cache) is mounted at /cache; --cache <vol> overrides the name;
 # --cache off / --no-cache disables it (per-container installs).
 # DOCKER mirrors BROWSER's tri-state ("" = off unless CLAUDE_DOCKER says otherwise,
@@ -104,11 +104,11 @@ while [[ $# -gt 0 ]]; do
         # what makes an inner daemon safe), but it is no longer a flag of its own: --docker
         # selects it. Point there rather than dying with a dead-end "removed" message.
         --sysbox)
-            die "claude-launch: --sysbox was removed in SC-5. To run containers inside a
-       session, use --docker — it selects --runtime=sysbox-runc for you.
+            die "claude-launch: --sysbox was removed (the nested worker-broker substrate). To run containers inside a
+       session, use --docker: it selects --runtime=sysbox-runc for you.
        (The worker broker it used to serve is gone: docs/legacy-sysbox-broker.md.)" ;;
         --broker|--worker-tarball)
-            die "claude-launch: $1 was removed in SC-5 (legacy Sysbox/broker substrate retired; see docs/legacy-sysbox-broker.md)" ;;
+            die "claude-launch: $1 was removed (the legacy Sysbox worker-broker substrate is retired; see docs/legacy-sysbox-broker.md)" ;;
         -h|--help)     usage 0 ;;
         -*)            die "unknown option: $1 (try --help)" ;;
         *)             [[ -z "$PROJECT" ]] && PROJECT="$1" || die "unexpected arg: $1"; shift ;;
@@ -116,7 +116,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --browser / --no-browser can also be set via CLAUDE_BROWSER in .env / the host
-# env — a CLI flag wins; env is the fallback; unset leaves auto-detect to the
+# env: a CLI flag wins; env is the fallback; unset leaves auto-detect to the
 # image's entrypoint (a browser image self-enables the MCP). Normalize the env
 # value (strip whitespace / a CRLF `\r`, lowercase) so a Windows-authored .env
 # still matches.
@@ -149,7 +149,7 @@ done
 
 need_docker
 [[ -z "${ANTHROPIC_API_KEY:-}" ]] || die "ANTHROPIC_API_KEY is set (env or .env).
-       This stack is OAuth-subscription only — unset it. It would otherwise be
+       This stack is OAuth-subscription only: unset it. It would otherwise be
        passed in and the container would refuse to start anyway."
 PROJECT="$(sanitize "$PROJECT")"
 CN="$(cname "$PROJECT")"
@@ -158,47 +158,47 @@ state="$(container_state "$CN")"
 # Already running -> just print how to connect.
 if [[ "$state" == "running" ]]; then
     info "Container '$CN' is already running."
-    [[ "$OPTS_GIVEN" == "1" ]] && warn "launch options are ignored for an existing container — \`claude-rm $PROJECT\` then relaunch to apply them"
+    [[ "$OPTS_GIVEN" == "1" ]] && warn "launch options are ignored for an existing container: \`claude-rm $PROJECT\` then relaunch to apply them"
     print_connect "$PROJECT" "$(container_ssh_port "$CN")"
     exit 0
 fi
 
 # Stopped -> start it back up (workspace + history preserved). `docker start`
 # reuses the container's creation-time env, ports, and mounts, so launch
-# options passed now do NOT take effect — recreate the container to apply them.
+# options passed now do NOT take effect: recreate the container to apply them.
 if [[ "$state" == "stopped" ]]; then
     info "Starting existing container '$CN'…"
-    [[ "$OPTS_GIVEN" == "1" ]] && warn "launch options are ignored on resume — \`claude-rm $PROJECT\` then relaunch to apply them"
+    [[ "$OPTS_GIVEN" == "1" ]] && warn "launch options are ignored on resume: \`claude-rm $PROJECT\` then relaunch to apply them"
     docker start "$CN" >/dev/null
     print_connect "$PROJECT" "$(container_ssh_port "$CN")"
     exit 0
 fi
 
 # Absent -> create it. An explicit --image must already exist locally: only the
-# default image is auto-built from the local Dockerfile — auto-building an
+# default image is auto-built from the local Dockerfile: auto-building an
 # arbitrary ref (a registry image, or a :browser variant) would silently tag the
 # lean build with the wrong name.
 if [[ "$IMAGE_EXPLICIT" == "1" ]]; then
     info "Image: $CLAUDE_IMAGE (from --image)"
     docker image inspect "$CLAUDE_IMAGE" >/dev/null 2>&1 || \
         die "--image '$CLAUDE_IMAGE' not found locally. Build it (e.g. \`make build-browser\`)
-       or \`docker pull\` it first — claude-launch only auto-builds the default image."
+       or \`docker pull\` it first: claude-launch only auto-builds the default image."
 else
     ensure_image
 fi
 # Pre-flight: force-on (BROWSER=1) needs an image baked with WITH_BROWSER=1 (the
 # Dockerfile's `claude.browser` label). An EXPLICIT per-launch --browser against a
-# lean image fails LOUD and early — a requested-but-impossible browser session is
+# lean image fails LOUD and early: a requested-but-impossible browser session is
 # an error, not a silent no-op that surfaces 30s later as a buried log line. An
 # AMBIENT default (CLAUDE_BROWSER=1 in .env) must NOT brick ordinary lean launches:
 # warn and fall back to auto so browser images still self-force while lean ones
-# come up clean. (Auto — BROWSER="" — never trips this: the lean image is normal.)
+# come up clean. (Auto, BROWSER="", never trips this: the lean image is normal.)
 if [[ "$BROWSER" == "1" ]]; then
     img_browser="$(docker image inspect -f '{{ index .Config.Labels "claude.browser" }}' "$CLAUDE_IMAGE" 2>/dev/null || true)"
     if [[ "$img_browser" != "1" ]]; then
         if [[ "$BROWSER_EXPLICIT" == "1" ]]; then
             die "--browser was requested, but image '$CLAUDE_IMAGE' was not built with
-       WITH_BROWSER=1 — the chrome-devtools MCP cannot be enabled.
+       WITH_BROWSER=1: the chrome-devtools MCP cannot be enabled.
        Rebuild the browser variant:  make build-browser
          (or:  make build WITH_BROWSER=1 CLAUDE_IMAGE=<tag>, then set CLAUDE_IMAGE)
        Or drop --browser to launch the lean image."
@@ -206,13 +206,13 @@ if [[ "$BROWSER" == "1" ]]; then
             warn "CLAUDE_BROWSER=1 is set but image '$CLAUDE_IMAGE' is lean (no WITH_BROWSER=1)."
             warn "  Launching without the chrome-devtools MCP. Build the browser variant"
             warn "  (make build-browser) for frontend debugging, or pass --no-browser to silence this."
-            BROWSER=""   # fall back to auto — don't force the entrypoint to error
+            BROWSER=""   # fall back to auto: don't force the entrypoint to error
         fi
     fi
 fi
 # Pre-flight --docker, same shape as --browser: an explicit flag against an engine-less
 # image is an error; an ambient CLAUDE_DOCKER=1 must not brick ordinary lean launches, so
-# it warns and falls back to off. Then check the HOST can actually run it — the image
+# it warns and falls back to off. Then check the HOST can actually run it: the image
 # having dockerd is only half of it, the runtime is the other half.
 DOCKER_RUNTIME_ARGS=() DOCKER_VOL_ARGS=() DOCKER_ENV=()
 if [[ "$DOCKER" == "1" ]]; then
@@ -220,7 +220,7 @@ if [[ "$DOCKER" == "1" ]]; then
     if [[ "$img_docker" != "1" ]]; then
         if [[ "$DOCKER_EXPLICIT" == "1" ]]; then
             die "--docker was requested, but image '$CLAUDE_IMAGE' was not built with
-       WITH_DOCKER=1 — it has no Docker engine, so the session cannot build or run
+       WITH_DOCKER=1: it has no Docker engine, so the session cannot build or run
        containers.
        Rebuild the docker variant:  make build-docker
          (both engine + Chromium:   make build-docker-browser)
@@ -239,7 +239,7 @@ if [[ "$DOCKER" == "1" ]]; then
     DOCKER_ENV=(-e CLAUDE_DOCKER=1)
     DOCKER_VOL_ARGS=(-v "$(docker_volume "$PROJECT"):/var/lib/docker")
 
-    # Inner containers live in THIS container's cgroup — every process, byte of RAM and CPU
+    # Inner containers live in THIS container's cgroup: every process, byte of RAM and CPU
     # second they use is charged to the session's limits. A compose stack in a 4g box OOM-
     # kills a nested container with a confusing inner-daemon error, not an obvious limit
     # error, so say it here while the operator can still act on it.
@@ -250,7 +250,7 @@ if [[ "$DOCKER" == "1" ]]; then
     fi
 
     # Docker socket access is a path to root INSIDE the container (docker run -v /:/rootfs).
-    # Sysbox keeps that root off the host, so the host boundary holds — but these two
+    # Sysbox keeps that root off the host, so the host boundary holds, but these two
     # controls exist to separate the agent from CONTAINER-root, and they no longer do.
     # Neither is on by default; warn rather than refuse, because the operator may genuinely
     # want docker on a container whose git key is already low-value.
@@ -296,7 +296,7 @@ fi
 # Auth: either the single default volume (AUTH_VOLUME, from 'make login'), or a
 # set of named accounts (--accounts, from claude-account-login) mounted
 # read-write at /auth-accounts/<name> so bin/claude-usage-watchdog can rotate
-# between them on a usage-limit hit. Mutually exclusive per container —
+# between them on a usage-limit hit. Mutually exclusive per container:
 # entrypoint.sh picks its auth source based on whether CLAUDE_ACCOUNTS is set.
 # Read-write (not :ro): the credential reconcile loop writes refreshed tokens
 # back into whichever account volume is active.
@@ -318,7 +318,7 @@ else
     AUTH_MOUNT_ARGS=(-v "$AUTH_VOLUME:/auth")
 fi
 
-# Shared tool cache (PKG-3): mount the shared cache volume at /cache unless disabled.
+# Shared tool cache: mount the shared cache volume at /cache unless disabled.
 # Docker auto-creates the named volume (seeded from the image's /cache) on first use,
 # so this never blocks a launch; --no-cache / --cache off drops the mount entirely.
 CACHE_MOUNT_ARGS=()
@@ -334,12 +334,12 @@ RO_MOUNTS=()
 if [[ -f "$SSH_AUTHORIZED_KEYS" ]]; then
     RO_MOUNTS+=(-v "$SSH_AUTHORIZED_KEYS:/etc/claude/authorized_keys:ro")
 else
-    warn "no authorized_keys at $SSH_AUTHORIZED_KEYS — SSH will be disabled"
+    warn "no authorized_keys at $SSH_AUTHORIZED_KEYS: SSH will be disabled"
 fi
 if [[ -f "$GIT_SSH_KEY" ]]; then
     RO_MOUNTS+=(-v "$GIT_SSH_KEY:/etc/claude/git-key:ro")
 else
-    warn "no git SSH key at $GIT_SSH_KEY — only public/https repos will clone"
+    warn "no git SSH key at $GIT_SSH_KEY: only public/https repos will clone"
 fi
 
 # Git identity defaults from the host's git config.
@@ -352,7 +352,7 @@ ENV_FILE_ARG=()
 # Per-container resource profile + escape hardening. Two runtimes now: plain runc for an
 # ordinary session, and sysbox-runc for --docker (the user namespace is what lets an inner
 # dockerd run with no --privileged and no host socket). harden_run_args takes the mode
-# because docker mode must NOT cap-drop — an inner daemon cannot run under the minimal set,
+# because docker mode must NOT cap-drop: an inner daemon cannot run under the minimal set,
 # and under Sysbox the full set is namespaced to a container-root that maps to an
 # unprivileged host uid anyway. preflight_runc's escape warning still applies to both.
 FLAT_PROFILE=(--cpus "$CLAUDE_CPU_LIMIT" --memory "$CLAUDE_MEM_LIMIT" \
@@ -439,11 +439,11 @@ if (( ${#EXPOSE_RAW[@]} )); then
     done
     echo
 fi
-info "Model: ${MODEL:-opus (best available — container default)}"
+info "Model: ${MODEL:-opus (best available, container default)}"
 [[ -n "$DEVCMD" ]] && \
     info "Dev server auto-starts on boot in tmux window 'dev' (claude-attach, then: tmux select-window -t claude:dev)"
 # Only announce an explicit choice; in auto mode the entrypoint decides by image
-# (a browser image auto-registers, a lean image stays silent) — no noise here.
+# (a browser image auto-registers, a lean image stays silent): no noise here.
 case "$BROWSER" in
     1) info "Frontend debug: chrome-devtools MCP force-enabled (headless Chromium in-container)" ;;
     0) info "Frontend debug: chrome-devtools MCP opted out (--no-browser)" ;;

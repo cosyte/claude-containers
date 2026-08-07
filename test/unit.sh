@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Unit tests that need NO docker — safe for CI and for `scripts/verify.sh`.
+# Unit tests that need NO docker: safe for CI and for `scripts/verify.sh`.
 #
-# Covers the pure-logic checks in bin/_common.sh that survive SC-5 (the Sysbox
+# Covers the pure-logic checks in bin/_common.sh that survive the substrate strip (the Sysbox
 # version-floor refusal, preflight_sysbox/sysbox_version_check, was removed along
-# with the nested-Sysbox worker-broker substrate it gated — see
+# with the nested-Sysbox worker-broker substrate it gated: see
 # docs/legacy-sysbox-broker.md):
 #   - version_ge: the generic dotted-numeric comparator (fail-closed on garbage)
 #   - preflight_runc: the warn-only posture is preserved (never exits non-zero)
@@ -45,12 +45,12 @@ echo "== version_ge helper =="
 echo
 echo "== preflight_runc: warn-only posture preserved (K=1 non-regression) =="
 
-# preflight_runc must never exit non-zero — it warns. Feed it a vulnerable runc via a stub.
+# preflight_runc must never exit non-zero: it warns. Feed it a vulnerable runc via a stub.
 STUB="$(mktemp -d)"
 trap 'rm -rf "$STUB"' EXIT
 printf '#!/bin/sh\necho "runc version 1.2.7"\n' > "$STUB/runc" && chmod +x "$STUB/runc"
 if in_env PATH="$STUB:/usr/bin:/bin" -- preflight_runc; then
-    ok  "a vulnerable runc (1.2.7) only WARNS — flat launch path behavior unchanged"
+    ok  "a vulnerable runc (1.2.7) only WARNS: flat launch path behavior unchanged"
 else
     bad "preflight_runc must never exit non-zero (it is warn-only by design)"
 fi
@@ -62,25 +62,25 @@ else
 fi
 
 echo
-echo "== entrypoint.sh §8b: SC-5 self-heal drops the stale claude-md-fragments SessionStart hook =="
+echo "== entrypoint.sh §8b: the self-heal drops the stale claude-md-fragments SessionStart hook =="
 
-# SC-5 deleted bin/claude-md-fragments (the CLAUDE.d fragment loader), but images built
-# BEFORE SC-5 persisted a SessionStart hook invoking it into every per-project config
+# The strip deleted bin/claude-md-fragments (the CLAUDE.d fragment loader), but images built
+# BEFORE it persisted a SessionStart hook invoking it into every per-project config
 # VOLUME. §8b's merge lets existing user settings win, so without a self-heal that hook
 # would survive the upgrade and fire an ENOENT at every session start, forever.
 #
 # The jq program is EXTRACTED FROM entrypoint.sh rather than mirrored here, so this test
 # exercises the real filter and cannot silently drift away from it.
 ENTRYPOINT="$REPO_ROOT/entrypoint.sh"
-# Extract the command string from entrypoint.sh too — NOT hardcoded here. If someone
+# Extract the command string from entrypoint.sh too, NOT hardcoded here. If someone
 # typos STALE_HOOK_CMD, the self-heal silently becomes a production no-op that resurrects
 # the ENOENT defect; a test carrying its own copy of the string would still pass and the
 # gate would be fake. Extracting both halves means the test can only pass if the shipped
-# filter really matches the hook the pre-SC-5 image actually baked (asserted below).
+# filter really matches the hook the older image actually baked (asserted below).
 STALE_CMD="$(sed -n 's/^STALE_HOOK_CMD="\(.*\)"$/\1/p' "$ENTRYPOINT")"
 [[ "$STALE_CMD" == "/usr/local/bin/claude-md-fragments" ]] \
-    && ok  "entrypoint.sh's STALE_HOOK_CMD matches the hook pre-SC-5 images actually baked" \
-    || bad "STALE_HOOK_CMD is '$STALE_CMD' — does not match the baked hook; the self-heal is a NO-OP"
+    && ok  "entrypoint.sh's STALE_HOOK_CMD matches the hook older images actually baked" \
+    || bad "STALE_HOOK_CMD is '$STALE_CMD': does not match the baked hook; the self-heal is a NO-OP"
 HOOK_FILTER="$(awk '/jq --arg stale "\$STALE_HOOK_CMD"/{f=1; sub(/^.*--arg stale "\$STALE_HOOK_CMD" .$/,""); }
                     f{print}
                     f && /^ *> "\$CLAUDE_CONFIG_DIR\/settings.json"$/{exit}' "$ENTRYPOINT" \
@@ -89,11 +89,11 @@ HOOK_FILTER="$(awk '/jq --arg stale "\$STALE_HOOK_CMD"/{f=1; sub(/^.*--arg stale
 if [[ -n "$HOOK_FILTER" ]] && echo '{}' | jq --arg stale "$STALE_CMD" "$HOOK_FILTER" >/dev/null 2>&1; then
     ok "the §8b stale-hook jq filter was extracted from entrypoint.sh and parses"
 
-    # The real legacy-volume state: the pre-SC-5 baked settings.json was EXACTLY this.
+    # The real legacy-volume state: the older baked settings.json was EXACTLY this.
     legacy='{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'"$STALE_CMD"'"}]}]}}'
     got="$(echo "$legacy" | jq -c --arg stale "$STALE_CMD" "$HOOK_FILTER")"
     [[ "$got" == '{}' ]] \
-        && ok  "a pre-SC-5 config volume is healed: the stale hook (and the empty .hooks) are dropped" \
+        && ok  "an older config volume is healed: the stale hook (and the empty .hooks) are dropped" \
         || bad "stale hook survived the self-heal: got $got"
 
     # A user's OWN SessionStart hook must NOT be collateral damage.
@@ -141,18 +141,18 @@ if [[ -n "$HOOK_FILTER" ]] && echo '{}' | jq --arg stale "$STALE_CMD" "$HOOK_FIL
     done
     [[ $malformed -eq 0 ]] \
         && ok  "malformed .hooks shapes pass through byte-identical (cannot truncate or mangle settings.json)" \
-        || bad "$malformed malformed shape(s) were dropped/mangled — settings.json would be truncated or corrupted"
+        || bad "$malformed malformed shape(s) were dropped/mangled: settings.json would be truncated or corrupted"
 else
-    bad "could not extract a working stale-hook jq filter from entrypoint.sh §8b (the SC-5 self-heal is missing or broke)"
+    bad "could not extract a working stale-hook jq filter from entrypoint.sh §8b (the self-heal is missing or broke)"
 fi
 
 echo
-echo "== entrypoint.sh §0: retired SC-5 env vars warn loudly, never silently no-op =="
+echo "== entrypoint.sh §0: retired env vars warn loudly, never silently no-op =="
 
 # The removed --broker/--sysbox/--worker-tarball FLAGS hard-die. The env vars they used to
-# set are merely unread — and silence there is unsafe: an operator running
+# set are merely unread, and silence there is unsafe: an operator running
 # CLAUDE_CACHE_PROXY_HOST + CLAUDE_EGRESS_LOCKDOWN=1 had a single audited egress choke
-# point, and post-SC-5 the firewall composes its default allowlist and public npm is
+# point, and since the strip the firewall composes its default allowlist and public npm is
 # reachable again. §0 must SAY so. Extracted from entrypoint.sh, not mirrored.
 GUARD="$(awk '/^# --- 0\. Refuse retired/,/^unset _v _retired_set/' "$ENTRYPOINT")"
 
@@ -160,7 +160,7 @@ GUARD="$(awk '/^# --- 0\. Refuse retired/,/^unset _v _retired_set/' "$ENTRYPOINT
 # subset. This is the whole point: §0 runs near the top of entrypoint.sh, so if it aborts
 # on a CLEAN boot (e.g. a bare `(( ${#arr[@]} > 0 ))` whose arithmetic evaluates to 0
 # returns exit 1, which `set -e` turns into an abort) then EVERY container fails to boot.
-# Under `set -u` alone that fatal case is invisible — the guard dies silently, produces no
+# Under `set -u` alone that fatal case is invisible: the guard dies silently, produces no
 # output, and a text-only assertion would PASS precisely because it is dead. So: real
 # options, and assert the EXIT CODE, not just the text.
 run_guard() { ( eval "log() { echo \"[entrypoint] \$*\"; }"; set -euo pipefail; eval "$GUARD" ) 2>&1; }
@@ -171,23 +171,23 @@ if [[ -n "$GUARD" ]]; then
     rc="$(guard_rc)"
     [[ "$rc" == "0" ]] \
         && ok  "§0 exits 0 on a clean boot under 'set -euo pipefail' (does not brick the container)" \
-        || bad "§0 exited $rc on a CLEAN boot under 'set -euo pipefail' — EVERY container would fail to boot"
+        || bad "§0 exited $rc on a CLEAN boot under 'set -euo pipefail': EVERY container would fail to boot"
 
     # And it must still exit 0 when it DOES fire (a warning must not abort the boot).
     rc="$(CLAUDE_CACHE_PROXY_HOST=cache.internal CLAUDE_WORKER_BROKER=1 guard_rc)"
     [[ "$rc" == "0" ]] \
         && ok  "§0 exits 0 when it fires (warn-not-die: a stale .env line never blocks boot)" \
-        || bad "§0 exited $rc when warning — a stale .env line would brick the container"
+        || bad "§0 exited $rc when warning: a stale .env line would brick the container"
 
     out="$(CLAUDE_CACHE_PROXY_HOST=cache.internal run_guard)"
-    [[ "$out" == *"RETIRED in SC-5"*   && "$out" == *"CLAUDE_CACHE_PROXY_HOST"* ]] \
+    [[ "$out" == *"were RETIRED"*       && "$out" == *"CLAUDE_CACHE_PROXY_HOST"* ]] \
         && ok  "a retired var (CLAUDE_CACHE_PROXY_HOST) is named in a loud warning" \
         || bad "retired var was silently ignored: $out"
     [[ "$out" == *"audited egress choke point"* ]] \
         && ok  "the cache-proxy warning spells out the egress-posture change (npm reachable again)" \
         || bad "cache-proxy warning does not explain the security-posture change: $out"
 
-    # PIN THE WHOLE LIST — spot-checking two vars is not a gate: truncating RETIRED_VARS
+    # PIN THE WHOLE LIST: spot-checking two vars is not a gate: truncating RETIRED_VARS
     # from 12 entries to 2 would let the other 10 go SILENT while the suite stayed green.
     # CLAUDE_SYSBOX is the highest-stakes one: an operator who believed they still had
     # Sysbox userns isolation would now get a plain runc container with nothing said.
@@ -209,21 +209,21 @@ if [[ -n "$GUARD" ]]; then
     out="$(CLAUDE_BROKER_GIT_KEY=1 run_guard)"
     [[ -z "$out" ]] \
         && ok  "CLAUDE_BROKER_GIT_KEY (live git-key broker) is NOT treated as retired" \
-        || bad "CLAUDE_BROKER_GIT_KEY was wrongly flagged as retired — it is a live control: $out"
+        || bad "CLAUDE_BROKER_GIT_KEY was wrongly flagged as retired: it is a live control: $out"
 
     out="$(run_guard)"
     [[ -z "$out" ]] \
         && ok  "no retired vars set → §0 is silent (no noise on a clean boot)" \
         || bad "§0 emitted output with no retired vars set: $out"
 else
-    bad "could not extract §0's retired-env guard from entrypoint.sh (the SC-5 guard is missing)"
+    bad "could not extract §0's retired-env guard from entrypoint.sh (the retired-env guard is missing)"
 fi
 
 # ==========================================================================================
-# CC-BINS — the bins that lost their reason are gone, and their removal is LOUD
+# The bin prune: the bins that lost their reason are gone, and their removal is LOUD
 # ==========================================================================================
 echo
-echo "== CC-BINS: claude-controller / claude-reaper / the WITH_DOCKER variant are fully gone =="
+echo "== claude-controller / claude-reaper / the WITH_DOCKER variant are fully gone =="
 
 # A deleted bin that some file still names is worse than the bin: a stale `COPY bin/claude-reaper`
 # fails the image build outright, and a stale CI step or npm-test entry fails every run. Pin the
@@ -231,7 +231,7 @@ echo "== CC-BINS: claude-controller / claude-reaper / the WITH_DOCKER variant ar
 for f in bin/claude-controller bin/claude-reaper test/controller-unit.sh test/reaper-unit.sh; do
     [[ ! -e "$REPO_ROOT/$f" ]] \
         && ok  "$f is deleted" \
-        || bad "$f still exists — CC-BINS removed it"
+        || bad "$f still exists: it was removed"
 done
 
 # Strip whole-line comments before asserting: the tombstone comments that RECORD the removal
@@ -244,14 +244,14 @@ if ! code_of "$REPO_ROOT/Dockerfile" | grep -qE 'claude-(controller|reaper)'; th
 else
     bad "Dockerfile still references a pruned bin: $(code_of "$REPO_ROOT/Dockerfile" | grep -E 'claude-(controller|reaper)')"
 fi
-# WITH_DOCKER is BACK, deliberately — but the property CC-BINS was protecting still holds and
+# WITH_DOCKER is BACK, deliberately, but the property that prune was protecting still holds and
 # is what we assert now. It deleted the variant because the baked engine was UNREACHABLE: no
-# runtime, no --privileged, no socket mount, and nothing that started dockerd — 400 MB of dead
+# runtime, no --privileged, no socket mount, and nothing that started dockerd: 400 MB of dead
 # daemon. The engine only earns its place if it can actually run, so pin the wiring, not the
 # absence: the entrypoint must start it, and the launcher must give it the Sysbox runtime that
 # lets it start without privilege. Break either and the variant is dead weight again.
 # (See docs/architecture.md; the worker BROKER it originally served stays retired.)
-# NOTE — materialize code_of's output into a variable instead of piping it into `grep -q`.
+# NOTE: materialize code_of's output into a variable instead of piping it into `grep -q`.
 # This file runs under `set -o pipefail`, and `producer | grep -q X` is a trap there: grep -q
 # exits the moment it matches, the producer takes SIGPIPE (141), and pipefail reports the
 # PIPELINE as failed even though the pattern was found. It is timing-dependent, so it shows
@@ -264,24 +264,24 @@ launch_code="$(code_of "$REPO_ROOT/bin/claude-launch")"
 if has "$dockerfile_code" 'WITH_DOCKER'; then
     ok  "the WITH_DOCKER image variant exists (bakes dockerd + CLI + compose/buildx)"
 else
-    bad "WITH_DOCKER is missing from the Dockerfile — --docker sessions cannot have an engine"
+    bad "WITH_DOCKER is missing from the Dockerfile: --docker sessions cannot have an engine"
 fi
 if has "$entrypoint_code" 'CLAUDE_DOCKER' && has "$entrypoint_code" '(^|[[:space:]])dockerd[[:space:]]*>>'; then
     ok  "the entrypoint actually STARTS the baked engine (CLAUDE_DOCKER=1 → dockerd)"
 else
-    bad "nothing starts dockerd — the baked engine is unreachable again (the exact defect CC-BINS deleted it for)"
+    bad "nothing starts dockerd: the baked engine is unreachable again (the exact defect it was once deleted for)"
 fi
 if has "$launch_code" 'runtime=sysbox-runc'; then
     ok  "claude-launch gives the engine a runtime it can start under (--runtime=sysbox-runc)"
 else
-    bad "claude-launch selects no Sysbox runtime — an inner dockerd cannot start without the userns"
+    bad "claude-launch selects no Sysbox runtime: an inner dockerd cannot start without the userns"
 fi
 # The two shortcuts that would make an inner engine trivial and catastrophic. Sysbox exists
 # precisely so neither is needed; if one appears, the isolation story is gone.
 for f in bin/claude-launch bin/claude-compose-gen entrypoint.sh docker-compose.yml; do
     [[ -e "$REPO_ROOT/$f" ]] || continue
     if has "$(code_of "$REPO_ROOT/$f")" '--privileged|privileged:[[:space:]]*true|/var/run/docker\.sock'; then
-        bad "$f grants --privileged or mounts the host docker socket — either hands the agent the host"
+        bad "$f grants --privileged or mounts the host docker socket: either hands the agent the host"
     else
         ok  "$f grants no --privileged and mounts no host docker socket"
     fi
@@ -299,14 +299,14 @@ else
 fi
 
 echo
-echo "== CC-BINS: entrypoint REFUSES CLAUDE_CONTROLLER=1 (never silently boots interactive) =="
+echo "== entrypoint REFUSES CLAUDE_CONTROLLER=1 (never silently boots interactive) =="
 
-# CLAUDE_CONTROLLER is NOT an inert leftover like the §0 vars — it is an ACTIVE request for
+# CLAUDE_CONTROLLER is NOT an inert leftover like the §0 vars: it is an ACTIVE request for
 # unattended operation. Warn-and-ignore would boot an unattended fleet container into an
 # interactive Remote-Control session nobody is watching, which never runs the loop: a container
 # that looks alive and does nothing. So this one DIES (§0b).
 #
-# BOTH the guard AND the real `die` it depends on are extracted from entrypoint.sh — never
+# BOTH the guard AND the real `die` it depends on are extracted from entrypoint.sh, never
 # mirrored. A local stub `die` would keep passing if entrypoint's real one stopped exiting
 # non-zero, which is exactly the drift that turns a gate into theater.
 CTRL_GUARD="$(awk '/^case "\$\{CLAUDE_CONTROLLER/,/^esac/' "$ENTRYPOINT")"
@@ -318,48 +318,48 @@ ctrl_rc()  { ( eval "$REAL_DIE"; set -euo pipefail; eval "$CTRL_GUARD" ) >/dev/n
 
 # PROVE THE EXTRACTED die() ACTUALLY WORKS, rather than merely being non-empty. A text check
 # passes on a half-extracted function; the eval then throws a syntax error, `die` is undefined,
-# and "command not found" under `set -e` LOOKS exactly like a refusal — so the controller
+# and "command not found" under `set -e` LOOKS exactly like a refusal, so the controller
 # assertions below would all still pass while testing nothing at all. Exercise it instead.
 die_rc="$( ( eval "$REAL_DIE"; die "probe" ) >/dev/null 2>&1; echo $? )"
 die_out="$( ( eval "$REAL_DIE"; die "probe" ) 2>&1 )"
 [[ "$die_rc" == "1" && "$die_out" == *"probe"* ]] \
-    && ok  "entrypoint's real die() extracted AND exercised (exits 1, prints its message) — not a stub, not a broken eval" \
-    || bad "the extracted die() does not behave (rc=$die_rc, out=$die_out) — the CLAUDE_CONTROLLER gate would be theater"
+    && ok  "entrypoint's real die() extracted AND exercised (exits 1, prints its message), not a stub, not a broken eval" \
+    || bad "the extracted die() does not behave (rc=$die_rc, out=$die_out): the CLAUDE_CONTROLLER gate would be theater"
 
 if [[ -n "$CTRL_GUARD" ]]; then
     for v in 1 true yes on; do
         rc="$(CLAUDE_CONTROLLER="$v" ctrl_rc)"
         [[ "$rc" != "0" ]] \
             && ok  "CLAUDE_CONTROLLER=$v is REFUSED (exit $rc), not silently downgraded to interactive" \
-            || bad "CLAUDE_CONTROLLER=$v booted anyway — an unattended container would silently run interactive"
+            || bad "CLAUDE_CONTROLLER=$v booted anyway: an unattended container would silently run interactive"
     done
 
     # The refusal has to be ACTIONABLE, or the operator just sees their fleet crashloop.
     out="$(CLAUDE_CONTROLLER=1 ctrl_run)"
     [[ "$out" == *"CLAUDE_AUTOPILOT=1"* ]] \
-        && ok  "the refusal names the replacement (CLAUDE_AUTOPILOT=1 — the same loop it always was)" \
+        && ok  "the refusal names the replacement (CLAUDE_AUTOPILOT=1, the same loop it always was)" \
         || bad "the CLAUDE_CONTROLLER refusal does not tell the operator what to set instead: $out"
 
     # A clean boot, and the inert CLAUDE_CONTROLLER=0 that every old .env.example carries, must
-    # sail straight through — refusing THOSE would brick every container.
+    # sail straight through: refusing THOSE would brick every container.
     rc="$(ctrl_rc)";                     [[ "$rc" == "0" ]] \
         && ok  "unset CLAUDE_CONTROLLER → no refusal (clean boot unaffected)" \
-        || bad "the guard aborts a CLEAN boot (exit $rc) — every container would fail to start"
+        || bad "the guard aborts a CLEAN boot (exit $rc): every container would fail to start"
     rc="$(CLAUDE_CONTROLLER=0 ctrl_rc)"; [[ "$rc" == "0" ]] \
         && ok  "CLAUDE_CONTROLLER=0 → no refusal (a stale .env line never blocks boot)" \
-        || bad "CLAUDE_CONTROLLER=0 aborted the boot (exit $rc) — stale .env files would brick"
+        || bad "CLAUDE_CONTROLLER=0 aborted the boot (exit $rc): stale .env files would brick"
 else
-    bad "could not extract the CLAUDE_CONTROLLER refusal from entrypoint.sh (CC-BINS guard is missing)"
+    bad "could not extract the CLAUDE_CONTROLLER refusal from entrypoint.sh (the guard is missing)"
 fi
 
 echo
-echo "== CC-BINS: claude-autopilot never invents a prompt (the /next default is gone) =="
+echo "== claude-autopilot never invents a prompt (the removed default is gone) =="
 
-# The old CLAUDE_AUTOPILOT_CMD default was `/next` — a cosyte-cockpit command this generic image
-# does not ship, so on almost every container it resolved to nothing at all. (It did NOT reach the
+# The old CLAUDE_AUTOPILOT_CMD default was a slash command that existed only in the maintainer's
+# own repo, which this generic image does not ship, so on almost every container it resolved to nothing at all. (It did NOT reach the
 # model as a literal prompt: `claude -p` reports an unknown slash command as a zero-turn success
-# and never invokes the model — see the next section, which is where the real damage was.) The fix
-# is a hard rule: NO COMMAND, NO RUN. These tests prove `claude` is never invoked without one —
+# and never invokes the model: see the next section, which is where the real damage was.) The fix
+# is a hard rule: NO COMMAND, NO RUN. These tests prove `claude` is never invoked without one:
 # using a stub that records every invocation.
 AP="$REPO_ROOT/bin/claude-autopilot"
 APD="$(mktemp -d)"; trap 'rm -rf "$APD"' EXIT
@@ -384,7 +384,7 @@ invocations() { wc -l < "$APD/claude-invocations" | tr -d ' '; }
 out="$(run_autopilot 10 CLAUDE_AUTOPILOT_INTERVAL=1)"
 [[ "$(invocations)" == "0" ]] \
     && ok  "no CLAUDE_AUTOPILOT_CMD + no queue → claude is NEVER invoked (no invented prompt)" \
-    || bad "the autopilot invoked claude with no command set — the /next class of bug is back"
+    || bad "the autopilot invoked claude with no command set, that class of bug is back"
 [[ "$out" == *"CLAUDE_AUTOPILOT_CMD is not set"* && "$out" == *"NO DEFAULT"* ]] \
     && ok  "it says WHY it refused (CLAUDE_AUTOPILOT_CMD unset, no default)" \
     || bad "the refusal is not explained: $out"
@@ -396,31 +396,31 @@ out="$(run_autopilot 10 CLAUDE_AUTOPILOT_INTERVAL=1)"
 out="$(run_autopilot 4 CLAUDE_AUTOPILOT_QUEUE=1 CLAUDE_AUTOPILOT_INTERVAL=1)"
 [[ "$(invocations)" == "0" ]] \
     && ok  "empty queue + no fallback command → idles, never invokes claude" \
-    || bad "a pure queue consumer invoked claude on an EMPTY queue — it invented work"
+    || bad "a pure queue consumer invoked claude on an EMPTY queue: it invented work"
 [[ "$out" == *"idling"* ]] \
     && ok  "the idle is announced (an operator can tell 'waiting' from 'wedged')" \
     || bad "the idle cycle is silent: $out"
 
-# 3. Positive control — the refusal must not have broken the actual loop. With a command set,
+# 3. Positive control: the refusal must not have broken the actual loop. With a command set,
 #    claude IS invoked, with exactly that prompt. Without this, tests 1-2 would pass on a
 #    permanently broken autopilot.
 out="$(run_autopilot 20 CLAUDE_AUTOPILOT_CMD=/build-the-thing CLAUDE_AUTOPILOT_MAX_RUNS=1 CLAUDE_AUTOPILOT_INTERVAL=0)"
 [[ "$(invocations)" == "1" ]] \
-    && ok  "CLAUDE_AUTOPILOT_CMD set → claude is invoked exactly once (MAX_RUNS=1) — the loop still works" \
+    && ok  "CLAUDE_AUTOPILOT_CMD set → claude is invoked exactly once (MAX_RUNS=1): the loop still works" \
     || bad "with a command set, claude was invoked $(invocations) times (expected 1): $out"
 grep -q -- '-p /build-the-thing' "$APD/claude-invocations" \
     && ok  "the prompt passed to claude is CLAUDE_AUTOPILOT_CMD verbatim" \
     || bad "claude got the wrong prompt: $(cat "$APD/claude-invocations")"
 
 echo
-echo "== CC-BINS: a zero-turn 'Unknown command' is a FAILURE, not a healthy \$0 run =="
+echo "== a zero-turn 'Unknown command' is a FAILURE, not a healthy \$0 run =="
 
 # THE TRAP, verified by hand against the then-pinned CLI (2.1.207):
 #   $ claude -p "/typo" --output-format json ; echo $?
 #   {"subtype":"success","is_error":false,"num_turns":0,"result":"Unknown command: /typo",
 #    "total_cost_usd":0}
 #   0
-# Exit 0 and is_error:false — so the autopilot's success check scored it as a GOOD run. Left
+# Exit 0 and is_error:false, so the autopilot's success check scored it as a GOOD run. Left
 # unguarded, a typo'd CLAUDE_AUTOPILOT_CMD gives you a container that logs a healthy "$0 run"
 # every interval forever and does nothing, and a queued task filed to done/ though it never
 # ran. This stub reproduces that exact response shape.
@@ -440,14 +440,14 @@ run_autopilot_unk() {  # same harness, but with the unknown-command stub
 }
 
 # 1. No queue: it must STOP (drop to a shell), not spin forever pretending to work.
-#    MAX_RUNS is 0 (unlimited) and INTERVAL 1 — an unguarded loop would run many times in 6s.
+#    MAX_RUNS is 0 (unlimited) and INTERVAL 1: an unguarded loop would run many times in 6s.
 out="$(run_autopilot_unk 6 CLAUDE_AUTOPILOT_CMD=/typo CLAUDE_AUTOPILOT_INTERVAL=1)"
 [[ "$out" == *"nothing ran"* && "$out" == *"Unknown command: /typo"* ]] \
     && ok  "a zero-turn 'Unknown command' is reported as a failure, quoting what claude said" \
-    || bad "the unknown-command no-op was NOT flagged — the loop counted it as a healthy run: $out"
+    || bad "the unknown-command no-op was NOT flagged: the loop counted it as a healthy run: $out"
 [[ "$(invocations)" == "1" ]] \
     && ok  "it stops after the first unknown-command run (did not spin: 1 invocation, not many)" \
-    || bad "the loop kept firing an unknown command ($(invocations)x in 6s) — the silent-green no-op is back"
+    || bad "the loop kept firing an unknown command ($(invocations)x in 6s): the silent-green no-op is back"
 [[ "$out" == *"Dropping to a shell"* ]] \
     && ok  "with no queue to fall back on, it drops to a shell (the reason stays on the pane)" \
     || bad "it neither ran nor stopped visibly: $out"
@@ -461,7 +461,7 @@ Q="$APD/uhome/.claude/autopilot-queue"
 if [[ -z "$(ls -A "$Q/done" 2>/dev/null)" ]] && [[ -n "$(ls -A "$Q/failed" 2>/dev/null)" ]]; then
     ok  "a queued task that ran NOTHING is filed under failed/, never done/"
 else
-    bad "queued unknown-command task was filed as DONE (done/: $(ls -A "$Q/done" 2>/dev/null), failed/: $(ls -A "$Q/failed" 2>/dev/null)) — unrun work marked complete"
+    bad "queued unknown-command task was filed as DONE (done/: $(ls -A "$Q/done" 2>/dev/null), failed/: $(ls -A "$Q/failed" 2>/dev/null)), unrun work marked complete"
 fi
 
 # 3. A broken CLAUDE_AUTOPILOT_CMD *fallback* must not kill a working queue consumer: drop the
@@ -477,11 +477,11 @@ out="$(run_autopilot_unk 6 CLAUDE_AUTOPILOT_QUEUE=1 CLAUDE_AUTOPILOT_CMD=/typo \
     || bad "the bogus fallback kept firing ($(invocations)x) instead of being disabled"
 
 echo
-echo "== CC-BINS: the outcome checks FAIL CLOSED — stderr can't be merged into the JSON =="
+echo "== the outcome checks FAIL CLOSED: stderr can't be merged into the JSON =="
 
 # THE FAIL-OPEN this closes. The real pinned CLI writes to STDERR when stdin is an open pipe
 # with no data (verified: 157 bytes, "Warning: no stdin data received in 3s..."). The loop used
-# to run `claude ... >"$out" 2>&1`, so that line landed in $out AHEAD of the JSON — $out was
+# to run `claude ... >"$out" 2>&1`, so that line landed in $out AHEAD of the JSON: $out was
 # then unparseable, EVERY jq read returned empty, `.is_error` read empty rather than "true",
 # the zero-turn check read empty, and the run scored as a SUCCESS. A poison queued task went
 # to done/. Any stderr line at all (deprecation notice, update nag, token refresh) does this.
@@ -497,7 +497,7 @@ EOF
 chmod +x "$APD/errbin/claude"
 
 # A queued poison task, with the CLI also writing to stderr. It must STILL be caught and filed
-# under failed/ — this is the exact case that silently landed in done/ before.
+# under failed/: this is the exact case that silently landed in done/ before.
 rm -rf "$APD/ehome"; mkdir -p "$APD/ehome/.claude/autopilot-queue/pending"
 printf '/typo' > "$APD/ehome/.claude/autopilot-queue/pending/001-task"
 out="$( : > "$APD/claude-invocations"
@@ -506,9 +506,9 @@ out="$( : > "$APD/claude-invocations"
             bash "$AP" </dev/null 2>&1 || true )"
 E="$APD/ehome/.claude/autopilot-queue"
 if [[ -z "$(ls -A "$E/done" 2>/dev/null)" ]] && [[ -n "$(ls -A "$E/failed" 2>/dev/null)" ]]; then
-    ok  "stderr on the CLI does NOT blind the checks — the poison task still lands in failed/, not done/"
+    ok  "stderr on the CLI does NOT blind the checks: the poison task still lands in failed/, not done/"
 else
-    bad "FAIL-OPEN: with stderr present the run scored as success (done/: $(ls -A "$E/done" 2>/dev/null)) — unrun work marked complete"
+    bad "FAIL-OPEN: with stderr present the run scored as success (done/: $(ls -A "$E/done" 2>/dev/null)), unrun work marked complete"
 fi
 [[ "$out" == *"Unknown command: /typo"* ]] \
     && ok  "the unknown-command result is still detected when the CLI also writes to stderr" \
@@ -541,7 +541,7 @@ fi
     || bad "the unparseable log was not reported: $out"
 
 echo
-echo "== CC-BINS: ANY zero-turn run is a no-op — not just the 'Unknown command' typo =="
+echo "== ANY zero-turn run is a no-op, not just the 'Unknown command' typo =="
 
 # The predicate is `num_turns == 0` ALONE. It must NOT be narrowed to results whose text starts
 # with "Unknown command:", because on the then-pinned CLI (2.1.207) EVERY slash command that exists
@@ -550,7 +550,7 @@ echo "== CC-BINS: ANY zero-turn run is a no-op — not just the 'Unknown command
 #   /cost    → result:"You are currently using your subscription…"
 #   /compact → result:""   ← no message at all
 #   /clear   → result:""
-# A string-matching guard files all of those to done/. Zero turns is zero work — full stop. These
+# A string-matching guard files all of those to done/. Zero turns is zero work: full stop. These
 # stubs reproduce the two shapes a string check would miss (a non-matching message, and none).
 zero_turn_stub() {  # zero_turn_stub <dir> <result-text>
     mkdir -p "$APD/$1"
@@ -584,14 +584,14 @@ task_lands_in() {  # task_lands_in <stubdir> <homedir>
 zero_turn_stub helpbin "/help isn't available in this environment."
 [[ "$(task_lands_in helpbin hlhome)" == "failed" ]] \
     && ok  "a zero-turn run with a NON-'Unknown command' message (/help) is a failure, not done/" \
-    || bad "FAIL-OPEN: a /help-shaped zero-turn no-op was filed as DONE — the guard only catches typos"
+    || bad "FAIL-OPEN: a /help-shaped zero-turn no-op was filed as DONE, the guard only catches typos"
 
 zero_turn_stub quietbin ""
 [[ "$(task_lands_in quietbin qthome)" == "failed" ]] \
     && ok  "a zero-turn run with NO message at all (/compact, /clear) is a failure, not done/" \
-    || bad "FAIL-OPEN: a silent zero-turn no-op was filed as DONE — nothing ran and nothing was said"
+    || bad "FAIL-OPEN: a silent zero-turn no-op was filed as DONE, nothing ran and nothing was said"
 
-# The other half of the rule: a run that DID invoke the model is a success, whatever it says —
+# The other half of the rule: a run that DID invoke the model is a success, whatever it says,
 # including one whose text happens to discuss an unknown command (num_turns >= 1 protects it,
 # which is why the string condition was never needed).
 zero_turn_stub_multiturn() {
@@ -610,15 +610,15 @@ zero_turn_stub_multiturn
     || bad "false positive: a genuine multi-turn run was failed because of its result text"
 
 echo
-echo "== CC-BINS: the check validates JSON *shape*, not just syntax (CLAUDE_EXTRA_ARGS=--verbose) =="
+echo "== the check validates JSON *shape*, not just syntax (CLAUDE_EXTRA_ARGS=--verbose) =="
 
 # THE SAME FAIL-OPEN, ONE LAYER UP. CLAUDE_EXTRA_ARGS is a documented, first-class tunable
 # (.env.example, README, `claude-launch --extra-args`). Adding `--verbose` makes the pinned CLI
-# emit a top-level ARRAY of stream messages rather than one result object — verified against
+# emit a top-level ARRAY of stream messages rather than one result object: verified against
 # the then-pinned 2.1.207. An array is VALID JSON, so a syntax-only check (`jq -e .`) passes it; then every field
 # read against an array returns empty, is_error reads "" (not "true") and num_turns reads ""
 # (not "0"), and BOTH guards silently disengage. And `--verbose` is exactly the flag an operator
-# reaches for to ask "why is my autopilot doing nothing?" — so the debugging flag would recreate
+# reaches for to ask "why is my autopilot doing nothing?", so the debugging flag would recreate
 # the silence. The loop must reduce either shape to the result object. These stubs reproduce the
 # real array shape (system/assistant/result elements, result LAST).
 mkdir -p "$APD/arrbin"
@@ -637,9 +637,9 @@ out="$( : > "$APD/claude-invocations"
             bash "$AP" </dev/null 2>&1 || true )"
 A="$APD/ahome/.claude/autopilot-queue"
 if [[ -z "$(ls -A "$A/done" 2>/dev/null)" ]] && [[ -n "$(ls -A "$A/failed" 2>/dev/null)" ]]; then
-    ok  "the --verbose ARRAY shape is still read — poison task lands in failed/, not done/"
+    ok  "the --verbose ARRAY shape is still read: poison task lands in failed/, not done/"
 else
-    bad "FAIL-OPEN: a top-level array (valid JSON, wrong shape) disengaged the guards — task filed as done"
+    bad "FAIL-OPEN: a top-level array (valid JSON, wrong shape) disengaged the guards, task filed as done"
 fi
 
 # POSITIVE CONTROL: the array shape must still be read as a SUCCESS when the run genuinely
@@ -662,7 +662,7 @@ K="$APD/aokhome/.claude/autopilot-queue"
 if [[ -n "$(ls -A "$K/done" 2>/dev/null)" ]] && [[ -z "$(ls -A "$K/failed" 2>/dev/null)" ]]; then
     ok  "a genuinely successful --verbose run is still scored SUCCESS (fail-closed ≠ '--verbose is broken')"
 else
-    bad "a good run under --verbose was wrongly failed — the shape check false-positives"
+    bad "a good run under --verbose was wrongly failed: the shape check false-positives"
 fi
 [[ "$out" == *"did the work"* ]] \
     && ok  "the result text is read out of the array's result element" \
@@ -685,7 +685,7 @@ out="$( : > "$APD/claude-invocations"
             bash "$AP" </dev/null 2>&1 || true )"
 M="$APD/mthome/.claude/autopilot-queue"
 if [[ -z "$(ls -A "$M/done" 2>/dev/null)" ]] && [[ -n "$(ls -A "$M/failed" 2>/dev/null)" ]]; then
-    ok  "an EMPTY run log fails closed (task → failed/) — 'jq -e .' exits 0 on empty; -s catches it"
+    ok  "an EMPTY run log fails closed (task → failed/): 'jq -e .' exits 0 on empty; -s catches it"
 else
     bad "FAIL-OPEN: an empty run log scored as SUCCESS (done/: $(ls -A "$M/done" 2>/dev/null))"
 fi
@@ -696,9 +696,9 @@ echo "== credential reconcile guard: creds_have_token refuses a tokenless (logge
 # 2026-07-15 incident: a claude.ai refresh-token expiry made Claude Code rewrite
 # .credentials.json with EMPTY token fields (a logout). The reconcile loop took
 # that freshly-mtimed, tokenless file as "newest wins" and published it to the
-# shared /auth master and every container — one expiry became a fleet-wide
+# shared /auth master and every container: one expiry became a fleet-wide
 # "Login expired" blackout. The guard (creds_have_token) is EXTRACTED from
-# entrypoint.sh here — not mirrored — so this test cannot silently drift from the
+# entrypoint.sh here, not mirrored, so this test cannot silently drift from the
 # shipped predicate.
 ENTRYPOINT="$REPO_ROOT/entrypoint.sh"
 CREDS_FN="$(awk '/^creds_have_token\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$ENTRYPOINT")"
@@ -710,12 +710,12 @@ if [[ -n "$CREDS_FN" ]] && eval "$CREDS_FN" 2>/dev/null; then
     : > "$CD/blank.json"
     creds_have_token "$CD/good.json"    && ok  "a real access token is accepted"                  || bad "real token wrongly rejected"
     creds_have_token "$CD/spaced.json"  && ok  "whitespace after the colon still parses"          || bad "spaced token wrongly rejected"
-    ! creds_have_token "$CD/empty.json" && ok  "a logged-out (empty-token) credential is refused"  || bad "POISON: empty-token credential accepted — a logout would spread fleet-wide"
+    ! creds_have_token "$CD/empty.json" && ok  "a logged-out (empty-token) credential is refused"  || bad "POISON: empty-token credential accepted, a logout would spread fleet-wide"
     ! creds_have_token "$CD/blank.json" && ok  "an empty file is refused"                           || bad "empty file accepted"
     ! creds_have_token "$CD/missing"    && ok  "a missing file is refused"                          || bad "missing file accepted"
     rm -rf "$CD"
 else
-    bad "could not extract creds_have_token() from entrypoint.sh — the guard test is a no-op"
+    bad "could not extract creds_have_token() from entrypoint.sh: the guard test is a no-op"
 fi
 
 # Structural tripwire: reconcile_creds must gate propagation on creds_have_token and
@@ -725,7 +725,7 @@ RECON_FN="$(awk '/^reconcile_creds\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$ENTRY
 if [[ -n "$RECON_FN" ]] && grep -q 'creds_have_token' <<<"$RECON_FN" && ! grep -q 'mv -f' <<<"$RECON_FN"; then
     ok  "reconcile_creds gates every propagation on creds_have_token (no unguarded copy)"
 else
-    bad "reconcile_creds may copy without a token guard — a tokenless credential could spread"
+    bad "reconcile_creds may copy without a token guard: a tokenless credential could spread"
 fi
 
 echo

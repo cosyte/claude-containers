@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# claude-usage-watchdog — rotate to a different pre-authenticated Claude.ai
+# claude-usage-watchdog: rotate to a different pre-authenticated Claude.ai
 # account when the ACTIVE one hits its usage limit mid-session, resuming the
 # same conversation. Only runs when CLAUDE_ACCOUNTS is set (see
 # claude-launch --accounts / claude-account-login); works with any account
-# count >= 1 — a single account just gets auto-resume once its usage window
+# count >= 1: a single account just gets auto-resume once its usage window
 # resets, since round-robin degenerates to "wait for my own cooldown, then
 # use me again."
 #
-# Detection: tmux capture-pane, NOT the RC debug log — claude-session's debug
+# Detection: tmux capture-pane, NOT the RC debug log, claude-session's debug
 # filter is hardcoded to the `bridge` category, so that log structurally
 # cannot contain usage-limit text; capture-pane also shows exactly what a
-# human would see. THE DETECTION PATTERN BELOW IS AN UNVERIFIED PLACEHOLDER —
+# human would see. THE DETECTION PATTERN BELOW IS AN UNVERIFIED PLACEHOLDER:
 # see usage_state() for what needs confirming before this runs unattended
 # against real accounts.
 #
@@ -18,18 +18,18 @@
 # querying). The cooldown prefers a real reset time parsed out of the CLI's
 # own usage-limit message (same idea as claude-autopilot's
 # seconds_until_reset(), ported from JSON to plain pane text) and only falls
-# back to a flat ~5h assumption when no reset hint is found — Claude's usage
+# back to a flat ~5h assumption when no reset hint is found: Claude's usage
 # window is rolling from an account's first message, not from the hit, so a
 # blind +5h would leave a partially-used account idle longer than necessary.
 #
 # Credential swap: this script runs as the unprivileged `claude` user and
 # cannot itself read another account's locked-down master
 # (/auth-accounts/<name> is root:700, same lockdown as the single-account
-# /auth master) — it requests the swap from entrypoint.sh's
+# /auth master): it requests the swap from entrypoint.sh's
 # account_switch_listener() instead, which runs as root.
 #
 # Sources claude-rc-watchdog for pane_idle/dismiss_resume_menu/is_resume_menu/
-# with_respawn_lock/_kill_and_respawn_pane — both scripts can respawn the same
+# with_respawn_lock/_kill_and_respawn_pane: both scripts can respawn the same
 # claude:main pane, and with_respawn_lock's mkdir-based mutex is what keeps
 # them from ever doing so at the same instant.
 #
@@ -40,7 +40,7 @@ set -uo pipefail
 # shellcheck disable=SC1091
 source /usr/local/bin/claude-rc-watchdog
 
-# Override the sourced say()/watch_loop() — claude-rc-watchdog's own prefix and
+# Override the sourced say()/watch_loop(): claude-rc-watchdog's own prefix and
 # main loop aren't this script's; everything else it defines (pane_idle,
 # dismiss_resume_menu, is_resume_menu, with_respawn_lock, _kill_and_respawn_pane,
 # WINDOW, SESSION) is reused as-is.
@@ -57,7 +57,7 @@ COOLDOWN_DIR="$CLAUDE_CONFIG_DIR/account-state"
 # Prints: limited | ok | unknown
 #
 # Pattern sourced from Anthropic's own error reference (code.claude.com/docs/en/errors)
-# plus corroborating GitHub issues, not a guess — but the docs themselves note
+# plus corroborating GitHub issues, not a guess, but the docs themselves note
 # punctuation (a middle-dot separator vs. a period) has varied across CLI
 # versions, so spot-check this against the actual pinned CLAUDE_CODE_VERSION
 # (Dockerfile) with `tmux capture-pane -p -t claude:main -S -200` on a
@@ -65,13 +65,13 @@ COOLDOWN_DIR="$CLAUDE_CONFIG_DIR/account-state"
 # Confirmed forms (any of these ends a message-send):
 #   "You've hit your session limit · resets 3:45pm"
 #   "You've hit your weekly limit · resets Mon 12:00am"
-#   "You've hit your Opus limit · resets 3:45pm"          (Opus-specific, not account-wide —
+#   "You've hit your Opus limit · resets 3:45pm"          (Opus-specific, not account-wide,
 #                                                           still worth rotating: another
 #                                                           account may have Opus headroom)
 #   "Claude usage limit reached. Your limit will reset at 3pm (America/Santiago)."  (older CLI)
 # A wrong pattern either never fires (silent no-op, safe) or false-positives on
 # ordinary text mentioning "usage limit" (the agent discussing an HTTP 429 in
-# code, say) and rotates for no reason — hence anchoring on "you've hit your"/
+# code, say) and rotates for no reason: hence anchoring on "you've hit your"/
 # "usage limit reached" rather than a bare "usage limit" substring match.
 usage_state() {
     local pane
@@ -86,13 +86,13 @@ usage_state() {
 # Best-effort: pull a "resets 3:45pm"/"reset at 23:00" hint out of the
 # usage-limit banner and turn it into seconds-from-now. Same regex
 # claude-autopilot's seconds_until_reset() uses for its human-string
-# fallback, ported to operate on a string (pane text) instead of a log file —
+# fallback, ported to operate on a string (pane text) instead of a log file:
 # the interactive banner is plain terminal text, not the JSON autopilot's -p
 # path gets. Echoes seconds (>0) on success; returns 1 with nothing echoed if
 # no usable hint is found (caller falls back to RESET_WINDOW).
 #
-# Deliberately bails out (falls back to RESET_WINDOW) on a WEEKLY reset —
-# "resets Mon 12:00am" — rather than guessing: parsing just the clock and
+# Deliberately bails out (falls back to RESET_WINDOW) on a WEEKLY reset,
+# "resets Mon 12:00am", rather than guessing: parsing just the clock and
 # dropping the day name would compute "today/tomorrow at 12am" when the real
 # reset could be days out, which is worse than the flat fallback, not better.
 reset_seconds_from_pane() {
@@ -109,7 +109,7 @@ reset_seconds_from_pane() {
     echo "$secs"
 }
 
-# Stamp <account>'s cooldown ONLY if it isn't already cooling down — called
+# Stamp <account>'s cooldown ONLY if it isn't already cooling down: called
 # every tick while a rotation is pending, so this must be idempotent within a
 # single usage-limit episode. Without the guard, re-stamping "now + fallback"
 # on every tick would push a fallback-window cooldown later forever as long
@@ -127,12 +127,12 @@ mark_cooldown_if_new() {
         say "Account '$acct' hit its usage limit; real reset in ${cooldown_secs}s (parsed from the CLI's own message)."
     else
         cooldown_secs="$RESET_WINDOW"
-        say "Account '$acct' hit its usage limit; no reset time found in the message — assuming ${cooldown_secs}s (~5h)."
+        say "Account '$acct' hit its usage limit; no reset time found in the message: assuming ${cooldown_secs}s (~5h)."
     fi
     echo "$(( now + cooldown_secs ))" > "$cd_file"
 }
 
-# Ordered candidates (round-robin from <current>, cooldown-eligible only —
+# Ordered candidates (round-robin from <current>, cooldown-eligible only,
 # one per line). Deliberately does NOT check token validity here: this script
 # runs unprivileged and cannot read a locked-down /auth-accounts/<name>
 # master to check. request_account_switch()/account_switch_listener() (root)
@@ -172,7 +172,7 @@ request_account_switch() {
 
 # Mark the current account cooling down, wait for the pane to go idle (never
 # interrupt an in-flight turn), then try each round-robin candidate in order
-# until one actually accepts the switch — a candidate the listener rejects
+# until one actually accepts the switch: a candidate the listener rejects
 # (no valid token) gets a short cooldown of its own so it isn't retried every
 # cycle, and the next candidate is tried within the same pass.
 rotate_account() {
@@ -181,16 +181,16 @@ rotate_account() {
     mark_cooldown_if_new "$current"
 
     candidates="$(next_account "$current")"
-    [[ -n "$candidates" ]] || { say "No account eligible yet (all cooling down) — will retry."; return 1; }
+    [[ -n "$candidates" ]] || { say "No account eligible yet (all cooling down), will retry."; return 1; }
 
     say "Waiting for the pane to go idle before rotating…"
     while ! pane_idle; do
-        [[ "$(usage_state)" == limited ]] || { say "Recovered before rotation — standing down."; return 0; }
+        [[ "$(usage_state)" == limited ]] || { say "Recovered before rotation, standing down."; return 0; }
     done
-    [[ "$(usage_state)" == limited ]] || { say "Recovered before rotation — standing down."; return 0; }
+    [[ "$(usage_state)" == limited ]] || { say "Recovered before rotation, standing down."; return 0; }
 
     sid="$(/usr/local/bin/claude-session-id 2>/dev/null)" || sid=""
-    [[ -n "$sid" ]] || say "WARNING: could not determine the session id — falling back to --continue."
+    [[ -n "$sid" ]] || say "WARNING: could not determine the session id, falling back to --continue."
 
     while IFS= read -r target; do
         [[ -n "$target" ]] || continue
@@ -206,37 +206,37 @@ rotate_account() {
                 dismiss_resume_menu
                 return 0
             else
-                say "WARNING: credentials switched to '$target' but the respawn failed (lock busy, or 'tmux respawn-pane' failed) — will retry next cycle."
+                say "WARNING: credentials switched to '$target' but the respawn failed (lock busy, or 'tmux respawn-pane' failed), will retry next cycle."
                 return 1
             fi
         else
-            say "Account '$target' has no valid token right now — short cooldown, trying the next candidate."
+            say "Account '$target' has no valid token right now: short cooldown, trying the next candidate."
             echo "$(( $(date +%s) + NO_TOKEN_COOLDOWN ))" > "$COOLDOWN_DIR/$target.cooldown-until"
         fi
     done <<< "$candidates"
 
-    say "No candidate account has a valid token right now — will retry."
+    say "No candidate account has a valid token right now, will retry."
     return 1
 }
 
 watch_loop() {
     if [[ -z "${CLAUDE_ACCOUNTS:-}" ]]; then
-        say "CLAUDE_ACCOUNTS is unset — nothing to watch. Exiting."
+        say "CLAUDE_ACCOUNTS is unset: nothing to watch. Exiting."
         return 0
     fi
     mkdir -p "$COOLDOWN_DIR"
 
     local restarts=0 last_attempt=0 now current
 
-    say "started — watching pane ${WINDOW} for a usage-limit hit (accounts: ${CLAUDE_ACCOUNTS}, check every ${CHECK_INTERVAL}s)"
+    say "started: watching pane ${WINDOW} for a usage-limit hit (accounts: ${CLAUDE_ACCOUNTS}, check every ${CHECK_INTERVAL}s)"
 
     while sleep "$CHECK_INTERVAL"; do
-        tmux has-session -t "$SESSION" >/dev/null 2>&1 || { say "tmux session gone — exiting."; break; }
+        tmux has-session -t "$SESSION" >/dev/null 2>&1 || { say "tmux session gone: exiting."; break; }
 
         now="$(date +%s)"
         if [[ "$(usage_state)" != limited ]]; then
             if (( restarts > 0 )) && (( now - last_attempt > ATTEMPT_COOLDOWN )); then
-                say "No usage-limit hit since the last rotation — resetting restart counter."
+                say "No usage-limit hit since the last rotation: resetting restart counter."
                 restarts=0
             fi
             continue
@@ -244,12 +244,12 @@ watch_loop() {
 
         (( now - last_attempt < ATTEMPT_COOLDOWN )) && continue
         if (( restarts >= MAX_RESTARTS )); then
-            say "Rotated ${restarts} times without staying clear of the limit — giving up (investigate manually)."
+            say "Rotated ${restarts} times without staying clear of the limit: giving up (investigate manually)."
             break
         fi
 
         current="$(cat "$CLAUDE_CONFIG_DIR/.active-account" 2>/dev/null)"
-        [[ -n "$current" ]] || { say "WARNING: no active-account state found — cannot rotate."; continue; }
+        [[ -n "$current" ]] || { say "WARNING: no active-account state found, cannot rotate."; continue; }
 
         last_attempt="$(date +%s)"
         rotate_account "$current" && restarts=$((restarts + 1))

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# claude-disk-verify — prove disk-safety hygiene: docker-free, no root, no daemon needed.
+# claude-disk-verify: prove disk-safety hygiene: docker-free, no root, no daemon needed.
 #
-# SC-5 removed the on-host proof this script used to run against a real Sysbox
+# The substrate strip removed the on-host proof this script used to run against a real Sysbox
 # nested-worker controller (the broker's per-launch disk-floor refusal, N sequential
-# worker cycles, worker-image reuse) — that whole substrate is retired; see
+# worker cycles, worker-image reuse), that whole substrate is retired; see
 # docs/legacy-sysbox-broker.md. What's left is the surviving, non-broker disk-hygiene
 # surface, all of it docker-free:
 #
 #   1. disk_free_mib parses a real `df` correctly, and CLAUDE_DISK_FREE_MIB_OVERRIDE
 #      forces the value loudly;
-#   2. claude-disk-gc's plan is exactly `system prune -f` + `builder prune -f` — never
+#   2. claude-disk-gc's plan is exactly `system prune -f` + `builder prune -f`, never
 #      `-a`, never `--volumes`;
-#   3. the PKG-3 shared-cache trim is safe: cache_gc_plan reclaims only re-fetchable
+#   3. the shared-cache trim is safe: cache_gc_plan reclaims only re-fetchable
 #      download/registry caches (never an installs/shims/bin dir or bare /cache), and the
 #      idle guard gates on the cache VOLUME (covers every cache-mounting container, not
 #      just a subset).
@@ -24,7 +24,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 for a in "$@"; do
-    die "unknown flag '$a' (usage: claude-disk-verify — no flags; everything here is docker-free)"
+    die "unknown flag '$a' (usage: claude-disk-verify, no flags; everything here is docker-free)"
 done
 
 PASS=0 FAIL=0
@@ -35,7 +35,7 @@ TMPD="$(mktemp -d)"
 trap 'rm -rf "$TMPD"' EXIT
 
 # --- phase 0: disk_free_mib parsing + override seam -------------------------------------
-info "phase 0 — disk_free_mib: real df parsing + the override seam"
+info "phase 0: disk_free_mib: real df parsing + the override seam"
 
 got="$(disk_free_mib "$TMPD" 2>/dev/null || echo FAILED)"
 if [[ "$got" =~ ^[0-9]+$ ]]; then
@@ -50,14 +50,14 @@ else
     badp "the override seam must force disk_free_mib's return (got: ${got2:-nothing})"
 fi
 
-if disk_free_mib "/no/such/path/CC-5-verify" >/dev/null 2>&1; then
+if disk_free_mib "/no/such/path/disk-verify" >/dev/null 2>&1; then
     badp "disk_free_mib must fail (not silently succeed) on a nonexistent path"
 else
     okp "disk_free_mib fails closed on a nonexistent path"
 fi
 
 # --- phase 1: disk_gc_plan is exactly the two safe prunes -------------------------------
-info "phase 1 — disk_gc_plan: exactly system+builder prune -f, never -a/--volumes"
+info "phase 1: disk_gc_plan: exactly system+builder prune -f, never -a/--volumes"
 
 plan="$(bash -c 'source "'"$CLAUDE_DOCKER_ROOT"'/bin/claude-disk-gc" 2>/dev/null; disk_gc_plan')"
 if grep -q "system prune -f" <<<"$plan" && grep -q "builder prune -f" <<<"$plan"; then
@@ -71,8 +71,8 @@ else
     okp "the gc plan never includes -a/--all/--volumes"
 fi
 
-# --- phase 1b: the PKG-3 shared-cache trim is safe, re-fetchable-only, idle-gated -------
-info "phase 1b — cache_gc_plan: re-fetchable caches only; the idle guard gates on the cache volume"
+# --- phase 1b: the shared-cache trim is safe, re-fetchable-only, idle-gated -------
+info "phase 1b: cache_gc_plan: re-fetchable caches only; the idle guard gates on the cache volume"
 
 cplan="$(bash -c 'source "'"$CLAUDE_DOCKER_ROOT"'/bin/claude-disk-gc" 2>/dev/null; cache_gc_plan')"
 if grep -q '/cache/mise/downloads' <<<"$cplan" && grep -q '/cache/npm/_cacache' <<<"$cplan"; then
@@ -81,7 +81,7 @@ else
     badp "the cache trim plan is missing an expected re-fetchable cache (got: $cplan)"
 fi
 # CRITICAL: the trim must NEVER remove an installed toolchain, a shims dir, a bin dir, or
-# the whole /cache — that would un-provision tools or wipe the shared store.
+# the whole /cache, that would un-provision tools or wipe the shared store.
 if grep -qE '(^/cache$|/installs(/|$)|/shims(/|$)|/cargo/bin|/go/bin)' <<<"$cplan"; then
     badp "the cache trim plan includes an installs/shims/bin/bare-/cache path (would un-provision tools)"
 else
@@ -92,11 +92,11 @@ fi
 if grep -Eq 'ps -q --filter volume=' "$CLAUDE_DOCKER_ROOT/bin/claude-disk-gc"; then
     okp "the cache trim defers on any container using the cache volume"
 else
-    badp "the cache trim idle guard does not gate on --filter volume=<vol> — a launch/compose mid-install could be trimmed"
+    badp "the cache trim idle guard does not gate on --filter volume=<vol>: a launch/compose mid-install could be trimmed"
 fi
 
 # --- summary ------------------------------------------------------------------------------
 echo
 echo "== $PASS passed, $FAIL failed =="
 (( FAIL == 0 )) || { err "disk-safety NOT proven"; exit 1; }
-ok "disk-safety proven: disk_free_mib parsing + override, disk_gc_plan safety, PKG-3 cache-trim safety"
+ok "disk-safety proven: disk_free_mib parsing + override, disk_gc_plan safety, shared-cache-trim safety"

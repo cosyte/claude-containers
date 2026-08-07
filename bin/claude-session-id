@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# claude-session-id — print the current session's transcript UUID, or exit 1
+# claude-session-id: print the current session's transcript UUID, or exit 1
 # if none is found.
 #
 # Every container in this repo uses a fixed WORKSPACE=/workspace
 # (entrypoint.sh), so there's exactly one project transcript directory per
-# container — this sidesteps needing to know Claude Code's own path-
+# container: this sidesteps needing to know Claude Code's own path-
 # sanitization scheme by just globbing every project dir and taking the
 # newest *.jsonl file by mtime. Used by bin/claude-usage-watchdog to pass
 # `claude-session --resume <id>` across an account-rotation respawn.

@@ -1,4 +1,4 @@
-# Claude Code container — build / auth / run helpers.
+# Claude Code container: build / auth / run helpers.
 # Config comes from .env (if present) then the environment.
 
 SHELL := /bin/bash
@@ -85,7 +85,7 @@ login: ## One-time OAuth login; persists creds to the claude-auth volume
 	  $(CLAUDE_IMAGE)
 	@echo "Login complete. Credentials are in volume '$(AUTH_VOLUME)'."
 
-accounts-login: ## make accounts-login ARGS="work2" — OAuth login for a NAMED account (for --accounts rotation)
+accounts-login: ## make accounts-login ARGS="work2", OAuth login for a NAMED account (for --accounts rotation)
 	@./bin/claude-account-login $(ARGS)
 accounts-list: ## List every named account (claude-auth-*) and its token/email status
 	@./bin/claude-account-list
@@ -95,7 +95,7 @@ launch: ## make launch ARGS="myproj --repo git@github.com:me/x.git"
 
 list:  ## List all claude-* containers
 	@./bin/claude-list
-attach: ## make attach ARGS="myproj" — attach to a container's tmux session
+attach: ## make attach ARGS="myproj", attach to a container's tmux session
 	@./bin/claude-attach $(ARGS)
 stop:  ## make stop ARGS="myproj"
 	@./bin/claude-stop $(ARGS)

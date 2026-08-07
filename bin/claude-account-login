@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claude-account-login <name> — one-time OAuth login for a NAMED account.
+# claude-account-login <name>: one-time OAuth login for a NAMED account.
 #
 # Identical to `make login`, just with a name-first interface instead of the
 # AUTH_VOLUME env override: it persists credentials to their own volume

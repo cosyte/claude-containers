@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# manifest-hardening-unit.sh — pure-static + function-level tests for the PKG-5
+# manifest-hardening-unit.sh: pure-static + function-level tests for the
 # reproducible-manifest + install-script hardening. NO docker, NO network, NO build.
 #
-# PKG-5 bakes two supply-chain hardenings for AGENT-initiated installs — `ignore-scripts=true`
-# in the claude user's ~/.npmrc and mise `lockfile=true` in the global mise config — plus an
+# The manifest hardening bakes two supply-chain hardenings for AGENT-initiated installs: `ignore-scripts=true`
+# in the claude user's ~/.npmrc and mise `lockfile=true` in the global mise config, plus an
 # advisory `claude-deps-check` linter that flags unpinned/`latest` manifest specs. The LIVE
-# proof (a pinned mise.lock reinstalls identical versions offline from the PKG-3 cache with
+# proof (a pinned mise.lock reinstalls identical versions offline from the shared cache with
 # zero registry calls; a postinstall-script fixture does NOT execute under ignore-scripts)
 # needs a real image build and is the on-host gate. Here we prove the WIRING is present and
 # correctly scoped:
@@ -31,21 +31,21 @@ okp()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
 badp() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 TMPD="$(mktemp -d)"; trap 'rm -rf "$TMPD"' EXIT
 
-echo "PKG-5 reproducible manifest + install-script hardening"
+echo "reproducible manifest + install-script hardening"
 
 # ============================================================================
 echo "== Dockerfile: ignore-scripts + lockfile baked into the USER config (build untouched) =="
 # ============================================================================
-# ignore-scripts=true goes into the claude user's ~/.npmrc — so an AGENT install is hardened,
+# ignore-scripts=true goes into the claude user's ~/.npmrc, so an AGENT install is hardened,
 # but the root build-time `npm install -g` layers (which run as root, before this) are NOT.
 grep -Eq "printf 'ignore-scripts=true\\\\n' > /home/\\\$\{CLAUDE_USER\}/\.npmrc" "$DOCKERFILE" \
   && okp "ignore-scripts=true is written to the claude user's ~/.npmrc (agent installs hardened)" \
   || badp "ignore-scripts=true not baked into /home/\${CLAUDE_USER}/.npmrc"
 
-# It must NOT be in the ROOT/global npm config — that would break the build-time global installs
+# It must NOT be in the ROOT/global npm config, that would break the build-time global installs
 # (claude-code, pnpm, chrome-devtools-mcp) which legitimately run as root.
 if grep -Eq 'ignore-scripts=true' <<<"$(grep -E '/usr/local/etc/npmrc|/root/\.npmrc|npm config set ignore-scripts' "$DOCKERFILE")"; then
-  badp "ignore-scripts appears in a ROOT/global npm config — would break build-time global installs"
+  badp "ignore-scripts appears in a ROOT/global npm config: would break build-time global installs"
 else
   okp "ignore-scripts is NOT in the root/global npm config (build-time installs unaffected)"
 fi
@@ -68,9 +68,9 @@ grep -Eq 'chown -R \$\{CLAUDE_UID\}:\$\{CLAUDE_GID\} /home/\$\{CLAUDE_USER\}/\.n
   && okp "claude-deps-check is COPYed onto PATH and chmod +x" \
   || badp "claude-deps-check is not installed + made executable in the image"
 
-# The /workspace-only mise config trust (PKG-2) must NOT be widened by PKG-5.
+# The /workspace-only mise config trust must NOT be widened by it.
 grep -Eq '^\s*MISE_TRUSTED_CONFIG_PATHS=/workspace(\s|\\|$)' "$DOCKERFILE" \
-  && okp "MISE_TRUSTED_CONFIG_PATHS is still /workspace-only (PKG-5 did not widen config trust)" \
+  && okp "MISE_TRUSTED_CONFIG_PATHS is still /workspace-only (the hardening did not widen config trust)" \
   || badp "MISE_TRUSTED_CONFIG_PATHS is no longer exactly /workspace"
 
 # ============================================================================
@@ -80,8 +80,8 @@ STRICT=0
 for spec in latest lts stable "*" x "" "1.x" "1.X" ">=1.0.0" "1 - 2" "1.2.*" "npm:lodash@latest" "foo@x"; do
   if is_unpinned "$spec"; then okp "unpinned (default): '$spec'"; else badp "'$spec' should be unpinned (default)"; fi
 done
-# Exact pins — including PRERELEASE pins (hyphen with NO surrounding spaces): these are
-# reproducible and must NOT be flagged (the gate-refuter's MAJOR — a range glob was
+# Exact pins: including PRERELEASE pins (hyphen with NO surrounding spaces): these are
+# reproducible and must NOT be flagged (the gate-refuter's MAJOR, a range glob was
 # swallowing prerelease pins, wrongly refusing them under --strict).
 for spec in "1.2.3" "22" "20.10" "3.12.1" "1.2.3-alpha.1" "2.0.0-rc.0" "1.0.0-0" "1.2.3-beta" "npm:lodash@4.17.21" "1.2.3-alpha.x" "1.2.3+build.X"; do
   if is_unpinned "$spec"; then badp "'$spec' should be PINNED (default)"; else okp "pinned (default): '$spec'"; fi
@@ -130,18 +130,18 @@ out="$(run_dc --strict "$TMPD" 2>&1)"; rc=$?
   || badp "--strict did not refuse / flag the caret (rc=$rc, out='$out')"
 
 # regression (gate-refuter MAJOR): a manifest pinned to a PRERELEASE version must PASS
-# --strict — the enforcing mode must not refuse a legitimately-pinned prerelease.
+# --strict: the enforcing mode must not refuse a legitimately-pinned prerelease.
 printf '[tools]\nnode = "22.1.0"\n' > "$TMPD/mise.toml"
 printf '{"dependencies":{"pkg":"1.2.3-alpha.1","other":"2.0.0-rc.0"}}' > "$TMPD/package.json"
 out="$(run_dc --strict "$TMPD" 2>&1)"; rc=$?
 { [[ $rc -eq 0 ]] && grep -qi 'fully pinned' <<<"$out"; } \
-  && okp "--strict ACCEPTS exact prerelease pins (1.2.3-alpha.1 / 2.0.0-rc.0) — no false refusal" \
+  && okp "--strict ACCEPTS exact prerelease pins (1.2.3-alpha.1 / 2.0.0-rc.0): no false refusal" \
   || badp "--strict wrongly refused a prerelease-pinned manifest (rc=$rc, out='$out')"
 
 # fail-safe: no manifest → no-op exit 0
 out="$(run_dc "$(mktemp -d)" 2>&1)"; rc=$?
 { [[ $rc -eq 0 ]] && grep -qi 'nothing to check' <<<"$out"; } \
-  && okp "a dir with no manifest is a no-op (exit 0) — never blocks a session" \
+  && okp "a dir with no manifest is a no-op (exit 0), never blocks a session" \
   || badp "missing manifest did not no-op cleanly (rc=$rc, out='$out')"
 
 # fail-safe: malformed package.json → swallowed, exit 0 (not a crash)

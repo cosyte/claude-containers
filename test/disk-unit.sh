@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Unit tests for disk-hygiene logic — NO docker, NO sysbox, NO root.
+# Unit tests for disk-hygiene logic: NO docker, NO sysbox, NO root.
 #
-# SC-5 removed the broker's per-launch disk-floor refusal (broker_check_disk /
+# The substrate strip removed the broker's per-launch disk-floor refusal (broker_check_disk /
 # broker_check_disk_config, and the broker_process_request integration around it)
-# along with the nested-Sysbox worker-broker substrate it gated — see
+# along with the nested-Sysbox worker-broker substrate it gated: see
 # docs/legacy-sysbox-broker.md. What survives, and what this covers:
-#   1. disk_free_mib (bin/_common.sh)     — df parsing, fail-closed on garbage/missing path
-#   2. disk_gc_plan / disk_gc_once (bin/claude-disk-gc) — the plan is exactly the two safe
+#   1. disk_free_mib (bin/_common.sh): df parsing, fail-closed on garbage/missing path
+#   2. disk_gc_plan / disk_gc_once (bin/claude-disk-gc): the plan is exactly the two safe
 #      prunes (never -a/--volumes), and disk_gc_once is fail-safe on a docker error
 #
 # The one-command sanity re-run of this same logic is bin/claude-disk-verify.
@@ -16,7 +16,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # shellcheck disable=SC1091
 source "$REPO_ROOT/bin/_common.sh"
-# _common.sh sets -e; this harness counts failures instead of dying on the first one —
+# _common.sh sets -e; this harness counts failures instead of dying on the first one:
 # undo it, keep -u/pipefail.
 set +e
 
@@ -37,7 +37,7 @@ else
     bad "disk_free_mib must succeed with a numeric MiB value on a real path (rc=$rc, got='$got')"
 fi
 
-if disk_free_mib "/no/such/path/CC-5-disk-unit" >/dev/null 2>&1; then
+if disk_free_mib "/no/such/path/disk-unit" >/dev/null 2>&1; then
     bad "disk_free_mib must fail on a nonexistent path (fail closed, never read as free space)"
 else
     ok  "disk_free_mib fails closed on a nonexistent path"
@@ -131,13 +131,13 @@ else
     bad "the plan must include 'docker builder prune -f' (got: $plan)"
 fi
 if grep -qE -- ' -a\b| --all\b| --volumes\b' <<<"$plan"; then
-    bad "the plan must NEVER include -a/--all/--volumes — that could reach live worker data (got: $plan)"
+    bad "the plan must NEVER include -a/--all/--volumes, that could reach live worker data (got: $plan)"
 else
     ok  "the plan never includes -a/--all/--volumes"
 fi
 lines="$(grep -c . <<<"$plan")"
 if [[ "$lines" == 2 ]]; then
-    ok  "the plan is exactly two commands — nothing extra"
+    ok  "the plan is exactly two commands: nothing extra"
 else
     bad "expected exactly 2 plan lines, got $lines: $plan"
 fi
