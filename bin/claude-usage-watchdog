@@ -56,39 +56,50 @@ COOLDOWN_DIR="$CLAUDE_CONFIG_DIR/account-state"
 # True if the claude pane is currently showing a usage-limit message.
 # Prints: limited | ok | unknown
 #
-# PLACEHOLDER PATTERN — NOT YET VERIFIED. Nothing in this repo has captured
-# the real on-screen text Claude Code prints when an interactive session hits
-# its usage limit (grep -rE "rate limit|usage limit|429|capacity" bin/
-# entrypoint.sh is empty; claude-autopilot's equivalent only parses `-p
-# --output-format json` fields, not interactive terminal text). Confirm the
-# real string with `tmux capture-pane -p -t claude:main -S -200` against a
-# genuinely exhausted test account before relying on this in production — a
-# wrong pattern either never fires (silent no-op, safe) or worse,
-# false-positives on ordinary text mentioning "usage limit"/"rate limit" (the
-# agent discussing an HTTP 429 in code, for instance) and rotates for no
-# reason. Anchor to the CLI's actual banner formatting once known, not a loose
-# substring match.
+# Pattern sourced from Anthropic's own error reference (code.claude.com/docs/en/errors)
+# plus corroborating GitHub issues, not a guess — but the docs themselves note
+# punctuation (a middle-dot separator vs. a period) has varied across CLI
+# versions, so spot-check this against the actual pinned CLAUDE_CODE_VERSION
+# (Dockerfile) with `tmux capture-pane -p -t claude:main -S -200` on a
+# genuinely exhausted test account before trusting it fully unattended.
+# Confirmed forms (any of these ends a message-send):
+#   "You've hit your session limit · resets 3:45pm"
+#   "You've hit your weekly limit · resets Mon 12:00am"
+#   "You've hit your Opus limit · resets 3:45pm"          (Opus-specific, not account-wide —
+#                                                           still worth rotating: another
+#                                                           account may have Opus headroom)
+#   "Claude usage limit reached. Your limit will reset at 3pm (America/Santiago)."  (older CLI)
+# A wrong pattern either never fires (silent no-op, safe) or false-positives on
+# ordinary text mentioning "usage limit" (the agent discussing an HTTP 429 in
+# code, say) and rotates for no reason — hence anchoring on "you've hit your"/
+# "usage limit reached" rather than a bare "usage limit" substring match.
 usage_state() {
     local pane
     pane="$(tmux capture-pane -p -t "$WINDOW" -S -50 2>/dev/null)" || { echo unknown; return; }
-    if grep -qiE 'usage limit|rate.limit.*reached|you.ve hit your (usage|rate) limit' <<<"$pane"; then
+    if grep -qiE "you.ve hit your (session|weekly|opus) limit|claude usage limit reached|you.ve reached your usage limit" <<<"$pane"; then
         echo limited
     else
         echo ok
     fi
 }
 
-# Best-effort: pull a "reset(s) at 3pm"/"reset at 23:00" hint out of the
+# Best-effort: pull a "resets 3:45pm"/"reset at 23:00" hint out of the
 # usage-limit banner and turn it into seconds-from-now. Same regex
 # claude-autopilot's seconds_until_reset() uses for its human-string
 # fallback, ported to operate on a string (pane text) instead of a log file —
 # the interactive banner is plain terminal text, not the JSON autopilot's -p
 # path gets. Echoes seconds (>0) on success; returns 1 with nothing echoed if
 # no usable hint is found (caller falls back to RESET_WINDOW).
+#
+# Deliberately bails out (falls back to RESET_WINDOW) on a WEEKLY reset —
+# "resets Mon 12:00am" — rather than guessing: parsing just the clock and
+# dropping the day name would compute "today/tomorrow at 12am" when the real
+# reset could be days out, which is worse than the flat fallback, not better.
 reset_seconds_from_pane() {
     local pane="$1" hint clock target secs
     hint="$(grep -oiE 'reset[s]?[^0-9]{0,12}([0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)?)' <<<"$pane" | tail -n1)"
     [[ -n "$hint" ]] || return 1
+    grep -qiE '\b(mon|tue|wed|thu|fri|sat|sun)' <<<"$hint" && return 1
     clock="$(grep -oiE '[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)?' <<<"$hint" | head -n1)"
     [[ -n "$clock" ]] || return 1
     target="$(date -d "$clock" +%s 2>/dev/null)" || return 1
