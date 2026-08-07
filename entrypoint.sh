@@ -898,6 +898,14 @@ if [[ "${CLAUDE_OTEL_ENABLED:-0}" =~ ^(1|true|yes|on)$ || -n "${OTEL_EXPORTER_OT
         log "OpenTelemetry        : WARNING — enabled but OTEL_EXPORTER_OTLP_ENDPOINT is empty; nothing will be exported"
 fi
 
+# Native Claude Code CLI tuning knobs (real upstream env vars the `claude`
+# binary reads directly — see .env.example). Nothing to translate here, just
+# surface non-default values in the boot log for operator visibility; a
+# default fleet (all unset) stays quiet.
+for _v in CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION BASH_DEFAULT_TIMEOUT_MS BASH_MAX_TIMEOUT_MS API_TIMEOUT_MS; do
+    [[ -n "${!_v:-}" ]] && log "CLI tuning           : ${_v}=${!_v}"
+done
+
 # Egress lockdown (opt-in): apply a default-deny firewall NOW — after the
 # entrypoint's own setup (clone, plugin install) has finished with open egress,
 # and as root (we still hold NET_ADMIN) before the unprivileged agent starts, so

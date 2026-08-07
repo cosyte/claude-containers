@@ -63,6 +63,12 @@ services:
       # (requires WITH_BROWSER=1 at build time).
       CLAUDE_BROWSER: ${CLAUDE_BROWSER:-0}
       CLAUDE_PERMISSION_MODE: ${CLAUDE_PERMISSION_MODE:-bypassPermissions}
+      # Native Claude Code CLI tuning (real upstream env vars, not a wrapper —
+      # see .env.example). Unset by default = upstream's own defaults.
+      CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION: ${CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION:-}
+      BASH_DEFAULT_TIMEOUT_MS: ${BASH_DEFAULT_TIMEOUT_MS:-}
+      BASH_MAX_TIMEOUT_MS: ${BASH_MAX_TIMEOUT_MS:-}
+      API_TIMEOUT_MS: ${API_TIMEOUT_MS:-}
       GIT_REPO_URL: ${GIT_REPO_URL:-}
       GIT_REPO_BRANCH: ${GIT_REPO_BRANCH:-}
       GIT_REPO_DEPTH: ${GIT_REPO_DEPTH:-}

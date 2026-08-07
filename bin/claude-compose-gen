@@ -742,6 +742,12 @@ EOF
       OTEL_EXPORTER_OTLP_PROTOCOL: "\${OTEL_EXPORTER_OTLP_PROTOCOL:-}"
       OTEL_EXPORTER_OTLP_HEADERS: "\${OTEL_EXPORTER_OTLP_HEADERS:-}"
       OTEL_RESOURCE_ATTRIBUTES: "\${OTEL_RESOURCE_ATTRIBUTES:-}"
+      # Native Claude Code CLI tuning (real upstream env vars, not a wrapper —
+      # see .env.example). Unset by default = upstream's own defaults.
+      CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION: "\${CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION:-}"
+      BASH_DEFAULT_TIMEOUT_MS: "\${BASH_DEFAULT_TIMEOUT_MS:-}"
+      BASH_MAX_TIMEOUT_MS: "\${BASH_MAX_TIMEOUT_MS:-}"
+      API_TIMEOUT_MS: "\${API_TIMEOUT_MS:-}"
       GIT_REPO_URL: "${url}"
 EOF
     [[ -n "$branch" ]] && echo "      GIT_REPO_BRANCH: \"${branch}\""
