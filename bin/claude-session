@@ -4,10 +4,14 @@
 # interactive shell if Claude exits so the SSH/tmux session stays usable. Run
 # `claude-session` (this script) again from that shell to relaunch.
 #
-# Usage: claude-session [--continue]
-#   --continue   resume the most recent conversation. The RC watchdog passes
-#                this when it restarts a session whose Remote Control link died,
-#                so the conversation survives the restart.
+# Usage: claude-session [--continue | --resume <id>]
+#   --continue     resume the most recent conversation. The RC watchdog passes
+#                  this when it restarts a session whose Remote Control link died,
+#                  so the conversation survives the restart.
+#   --resume <id>  resume a specific conversation by session id (see
+#                  claude-session-id). bin/claude-usage-watchdog passes this on
+#                  an account-rotation respawn, since by the time it restarts
+#                  the pane "most recent" could be ambiguous.
 set -uo pipefail
 
 cd /workspace || cd "$HOME"
@@ -48,6 +52,9 @@ ARGS+=(--remote-control "$NAME")
 if [[ "${1:-}" == "--continue" || "${1:-}" == "-c" ]]; then
     ARGS+=(--continue)
     echo "Resuming the most recent conversation (--continue)."
+elif [[ "${1:-}" == "--resume" && -n "${2:-}" ]]; then
+    ARGS+=(--resume "$2")
+    echo "Resuming conversation $2 (--resume)."
 fi
 
 if [[ -n "$RC_DEBUG_LOG" ]]; then

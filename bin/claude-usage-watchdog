@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# claude-usage-watchdog — rotate to a different pre-authenticated Claude.ai
+# account when the ACTIVE one hits its usage limit mid-session, resuming the
+# same conversation. Only runs when CLAUDE_ACCOUNTS is set (see
+# claude-launch --accounts / claude-account-login); works with any account
+# count >= 1 — a single account just gets auto-resume once its usage window
+# resets, since round-robin degenerates to "wait for my own cooldown, then
+# use me again."
+#
+# Detection: tmux capture-pane, NOT the RC debug log — claude-session's debug
+# filter is hardcoded to the `bridge` category, so that log structurally
+# cannot contain usage-limit text; capture-pane also shows exactly what a
+# human would see. THE DETECTION PATTERN BELOW IS AN UNVERIFIED PLACEHOLDER —
+# see usage_state() for what needs confirming before this runs unattended
+# against real accounts.
+#
+# Headroom: round-robin + a per-account cooldown timer (not live /status
+# querying). The cooldown prefers a real reset time parsed out of the CLI's
+# own usage-limit message (same idea as claude-autopilot's
+# seconds_until_reset(), ported from JSON to plain pane text) and only falls
+# back to a flat ~5h assumption when no reset hint is found — Claude's usage
+# window is rolling from an account's first message, not from the hit, so a
+# blind +5h would leave a partially-used account idle longer than necessary.
+#
+# Credential swap: this script runs as the unprivileged `claude` user and
+# cannot itself read another account's locked-down master
+# (/auth-accounts/<name> is root:700, same lockdown as the single-account
+# /auth master) — it requests the swap from entrypoint.sh's
+# account_switch_listener() instead, which runs as root.
+#
+# Sources claude-rc-watchdog for pane_idle/dismiss_resume_menu/is_resume_menu/
+# with_respawn_lock/_kill_and_respawn_pane — both scripts can respawn the same
+# claude:main pane, and with_respawn_lock's mkdir-based mutex is what keeps
+# them from ever doing so at the same instant.
+#
+# Runs as the `claude` user, started by the entrypoint only when CLAUDE_ACCOUNTS
+# is set. Disable with CLAUDE_USAGE_WATCHDOG=0.
+set -uo pipefail
+
+# shellcheck disable=SC1091
+source /usr/local/bin/claude-rc-watchdog
+
+# Override the sourced say()/watch_loop() — claude-rc-watchdog's own prefix and
+# main loop aren't this script's; everything else it defines (pane_idle,
+# dismiss_resume_menu, is_resume_menu, with_respawn_lock, _kill_and_respawn_pane,
+# WINDOW, SESSION) is reused as-is.
+say() { echo "[usage-watchdog] $*"; }
+
+CHECK_INTERVAL="${CLAUDE_USAGE_CHECK_INTERVAL:-30}"        # seconds between pane checks
+ATTEMPT_COOLDOWN="${CLAUDE_USAGE_COOLDOWN:-60}"             # min seconds between rotation attempts
+MAX_RESTARTS="${CLAUDE_USAGE_MAX_RESTARTS:-10}"             # give up after this many in a row
+RESET_WINDOW="${CLAUDE_ACCOUNT_RESET_WINDOW:-18000}"        # 5h fallback when no reset hint is found in the banner
+NO_TOKEN_COOLDOWN=300                                       # short cooldown for a candidate the switch listener rejects (not yet logged in / refresh failed)
+COOLDOWN_DIR="$CLAUDE_CONFIG_DIR/account-state"
+
+# True if the claude pane is currently showing a usage-limit message.
+# Prints: limited | ok | unknown
+#
+# PLACEHOLDER PATTERN — NOT YET VERIFIED. Nothing in this repo has captured
+# the real on-screen text Claude Code prints when an interactive session hits
+# its usage limit (grep -rE "rate limit|usage limit|429|capacity" bin/
+# entrypoint.sh is empty; claude-autopilot's equivalent only parses `-p
+# --output-format json` fields, not interactive terminal text). Confirm the
+# real string with `tmux capture-pane -p -t claude:main -S -200` against a
+# genuinely exhausted test account before relying on this in production — a
+# wrong pattern either never fires (silent no-op, safe) or worse,
+# false-positives on ordinary text mentioning "usage limit"/"rate limit" (the
+# agent discussing an HTTP 429 in code, for instance) and rotates for no
+# reason. Anchor to the CLI's actual banner formatting once known, not a loose
+# substring match.
+usage_state() {
+    local pane
+    pane="$(tmux capture-pane -p -t "$WINDOW" -S -50 2>/dev/null)" || { echo unknown; return; }
+    if grep -qiE 'usage limit|rate.limit.*reached|you.ve hit your (usage|rate) limit' <<<"$pane"; then
+        echo limited
+    else
+        echo ok
+    fi
+}
+
+# Best-effort: pull a "reset(s) at 3pm"/"reset at 23:00" hint out of the
+# usage-limit banner and turn it into seconds-from-now. Same regex
+# claude-autopilot's seconds_until_reset() uses for its human-string
+# fallback, ported to operate on a string (pane text) instead of a log file —
+# the interactive banner is plain terminal text, not the JSON autopilot's -p
+# path gets. Echoes seconds (>0) on success; returns 1 with nothing echoed if
+# no usable hint is found (caller falls back to RESET_WINDOW).
+reset_seconds_from_pane() {
+    local pane="$1" hint clock target secs
+    hint="$(grep -oiE 'reset[s]?[^0-9]{0,12}([0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)?)' <<<"$pane" | tail -n1)"
+    [[ -n "$hint" ]] || return 1
+    clock="$(grep -oiE '[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)?' <<<"$hint" | head -n1)"
+    [[ -n "$clock" ]] || return 1
+    target="$(date -d "$clock" +%s 2>/dev/null)" || return 1
+    secs=$(( target - $(date +%s) ))
+    (( secs <= 0 )) && secs=$(( secs + 86400 ))   # already past today -> tomorrow
+    (( secs > 0 )) || return 1
+    echo "$secs"
+}
+
+# Stamp <account>'s cooldown ONLY if it isn't already cooling down — called
+# every tick while a rotation is pending, so this must be idempotent within a
+# single usage-limit episode. Without the guard, re-stamping "now + fallback"
+# on every tick would push a fallback-window cooldown later forever as long
+# as the pane keeps showing the same stale limit message.
+mark_cooldown_if_new() {
+    local acct="$1" cd_file="$COOLDOWN_DIR/$acct.cooldown-until" now until_ts=0
+    now="$(date +%s)"
+    [[ -s "$cd_file" ]] && until_ts="$(cat "$cd_file" 2>/dev/null || echo 0)"
+    (( now < until_ts )) && return 0   # already cooling down from an earlier tick
+
+    local pane reset_secs cooldown_secs
+    pane="$(tmux capture-pane -p -t "$WINDOW" -S -50 2>/dev/null)"
+    if reset_secs="$(reset_seconds_from_pane "$pane")"; then
+        cooldown_secs="$reset_secs"
+        say "Account '$acct' hit its usage limit; real reset in ${cooldown_secs}s (parsed from the CLI's own message)."
+    else
+        cooldown_secs="$RESET_WINDOW"
+        say "Account '$acct' hit its usage limit; no reset time found in the message — assuming ${cooldown_secs}s (~5h)."
+    fi
+    echo "$(( now + cooldown_secs ))" > "$cd_file"
+}
+
+# Ordered candidates (round-robin from <current>, cooldown-eligible only —
+# one per line). Deliberately does NOT check token validity here: this script
+# runs unprivileged and cannot read a locked-down /auth-accounts/<name>
+# master to check. request_account_switch()/account_switch_listener() (root)
+# is the actual authority on that; a token-less candidate is skipped after a
+# real rejection, not guessed in advance.
+next_account() {
+    local current="$1" now names=() total idx=0 i n cd_file until_ts
+    IFS=',' read -ra names <<< "$CLAUDE_ACCOUNTS"
+    total=${#names[@]}
+    for i in "${!names[@]}"; do [[ "${names[$i]}" == "$current" ]] && idx=$i; done
+    now="$(date +%s)"
+    for (( i=1; i<=total; i++ )); do
+        n="${names[$(( (idx + i) % total ))]}"
+        cd_file="$COOLDOWN_DIR/$n.cooldown-until"
+        until_ts=0
+        [[ -s "$cd_file" ]] && until_ts="$(cat "$cd_file" 2>/dev/null || echo 0)"
+        (( now >= until_ts )) && echo "$n"
+    done
+}
+
+# Ask entrypoint.sh's root-side account_switch_listener() to publish <name>'s
+# credentials into this container's active $CLAUDE_CONFIG_DIR/.credentials.json
+# and record it as the active account. Prints nothing; returns 0 iff the
+# listener confirmed the switch (i.e. the account had a valid token).
+request_account_switch() {
+    local target="$1" req_file="$CLAUDE_CONFIG_DIR/.account-switch-request" done_file="$CLAUDE_CONFIG_DIR/.account-switch-done"
+    rm -f "$done_file"
+    echo "$target" > "$req_file"
+    local i
+    for ((i = 0; i < 20; i++)); do
+        [[ -s "$done_file" ]] && break
+        sleep 0.5
+    done
+    local result; result="$(cat "$done_file" 2>/dev/null)"; rm -f "$done_file"
+    [[ "$result" == "$target" ]]
+}
+
+# Mark the current account cooling down, wait for the pane to go idle (never
+# interrupt an in-flight turn), then try each round-robin candidate in order
+# until one actually accepts the switch — a candidate the listener rejects
+# (no valid token) gets a short cooldown of its own so it isn't retried every
+# cycle, and the next candidate is tried within the same pass.
+rotate_account() {
+    local current="$1" target sid candidates
+
+    mark_cooldown_if_new "$current"
+
+    candidates="$(next_account "$current")"
+    [[ -n "$candidates" ]] || { say "No account eligible yet (all cooling down) — will retry."; return 1; }
+
+    say "Waiting for the pane to go idle before rotating…"
+    while ! pane_idle; do
+        [[ "$(usage_state)" == limited ]] || { say "Recovered before rotation — standing down."; return 0; }
+    done
+    [[ "$(usage_state)" == limited ]] || { say "Recovered before rotation — standing down."; return 0; }
+
+    sid="$(/usr/local/bin/claude-session-id 2>/dev/null)" || sid=""
+    [[ -n "$sid" ]] || say "WARNING: could not determine the session id — falling back to --continue."
+
+    while IFS= read -r target; do
+        [[ -n "$target" ]] || continue
+        if request_account_switch "$target"; then
+            say "Switched credentials to account '$target'."
+            if [[ -n "$sid" ]]; then
+                RESPAWN_CMD="/usr/local/bin/claude-session --resume $sid"
+            else
+                RESPAWN_CMD="/usr/local/bin/claude-session --continue"
+            fi
+            if with_respawn_lock _kill_and_respawn_pane; then
+                say "Session respawned under account '$target'."
+                dismiss_resume_menu
+                return 0
+            else
+                say "WARNING: credentials switched to '$target' but the respawn failed (lock busy, or 'tmux respawn-pane' failed) — will retry next cycle."
+                return 1
+            fi
+        else
+            say "Account '$target' has no valid token right now — short cooldown, trying the next candidate."
+            echo "$(( $(date +%s) + NO_TOKEN_COOLDOWN ))" > "$COOLDOWN_DIR/$target.cooldown-until"
+        fi
+    done <<< "$candidates"
+
+    say "No candidate account has a valid token right now — will retry."
+    return 1
+}
+
+watch_loop() {
+    if [[ -z "${CLAUDE_ACCOUNTS:-}" ]]; then
+        say "CLAUDE_ACCOUNTS is unset — nothing to watch. Exiting."
+        return 0
+    fi
+    mkdir -p "$COOLDOWN_DIR"
+
+    local restarts=0 last_attempt=0 now current
+
+    say "started — watching pane ${WINDOW} for a usage-limit hit (accounts: ${CLAUDE_ACCOUNTS}, check every ${CHECK_INTERVAL}s)"
+
+    while sleep "$CHECK_INTERVAL"; do
+        tmux has-session -t "$SESSION" >/dev/null 2>&1 || { say "tmux session gone — exiting."; break; }
+
+        now="$(date +%s)"
+        if [[ "$(usage_state)" != limited ]]; then
+            if (( restarts > 0 )) && (( now - last_attempt > ATTEMPT_COOLDOWN )); then
+                say "No usage-limit hit since the last rotation — resetting restart counter."
+                restarts=0
+            fi
+            continue
+        fi
+
+        (( now - last_attempt < ATTEMPT_COOLDOWN )) && continue
+        if (( restarts >= MAX_RESTARTS )); then
+            say "Rotated ${restarts} times without staying clear of the limit — giving up (investigate manually)."
+            break
+        fi
+
+        current="$(cat "$CLAUDE_CONFIG_DIR/.active-account" 2>/dev/null)"
+        [[ -n "$current" ]] || { say "WARNING: no active-account state found — cannot rotate."; continue; }
+
+        last_attempt="$(date +%s)"
+        rotate_account "$current" && restarts=$((restarts + 1))
+    done
+}
+
+# Executed directly -> run the watcher. Sourced (unit tests) -> just define
+# the helpers above without starting the loop.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    watch_loop
+fi

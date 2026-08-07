@@ -36,7 +36,7 @@ BUILD_ARGS = \
   --build-arg WITH_DOCKER=$(WITH_DOCKER)
 
 .DEFAULT_GOAL := help
-.PHONY: help builder build build-all build-browser push login launch list attach stop rm logs clean lint smoke
+.PHONY: help builder build build-all build-browser push login accounts-login accounts-list launch list attach stop rm logs clean lint smoke
 
 help: ## Show this help
 	@# Grep only this Makefile, not all of MAKEFILE_LIST: `-include .env` adds
@@ -84,6 +84,11 @@ login: ## One-time OAuth login; persists creds to the claude-auth volume
 	  -v $(AUTH_VOLUME):/auth \
 	  $(CLAUDE_IMAGE)
 	@echo "Login complete. Credentials are in volume '$(AUTH_VOLUME)'."
+
+accounts-login: ## make accounts-login ARGS="work2" — OAuth login for a NAMED account (for --accounts rotation)
+	@./bin/claude-account-login $(ARGS)
+accounts-list: ## List every named account (claude-auth-*) and its token/email status
+	@./bin/claude-account-list
 
 launch: ## make launch ARGS="myproj --repo git@github.com:me/x.git"
 	@./bin/claude-launch $(ARGS)

@@ -111,6 +111,36 @@ if [[ "${CLAUDE_LOGIN_MODE:-0}" == "1" ]]; then
         claude auth login --claudeai
 fi
 
+# --- 1b. Multi-account mode (opt-in) ------------------------------------------
+# CLAUDE_ACCOUNTS (comma-separated names) redirects AUTH_DIR from the single
+# shared /auth volume to one of several named /auth-accounts/<name> volumes
+# mounted by `claude-launch --accounts` — each created by `claude-account-login
+# <name>`. Works with any account count >= 1: a single account still benefits
+# (bin/claude-usage-watchdog auto-resumes it once its usage window resets), and
+# unset (the default) leaves AUTH_DIR="/auth" with every line below unchanged.
+# The "active" account persists in a state file so a rotation survives a plain
+# `docker start` (which reuses creation-time env/mounts, not a fresh launch).
+ACCOUNT_NAMES=()
+if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
+    IFS=',' read -ra ACCOUNT_NAMES <<< "$CLAUDE_ACCOUNTS"
+    (( ${#ACCOUNT_NAMES[@]} > 0 )) || die "CLAUDE_ACCOUNTS is set but empty"
+    for n in "${ACCOUNT_NAMES[@]}"; do
+        [[ -d "/auth-accounts/$n" ]] || die "account '$n' listed in CLAUDE_ACCOUNTS has no volume mounted at /auth-accounts/$n — check claude-launch --accounts wiring"
+    done
+    mkdir -p "$CLAUDE_CONFIG_DIR"
+    ACTIVE_FILE="$CLAUDE_CONFIG_DIR/.active-account"
+    [[ -s "$ACTIVE_FILE" ]] || echo "${ACCOUNT_NAMES[0]}" > "$ACTIVE_FILE"
+    ACTIVE_ACCOUNT="$(cat "$ACTIVE_FILE")"
+    case ",${CLAUDE_ACCOUNTS}," in
+        *",${ACTIVE_ACCOUNT},"*) ;;
+        *) log "WARNING: previously-active account '$ACTIVE_ACCOUNT' is no longer in CLAUDE_ACCOUNTS — falling back to '${ACCOUNT_NAMES[0]}'"
+           ACTIVE_ACCOUNT="${ACCOUNT_NAMES[0]}"
+           echo "$ACTIVE_ACCOUNT" > "$ACTIVE_FILE" ;;
+    esac
+    AUTH_DIR="/auth-accounts/$ACTIVE_ACCOUNT"
+    log "Multi-account mode  : ${#ACCOUNT_NAMES[@]} account(s) (${CLAUDE_ACCOUNTS}); active=$ACTIVE_ACCOUNT"
+fi
+
 # --- 2. Fix ownership of mounted volumes -------------------------------------
 mkdir -p "$CLAUDE_CONFIG_DIR" "$AUTH_DIR" "$HOSTKEY_DIR" "$CLAUDE_HOME/.ssh" "$WORKSPACE"
 chown -R "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR" "$CLAUDE_HOME/.ssh"
@@ -334,7 +364,10 @@ fi
 # per-container file and the shared volume converged (newest wins).
 if [[ ! -s "$AUTH_DIR/.credentials.json" ]]; then
     if [[ "${CLAUDE_SKIP_AUTH_CHECK:-0}" == "1" ]]; then
-        log "WARNING: no credentials in claude-auth volume (auth check skipped)"
+        log "WARNING: no credentials for the active account (auth check skipped)"
+    elif [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
+        die "No credentials for account '$ACTIVE_ACCOUNT' (checked $AUTH_DIR/.credentials.json).
+       Run 'claude-account-login $ACTIVE_ACCOUNT' once before launching containers."
     else
         die "No credentials in the claude-auth volume. Run 'make login' once
        before launching containers (see README Quick start)."
@@ -349,9 +382,20 @@ fi
 # per-container session token ($CLAUDE_CONFIG_DIR/.credentials.json, claude:600,
 # unavoidable — Claude Code authenticates with it), but cannot reach the master
 # that backs every other container. `make login` (root-chowns /auth) is separate.
-chown root:root "$AUTH_DIR" 2>/dev/null || true
-chmod 700 "$AUTH_DIR" 2>/dev/null || true
-[[ -e "$AUTH_DIR/.credentials.json" ]] && { chown root:root "$AUTH_DIR/.credentials.json" 2>/dev/null || true; chmod 600 "$AUTH_DIR/.credentials.json" 2>/dev/null || true; }
+if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
+    # Every account dir gets the same lockdown, not just the active one — the
+    # agent must never read a not-currently-active account's credential either.
+    for n in "${ACCOUNT_NAMES[@]}"; do
+        d="/auth-accounts/$n"
+        chown root:root "$d" 2>/dev/null || true
+        chmod 700 "$d" 2>/dev/null || true
+        [[ -e "$d/.credentials.json" ]] && { chown root:root "$d/.credentials.json" 2>/dev/null || true; chmod 600 "$d/.credentials.json" 2>/dev/null || true; }
+    done
+else
+    chown root:root "$AUTH_DIR" 2>/dev/null || true
+    chmod 700 "$AUTH_DIR" 2>/dev/null || true
+    [[ -e "$AUTH_DIR/.credentials.json" ]] && { chown root:root "$AUTH_DIR/.credentials.json" 2>/dev/null || true; chmod 600 "$AUTH_DIR/.credentials.json" 2>/dev/null || true; }
+fi
 
 # A .credentials.json is USABLE only if it carries a non-empty OAuth access
 # token. When a token refresh fails, Claude Code rewrites the file in place with
@@ -384,9 +428,18 @@ publish_creds() {  # publish_creds <src> <dst>
 }
 
 reconcile_creds() {
-    local a="$AUTH_DIR/.credentials.json"           # shared fleet master (root:600)
     local b="$CLAUDE_CONFIG_DIR/.credentials.json"  # per-container copy (claude:600)
     while sleep 30; do
+        # Re-derive the master path every tick (not just once) so a rotation
+        # picked up mid-loop (bin/claude-usage-watchdog updates .active-account
+        # via account_switch_listener below) keeps token-refresh write-back
+        # flowing to whichever account is now active, not the one at boot.
+        local a
+        if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
+            a="/auth-accounts/$(cat "$CLAUDE_CONFIG_DIR/.active-account" 2>/dev/null || echo "${ACCOUNT_NAMES[0]}")/.credentials.json"
+        else
+            a="$AUTH_DIR/.credentials.json"          # shared fleet master (root:600)
+        fi
         if creds_have_token "$b" && ! creds_have_token "$a"; then
             # master absent/logged-out, local good -> seed or repair the master
             publish_creds "$b" "$a"
@@ -406,6 +459,45 @@ reconcile_creds() {
 }
 reconcile_creds &
 RECONCILE_PID=$!
+
+# --- 6a. Account-switch listener (multi-account mode only) -------------------
+# bin/claude-usage-watchdog runs as the unprivileged `claude` user, so it
+# cannot itself read a NON-active account's locked-down master (each
+# /auth-accounts/<name> is root:700 / root:600, same lockdown as the
+# single-account master above) — it requests a swap here instead. Runs as
+# root specifically so it CAN read every account, unlike the watchdog.
+# Request/done files live inside $CLAUDE_CONFIG_DIR: root can read/write there
+# regardless of its claude:700 ownership, so no separate shared directory or
+# group permissions are needed.
+account_switch_listener() {
+    local req_file="$CLAUDE_CONFIG_DIR/.account-switch-request"
+    local done_file="$CLAUDE_CONFIG_DIR/.account-switch-done"
+    while sleep 2; do
+        [[ -s "$req_file" ]] || continue
+        local req; req="$(cat "$req_file" 2>/dev/null)"; rm -f "$req_file"
+        # Validate against CLAUDE_ACCOUNTS before touching any path — an
+        # unvalidated name interpolated into /auth-accounts/$req/... would be a
+        # path-traversal risk if a request were ever forged.
+        case ",${CLAUDE_ACCOUNTS}," in
+            *",${req},"*) ;;
+            *) echo "ERROR:unknown-account:$req" > "$done_file.tmp" && mv -f "$done_file.tmp" "$done_file"; continue ;;
+        esac
+        local src="/auth-accounts/$req/.credentials.json"
+        if creds_have_token "$src"; then
+            publish_creds "$src" "$CLAUDE_CONFIG_DIR/.credentials.json"
+            echo "$req" > "$CLAUDE_CONFIG_DIR/.active-account.tmp" \
+                && mv -f "$CLAUDE_CONFIG_DIR/.active-account.tmp" "$CLAUDE_CONFIG_DIR/.active-account"
+            echo "$req" > "$done_file.tmp" && mv -f "$done_file.tmp" "$done_file"
+        else
+            echo "ERROR:no-token:$req" > "$done_file.tmp" && mv -f "$done_file.tmp" "$done_file"
+        fi
+    done
+}
+ACCT_SWITCH_PID=""
+if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
+    account_switch_listener &
+    ACCT_SWITCH_PID=$!
+fi
 
 # --- 7. Seed .claude.json (onboarding + workspace trust) ---------------------
 # With CLAUDE_CONFIG_DIR set, Claude stores .claude.json *inside* it. Pre-accept
@@ -861,6 +953,22 @@ else
     log "Remote Control watchdog disabled (CLAUDE_RC_WATCHDOG=0)"
 fi
 
+# --- 12c. Usage-limit account-rotation watchdog (multi-account mode only) ----
+# Rotates to a different pre-authenticated account when the active one hits
+# its usage limit, resuming the same conversation. Only meaningful with
+# CLAUDE_ACCOUNTS set (nothing to rotate to otherwise) and in interactive
+# mode (autopilot has its own reset-time backoff, bin/claude-autopilot).
+USAGE_WATCHDOG_PID=""
+if [[ "$CLAUDE_MODE" == "autopilot" || -z "${CLAUDE_ACCOUNTS:-}" ]]; then
+    : # nothing to watch
+elif [[ "${CLAUDE_USAGE_WATCHDOG:-1}" != "0" ]]; then
+    asclaude /usr/local/bin/claude-usage-watchdog &
+    USAGE_WATCHDOG_PID=$!
+    log "Usage-limit watchdog started (accounts: $CLAUDE_ACCOUNTS; disable with CLAUDE_USAGE_WATCHDOG=0)"
+else
+    log "Usage-limit watchdog disabled (CLAUDE_USAGE_WATCHDOG=0)"
+fi
+
 echo
 if [[ "$CLAUDE_MODE" == "autopilot" ]]; then
     if [[ -n "${CLAUDE_AUTOPILOT_CMD:-}" ]]; then
@@ -882,7 +990,9 @@ shutdown() {
     asclaude tmux kill-server >/dev/null 2>&1 || true
     pkill -x sshd >/dev/null 2>&1 || true
     kill "$RECONCILE_PID" >/dev/null 2>&1 || true
+    [[ -n "${ACCT_SWITCH_PID:-}" ]] && kill "$ACCT_SWITCH_PID" >/dev/null 2>&1 || true
     [[ -n "${RC_WATCHDOG_PID:-}" ]] && kill "$RC_WATCHDOG_PID" >/dev/null 2>&1 || true
+    [[ -n "${USAGE_WATCHDOG_PID:-}" ]] && kill "$USAGE_WATCHDOG_PID" >/dev/null 2>&1 || true
     # Tear the inner Docker down BEFORE PID 1 exits (docker mode only). Without this, the
     # inner containers and their containerd-shims are still alive when the container dies;
     # the runtime then SIGKILLs the tree and the exit event can arrive after Docker has
