@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# claude-account-list: show every named account created by claude-account-login
+# (plus the bare single-account `claude-auth` volume from `make login`, if any),
+# with token/email status for each.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+# shellcheck disable=SC1091
+source ./_common.sh
+
+need_docker
+ensure_image
+
+vols="$(docker volume ls --format '{{.Name}}' | grep -E '^claude-auth(-|$)' || true)"
+if [[ -z "$vols" ]]; then
+    echo "No account volumes found. Create one with: claude-account-login <name>"
+    exit 0
+fi
+
+printf '%-20s %-10s %s\n' "ACCOUNT" "TOKEN" "EMAIL"
+while IFS= read -r vol; do
+    [[ -n "$vol" ]] || continue
+    name="${vol#claude-auth}"
+    name="${name#-}"
+    [[ -z "$name" ]] && name="(default)"
+
+    status="$(docker run --rm -v "$vol:/auth:ro" --entrypoint bash "$CLAUDE_IMAGE" -c '
+        if [[ -s /auth/.credentials.json ]] && grep -q "\"accessToken\"[[:space:]]*:[[:space:]]*\"[^\"]" /auth/.credentials.json; then
+            tok="yes"
+        else
+            tok="no"
+        fi
+        email="$(jq -r ".oauthAccount.emailAddress // \"?\"" /auth/.claude.json 2>/dev/null || echo "?")"
+        echo "${tok}|${email}"
+    ' 2>/dev/null || echo "error|?")"
+
+    tok="${status%%|*}"
+    email="${status#*|}"
+    printf '%-20s %-10s %s\n' "$name" "$tok" "$email"
+done <<< "$vols"

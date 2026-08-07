@@ -263,6 +263,11 @@ sanitize() {
 cname()      { echo "claude-$1"; }
 ws_volume()  { echo "claude-ws-$1"; }
 cfg_volume() { echo "claude-config-$1"; }
+# Per-account OAuth credential volume, created by claude-account-login <name>.
+# Mounted read-write at /auth-accounts/<name> by claude-launch --accounts, so
+# a container can hold several named accounts and rotate between them
+# (bin/claude-usage-watchdog) without a recreate.
+account_auth_volume() { echo "claude-auth-$1"; }
 # Per-container /var/lib/docker for --docker sessions. Sysbox gives each container its own
 # inner image store, but that store dies WITH the container, so without this volume every
 # recreate re-pulls every base image and rebuilds every layer from cold. Per-container (not

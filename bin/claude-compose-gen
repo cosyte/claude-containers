@@ -91,6 +91,15 @@
 #                       another stack), so `up` fails fast if it doesn't exist and
 #                       a `down -v` here can never delete it. Prefer :ro, two live
 #                       Claude sessions writing one git tree race on the index.
+#     --accounts <map>  let a repo's session rotate between named OAuth accounts
+#                       when the active one hits its usage limit (auto-resumes the
+#                       same conversation; bin/claude-usage-watchdog). Format
+#                       REPO=name1,name2,... (repeatable, accumulates per repo).
+#                       Each name must already exist: `claude-account-login <name>`
+#                       (or `make accounts-login ARGS=<name>`) once. Works with any
+#                       count >= 1. The claude-auth-<name> volumes are external and
+#                       shared like claude-auth itself: several repos or stacks can
+#                       name the same account.
 #     --build-context <dir>  build.context for every service (default: the checkout
 #                       this script runs from). Pin it in the scenario when the
 #                       deployment builds from a DIFFERENT clone than the one you
@@ -189,7 +198,7 @@ NETWORK=""
 CACHE_VOL="$CACHE_VOLUME"
 BUILD_CONTEXT=""
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() DOCKER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() DOCKER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=() ACCOUNTS_RAW=()
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
 # follow so they override scalars (--out/--org/--port-base) and append to
 # repeatables (--active/--expose/…). --scenario/--env-file were consumed in the
@@ -215,6 +224,7 @@ while [[ $# -gt 0 ]]; do
         --marketplace)     MKTS_RAW+=("$2"); shift 2 ;;
         --plugin)          PLUGINS_RAW+=("$2"); shift 2 ;;
         --mount)           MOUNTS_RAW+=("$2"); shift 2 ;;
+        --accounts)        ACCOUNTS_RAW+=("$2"); shift 2 ;;
         --build-context)   BUILD_CONTEXT="$2"; shift 2 ;;
         --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
         --forks)           WANT_FORKS=1; shift ;;
@@ -382,6 +392,27 @@ for tok in "${MOUNTS_RAW[@]:-}"; do
     esac
     MOUNTS[$us]="${MOUNTS[$us]:-}${MOUNTS[$us]:+$'\n'}${mvol}:${mpath}${mopt:+:$mopt}"
     MOUNT_VOLS[$mvol]=1
+done
+
+# Named-account rotation per service: svc -> comma-separated account names.
+# Each name's physical claude-auth-<name> volume (account_auth_volume, _common.sh)
+# is SHARED/external like claude-auth itself, not owned by any one service: several
+# repos (or stacks) can reference the same account, so ACCOUNT_VOLS just collects
+# the distinct set for one external declaration each, not an ownership check like
+# MOUNT_VOLS above.
+declare -A ACCOUNTS=()
+declare -A ACCOUNT_VOLS=()
+for tok in "${ACCOUNTS_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == *=* ]] || die "--accounts must be REPO=name1,name2,... (got '$tok')"
+    as="$(sanitize "${tok%%=*}")"
+    av="${tok#*=}"
+    [[ -n "$av" ]] || die "--accounts '$tok' has no account names after '='"
+    for one in $(echo "$av" | tr ',' ' '); do
+        one="$(sanitize "$one")"
+        ACCOUNTS[$as]="${ACCOUNTS[$as]:-}${ACCOUNTS[$as]:+,}${one}"
+        ACCOUNT_VOLS["$(account_auth_volume "$one")"]=1
+    done
 done
 
 # The generated multi-repo compose is deployment config, not part of this
@@ -592,6 +623,19 @@ for row in "${FINAL[@]}"; do
         svc_scratch_tmpfs=""
         svc_scratch_vol=$'\n      - claude-scratch-'"${svc}"':/scratch'
     fi
+    # Auth mount: either the single shared claude-auth volume (default), or one
+    # read-write mount per named account (--accounts) at /auth-accounts/<name>:
+    # mutually exclusive per service, mirroring claude-launch --accounts. Read-write:
+    # the credential reconcile loop writes refreshed tokens back into whichever
+    # account volume is active.
+    if [[ -n "${ACCOUNTS[$svc]:-}" ]]; then
+        svc_auth_lines=""
+        for one in $(echo "${ACCOUNTS[$svc]}" | tr ',' ' '); do
+            svc_auth_lines+=$'\n      - '"$(account_auth_volume "$one")"':/auth-accounts/'"${one}"
+        done
+    else
+        svc_auth_lines=$'\n      - claude-auth:/auth'
+    fi
     # Per-repo --model override emits a literal; otherwise emit a compose
     # interpolation so a fleet-wide CLAUDE_MODEL (env/.env) wins, defaulting to
     # opus, the best available model, when nothing is set.
@@ -698,6 +742,12 @@ EOF
       OTEL_EXPORTER_OTLP_PROTOCOL: "\${OTEL_EXPORTER_OTLP_PROTOCOL:-}"
       OTEL_EXPORTER_OTLP_HEADERS: "\${OTEL_EXPORTER_OTLP_HEADERS:-}"
       OTEL_RESOURCE_ATTRIBUTES: "\${OTEL_RESOURCE_ATTRIBUTES:-}"
+      # Native Claude Code CLI tuning (real upstream env vars, not a wrapper,
+      # see .env.example). Unset by default = upstream's own defaults.
+      CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION: "\${CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION:-}"
+      BASH_DEFAULT_TIMEOUT_MS: "\${BASH_DEFAULT_TIMEOUT_MS:-}"
+      BASH_MAX_TIMEOUT_MS: "\${BASH_MAX_TIMEOUT_MS:-}"
+      API_TIMEOUT_MS: "\${API_TIMEOUT_MS:-}"
       GIT_REPO_URL: "${url}"
 EOF
     [[ -n "$branch" ]] && echo "      GIT_REPO_BRANCH: \"${branch}\""
@@ -708,6 +758,9 @@ EOF
     fi
     [[ -n "${BROWSER[$svc]:-}" ]] && echo '      CLAUDE_BROWSER: "1"'
     [[ -n "${DOCKER[$svc]:-}" ]]  && echo '      CLAUDE_DOCKER: "1"'
+    # Account names come only from sanitize() (charset [a-z0-9._-]), so no
+    # quoting hazard, unlike CLAUDE_DEV_CMD/MKTS/PLUGINS: no escaping needed.
+    [[ -n "${ACCOUNTS[$svc]:-}" ]] && echo "      CLAUDE_ACCOUNTS: \"${ACCOUNTS[$svc]}\""
     # Disk-backed TMPDIR. Without it everything temp (pip/uv wheel builds, docker
     # save|load tarballs, the inner containerd's mount dirs) defaults to /tmp: a 1g
     # tmpfs in RAM, and a big install dies with ENOSPC while the pool sits mostly empty.
@@ -730,8 +783,7 @@ EOF
       GIT_COMMITTER_NAME: "${GH_NAME}"
       GIT_COMMITTER_EMAIL: "${GH_MAIL}"
       GH_TOKEN: "\${GH_TOKEN:-}"
-    volumes:
-      - claude-auth:/auth
+    volumes:${svc_auth_lines}
       - claude-sshkeys:/etc/ssh/host-keys
       - claude-config-${svc}:/home/claude/.claude
       - claude-ws-${svc}:/workspace${svc_scratch_vol}${CACHE_NAME:+
@@ -786,6 +838,14 @@ cat <<EOF
     name: ${SSHKEYS_VOLUME}
     external: true
 EOF
+# Named accounts (--accounts / multi-account OAuth rotation): each
+# claude-auth-<name> volume is created once via `claude-account-login <name>`,
+# outside this generator, then can be referenced by any number of repos or
+# stacks, external for the same reason claude-auth is: a `down -v` on one
+# stack must never delete a credential another stack rotates through.
+for avol in "${!ACCOUNT_VOLS[@]}"; do
+    printf '  %s:\n    name: %s\n    external: true\n' "$avol" "$avol"
+done
 # Shared tool cache: every service mounts it at /cache, so a mise/cargo/go/
 # npm/uv install by one is a hit for the rest. It defaults to ONE name (claude-cache)
 # per host, so stacks share it: that's deliberate (a wider cache = more hits), and it
@@ -875,6 +935,10 @@ for r in "${FINAL[@]}"; do
         n_plugs="$(awk -F, '{print NF}' <<<"${PLUGINS[$s]}")"
         extra="$extra +plugins($n_plugs)"
     fi
+    if [[ -n "${ACCOUNTS[$s]:-}" ]]; then
+        n_accts="$(awk -F, '{print NF}' <<<"${ACCOUNTS[$s]}")"
+        extra="$extra +accounts($n_accts)"
+    fi
     printf '   %-22s -> claude-%-20s ssh :%-5s %s%s\n' "$nm" "$s" "${SVCPORT[$s]}" "$mark" "$extra"
 done
 
@@ -907,6 +971,10 @@ if (( ${#DOCKER[@]} > 0 )); then
 fi
 
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing: run 'make login'"
+for avol in "${!ACCOUNT_VOLS[@]}"; do
+    docker volume inspect "$avol" >/dev/null 2>&1 \
+        || warn "account volume '$avol' missing: run 'claude-account-login ${avol#claude-auth-}' before 'up'"
+done
 # The shared volumes are external now, so a missing one is a hard 'up' failure.
 for v in $SHARED_VOL_LIST; do
     docker volume inspect "$v" >/dev/null 2>&1 \

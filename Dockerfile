@@ -373,6 +373,8 @@ COPY bin/claude-scm-observer /usr/local/bin/claude-scm-observer
 COPY bin/claude-egress-firewall /usr/local/bin/claude-egress-firewall
 COPY bin/claude-secret-guard /usr/local/bin/claude-secret-guard
 COPY bin/claude-rc-watchdog /usr/local/bin/claude-rc-watchdog
+COPY bin/claude-usage-watchdog /usr/local/bin/claude-usage-watchdog
+COPY bin/claude-session-id /usr/local/bin/claude-session-id
 COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
 # _common.sh rides along because claude-disk-gc sources it.
 COPY bin/_common.sh /usr/local/bin/_common.sh
@@ -394,6 +396,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-egress-firewall \
         /usr/local/bin/claude-secret-guard \
         /usr/local/bin/claude-rc-watchdog \
+        /usr/local/bin/claude-usage-watchdog \
+        /usr/local/bin/claude-session-id \
         /usr/local/bin/claude-healthcheck \
         /usr/local/bin/claude-disk-gc \
         /usr/local/bin/claude-deps-check \

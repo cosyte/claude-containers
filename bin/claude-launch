@@ -38,6 +38,12 @@
 #                              (default: claude-cache). Reused across restarts
 #                              for mise/cargo/go/npm/uv installs.
 #   --no-cache                 disable the shared cache (per-container installs)
+#   --accounts <name[,...]>    named OAuth accounts (from claude-account-login) this
+#                              container can rotate between on a usage-limit hit
+#                              (bin/claude-usage-watchdog). Repeatable/comma-list, works
+#                              with any count >= 1 (a single account just gets auto-resume
+#                              once its usage window resets, no rotation needed for that).
+#                              Mutually exclusive with the default single AUTH_VOLUME mount.
 #
 # --broker / --sysbox / --worker-tarball were REMOVED with the nested-Sysbox
 # worker-broker substrate was retired in favor of Claude Code subagents in git
@@ -55,6 +61,7 @@ PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
 # `docker run` would shadow any value set in .env with an empty string.
 EXTRA="${CLAUDE_EXTRA_ARGS:-}" MCP_LIST="${CLAUDE_MCP_ENABLED:-}" DEVCMD="${CLAUDE_DEV_CMD:-}"
 MKTS="${CLAUDE_EXTRA_MARKETPLACES:-}" PLUGINS="${CLAUDE_EXTRA_PLUGINS:-}"
+ACCOUNTS="${CLAUDE_ACCOUNTS:-}"
 # Empty here means "unset": the container's entrypoint then defaults it to opus
 # (best available). A value from .env/env seeds the default; --model overrides.
 MODEL="${CLAUDE_MODEL:-}"
@@ -92,6 +99,7 @@ while [[ $# -gt 0 ]]; do
         --plugin)      PLUGINS="${PLUGINS:+$PLUGINS,}$2"; OPTS_GIVEN=1; shift 2 ;;
         --cache)       CACHE_ARG="$2"; OPTS_GIVEN=1; shift 2 ;;
         --no-cache)    CACHE_ARG="off"; OPTS_GIVEN=1; shift ;;
+        --accounts)    ACCOUNTS="${ACCOUNTS:+$ACCOUNTS,}$2"; OPTS_GIVEN=1; shift 2 ;;
         # --sysbox named the retired broker's runtime toggle. The runtime is back (it is
         # what makes an inner daemon safe), but it is no longer a flag of its own: --docker
         # selects it. Point there rather than dying with a dead-end "removed" message.
@@ -285,9 +293,30 @@ else
     fi
 fi
 
-# Auth volume must exist (created by 'make login').
-docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 \
-    || die "auth volume '$AUTH_VOLUME' missing. Run 'make login' once first."
+# Auth: either the single default volume (AUTH_VOLUME, from 'make login'), or a
+# set of named accounts (--accounts, from claude-account-login) mounted
+# read-write at /auth-accounts/<name> so bin/claude-usage-watchdog can rotate
+# between them on a usage-limit hit. Mutually exclusive per container:
+# entrypoint.sh picks its auth source based on whether CLAUDE_ACCOUNTS is set.
+# Read-write (not :ro): the credential reconcile loop writes refreshed tokens
+# back into whichever account volume is active.
+AUTH_MOUNT_ARGS=() AUTH_ENV_ARGS=()
+if [[ -n "$ACCOUNTS" ]]; then
+    IFS=',' read -ra _account_names <<< "$ACCOUNTS"
+    for _acct in "${_account_names[@]}"; do
+        [[ -n "$_acct" ]] || die "--accounts has an empty account name in '$ACCOUNTS'"
+        _vol="$(account_auth_volume "$_acct")"
+        docker volume inspect "$_vol" >/dev/null 2>&1 \
+            || die "account '$_acct' has no volume '$_vol'. Run 'claude-account-login $_acct' once first."
+        AUTH_MOUNT_ARGS+=(-v "$_vol:/auth-accounts/$_acct")
+    done
+    AUTH_ENV_ARGS=(-e CLAUDE_ACCOUNTS="$ACCOUNTS")
+    info "Accounts: $ACCOUNTS (rotates on a usage-limit hit; single-account still auto-resumes after reset)"
+else
+    docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 \
+        || die "auth volume '$AUTH_VOLUME' missing. Run 'make login' once first."
+    AUTH_MOUNT_ARGS=(-v "$AUTH_VOLUME:/auth")
+fi
 
 # Shared tool cache: mount the shared cache volume at /cache unless disabled.
 # Docker auto-creates the named volume (seeded from the image's /cache) on first use,
@@ -366,6 +395,7 @@ docker run -d \
     "${BROWSER_ENV[@]}" \
     -e CLAUDE_EXTRA_MARKETPLACES="$MKTS" \
     -e CLAUDE_EXTRA_PLUGINS="$PLUGINS" \
+    "${AUTH_ENV_ARGS[@]}" \
     -e CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}" \
     -e CLAUDE_SECRET_GUARD="${CLAUDE_SECRET_GUARD:-1}" \
     -e CLAUDE_BROKER_GIT_KEY="${CLAUDE_BROKER_GIT_KEY:-0}" \
@@ -378,7 +408,7 @@ docker run -d \
     -e GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-$GH_MAIL}" \
     -e GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-$GH_NAME}" \
     -e GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$GH_MAIL}" \
-    -v "$AUTH_VOLUME:/auth" \
+    "${AUTH_MOUNT_ARGS[@]}" \
     -v "$SSHKEYS_VOLUME:/etc/ssh/host-keys" \
     -v "$CFG_VOL:/home/claude/.claude" \
     "${WS_MOUNT[@]}" \

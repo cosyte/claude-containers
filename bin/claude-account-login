@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# claude-account-login <name>: one-time OAuth login for a NAMED account.
+#
+# Identical to `make login`, just with a name-first interface instead of the
+# AUTH_VOLUME env override: it persists credentials to their own volume
+# (claude-auth-<name>) so a container can later be launched with
+# `--accounts <name>,...` (bin/claude-launch) and rotate between several
+# logged-in accounts. See docs/troubleshooting.md for the single-account
+# `make login` flow this wraps.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+# shellcheck disable=SC1091
+source ./_common.sh
+
+[[ $# -ge 1 ]] || die "usage: claude-account-login <name>
+  <name> becomes the volume suffix: credentials land in 'claude-auth-<name>'.
+  List existing accounts with: claude-account-list"
+
+NAME="$(sanitize "$1")"
+VOL="claude-auth-$NAME"
+
+need_docker
+ensure_image
+
+info "Starting OAuth login for account '$NAME' (volume: $VOL)…"
+info "Use whichever claude.ai subscription you want this account to be."
+docker run --rm -it \
+    -e CLAUDE_LOGIN_MODE=1 \
+    -e ANTHROPIC_API_KEY= \
+    -v "$VOL:/auth" \
+    "$CLAUDE_IMAGE"
+
+ok "Login complete for account '$NAME'. Credentials are in volume '$VOL'."
+echo "  Launch a container that can rotate to it with:"
+echo -e "      ${C_B}claude-launch <project> --accounts ${NAME},... --workspace <path>${C_0}"

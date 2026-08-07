@@ -105,9 +105,37 @@ pane_idle() {
     [[ "$a" == "$b" ]]
 }
 
-# Kill the stale RC process, then respawn the pane fresh with --continue.
-restart_session() {
-    say "Restarting Claude session with --continue to restore Remote Control."
+# Cross-script pane-respawn lock. bin/claude-usage-watchdog (account-rotation
+# on a usage-limit hit) can also decide to respawn this same pane: mkdir is
+# atomic and needs no extra package (unlike flock/util-linux, not guaranteed
+# present on every base image), so it's a portable mutex against the two ever
+# racing each other. A lock dir older than LOCK_STALE_SECONDS is treated as
+# abandoned (its owner died mid-respawn) and reclaimed rather than wedging
+# every future respawn.
+RESPAWN_LOCK_DIR="${CLAUDE_RESPAWN_LOCK_DIR:-/tmp/claude-respawn.lock}"
+LOCK_STALE_SECONDS=90
+
+with_respawn_lock() {  # with_respawn_lock <command...> -> command's exit status, or 1 if the lock stayed busy
+    local waited=0
+    while ! mkdir "$RESPAWN_LOCK_DIR" 2>/dev/null; do
+        if [[ -d "$RESPAWN_LOCK_DIR" ]]; then
+            local age; age=$(( $(date +%s) - $(stat -c %Y "$RESPAWN_LOCK_DIR" 2>/dev/null || echo 0) ))
+            if (( age > LOCK_STALE_SECONDS )); then
+                say "WARNING: reclaiming a respawn lock older than ${LOCK_STALE_SECONDS}s, its owner likely died mid-respawn."
+                rmdir "$RESPAWN_LOCK_DIR" 2>/dev/null || true
+                continue
+            fi
+        fi
+        (( waited >= 60 )) && return 1
+        sleep 1; waited=$((waited + 1))
+    done
+    "$@"
+    local rc=$?
+    rmdir "$RESPAWN_LOCK_DIR" 2>/dev/null || true
+    return $rc
+}
+
+_kill_and_respawn_pane() {
     # The old `claude` process is alive but its RC bridge is dead: kill it
     # explicitly so the respawn doesn't leave a second --remote-control process.
     pkill -f 'remote-control' 2>/dev/null || true
@@ -117,11 +145,17 @@ restart_session() {
         sleep 0.5
     done
     pkill -9 -f 'remote-control' 2>/dev/null || true
-    if tmux respawn-pane -k -t "$WINDOW" "$RESPAWN_CMD"; then
+    tmux respawn-pane -k -t "$WINDOW" "$RESPAWN_CMD"
+}
+
+# Kill the stale RC process, then respawn the pane fresh with --continue.
+restart_session() {
+    say "Restarting Claude session with --continue to restore Remote Control."
+    if with_respawn_lock _kill_and_respawn_pane; then
         say "Session respawned; Remote Control should re-register within ~30s."
         dismiss_resume_menu
     else
-        say "WARNING: 'tmux respawn-pane' failed, could not restart the session."
+        say "WARNING: could not restart the session (respawn lock busy, or 'tmux respawn-pane' failed)."
     fi
 }
 
