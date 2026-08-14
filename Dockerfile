@@ -214,6 +214,36 @@ RUN set -eux; \
     rm -f /tmp/mise; \
     mise --version
 
+# --- just: command runner ------------------------------------------------
+# Bake `just` (https://github.com/casey/just) so every session has a task
+# runner available with no per-container provisioning step.
+#
+# Pinned + checksummed IN-REPO, same rationale as mise above: no piping a
+# remote install script into a shell. Download the pinned release tarball
+# straight from GitHub releases and verify its SHA256 against a digest
+# hardcoded here BEFORE installing: a tampered/served-wrong tarball fails
+# the build. Reproducible, not "latest".
+# Bump: change JUST_VERSION and BOTH digests together, from the release's
+# published SHA256SUMS (the `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl` rows).
+ARG JUST_VERSION=1.58.0
+ARG JUST_SHA256_AMD64=4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b84931d
+ARG JUST_SHA256_ARM64=748237128c4c40cbdabc65e841d05ceba13cc23a91eaba395495894c1d9764df
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) justarch=x86_64;  sha="${JUST_SHA256_AMD64}" ;; \
+      arm64) justarch=aarch64; sha="${JUST_SHA256_ARM64}" ;; \
+      *) echo "just: unsupported arch '$arch'" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+      "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-${justarch}-unknown-linux-musl.tar.gz" \
+      -o /tmp/just.tar.gz; \
+    echo "${sha}  /tmp/just.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/just.tar.gz -C /tmp just; \
+    install -m 0755 /tmp/just /usr/local/bin/just; \
+    rm -f /tmp/just.tar.gz /tmp/just; \
+    just --version
+
 # --- Shared, persistent tool cache -----------------------------------
 # One shared /cache tree holds mise's install store + the language package-manager
 # caches, so a toolchain/CLI provisioned once is reused across container restarts
