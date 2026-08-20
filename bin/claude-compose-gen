@@ -733,7 +733,11 @@ EOF
       CLAUDE_MODEL: "${svc_model}"
       CLAUDE_PERMISSION_MODE: "\${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
       CLAUDE_SECRET_GUARD: "\${CLAUDE_SECRET_GUARD:-1}"
-      CLAUDE_BROKER_GIT_KEY: "\${CLAUDE_BROKER_GIT_KEY:-0}"
+      # Brokering is the DEFAULT (entrypoint.sh §5): the compose default has to be
+      # 1, not 0, or a stack whose operator never set this would receive an
+      # explicit opt-out and get the agent-readable key file the default exists to
+      # avoid. Set CLAUDE_BROKER_GIT_KEY=0 in the environment to opt out.
+      CLAUDE_BROKER_GIT_KEY: "\${CLAUDE_BROKER_GIT_KEY:-1}"
       CLAUDE_EGRESS_LOCKDOWN: "\${CLAUDE_EGRESS_LOCKDOWN:-0}"
       CLAUDE_EGRESS_EXTRA_HOSTS: "\${CLAUDE_EGRESS_EXTRA_HOSTS:-}"
       CLAUDE_OTEL_ENABLED: "\${CLAUDE_OTEL_ENABLED:-0}"

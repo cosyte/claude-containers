@@ -246,7 +246,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_HARDEN_CAPS` | `1` | `1` = `--cap-drop ALL` + minimal `--cap-add` (drops NET_RAW/MKNOD/SETFCAP); `0` = Docker defaults. `no-new-privileges` is always set. Override the set with `CLAUDE_MIN_CAPS` |
 | `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts. Extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. Fail-open on error |
 | `CLAUDE_EGRESS_PACKAGES` | `0` | `1` = additively allowlist the curated **package registries** (PyPI, crates.io, Go proxy, `mise.run`, `ghcr.io`) so agent-driven `pip`/`cargo`/`go`/`mise` installs work under lockdown. Opt-in and curated (not open); nothing else broadens. Debian/apt system libs have no self-service path (see [docs/package-provisioning-security.md](docs/package-provisioning-security.md)) |
-| `CLAUDE_BROKER_GIT_KEY` | `0` | `1` = hold the SSH deploy key in a root ssh-agent (agent signs/pushes but can't read the key bytes) instead of a readable `~/.ssh/id_ed25519` |
+| `CLAUDE_BROKER_GIT_KEY` | `1` (brokered) | **Brokering is the default.** Unset, the SSH deploy key is held in a root ssh-agent: the agent signs/pushes with it but cannot read the key bytes. `0`/`false`/`no`/`off` is the explicit opt-out back to a readable `~/.ssh/id_ed25519`; any other value (including a typo) brokers. If brokering cannot be established there is **no** readable-file fallback: git is left unable to authenticate with that key and the boot log says so |
 | `CLAUDE_DISK_DATA_ROOT` | `/var/lib/docker` | Path whose free space `claude-disk-gc` reports before/after each cycle |
 | `CLAUDE_DISK_GC_INTERVAL` | `3600` | Seconds between `claude-disk-gc --loop` cycles (standalone tool; nothing auto-starts it) |
 | `CLAUDE_CONTROLLER` | *removed* | **Removed: setting it to `1` now refuses to boot.** It had collapsed to a byte-identical pass-through to `CLAUDE_AUTOPILOT=1`. Use that instead |
@@ -481,7 +481,10 @@ bind:
 - **`CLAUDE_EGRESS_LOCKDOWN=1`** filters the `OUTPUT` chain; inner containers'
   traffic is `FORWARD`ed, and container-root can flush the rules anyway.
 
-Both are off by default. The launcher warns if you combine either with `--docker`.
+Egress lockdown is off by default; git-key brokering is **on** by default, so the
+first bullet applies to a plain `--docker` session unless you opted out. The
+caveat itself is unchanged: under `--docker`, treat the deploy key as readable by
+the agent. The launcher warns if you combine either with `--docker`.
 Also: `--cap-drop ALL` is skipped for these containers (an inner daemon cannot
 start under the minimal set), while `no-new-privileges` is kept: its one real
 cost is that setuid binaries *inside an inner container* (`sudo`, `ping`) can't
@@ -651,12 +654,23 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   envelope and a per-launch disk-pressure refusal. It is retired; see
   [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md).)
 - **Secret brokering (git key + credentials).** By default the SSH deploy key is
-  copied to a `claude`-readable `~/.ssh/id_ed25519`, so a prompt-injected agent
-  could exfiltrate it. `CLAUDE_BROKER_GIT_KEY=1` instead loads the key into a
-  **root-owned `ssh-agent`** and exposes only a signing socket (via a root
-  `socat` relay): git still pushes, but the unprivileged agent can never read the
-  key bytes, not from a file, the agent protocol, the socket, or root's
-  `/proc/<pid>/mem`. The shared **`claude-auth` credential master is always**
+  loaded into a **root-owned `ssh-agent`** and only a signing socket is exposed
+  to the agent (via a root `socat` relay): git still pushes, but the
+  unprivileged, prompt-injectable agent can never read the key bytes, not from a
+  file, the agent protocol, the socket, or root's `/proc/<pid>/mem`. You do not
+  have to know a flag exists to get that. `CLAUDE_BROKER_GIT_KEY=0` is the
+  explicit opt-out back to a `claude`-readable `~/.ssh/id_ed25519`, and it is the
+  only value that produces one: unset brokers, `1`/`true`/`yes`/`on` brokers, and
+  an unrecognised value brokers too, so a typo cannot silently downgrade
+  containment. If the agent/relay cannot be established the boot **fails closed**:
+  no key file is installed, git is left unable to authenticate with that key, and
+  the failure is logged loudly (a failed push is recoverable, an exfiltrated
+  deploy key is not). Whichever path runs, the boot log carries a
+  `Deploy key readable :` line saying in plain language whether the agent user
+  can read the key right now. **Upgrading:** an existing `.env` copied from an
+  older `.env.example` carries a literal `CLAUDE_BROKER_GIT_KEY=0` line, which is
+  read as the explicit opt-out and keeps the old readable-file behaviour: delete
+  that line to pick up brokering. The shared **`claude-auth` credential master is always**
   locked to `root` (`/auth`, mode 700), so the agent can't reach the token that
   backs the rest of the fleet; it only ever holds its **own** per-container
   session token, which is unavoidable (Claude Code authenticates with it, and a
