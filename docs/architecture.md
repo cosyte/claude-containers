@@ -173,7 +173,9 @@ root is separate from the agent, and on a `--docker` session they do not bind:
 `CLAUDE_BROKER_GIT_KEY` (root-owned `ssh-agent` hiding the deploy key, an agent
 with Docker reads the key file directly) and `CLAUDE_EGRESS_LOCKDOWN` (filters
 `OUTPUT`; inner-container traffic is `FORWARD`ed, and container-root can flush
-the rules). Both default off; the launcher and generator warn on the
+the rules). Egress lockdown defaults off; git-key brokering defaults ON, so the
+first one applies to a plain `--docker` session unless the operator opted out
+with `CLAUDE_BROKER_GIT_KEY=0`. The launcher and generator warn on the
 combination rather than refusing, since the operator may not care about either
 on a given box. Do not treat them as active on a `--docker` container.
 

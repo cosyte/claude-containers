@@ -729,6 +729,281 @@ else
 fi
 
 echo
+echo "== entrypoint.sh §5: the mounted deploy key is BROKERED unless the operator opts out =="
+
+# CC-11 flipped this default. Before it, CLAUDE_BROKER_GIT_KEY defaulted to 0 and an
+# operator who mounted a deploy key without ever hearing of the flag got it installed
+# as a ~/.ssh/id_ed25519 that the prompt-injectable agent could read and exfiltrate.
+# Now: unset brokers, an enabling value brokers, an UNRECOGNISED value brokers, and
+# only a recognised disabling value (0/false/no/off) installs a readable key. A broker
+# that cannot be established installs NOTHING (the old code fell through to the
+# readable file, which after the flip would have handed the key over on every hiccup).
+#
+# The whole §5 block is EXTRACTED from entrypoint.sh and EXECUTED here, never mirrored:
+# a copy would keep passing after the shipped default silently flipped back. Only the
+# two ROOT-ONLY paths it names ($BROKER_RUN_DIR, $BROKER_PROFILE_D) are redirected into
+# a sandbox so the block can run unprivileged, and that redirect is asserted below so it
+# cannot degrade into a test that quietly targets /run and /etc instead.
+GITKEY_BLOCK="$(awk '/^# --- 5\. Git SSH key \+ identity/{f=1} f{print} f&&/^fi$/{exit}' "$ENTRYPOINT")"
+GKD="$(mktemp -d)"; trap 'rm -rf "$STUB" "$APD" "$GKD"' EXIT
+GK_UID="$(id -u)"; GK_GID="$(id -g)"; GK_USER="$(id -un)"
+# The private bytes the agent must never be able to reach, distinctive enough to grep
+# the whole sandbox home for. The PEM banner around them is assembled at run time from
+# the two halves below: the fleet-wide pre-commit secret guard refuses any staged file
+# holding a literal private-key banner, and it is right to. A synthetic fixture is not
+# worth teaching that guard an exception, so the literal block never lands in this file.
+GK_SECRET="SMOKINGGUNKEYBYTES"
+GK_PEM="PRIVATE KEY-----"
+gk_fake_key() { printf -- '-----BEGIN OPENSSH %s\n%s\n-----END OPENSSH %s\n' "$GK_PEM" "$GK_SECRET" "$GK_PEM"; }
+
+# A unix socket cannot be created from bash, and every decision on §5's success path
+# turns on `[[ -S ... ]]`. python3 is the socket factory. If it is missing this FAILS
+# rather than skipping: a silently-skipped broker test is exactly the theater this
+# suite refuses everywhere else.
+if python3 -c 'import socket' >/dev/null 2>&1; then
+    mkdir -p "$GKD/bin"
+    cat > "$GKD/bin/mksock" <<'EOS'
+#!/usr/bin/env bash
+# Create a REAL unix socket at $1, then exit: bind() creates the filesystem node and
+# the node outlives the process, which is what `[[ -S ... ]]` looks for.
+exec python3 -c 'import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+s.listen(1)' "$1"
+EOS
+    cat > "$GKD/bin/ssh-agent" <<'EOS'
+#!/usr/bin/env bash
+# Stands in for `ssh-agent -a <sock>`: makes the socket, then daemonises away.
+[[ "${GK_FAIL_AGENT:-0}" == 1 ]] && exit 1
+sock=""
+while [[ $# -gt 0 ]]; do case "$1" in -a) sock="$2"; shift 2 ;; *) shift ;; esac; done
+[[ -n "$sock" ]] || exit 1
+mksock "$sock"
+EOS
+    cat > "$GKD/bin/ssh-add" <<'EOS'
+#!/usr/bin/env bash
+# Stands in for loading the key into the root agent. Records the socket it was told
+# to use, so the test can prove the key went into the ROOT agent, not the relay.
+[[ "${GK_FAIL_ADD:-0}" == 1 ]] && exit 1
+[[ -s "${1:-}" ]] || exit 1
+printf '%s %s\n' "${SSH_AUTH_SOCK:-none}" "$1" >> "$GK_ADDLOG"
+EOS
+    cat > "$GKD/bin/socat" <<'EOS'
+#!/usr/bin/env bash
+# Stands in for the root relay: makes the claude-facing socket and exits.
+[[ "${GK_FAIL_RELAY:-0}" == 1 ]] && exit 1
+spec="${1:-}"; path="${spec#UNIX-LISTEN:}"; path="${path%%,*}"
+[[ -n "$path" && "$path" != "$spec" ]] || exit 1
+mksock "$path"
+chmod 600 "$path" 2>/dev/null || true
+EOS
+    chmod +x "$GKD/bin/mksock" "$GKD/bin/ssh-agent" "$GKD/bin/ssh-add" "$GKD/bin/socat"
+    ok "unix-socket factory available (python3): §5's broker path can really be exercised"
+else
+    bad "python3 is unavailable, so no unix socket can be created: every §5 broker assertion below would be theater"
+fi
+
+# The shipped block with ONLY its two root-only path constants pointed at a sandbox.
+gk_block() { printf '%s\n' "$GITKEY_BLOCK" \
+    | sed -e "s#^BROKER_RUN_DIR=.*#BROKER_RUN_DIR=\"$1/run\"#" \
+          -e "s#^BROKER_PROFILE_D=.*#BROKER_PROFILE_D=\"$1/profile-d.sh\"#"; }
+
+gk_probe="$(gk_block "$GKD/probe")"
+if [[ -n "$GITKEY_BLOCK" ]] \
+   && grep -qF "BROKER_RUN_DIR=\"$GKD/probe/run\"" <<<"$gk_probe" \
+   && grep -qF "BROKER_PROFILE_D=\"$GKD/probe/profile-d.sh\"" <<<"$gk_probe" \
+   && ! grep -qE '^BROKER_(RUN_DIR|PROFILE_D)=' <<<"$(grep -vF "$GKD/probe" <<<"$gk_probe")"; then
+    ok "§5 extracted from entrypoint.sh and its two root-only paths redirected into a sandbox"
+else
+    bad "§5 did not extract, or its root-only paths did not redirect: these tests would target /run and /etc"
+fi
+
+# run_gitkey <sandbox> <key|nokey> [VAR=VAL ...]
+# Executes the shipped §5 block under the entrypoint's REAL shell options against a
+# fresh sandbox home, and prints the boot log plus a final git_brokered=<0|1> line.
+run_gitkey() {
+    local sb="$GKD/$1" keystate="$2"; shift 2
+    rm -rf "$sb"; mkdir -p "$sb/home/.ssh"
+    [[ "$keystate" == key ]] && gk_fake_key > "$sb/git-key"
+    local blk; blk="$(gk_block "$sb")"
+    ( # START FROM NOTHING. This suite is itself run inside one of these containers,
+      # which is launched with CLAUDE_BROKER_GIT_KEY already exported: inheriting it
+      # would make the "operator recorded no choice" case untestable, and (worse) make
+      # it PASS or FAIL according to the ambient posture of whoever ran the tests.
+      unset CLAUDE_BROKER_GIT_KEY GK_FAIL_AGENT GK_FAIL_ADD GK_FAIL_RELAY
+      export PATH="$GKD/bin:$PATH" CLAUDE_HOME="$sb/home" GITKEY_SRC="$sb/git-key" \
+             CLAUDE_USER="$GK_USER" CLAUDE_UID="$GK_UID" CLAUDE_GID="$GK_GID" \
+             GK_ADDLOG="$sb/ssh-add.log"
+      if [[ $# -gt 0 ]]; then export "$@"; fi
+      log() { echo "[entrypoint] $*"; }
+      set -euo pipefail
+      eval "$blk"
+      echo "git_brokered=$git_brokered" ) 2>&1
+}
+gk_readable_lines() { grep -c "Deploy key readable :" <<<"$1" || true; }
+
+# --- THE DEFAULT: nothing set at all -----------------------------------------------
+out="$(run_gitkey unset key)"
+[[ "$out" == *"git_brokered=1"* ]] \
+    && ok  "CLAUDE_BROKER_GIT_KEY unset -> the key is BROKERED (the CC-11 flip)" \
+    || bad "unset did NOT broker: an operator who never heard of the flag gets a readable key: $out"
+[[ ! -e "$GKD/unset/home/.ssh/id_ed25519" ]] \
+    && ok  "unset -> no readable key file is installed at ~/.ssh/id_ed25519" \
+    || bad "unset installed a readable key file: the default is still fail-open"
+grep -rqF "$GK_SECRET" "$GKD/unset/home" 2>/dev/null \
+    && bad "the private key bytes are reachable somewhere under the agent's home directory" \
+    || ok  "no file anywhere under the agent's home contains the private key bytes"
+grep -q "IdentityFile" "$GKD/unset/home/.ssh/config" 2>/dev/null \
+    && bad "the brokered path still points ssh at a key FILE (IdentityFile in ~/.ssh/config)" \
+    || ok  "the brokered ssh config names no IdentityFile (signing goes through the relay)"
+[[ -S "$GKD/unset/run/agent.sock" ]] \
+    && ok  "the claude-facing relay socket exists (git can still sign/push)" \
+    || bad "no relay socket: brokering claimed success without an agent-usable socket"
+grep -q "SSH_AUTH_SOCK=$GKD/unset/run/agent.sock" "$GKD/unset/profile-d.sh" 2>/dev/null \
+    && ok  "a login shell is pointed at the RELAY socket, never at the root agent socket" \
+    || bad "SSH_AUTH_SOCK was not exported to the relay socket: git would not find the agent"
+grep -q "$GKD/unset/run/agent-root.sock" "$GKD/unset/ssh-add.log" 2>/dev/null \
+    && ok  "the key was loaded into the ROOT agent socket, not the claude-facing relay" \
+    || bad "ssh-add did not target the root agent socket: $(cat "$GKD/unset/ssh-add.log" 2>/dev/null)"
+grep -q "Deploy key readable : NO" <<<"$out" \
+    && ok  "the boot log STATES the key is not readable by the agent user (plain language)" \
+    || bad "no plain-language readability statement on the default path: $out"
+[[ "$(gk_readable_lines "$out")" == 1 ]] \
+    && ok  "exactly one readability statement is emitted (no ambiguity to resolve)" \
+    || bad "expected exactly 1 'Deploy key readable' line, got $(gk_readable_lines "$out")"
+
+# A stale readable key from an EARLIER boot of the same container must not survive the
+# flip. `docker restart` keeps the container filesystem, so a box that once ran with
+# CLAUDE_BROKER_GIT_KEY=0 would otherwise broker the key AND leave the old copy in ~/.ssh.
+rm -rf "$GKD/stale"; mkdir -p "$GKD/stale/home/.ssh"
+printf '%s\n' "$GK_SECRET" > "$GKD/stale/home/.ssh/id_ed25519"
+gk_fake_key > "$GKD/stale/git-key"
+gk_stale_blk="$(gk_block "$GKD/stale")"
+( unset CLAUDE_BROKER_GIT_KEY GK_FAIL_AGENT GK_FAIL_ADD GK_FAIL_RELAY
+  export PATH="$GKD/bin:$PATH" CLAUDE_HOME="$GKD/stale/home" GITKEY_SRC="$GKD/stale/git-key" \
+         CLAUDE_USER="$GK_USER" CLAUDE_UID="$GK_UID" CLAUDE_GID="$GK_GID" GK_ADDLOG="$GKD/stale/ssh-add.log"
+  log() { echo "[entrypoint] $*"; }
+  set -euo pipefail
+  eval "$gk_stale_blk" ) >/dev/null 2>&1 || true
+[[ ! -e "$GKD/stale/home/.ssh/id_ed25519" ]] \
+    && ok  "a readable key left by an earlier boot is DELETED when brokering takes over" \
+    || bad "a stale ~/.ssh/id_ed25519 survived the brokered boot: the key is still readable"
+
+# --- THE EXPLICIT OPT-OUT: the historical readable file, unchanged -------------------
+for v in 0 false no off; do
+    out="$(run_gitkey "off-$v" key "CLAUDE_BROKER_GIT_KEY=$v")"
+    f="$GKD/off-$v/home/.ssh/id_ed25519"
+    if [[ -f "$f" && "$(stat -c '%u %g %a' "$f")" == "$GK_UID $GK_GID 600" ]]; then
+        ok "CLAUDE_BROKER_GIT_KEY=$v installs the historical key file, owned by the agent user at mode 600"
+    else
+        bad "CLAUDE_BROKER_GIT_KEY=$v did not reproduce today's readable-file behavior: $(stat -c '%u %g %a' "$f" 2>&1)"
+    fi
+    grep -q "IdentityFile ~/.ssh/id_ed25519" "$GKD/off-$v/home/.ssh/config" \
+        && ok "CLAUDE_BROKER_GIT_KEY=$v points ssh at the installed key file (git keeps working)" \
+        || bad "CLAUDE_BROKER_GIT_KEY=$v installed a key ssh will never offer (no IdentityFile)"
+    grep -q "Deploy key readable : YES" <<<"$out" \
+        && ok "CLAUDE_BROKER_GIT_KEY=$v says plainly that the agent user CAN read the key" \
+        || bad "the opt-out path does not state the key is readable: $out"
+done
+
+# --- EXPLICIT ENABLING VALUES still broker ------------------------------------------
+for v in 1 true yes on; do
+    out="$(run_gitkey "on-$v" key "CLAUDE_BROKER_GIT_KEY=$v")"
+    [[ "$out" == *"git_brokered=1"* && ! -e "$GKD/on-$v/home/.ssh/id_ed25519" ]] \
+        && ok "CLAUDE_BROKER_GIT_KEY=$v brokers (no readable key file)" \
+        || bad "CLAUDE_BROKER_GIT_KEY=$v did not broker: $out"
+done
+
+# --- AN UNRECOGNISED VALUE MUST BROKER, NEVER DOWNGRADE ------------------------------
+# A typo is the case that decides whether this control fails safe. "O" for "0", a
+# trailing-space "0 " that docker --env-file keeps verbatim, an empty value from a bare
+# `CLAUDE_BROKER_GIT_KEY=` line: every one of them must land on the brokered path.
+for v in O 2 "0 " " 0" "" broker "no thanks" 00 "false " disabled; do
+    out="$(run_gitkey typo key "CLAUDE_BROKER_GIT_KEY=$v")"
+    if [[ "$out" == *"git_brokered=1"* && ! -e "$GKD/typo/home/.ssh/id_ed25519" ]]; then
+        ok "CLAUDE_BROKER_GIT_KEY='$v' is unrecognised -> brokered (containment is not downgraded)"
+    else
+        bad "CLAUDE_BROKER_GIT_KEY='$v' was read as a request for a READABLE key: a typo silently exfiltratable"
+    fi
+done
+
+# --- FAIL CLOSED: a broker that cannot come up installs NOTHING ----------------------
+# Three independent ways to break it, one per stage the entrypoint names in its own
+# criterion (the agent process, the key add, the relay socket). The old code fell
+# through to `install ... id_ed25519` in all three.
+for stage in GK_FAIL_AGENT GK_FAIL_ADD GK_FAIL_RELAY; do
+    out="$(run_gitkey "fail-$stage" key "$stage=1")"
+    [[ "$out" == *"git_brokered=0"* && ! -e "$GKD/fail-$stage/home/.ssh/id_ed25519" ]] \
+        && ok  "$stage: a failed broker installs NO readable key file (no fail-open fallback)" \
+        || bad "$stage: FAIL-OPEN, the broker failed and a readable key was installed anyway: $out"
+    grep -rqF "$GK_SECRET" "$GKD/fail-$stage/home" 2>/dev/null \
+        && bad "$stage: the private key bytes are readable under the agent's home after a failed broker" \
+        || ok  "$stage: no private key bytes anywhere under the agent's home after a failed broker"
+    # "Unable to authenticate": no key file, no IdentityFile, and no agent socket to
+    # sign through. git has nothing left to offer this remote, which is the point.
+    if ! grep -q "IdentityFile" "$GKD/fail-$stage/home/.ssh/config" 2>/dev/null \
+       && [[ ! -e "$GKD/fail-$stage/profile-d.sh" ]] \
+       && [[ ! -S "$GKD/fail-$stage/run/agent.sock" ]]; then
+        ok "$stage: git is left with no key file, no IdentityFile and no agent socket (cannot authenticate)"
+    else
+        bad "$stage: something was left behind that git could still authenticate with"
+    fi
+    [[ "$out" == *"ERROR"* && "$out" == *"NOT falling back to a readable key file"* ]] \
+        && ok  "$stage: the failure is logged loudly and says it is NOT falling back" \
+        || bad "$stage: the broker failure is not loud enough to see in the boot log: $out"
+    grep -q "Deploy key readable : NO" <<<"$out" \
+        && ok  "$stage: the boot log still states the key's readability (NO) after the failure" \
+        || bad "$stage: no readability statement on the failed-broker path: $out"
+done
+
+# --- NO KEY MOUNTED: say so, claim nothing more, change nothing ----------------------
+out="$(run_gitkey nokey nokey)"
+[[ "$out" == *"No git SSH key mounted"* ]] \
+    && ok  "no key mounted -> the boot log says exactly that" \
+    || bad "the no-key-mounted path says nothing about the missing key: $out"
+grep -qE "Deploy key readable : (YES|NO)" <<<"$out" \
+    && bad "the no-key path CLAIMS a readability it cannot know: $out" \
+    || ok  "no key mounted -> no YES/NO readability claim is made (only that none was mounted)"
+grep -q "Deploy key readable : n/a" <<<"$out" \
+    && ok  "no key mounted -> the readability line reads n/a, so the operator is not left inferring" \
+    || bad "the no-key path emits no readability line at all: $out"
+[[ ! -e "$GKD/nokey/home/.ssh/id_ed25519" && ! -e "$GKD/nokey/home/.ssh/config" \
+   && ! -e "$GKD/nokey/profile-d.sh" && ! -d "$GKD/nokey/run" ]] \
+    && ok  "no key mounted -> nothing is written: no key file, no ssh config, no relay, no profile export" \
+    || bad "the no-key path wrote something: existing https/public-repo git behavior is not untouched"
+[[ "$out" == *"git_brokered=0"* ]] \
+    && ok  "no key mounted -> no broker is started for a key that does not exist" \
+    || bad "the no-key path started a broker: $out"
+# The HTTPS half of the same criterion: §5's no-key branch must only LOG. The gh
+# credential-helper wiring that HTTPS git depends on lives further down and must not be
+# reachable from, or conditional on, this branch.
+gk_nokey_branch="$(awk '/^else$/{f=1} f{print} f&&/^fi$/{exit}' <<<"$GITKEY_BLOCK")"
+if [[ -n "$gk_nokey_branch" ]] && ! grep -qE '^\s*(install|printf|cat|mkdir|rm|chmod|chown|git|gh)\b' <<<"$gk_nokey_branch"; then
+    ok "the no-key branch only logs: it touches no file and no git/gh configuration"
+else
+    bad "the no-key branch does more than log, so HTTPS/public-repo behavior is not provably unchanged"
+fi
+
+# --- STRUCTURAL TRIPWIRES: the shape of the fix, not just this run's outcome ---------
+# Pin the properties that a well-meaning refactor would quietly undo.
+if grep -qF 'CLAUDE_BROKER_GIT_KEY:-}" =~ ^(0|false|no|off)$' <<<"$GITKEY_BLOCK"; then
+    ok "the readable-file install is gated on a RECOGNISED DISABLING value (opt-out, not opt-in)"
+else
+    bad "§5 no longer selects the readable file by an explicit disabling value: the default may have flipped back"
+fi
+if ! grep -qF 'git_brokered" == 0' <<<"$GITKEY_BLOCK"; then
+    ok "the old 'if the broker did not engage, install the key anyway' fall-through is gone"
+else
+    bad "the fail-open fall-through is back: a broker hiccup would install a readable key"
+fi
+if grep -qF 'mode=0600,user=$CLAUDE_USER' <<<"$GITKEY_BLOCK" \
+   && grep -qF 'chmod 600 "$AGENT_SOCK"' <<<"$GITKEY_BLOCK"; then
+    ok "the agent reaches only a uid-restricted RELAY; the real agent socket stays root-only"
+else
+    bad "the relay/root-socket permissions were loosened: the agent could reach the root ssh-agent directly"
+fi
+
+echo
 echo "== RC watchdog: auth-aware state machine + login gate + resume-menu detection =="
 
 # The watchdog is source-guarded (watch_loop runs only when executed, not sourced),

@@ -65,6 +65,16 @@ ACCOUNTS="${CLAUDE_ACCOUNTS:-}"
 # Empty here means "unset": the container's entrypoint then defaults it to opus
 # (best available). A value from .env/env seeds the default; --model overrides.
 MODEL="${CLAUDE_MODEL:-}"
+# Git-key brokering is the DEFAULT posture (entrypoint.sh §5): a mounted deploy
+# key is held in a root-owned ssh-agent that the agent user cannot read, and only
+# a RECOGNISED disabling value (0/false/no/off) opts out to a readable
+# ~/.ssh/id_ed25519. Normalise the unset case to 1 HERE, once, before anything
+# below reads it: this script passes the variable through with `-e ...:-0` and
+# also warns on the --docker combination, and seeding "0" at either site would
+# hand every operator who never heard of this flag the readable key the default
+# exists to avoid. An operator's own value (including a typo, which the
+# entrypoint brokers) is passed through untouched.
+CLAUDE_BROKER_GIT_KEY="${CLAUDE_BROKER_GIT_KEY:-1}"
 # BROWSER is TRI-STATE: "" = auto (a browser image auto-enables the MCP; a lean
 # image stays off), 1 = force on, 0 = explicit opt-out. Left empty here, the `-e
 # CLAUDE_BROWSER` flag is omitted below so a browser image can self-detect.
@@ -252,8 +262,9 @@ if [[ "$DOCKER" == "1" ]]; then
     # Docker socket access is a path to root INSIDE the container (docker run -v /:/rootfs).
     # Sysbox keeps that root off the host, so the host boundary holds, but these two
     # controls exist to separate the agent from CONTAINER-root, and they no longer do.
-    # Neither is on by default; warn rather than refuse, because the operator may genuinely
-    # want docker on a container whose git key is already low-value.
+    # Git-key brokering IS on by default (normalised above), egress lockdown is not; warn
+    # rather than refuse, because the operator may genuinely want docker on a container
+    # whose git key is already low-value.
     if [[ "${CLAUDE_BROKER_GIT_KEY:-0}" =~ ^(1|true|yes|on)$ ]]; then
         warn "CLAUDE_BROKER_GIT_KEY=1 with --docker: the git-key broker no longer protects the key."
         warn "  It hides the deploy key in a root-owned ssh-agent, but an agent with Docker can"

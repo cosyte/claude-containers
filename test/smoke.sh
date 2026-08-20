@@ -19,6 +19,9 @@ CN="claude-smoke-$$"
 OTELCN="claude-smoke-otel-$$"
 EGCN="claude-smoke-egress-$$"
 BRKCN="claude-smoke-broker-$$"
+BRKOFFCN="claude-smoke-broker-off-$$"
+BRKFAILCN="claude-smoke-broker-fail-$$"
+NOKEYCN="claude-smoke-nokey-$$"
 BRWACN="claude-smoke-browser-auto-$$"
 BRWOCN="claude-smoke-browser-off-$$"
 BRWFCN="claude-smoke-browser-force-$$"
@@ -28,7 +31,8 @@ WSVOL="claude-smoke-ws-$$"
 PASS=0 FAIL=0
 
 cleanup() {
-    docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" "$BRWACN" "$BRWOCN" "$BRWFCN" "$BRWLCN" >/dev/null 2>&1 || true
+    docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" "$BRKOFFCN" "$BRKFAILCN" "$NOKEYCN" \
+                 "$BRWACN" "$BRWOCN" "$BRWFCN" "$BRWLCN" >/dev/null 2>&1 || true
     docker volume rm "$AUTHVOL" "$WSVOL" >/dev/null 2>&1 || true
     rm -rf "$TMP"
 }
@@ -325,29 +329,138 @@ fi
 docker rm -f "$EGCN" >/dev/null 2>&1 || true
 
 echo
-echo "== 15. git-key brokering: usable by the agent, not readable =="
-# Mount a throwaway deploy key and broker it. The agent must be able to USE it
-# (ssh-agent lists it) but never READ the private bytes.
+echo "== 15. git-key handling: brokered BY DEFAULT, usable by the agent, not readable =="
+# CC-11 flipped the default. Every container below is launched the way a real operator
+# launches one, and the only difference between them is which explicit choice (if any)
+# the operator recorded. §15a passes NO CLAUDE_BROKER_GIT_KEY at all: that is the case
+# that used to hand the agent a readable deploy key.
+#
+# The deploy key's own PUBLIC half is mounted as authorized_keys, so the container's own
+# sshd is a real ssh remote that only this key can open. That makes "git push actually
+# works through the relay" provable with no network and no external host.
 ssh-keygen -q -t ed25519 -f "$TMP/gitkey" -N ''
+printf 'not-a-private-key\n' > "$TMP/badkey"      # non-empty, so §5 engages; unloadable, so the broker fails
+GKPRIV="$(sed -n '2p' "$TMP/gitkey")"             # a base64 line of the PRIVATE key body
+wait_boot() { for _ in $(seq 1 40); do docker logs "$1" 2>&1 | grep -q "started in tmux" && return 0; sleep 1; done; return 1; }
+
+# --- 15a. THE DEFAULT: no flag set at all -------------------------------------------
 docker run -d --name "$BRKCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=broker \
-    -e CLAUDE_BROKER_GIT_KEY=1 \
-    -v "$TMP/repo:/workspace" -v "$TMP/key.pub:/etc/claude/authorized_keys:ro" \
+    -v "$TMP/repo:/workspace" -v "$TMP/gitkey.pub:/etc/claude/authorized_keys:ro" \
     -v "$TMP/gitkey:/etc/claude/git-key:ro" "$IMAGE" >/dev/null 2>&1 || true
-for _ in $(seq 1 40); do docker logs "$BRKCN" 2>&1 | grep -q "started in tmux" && break; sleep 1; done
-brk() { docker exec "$BRKCN" gosu claude bash -lc "$1"; }
-check "broker engaged (key held in root ssh-agent)" \
+wait_boot "$BRKCN" || true
+brk()  { docker exec "$BRKCN" gosu claude bash -lc "$1"; }
+brksh(){ docker exec "$BRKCN" gosu claude sh -c "$1"; }
+check "broker engaged with NO operator flag set (key held in root ssh-agent)" \
     'docker logs "$BRKCN" 2>&1 | grep -q "key broker.*root ssh-agent"'
+check "the boot log STATES the key is not readable by the agent user" \
+    'docker logs "$BRKCN" 2>&1 | grep -q "Deploy key readable : NO"'
 check "agent can USE the key (ssh-agent lists it via the relay)" \
     'brk "ssh-add -l" 2>/dev/null | grep -qE "ED25519|SHA256"'
 check "agent CANNOT read the private key (no readable key file)" \
     '! brk "test -e ~/.ssh/id_ed25519"'
+check "no file ANYWHERE under the agent's home holds private key material" \
+    '! brksh "grep -rq -- \"PRIVATE KEY\" /home/claude 2>/dev/null"'
+check "the mounted key itself is root-only (the agent cannot read it off the mount)" \
+    '! brksh "cat /etc/claude/git-key >/dev/null 2>&1"'
+
+# THE POINT OF THE DEFAULT: containment that breaks git is containment nobody keeps.
+# A real push, over ssh, signed by the brokered key, into a bare repo in the container.
+check "git push over the mounted key SUCCEEDS on the default path (signed through the relay)" \
+    'brk "git init -q --bare /home/claude/bare.git && git init -q /home/claude/src && cd /home/claude/src && GIT_AUTHOR_NAME=smoke GIT_AUTHOR_EMAIL=smoke@test GIT_COMMITTER_NAME=smoke GIT_COMMITTER_EMAIL=smoke@test git commit -q --allow-empty -m brokered && git remote add self claude@localhost:/home/claude/bare.git && git push -q self HEAD:refs/heads/smoke" >/dev/null 2>&1'
+check "the pushed ref really landed (the relay signed a real authentication)" \
+    'brk "git --git-dir=/home/claude/bare.git rev-parse --verify -q refs/heads/smoke" >/dev/null 2>&1'
+check "the push used the relay socket, not a key file (SSH_AUTH_SOCK is the relay)" \
+    'brk "echo \$SSH_AUTH_SOCK" 2>/dev/null | grep -q "/run/claude/agent.sock"'
+
+# AC1, sub-clause 2: THE SSH-AGENT PROTOCOL. "List identities" is the only "give me the
+# keys" question the protocol has, and it answers with public blobs by design. Assert on
+# BYTES, not on a keyword: dump every response the agent user can obtain from the relay
+# and prove the mounted key's own private material appears in none of them.
+check "the agent-protocol identity query yields a PUBLIC key and no private bytes" \
+    'o="$(brk "ssh-add -L; ssh-add -l" 2>&1)"; grep -q "ssh-ed25519" <<<"$o" \
+     && ! grep -qiE "PRIVATE KEY|BEGIN OPENSSH" <<<"$o" && ! grep -qF "$GKPRIV" <<<"$o"'
 check "agent CANNOT extract the key (ssh-add -L gives public only)" \
     '! brk "ssh-add -L 2>/dev/null | grep -qi PRIVATE"'
 check "real ssh-agent socket is root-only (claude cannot reach it directly)" \
     '[ "$(docker exec "$BRKCN" stat -c %U /run/claude/agent-root.sock)" = root ] && ! brk "cat /run/claude/agent-root.sock" 2>/dev/null'
+
+# AC1, sub-clause 3: PROCESS MEMORY. The key lives in a root-owned ssh-agent's address
+# space. From the agent uid the kernel's own ptrace_may_access check must refuse
+# /proc/<pid>/mem: not a convention, an EACCES.
+BRKPID="$(docker exec "$BRKCN" pgrep -u root -x ssh-agent 2>/dev/null | head -1 || true)"
+if [ -n "$BRKPID" ]; then
+    check "the broker's ssh-agent runs as root, a different uid from the agent" \
+        '[ "$(docker exec "$BRKCN" stat -c %U /proc/'"$BRKPID"')" = root ]'
+    check "the agent user CANNOT read the broker's process memory (/proc/<pid>/mem denied)" \
+        '! brksh "cat /proc/'"$BRKPID"'/mem >/dev/null 2>&1"'
+    check "the denial is a permission error, not a missing file" \
+        'brksh "cat /proc/'"$BRKPID"'/mem 2>&1 >/dev/null" | grep -qiE "permission denied|operation not permitted"'
+    check "the /proc surfaces the agent CAN read carry no private key bytes" \
+        '! brksh "cat /proc/'"$BRKPID"'/cmdline /proc/'"$BRKPID"'/environ 2>/dev/null" | grep -qF "$GKPRIV"'
+else
+    bad "could not find the broker's root ssh-agent process: the memory-isolation checks did not run"
+fi
 check "shared /auth credential master is locked to root (agent cannot list it)" \
     '[ "$(docker exec "$BRKCN" stat -c "%A %U" /auth)" = "drwx------ root" ] && ! brk "ls /auth" 2>/dev/null'
 docker rm -f "$BRKCN" >/dev/null 2>&1 || true
+
+# --- 15b. THE EXPLICIT OPT-OUT: today's readable file, unchanged ---------------------
+docker run -d --name "$BRKOFFCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=brokeroff \
+    -e CLAUDE_BROKER_GIT_KEY=0 \
+    -v "$TMP/repo:/workspace" -v "$TMP/gitkey.pub:/etc/claude/authorized_keys:ro" \
+    -v "$TMP/gitkey:/etc/claude/git-key:ro" "$IMAGE" >/dev/null 2>&1 || true
+wait_boot "$BRKOFFCN" || true
+check "CLAUDE_BROKER_GIT_KEY=0 still installs the historical key file, agent-owned at mode 600" \
+    '[ "$(docker exec "$BRKOFFCN" stat -c "%U %a" /home/claude/.ssh/id_ed25519)" = "claude 600" ]'
+check "the opt-out path points ssh at that key file (an operator relying on it is unaffected)" \
+    'docker exec "$BRKOFFCN" grep -q "IdentityFile ~/.ssh/id_ed25519" /home/claude/.ssh/config'
+check "the opt-out boot log says plainly that the key IS readable by the agent user" \
+    'docker logs "$BRKOFFCN" 2>&1 | grep -q "Deploy key readable : YES"'
+docker rm -f "$BRKOFFCN" >/dev/null 2>&1 || true
+
+# --- 15c. FAIL CLOSED: brokering engaged, cannot be established ----------------------
+# Same default launch, but the mounted "key" is unloadable, so ssh-add fails and the
+# relay never comes up. Before CC-11 this fell through to `install ... id_ed25519`.
+docker run -d --name "$BRKFAILCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=brokerfail \
+    -v "$TMP/repo:/workspace" -v "$TMP/gitkey.pub:/etc/claude/authorized_keys:ro" \
+    -v "$TMP/badkey:/etc/claude/git-key:ro" "$IMAGE" >/dev/null 2>&1 || true
+wait_boot "$BRKFAILCN" || true
+check "a failed broker still lets the container BOOT (fail-closed must not brick the session)" \
+    'docker logs "$BRKFAILCN" 2>&1 | grep -q "started in tmux"'
+check "a failed broker installs NO readable key file (the fail-open fallback is gone)" \
+    '! docker exec "$BRKFAILCN" test -e /home/claude/.ssh/id_ed25519'
+check "the failure is logged loudly and says it is NOT falling back to a readable key" \
+    'docker logs "$BRKFAILCN" 2>&1 | grep -q "NOT falling back to a readable key file"'
+check "the failed-broker boot log still states the key's readability" \
+    'docker logs "$BRKFAILCN" 2>&1 | grep -q "Deploy key readable : NO"'
+check "no relay socket and no IdentityFile are left behind" \
+    '! docker exec "$BRKFAILCN" test -S /run/claude/agent.sock \
+     && ! docker exec "$BRKFAILCN" grep -q IdentityFile /home/claude/.ssh/config'
+check "git is left UNABLE to authenticate with that deploy key (ssh auth is refused)" \
+    '! docker exec "$BRKFAILCN" gosu claude bash -lc "ssh -o BatchMode=yes -o ConnectTimeout=5 claude@localhost true" >/dev/null 2>&1'
+docker rm -f "$BRKFAILCN" >/dev/null 2>&1 || true
+
+# --- 15d. NO KEY MOUNTED: say so, claim nothing more, change nothing -----------------
+docker run -d --name "$NOKEYCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=nokey \
+    -e GH_TOKEN=ghp_smoketestdummy \
+    -v "$TMP/repo:/workspace" -v "$TMP/key.pub:/etc/claude/authorized_keys:ro" \
+    "$IMAGE" >/dev/null 2>&1 || true
+wait_boot "$NOKEYCN" || true
+check "no key mounted -> the boot log says exactly that" \
+    'docker logs "$NOKEYCN" 2>&1 | grep -q "No git SSH key mounted"'
+check "no key mounted -> no YES/NO readability is claimed about a key that does not exist" \
+    '! docker logs "$NOKEYCN" 2>&1 | grep -qE "Deploy key readable : (YES|NO)"'
+check "no key mounted -> the readability line reads n/a (nothing is left to infer)" \
+    'docker logs "$NOKEYCN" 2>&1 | grep -q "Deploy key readable : n/a"'
+check "no key mounted -> no key file, no ssh config and no relay are written" \
+    '! docker exec "$NOKEYCN" test -e /home/claude/.ssh/id_ed25519 \
+     && ! docker exec "$NOKEYCN" test -e /home/claude/.ssh/config \
+     && ! docker exec "$NOKEYCN" test -e /run/claude/agent.sock'
+check "no key mounted -> HTTPS git is unchanged: GH_TOKEN still wires gh in as the helper" \
+    'docker logs "$NOKEYCN" 2>&1 | grep -q "gh wired in as git credential helper"'
+check "no key mounted -> the github.com HTTPS credential helper is really configured" \
+    'docker exec "$NOKEYCN" gosu claude env HOME=/home/claude git config --global --get-all credential.https://github.com.helper 2>/dev/null | grep -q "gh auth git-credential"'
+docker rm -f "$NOKEYCN" >/dev/null 2>&1 || true
 
 echo
 echo "== 16. browser variant: MCP auto-enables, opt-out honored, loud on lean =="

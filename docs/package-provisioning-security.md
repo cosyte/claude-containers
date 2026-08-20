@@ -129,7 +129,8 @@ the egress and credential layers, never the thing that makes provisioning safe o
 Even if a hook does run, the secrets it would exfiltrate must not be in reach. Two existing controls
 provide this and provisioning **inherits, never bypasses** them:
 
-- **The git-key broker.** When `CLAUDE_BROKER_GIT_KEY=1`, the deploy key lives only in a **root-owned
+- **The git-key broker.** By default (only an explicit `CLAUDE_BROKER_GIT_KEY=0` opts out of it, and a
+  broker that cannot start installs no key file rather than falling back), the deploy key lives only in a **root-owned
   `ssh-agent`'s memory** (plus a root-only key file); the `claude` user signs git operations through a
   uid-restricted relay socket and **cannot read the key material** (`entrypoint.sh`). A compromised
   install script running as UID 1000 finds no readable private key to steal.

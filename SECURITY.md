@@ -43,10 +43,12 @@ What the stack does enforce, and therefore what a bypass of *is* a valid report:
   and privilege-dropping: `NET_RAW`, `MKNOD` and `SETFCAP` are removed.
 - **Credential isolation.** The shared `claude-auth` credential master is
   root-owned; the agent reaches only its own per-container session token.
-  With `CLAUDE_BROKER_GIT_KEY=1` the git deploy key lives in a root-owned
-  `ssh-agent` and the agent gets a signing socket only, so it cannot read the
-  private key bytes. A path by which the unprivileged agent reads the master
-  credential or the raw private key is in scope.
+  By default the git deploy key lives in a root-owned `ssh-agent` and the agent
+  gets a signing socket only, so it cannot read the private key bytes; only an
+  explicit `CLAUDE_BROKER_GIT_KEY=0` opts out to a readable key file, and a
+  broker that fails to come up installs no key file rather than falling back.
+  A path by which the unprivileged agent reads the master credential or the raw
+  private key is in scope.
 - **Egress lockdown** (`CLAUDE_EGRESS_LOCKDOWN=1`) is enforced in netfilter,
   default-deny, IP-pinned, applied at boot before the agent starts and while it
   is still unprivileged, so the agent cannot disable its own rules. A path that
