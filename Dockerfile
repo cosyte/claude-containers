@@ -17,28 +17,50 @@ FROM node:${NODE_VERSION}-bookworm-slim
 # --- Build-time configuration -------------------------------------------------
 # CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control.
 #
-# 2.1.220 (npm `latest` on 2026-07-25) is verified to support the exact launch this
+# 2.1.241 (npm `latest` on 2026-08-24) is verified to support the exact launch this
 # image makes: `claude --dangerously-skip-permissions --remote-control <name>`
 # (bin/claude-session): with both flags accepted TOGETHER and no interlock between
 # them. That combination is the reason this ARG is pinned at all; re-verify it on any
 # future bump (test/cli-version-unit.sh asserts the pin is consistent; the live
 # --remote-control handshake is the on-host check, CC-CLAUDE-CODE-UPGRADE-SMOKE).
 #
-# ⚠️ WHAT THE 2.1.207 -> 2.1.220 BUMP CHANGES ABOUT THE MODEL. CLI 2.1.219 introduced
-# Claude Opus 5 (`claude-opus-5`, 1M context) as the NEW DEFAULT Opus. The `opus` alias
-# this image passes resolves to the LATEST Opus, so the fleet moves Opus 4.8 -> Opus 5
-# on this bump. That is an UPGRADE and clears ADR 0009, but it is a real behavior change
-# (different model, far larger context) and not a no-op: it is the headline reason to
-# re-verify rather than assume. Pin CLAUDE_MODEL=claude-opus-4-8 on a container that
-# must stay on 4.8. Note 2.1.219 also dropped Opus 4.7 from fast mode.
+# NO DEFAULT-MODEL CHANGE IN THIS BUMP. Opus 5 (`claude-opus-5`, 1M context) has been
+# the `opus` alias's target since CLI 2.1.219 (the 2.1.207 -> 2.1.220 bump) and stays so
+# through 2.1.241: no new Opus release landed in this range. Pin
+# CLAUDE_MODEL=claude-opus-4-8 on a container that must stay off Opus 5.
 #
 # WHY THE FLOOR EXISTS (CC-CLAUDE-CODE-UPGRADE): the `opus` alias resolves to the LATEST
 # Opus, and Opus 4.8 shipped in CLI 2.1.154, so the old 2.1.145 pin silently resolved
 # `--model opus` (this image's default) to Opus 4.7, quietly downgrading every gate
 # agent below what ADR 0009 requires. The >=2.1.154 floor below is what makes that
-# downgrade impossible; it stays a floor, not an equality, and 2.1.220 clears it.
+# downgrade impossible; it stays a floor, not an equality.
 #
-# Landed between 2.1.207 and 2.1.220, and relevant to this image:
+# Landed between 2.1.220 and 2.1.241, and relevant to this image:
+#   - 2.1.224: removed the 200-subagent spawn cap entirely (the concurrency-20 /
+#     nesting-depth-3 limits from 2.1.212-2.1.219 remain). Loosens a ceiling this
+#     repo's worktree-isolated-subagent parallelism path (post Sysbox-broker retirement)
+#     could otherwise hit on a large fan-out.
+#   - 2.1.232: fixed Remote Control sessions appearing as new claude.ai sessions on
+#     resume, and fixed RC sessions going unreachable to new clients while idle: both
+#     upstream fixes for the exact RC-flakiness family entrypoint.sh's watchdog
+#     (`claude-rc-watchdog`, PR #36) works around from the outside. Keep the watchdog:
+#     it covers OAuth-credential expiry, a different trigger than either of these.
+#   - 2.1.234: fixed `--dangerously-skip-permissions` mode not persisting on restart.
+#     Directly relevant here: the RC watchdog respawns the tmux pane with
+#     `claude-session --continue` on a confirmed-dead link (docs/troubleshooting.md),
+#     and this bug could have silently dropped that respawned pane back into a
+#     prompting permission mode instead of bypassPermissions.
+#   - 2.1.222: Remote Control auto-start can no longer be enabled by repo-level
+#     settings, only user scope: harmless here, this image's baked settings.json sets
+#     it at user scope.
+#   - 2.1.227: fixed feature flags (GrowthBook) evaluating without subscription tier on
+#     an expired login: a contributing cause of `tengu_ccr_bridge` misfiring, tangential
+#     to the "never disable telemetry" invariant in the skill/README.
+#   - 2.1.238: fixed unbounded memory growth in long interactive sessions: relevant
+#     given this image's CLAUDE_MEM_LIMIT hard memory cap (OOM instead of a graceful
+#     GC used to be the failure mode this papered over).
+#
+# Landed between 2.1.207 and 2.1.220, still relevant:
 #   - 2.1.211: parallel sessions no longer all log out simultaneously on wake, and
 #     2.1.214 fixed feature flags going stale after a token rotation. Both are upstream
 #     fixes for the exact fleet-wide auth/Remote-Control failure mode this repo worked
@@ -70,7 +92,7 @@ FROM node:${NODE_VERSION}-bookworm-slim
 #     tmux pane would die on an invalid-choice refusal.
 #   - 2.1.198: Remote Control is disabled when ANTHROPIC_BASE_URL points at a
 #     non-Anthropic host. This image never sets it (and §1 refuses API-key auth).
-ARG CLAUDE_CODE_VERSION=2.1.220
+ARG CLAUDE_CODE_VERSION=2.1.241
 # PNPM_VERSION: pnpm baked into the image. "latest" works but isn't
 # reproducible: pin a real version (e.g. 10.4.1), same as UV_VERSION.
 ARG PNPM_VERSION=latest
