@@ -296,6 +296,41 @@ else
     bad "--no-cache generation failed"
 fi
 
+# --- egress lockdown: the strict spelling earns the same capability -----------------------
+echo
+echo "== CLAUDE_EGRESS_LOCKDOWN=strict emits the same cap_add as the on spellings =="
+# strict is the fail-CLOSED spelling of lockdown: it makes an unapplied ruleset refuse
+# the boot instead of logging it. A generated service that is not granted NET_ADMIN can
+# never apply that ruleset, so a strict stack that missed this grant would refuse to
+# start on every `up`, for a reason the operator never chose.
+#
+# The value is set in the LAYERED ENV FILE rather than the ambient environment on
+# purpose: _common.sh sources the repo's base .env with `set -a`, so a dev box that
+# happens to have CLAUDE_EGRESS_LOCKDOWN in its own .env would silently override an
+# ambient value and quietly turn this into a no-op. CLAUDE_ENV_FILE wins over .env.
+eg_svc() {  # eg_svc <CLAUDE_EGRESS_LOCKDOWN value> -> that service's YAML block
+    local v="$1" d="$TMPD/eglock-$2"
+    mkdir -p "$d"
+    { cat "$ENVF"; printf 'CLAUDE_EGRESS_LOCKDOWN=%s\n' "$v"; } > "$d/env"
+    gen --env-file "$d/env" --out "$d/dc.yml" --port-base 3900 e/one || return 1
+    awk '/^  one:$/{f=1;next} f&&/^  [a-z0-9-]+:$/{exit} f' "$d/dc.yml"
+}
+eg_caps() { awk '/^    cap_add:$/{f=1;next} f&&/^    [a-z_]+:$/{exit} f' <<<"$1"; }
+eg_on="$(eg_svc 1 on)"; eg_strict="$(eg_svc strict strict)"; eg_off="$(eg_svc 0 off)"
+if [[ -n "$eg_on" && -n "$eg_strict" && -n "$eg_off" ]]; then
+    grep -qx '      - NET_ADMIN' <<<"$eg_strict" \
+        && ok "a strict service is granted NET_ADMIN (its firewall can actually apply)" \
+        || bad "a strict service gets no NET_ADMIN: its firewall could never apply, so it would refuse to start on every up"
+    [[ -n "$(eg_caps "$eg_strict")" && "$(eg_caps "$eg_strict")" == "$(eg_caps "$eg_on")" ]] \
+        && ok "the strict cap_add block is IDENTICAL to the one emitted for =1" \
+        || bad "strict and =1 emit different cap_add blocks (strict: $(eg_caps "$eg_strict") / on: $(eg_caps "$eg_on"))"
+    grep -q 'NET_ADMIN' <<<"$eg_off" \
+        && bad "lockdown off still emits NET_ADMIN: the default posture changed" \
+        || ok "lockdown off emits no NET_ADMIN (the default posture is unchanged)"
+else
+    bad "could not generate the lockdown services: the strict cap_add checks are void"
+fi
+
 # --- summary ------------------------------------------------------------------------------
 echo
 echo "compose-gen-unit: $PASS passed, $FAIL failed"

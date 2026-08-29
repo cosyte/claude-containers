@@ -244,7 +244,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_PIDS_LIMIT` | `2048` | Fork-bomb guard (`--pids-limit`) |
 | `CLAUDE_SHM_SIZE` | `2g` | `/dev/shm` size |
 | `CLAUDE_HARDEN_CAPS` | `1` | `1` = `--cap-drop ALL` + minimal `--cap-add` (drops NET_RAW/MKNOD/SETFCAP); `0` = Docker defaults. `no-new-privileges` is always set. Override the set with `CLAUDE_MIN_CAPS` |
-| `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts. Extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. Fail-open on error |
+| `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1`/`true`/`yes`/`on` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts, **fail-open on error** (logs loudly, starts the agent anyway). `strict` = the same firewall **fail-closed**: if the ruleset cannot be applied the container refuses to start the agent and exits nonzero. `0`/`false`/`no`/`off`, unset or empty = off; any other value is off and is reported in the boot log. Extend the allowlist with `CLAUDE_EGRESS_EXTRA_HOSTS` |
 | `CLAUDE_EGRESS_PACKAGES` | `0` | `1` = additively allowlist the curated **package registries** (PyPI, crates.io, Go proxy, `mise.run`, `ghcr.io`) so agent-driven `pip`/`cargo`/`go`/`mise` installs work under lockdown. Opt-in and curated (not open); nothing else broadens. Debian/apt system libs have no self-service path (see [docs/package-provisioning-security.md](docs/package-provisioning-security.md)) |
 | `CLAUDE_BROKER_GIT_KEY` | `1` (brokered) | **Brokering is the default.** Unset, the SSH deploy key is held in a root ssh-agent: the agent signs/pushes with it but cannot read the key bytes. `0`/`false`/`no`/`off` is the explicit opt-out back to a readable `~/.ssh/id_ed25519`; any other value (including a typo) brokers. If brokering cannot be established there is **no** readable-file fallback: git is left unable to authenticate with that key and the boot log says so |
 | `CLAUDE_DISK_DATA_ROOT` | `/var/lib/docker` | Path whose free space `claude-disk-gc` reports before/after each cycle |
@@ -478,8 +478,11 @@ bind:
 
 - **`CLAUDE_BROKER_GIT_KEY=1`** hides the deploy key in a root-owned `ssh-agent`;
   an agent with Docker can read the key file straight off the filesystem.
-- **`CLAUDE_EGRESS_LOCKDOWN=1`** filters the `OUTPUT` chain; inner containers'
-  traffic is `FORWARD`ed, and container-root can flush the rules anyway.
+- **`CLAUDE_EGRESS_LOCKDOWN=1` (and `=strict`)** filters the `OUTPUT` chain; inner
+  containers' traffic is `FORWARD`ed, and container-root can flush the rules
+  anyway. `strict` does not refuse a `--docker` session over this: its ruleset
+  still applies inside the session's own namespace, it just does not reach what
+  the inner daemon forwards. The launcher warns for either spelling.
 
 Egress lockdown is off by default; git-key brokering is **on** by default, so the
 first bullet applies to a plain `--docker` session unless you opted out. The
@@ -686,10 +689,27 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   The baked allowlist covers the Claude API, OAuth, the Remote Control feature
   flags (`statsig.*`/`growthbook.*`, blocking those breaks RC), npm, and GitHub
   (via its published IP ranges); extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. It adds
-  ~10s to boot and the `NET_ADMIN` cap, and **fails open** (logs loudly, leaves
-  egress unrestricted) rather than bricking connectivity. Caveat: an IP-pinned
+  ~10s to boot and the `NET_ADMIN` cap. On the `1`/`true`/`yes`/`on` spellings it
+  **fails open** (logs loudly, leaves egress unrestricted) rather than bricking
+  connectivity, and that is still the default posture. Caveat: an IP-pinned
   allowlist can go stale as CDNs rotate IPs, and `statsig.anthropic.com` isn't
   publicly resolvable so it can't be pinned: re-verify if RC eligibility fails.
+- **Egress lockdown, fail-closed (`CLAUDE_EGRESS_LOCKDOWN=strict`).** Same
+  firewall, opposite trade: if the ruleset cannot be applied, the container
+  **refuses to start the agent** and exits nonzero, naming egress lockdown in the
+  boot log (readable with `claude-logs` after it has stopped). Every reason the
+  firewall reports a failure is fatal under `strict`, missing `iptables` and an
+  allowlist that resolved to nothing alike: fail-open turns lockdown into a
+  request, and `strict` is for when you need it to be a requirement, e.g. running
+  an agent on untrusted input. Use it knowing the cost: a strict container that
+  can never apply its ruleset keeps restarting until you stop it, exactly like one
+  with a bad `GIT_REPO_URL`, and the way out is to set the variable back to `1`
+  or `0`. `strict` is contained only as well as the ruleset underneath it: on a
+  host or image where the IPv6 pass cannot run, the boot log still says `IPv6
+  UNRESTRICTED` and the container still starts, because the IPv4 lockdown DID
+  apply. A value that is neither an off value nor a recognised on/`strict`
+  spelling boots with egress unrestricted and is reported in the boot log with the
+  posture it produced, so a mistyped `strict` cannot read as an intentional "off".
 - **Package-registry egress (opt-in, additive).** `CLAUDE_EGRESS_PACKAGES=1`
   adds the curated package registries: PyPI, crates.io, the Go module proxy,
   `mise.run`, and `ghcr.io`: to the same IP-pinned allowlist, so agent-driven

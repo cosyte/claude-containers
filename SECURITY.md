@@ -52,8 +52,17 @@ What the stack does enforce, and therefore what a bypass of *is* a valid report:
 - **Egress lockdown** (`CLAUDE_EGRESS_LOCKDOWN=1`) is enforced in netfilter,
   default-deny, IP-pinned, applied at boot before the agent starts and while it
   is still unprivileged, so the agent cannot disable its own rules. A path that
-  does is in scope. Note it **fails open by design**: if setup fails it logs
-  loudly and leaves egress unrestricted rather than bricking connectivity.
+  does is in scope. Note that on the `1`/`true`/`yes`/`on` spellings it **fails
+  open by design**: if setup fails it logs loudly and leaves egress unrestricted
+  rather than bricking connectivity, so on those spellings lockdown is a request,
+  not a guarantee, and a report that it did not apply is not a vulnerability.
+  `CLAUDE_EGRESS_LOCKDOWN=strict` is the **fail-closed** spelling: the same
+  firewall, but a ruleset that cannot be applied makes the container refuse to
+  start the agent and exit nonzero. Under `strict`, a path that reaches a running
+  agent session in a container whose ruleset was not applied IS in scope.
+  `strict` still contains only as well as the ruleset underneath it: a container
+  whose IPv4 lockdown applied and whose IPv6 pass did not starts, and says
+  `IPv6 UNRESTRICTED` in its boot log.
 - **Secret guard** installs a git pre-commit hook blocking obvious secret
   material. It is a backstop against an agent committing a credential, not a
   DLP control; `--no-verify` bypasses it by design.

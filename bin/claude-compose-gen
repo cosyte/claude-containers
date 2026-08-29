@@ -722,7 +722,10 @@ EOF
         echo "      - ALL"
         _caps="$CLAUDE_MIN_CAPS"
     fi
-    [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]] && _caps="$_caps NET_ADMIN"
+    # `strict` is the fail-CLOSED spelling of lockdown and needs the same capability:
+    # a strict service denied NET_ADMIN could never apply its ruleset, and would
+    # therefore refuse to start on every `up`.
+    [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on|strict)$ ]] && _caps="$_caps NET_ADMIN"
     if [[ -n "${_caps// }" ]]; then
         echo "    cap_add:"
         for c in $_caps; do echo "      - $c"; done

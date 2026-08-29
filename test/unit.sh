@@ -1078,24 +1078,47 @@ else
     bad "§12a did not extract, or its firewall path did not redirect: this would run the real firewall"
 fi
 
-# run_egress <firewall-exit-status> [VAR=VAL ...]
+# eg_stub <firewall-exit-status> [stderr-line]
+# Writes the firewall stub the extracted block will call. The optional second
+# argument is a line the stub prints to stderr first, so a test can model WHICH
+# reason the real script reported without pretending the reasons have different
+# exit statuses (they do not: fail_open() ends `exit 1` on every one of them).
+eg_stub() {
+    if [[ $# -gt 1 ]]; then
+        printf '#!/usr/bin/env bash\nprintf "%%s\\n" %q >&2\nexit %s\n' "$2" "$1" > "$EGD/fw"
+    else
+        printf '#!/usr/bin/env bash\nexit %s\n' "$1" > "$EGD/fw"
+    fi
+    chmod +x "$EGD/fw"
+}
+
+# eg_exec <CLAUDE_EGRESS_LOCKDOWN value, or the literal UNSET>
 # Executes the shipped §12a block under the entrypoint's REAL shell options
-# (set -euo pipefail) against a firewall stub that exits with the given status,
-# and prints the boot log plus a final block_continued=1 line. That last line is
-# load-bearing: under `set -e` it only appears if the block ran to completion, so
-# it is the evidence that boot carries on to the tmux launch (the agent session)
-# no matter which family failed.
-run_egress() {
-    local rc="$1"; shift
-    printf '#!/usr/bin/env bash\nexit %s\n' "$rc" > "$EGD/fw"; chmod +x "$EGD/fw"
-    local blk; blk="$(eg_block "$EGD/fw")"
-    ( export CLAUDE_EGRESS_LOCKDOWN=1
-      if [[ $# -gt 0 ]]; then export "$@"; fi
+# (set -euo pipefail) and with the entrypoint's REAL die() in scope, against
+# whatever stub eg_stub last wrote, and prints the boot log plus a final
+# block_continued=1 line. That last line is load-bearing: under `set -e` it only
+# appears if the block ran to completion, so it is the evidence that boot carries
+# on to the tmux launch (the agent session) rather than refusing.
+#
+# die() is EXTRACTED (REAL_DIE, proved to work above), never stubbed: the strict
+# spelling's entire behaviour is that die, and a local stub would keep passing if
+# the shipped one stopped exiting non-zero.
+eg_exec() {
+    ( if [[ "$1" == "UNSET" ]]; then unset CLAUDE_EGRESS_LOCKDOWN
+      else export CLAUDE_EGRESS_LOCKDOWN="$1"; fi
       log() { echo "[entrypoint] $*"; }
+      eval "$REAL_DIE"
       set -euo pipefail
-      eval "$blk"
+      eval "$(eg_block "$EGD/fw")"
       echo "block_continued=1" ) 2>&1
 }
+# The same run, reporting the block's EXIT STATUS instead of its output. Strict's
+# whole point is a non-zero exit BEFORE the agent starts, and a text-only
+# assertion cannot tell "refused" from "logged it and carried on".
+eg_exec_rc() { eg_exec "$@" >/dev/null 2>&1; echo $?; }
+
+# run_egress <firewall-exit-status> [lockdown-value]  (default: 1)
+run_egress() { eg_stub "$1"; eg_exec "${2:-1}"; }
 eg_line() { grep "Egress lockdown" <<<"$1" || true; }
 
 # 0 = both families contained.
@@ -1170,6 +1193,178 @@ EGOFF="$( ( export CLAUDE_EGRESS_LOCKDOWN=0
 [[ -z "$(eg_line "$EGOFF")" && ! -e "$EGD/ran" ]] \
     && ok "CLAUDE_EGRESS_LOCKDOWN=0: the firewall is never invoked and no posture is claimed" \
     || bad "lockdown off still ran the firewall or still logged a posture"
+
+echo
+echo "== entrypoint.sh §12a: CLAUDE_EGRESS_LOCKDOWN=strict fails CLOSED =="
+
+# `strict` turns lockdown from a REQUEST into a REQUIREMENT. Everything about it
+# is the same firewall, the same stub, the same shell options and the same log
+# lines; what changes is what happens after a run that left egress unrestricted.
+# The on spellings log it and fall through to the tmux launch on the very next
+# statement of entrypoint.sh; strict must not reach that statement at all.
+#
+# So the assertions below are about what does NOT happen, and they are made two
+# ways: the block's EXIT STATUS (non-zero = the entrypoint aborts) and the absence
+# of the block_continued=1 marker (proof it never ran to the end).
+
+# --- THE REFUSAL, per STATUS: no status is special-cased -----------------------------
+# 1 is every reason the shipped fail_open() has; 127 is the script missing or not
+# executable (the call site's own status); 9 is a status this entrypoint cannot
+# interpret and already reports as both families open. All three mean "the ruleset
+# was not applied", so all three must refuse.
+for _rc in 1 127 9; do
+    eg_stub "$_rc"
+    rc="$(eg_exec_rc strict)"
+    out="$(eg_exec strict)"
+    [[ "$rc" != "0" ]] \
+        && ok  "strict + firewall status $_rc: the entrypoint REFUSES (exit $rc)" \
+        || bad "strict + firewall status $_rc booted anyway: the agent would run with unrestricted egress"
+    grep -qxF 'block_continued=1' <<<"$out" \
+        && bad "strict + firewall status $_rc ran past §12a: the tmux launch is the next statement" \
+        || ok  "strict + firewall status $_rc stops before the agent session is started"
+    grep -qE '^\[entrypoint\] ERROR: .*[Ee]gress lockdown' <<<"$out" \
+        && ok  "strict + firewall status $_rc names egress lockdown as the reason for the refusal" \
+        || bad "strict + firewall status $_rc refused without naming egress lockdown: $out"
+    grep -qF 'CLAUDE_EGRESS_LOCKDOWN=strict' <<<"$out" \
+        && ok  "strict + firewall status $_rc quotes the flag that caused the refusal (actionable)" \
+        || bad "the refusal does not name CLAUDE_EGRESS_LOCKDOWN=strict: $out"
+done
+
+# --- THE REFUSAL, per REASON: EVERY reason the firewall reports is fatal --------------
+# The reasons are READ OUT OF bin/claude-egress-firewall rather than listed here, so a
+# reason added there is covered here the day it is added. They all exit 1 (fail_open()
+# ends `exit 1` on every path), which is the point: the refusal is driven by the status
+# alone, so "iptables not installed" is a failure to apply and never a skip, and an
+# allowlist that resolved to nothing is not treated as a lesser failure than missing
+# tooling.
+EGFW="$REPO_ROOT/bin/claude-egress-firewall"
+mapfile -t EG_REASONS < <(sed -n 's/.*fail_open "\([^"]*\)".*/\1/p' "$EGFW")
+if (( ${#EG_REASONS[@]} >= 5 )); then
+    ok "read ${#EG_REASONS[@]} fail_open reasons out of bin/claude-egress-firewall (not a hand-copied list)"
+else
+    bad "could not read the fail_open reasons from $EGFW (got ${#EG_REASONS[@]}): the per-reason checks would be vacuous"
+fi
+eg_strict_booted=() eg_open_refused=()
+for _reason in "${EG_REASONS[@]}"; do
+    eg_stub 1 "[egress] ERROR: $_reason, failing OPEN (egress UNRESTRICTED). Fix and restart the container."
+    [[ "$(eg_exec_rc strict)" == "0" ]] && eg_strict_booted+=("$_reason")
+    [[ "$(eg_exec_rc 1)"      != "0" ]] && eg_open_refused+=("$_reason")
+done
+[[ ${#eg_strict_booted[@]} -eq 0 ]] \
+    && ok  "strict refuses on EVERY reason the firewall reports (${#EG_REASONS[@]}/${#EG_REASONS[@]}), tooling-absent and zero-resolution alike" \
+    || bad "strict BOOTED on these firewall failures, so they are special-cased: ${eg_strict_booted[*]}"
+[[ ${#eg_open_refused[@]} -eq 0 ]] \
+    && ok  "the default spelling still fails OPEN on every one of those reasons (posture unchanged)" \
+    || bad "CLAUDE_EGRESS_LOCKDOWN=1 refused to boot on: ${eg_open_refused[*]}"
+
+# --- THE ON SPELLINGS ARE UNTOUCHED --------------------------------------------------
+# The regression this whole change could cause is a fleet that stops coming up. Each
+# existing on spelling must still log the fail-open line, still exit 0, and still reach
+# the agent session, on the very failure that makes strict refuse.
+eg_stub 1
+for _v in 1 true yes on; do
+    rc="$(eg_exec_rc "$_v")"
+    out="$(eg_exec "$_v")"
+    [[ "$rc" == "0" ]] && grep -qxF 'block_continued=1' <<<"$out" \
+        && ok  "CLAUDE_EGRESS_LOCKDOWN=$_v + a failed firewall: still boots (fail-open, unchanged)" \
+        || bad "CLAUDE_EGRESS_LOCKDOWN=$_v no longer fails open (exit $rc): every lockdown container would stop coming up"
+    grep -qE 'Egress lockdown +: IPv4 UNRESTRICTED, IPv6 UNRESTRICTED \(FAILED to apply, egress left OPEN' <<<"$out" \
+        && ok  "CLAUDE_EGRESS_LOCKDOWN=$_v still logs the fail-open line verbatim" \
+        || bad "the fail-open log line changed for CLAUDE_EGRESS_LOCKDOWN=$_v: $(eg_line "$out")"
+done
+
+# --- STRICT ON A RULESET THAT APPLIES: an ordinary boot ------------------------------
+# strict is not a different firewall. When the ruleset applies it must behave exactly
+# like the on spellings, or no strict container could ever start.
+eg_stub 0
+rc="$(eg_exec_rc strict)"
+out="$(eg_exec strict)"
+[[ "$rc" == "0" ]] && grep -qxF 'block_continued=1' <<<"$out" \
+    && ok  "strict + a firewall that APPLIES: boot carries on to the agent session" \
+    || bad "strict refused a SUCCESSFUL firewall run (exit $rc): no strict container could ever start"
+[[ "$(eg_line "$out")" == "$(eg_line "$(eg_exec 1)")" ]] \
+    && ok  "strict logs the SAME posture line as the on spellings on a successful run" \
+    || bad "strict logs a different posture line than =1 on success: $(eg_line "$out")"
+
+# Firewall status 2 is a PARTIAL application (IPv4 committed, IPv6 open), not a failure
+# to apply, so strict boots and the boot log keeps naming the unprotected family. This
+# is deliberate and is the phase's own known limitation: a strict container is contained
+# only as well as the ruleset underneath it, and refusing on 2 would make strict
+# unusable on every image or host without a working ip6tables.
+eg_stub 2
+rc="$(eg_exec_rc strict)"
+out="$(eg_exec strict)"
+[[ "$rc" == "0" ]] && grep -qxF 'block_continued=1' <<<"$out" \
+    && ok  "strict + firewall status 2 (IPv4 contained, IPv6 open): boots, per the phase's known limitation" \
+    || bad "strict refused on status 2 (exit $rc): strict would now require a working IPv6 ruleset"
+grep -qE 'Egress lockdown +: IPv4 default-deny, IPv6 UNRESTRICTED' <<<"$out" \
+    && ok  "strict + status 2 still names IPv6 UNRESTRICTED in the boot log (nothing is hidden)" \
+    || bad "strict + status 2 hid the unprotected family: $(eg_line "$out")"
+
+echo
+echo "== entrypoint.sh §12a: an unrecognised CLAUDE_EGRESS_LOCKDOWN value is REPORTED, never silent =="
+
+# A mistyped strict request must not read as an intentional "off". It must also not
+# refuse the boot: a container that bricked on a fat-fingered .env line would be a worse
+# regression than the one being reported (§0 makes the same trade for the retired vars).
+eg_stub 0
+printf '#!/usr/bin/env bash\ntouch "%s/ran"\nexit 0\n' "$EGD" > "$EGD/fw"; chmod +x "$EGD/fw"
+unk_refused=() unk_ran=() unk_unnamed=() unk_noposture=()
+for _v in stict Strict STRICT enabled 2 "1 " " on"; do
+    rm -f "$EGD/ran"
+    out="$(eg_exec "$_v")"
+    rc="$(eg_exec_rc "$_v")"
+    [[ "$rc" != "0" ]]           && unk_refused+=("$_v")
+    [[ -e "$EGD/ran" ]]          && unk_ran+=("$_v")
+    [[ "$out" == *"'$_v'"* ]]    || unk_unnamed+=("$_v")
+    grep -q 'IPv4 UNRESTRICTED, IPv6 UNRESTRICTED' <<<"$out" || unk_noposture+=("$_v")
+done
+[[ ${#unk_refused[@]} -eq 0 ]] \
+    && ok  "an unrecognised value never refuses the boot (a typo in .env cannot brick a container)" \
+    || bad "these unrecognised values aborted the boot: ${unk_refused[*]}"
+[[ ${#unk_ran[@]} -eq 0 ]] \
+    && ok  "an unrecognised value applies no firewall (it is not silently promoted to lockdown)" \
+    || bad "these unrecognised values ran the firewall: ${unk_ran[*]}"
+[[ ${#unk_unnamed[@]} -eq 0 ]] \
+    && ok  "the boot log QUOTES the unrecognised value back (a mistyped 'strict' cannot read as 'off')" \
+    || bad "these unrecognised values are not named in the boot log: ${unk_unnamed[*]}"
+[[ ${#unk_noposture[@]} -eq 0 ]] \
+    && ok  "the boot log names the POSTURE the unrecognised value produced (both families UNRESTRICTED)" \
+    || bad "these unrecognised values were reported without stating the posture: ${unk_noposture[*]}"
+
+# The recognised OFF values, and unset/empty, stay exactly as they are today: no
+# firewall, no posture line, no warning, no refusal. CLAUDE_EGRESS_LOCKDOWN=0 is the
+# shipped default and ships in every .env.example, so a new failure or even a new log
+# line here would be a fleet-wide regression.
+off_noisy=() off_ran=() off_refused=()
+for _v in 0 false no off "" UNSET; do
+    rm -f "$EGD/ran"
+    out="$(eg_exec "$_v")"
+    rc="$(eg_exec_rc "$_v")"
+    [[ -n "$(eg_line "$out")" ]] && off_noisy+=("${_v:-empty}")
+    [[ -e "$EGD/ran" ]]          && off_ran+=("${_v:-empty}")
+    [[ "$rc" != "0" ]]           && off_refused+=("${_v:-empty}")
+done
+[[ ${#off_noisy[@]} -eq 0 && ${#off_ran[@]} -eq 0 && ${#off_refused[@]} -eq 0 ]] \
+    && ok  "unset, empty and 0/false/no/off: no firewall, no posture line, no refusal (unchanged)" \
+    || bad "an off value changed behaviour (logged: ${off_noisy[*]-} / ran the firewall: ${off_ran[*]-} / refused: ${off_refused[*]-})"
+
+echo
+echo "== bin/_common.sh: strict gets the SAME capability grant as the on spellings =="
+
+# Without this a strict container is denied NET_ADMIN, its firewall can never apply,
+# and it refuses to start EVERY time: the feature would ship broken in the most
+# confusing possible way, and the operator would blame the refusal, not the grant.
+in_env CLAUDE_EGRESS_LOCKDOWN=strict -- '[[ "$(harden_run_args)" == *"--cap-add NET_ADMIN"* ]]' \
+    && ok  "harden_run_args grants NET_ADMIN under CLAUDE_EGRESS_LOCKDOWN=strict" \
+    || bad "a strict container is granted no NET_ADMIN: its firewall could never apply, so it would refuse to start every time"
+in_env CLAUDE_EGRESS_LOCKDOWN=strict -- \
+    'a="$(harden_run_args)"; export CLAUDE_EGRESS_LOCKDOWN=1; b="$(harden_run_args)"; [[ "$a" == "$b" ]]' \
+    && ok  "the strict run args are IDENTICAL to the run args for =1 (no extra privilege, and no less)" \
+    || bad "strict and =1 produce different docker run args"
+in_env CLAUDE_EGRESS_LOCKDOWN=0 -- '[[ "$(harden_run_args)" != *NET_ADMIN* ]]' \
+    && ok  "lockdown off still grants no NET_ADMIN (the default posture is unchanged)" \
+    || bad "NET_ADMIN is granted with lockdown off: the default posture changed"
 
 echo
 echo "== $PASS passed, $FAIL failed =="

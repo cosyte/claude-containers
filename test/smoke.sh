@@ -26,6 +26,10 @@ EG6SUBNET="fd00:5006:$(printf '%x' $(( $$ % 65536 )))::/64"
 EG6CN="claude-smoke-egress6-cn-$$"
 EG6ALLOW="claude-smoke-egress6-allow-$$"
 EG6DENY="claude-smoke-egress6-deny-$$"
+# Strict-lockdown fixtures (section 14c): one container that CANNOT apply its ruleset
+# and must therefore never reach an agent session, and one that can and must.
+EGSFCN="claude-smoke-egress-strict-fail-$$"
+EGSOKCN="claude-smoke-egress-strict-ok-$$"
 BRKCN="claude-smoke-broker-$$"
 BRKOFFCN="claude-smoke-broker-off-$$"
 BRKFAILCN="claude-smoke-broker-fail-$$"
@@ -41,7 +45,7 @@ PASS=0 FAIL=0
 cleanup() {
     docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" "$BRKOFFCN" "$BRKFAILCN" "$NOKEYCN" \
                  "$BRWACN" "$BRWOCN" "$BRWFCN" "$BRWLCN" \
-                 "$EG6CN" "$EG6ALLOW" "$EG6DENY" >/dev/null 2>&1 || true
+                 "$EG6CN" "$EG6ALLOW" "$EG6DENY" "$EGSFCN" "$EGSOKCN" >/dev/null 2>&1 || true
     # The network only goes after its containers do, or Docker refuses to remove it.
     docker network rm "$EG6NET" >/dev/null 2>&1 || true
     docker volume rm "$AUTHVOL" "$WSVOL" >/dev/null 2>&1 || true
@@ -433,6 +437,79 @@ else
 fi
 docker rm -f "$EG6CN" "$EG6ALLOW" "$EG6DENY" >/dev/null 2>&1 || true
 docker network rm "$EG6NET" >/dev/null 2>&1 || true
+
+echo
+echo "== 14c. CLAUDE_EGRESS_LOCKDOWN=strict refuses to start the agent when the ruleset cannot be applied =="
+# Section 14 pins the DEFAULT posture: lockdown never bricks boot, it applies or it
+# fails OPEN, and the agent starts either way. `strict` is the opposite promise, for an
+# operator running an agent on untrusted input: no ruleset, no agent. This section
+# proves it on a live container, because the property that matters is not a log line,
+# it is that nothing is reachable in the container afterwards.
+#
+# THE FAILURE IS FORCED BY WITHHOLDING NET_ADMIN, not by breaking the network: the same
+# image and the same request, launched with the capability set an ordinary (non-lockdown)
+# container gets, so the firewall cannot write a single rule. That reproduces on any
+# host, online or offline, which a DNS-based failure would not.
+EGNOCAP="$(source "$REPO_ROOT/bin/_common.sh"; CLAUDE_EGRESS_LOCKDOWN=0 harden_run_args)"
+# shellcheck disable=SC2086
+docker run -d --name "$EGSFCN" $EGNOCAP \
+    -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=egress-strict -e CLAUDE_EGRESS_LOCKDOWN=strict \
+    -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+eg_running() { docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null || echo false; }
+for _ in $(seq 1 90); do
+    [[ "$(eg_running "$EGSFCN")" == "true" ]] || break
+    sleep 1
+done
+check "a strict container that cannot apply its ruleset does not stay up" \
+    '[ "$(eg_running "$EGSFCN")" != true ]'
+check "it exits NONZERO (the refusal is a failure, not a quiet clean stop)" \
+    'c="$(docker inspect -f "{{.State.ExitCode}}" "$EGSFCN" 2>/dev/null || echo 0)"; [ "$c" != 0 ]'
+# The log is MATERIALIZED once, and every assertion below greps the variable. This file
+# runs under `pipefail`, where `docker logs ... | grep -q X` fails the PIPELINE on a
+# MATCH (grep -q exits early, docker logs takes SIGPIPE 141): a test that reds at random.
+# Reading it after the container has STOPPED is also the point of AC8: this is exactly
+# what `claude-logs` shows an operator who comes back to a container that would not boot.
+EGSF_LOG="$(docker logs "$EGSFCN" 2>&1 || true)"
+check "its retrievable boot log names egress lockdown as the reason for the refusal" \
+    'grep -q "ERROR: Egress lockdown" <<<"$EGSF_LOG"'
+check "the refusal quotes the flag that caused it (CLAUDE_EGRESS_LOCKDOWN=strict)" \
+    'grep -q "CLAUDE_EGRESS_LOCKDOWN=strict" <<<"$EGSF_LOG"'
+# The whole point of strict. No agent, by the container's own account and by ours.
+check "no agent session was ever announced (the tmux launch is never reached)" \
+    '! grep -q "started in tmux" <<<"$EGSF_LOG"'
+check "no agent session is reachable in that container" \
+    '! docker exec "$EGSFCN" gosu claude tmux has-session -t claude >/dev/null 2>&1'
+docker rm -f "$EGSFCN" >/dev/null 2>&1 || true
+
+# The other half, and the one that would make strict useless if it broke: given the
+# capability it needs, a strict container boots exactly like an on-spelling one.
+# shellcheck disable=SC2086
+docker run -d --name "$EGSOKCN" $EGHARDEN \
+    -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=egress-strict-ok -e CLAUDE_EGRESS_LOCKDOWN=strict \
+    -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+for _ in $(seq 1 90); do
+    grep -qE "Egress lockdown" <<<"$(docker logs "$EGSOKCN" 2>&1 || true)" && break
+    [[ "$(eg_running "$EGSOKCN")" == "true" ]] || break
+    sleep 1
+done
+EGSOK_LOG="$(docker logs "$EGSOKCN" 2>&1 || true)"
+if grep -q "Egress lockdown.*IPv4 default-deny" <<<"$EGSOK_LOG"; then
+    check "a strict container whose ruleset APPLIES reaches a running agent session" \
+        'docker exec "$EGSOKCN" gosu claude tmux has-session -t claude >/dev/null 2>&1'
+    check "and it is the SAME default-deny ruleset the on spellings get" \
+        'p="$(docker exec "$EGSOKCN" iptables -S OUTPUT 2>/dev/null | head -1)"; [ "$p" = "-P OUTPUT DROP" ]'
+    check "the ruleset was in force BEFORE the agent started (the firewall precedes the tmux launch)" \
+        'f="$(grep -m1 -E "Egress lockdown|started in tmux" <<<"$EGSOK_LOG")"; case "$f" in *"Egress lockdown"*) true ;; *) false ;; esac'
+else
+    # The ruleset could not be applied here either (no network in this test env, so the
+    # allowlist resolved to nothing). That is not a reason to claim a pass: report the
+    # applies-path as skipped and assert the refusal that DID happen instead, which is
+    # still the strict contract.
+    echo "  SKIP  strict-applies checks (the ruleset could not be applied in this environment)"
+    check "a strict container that could not apply the ruleset refused here too (no agent session)" \
+        '! docker exec "$EGSOKCN" gosu claude tmux has-session -t claude >/dev/null 2>&1'
+fi
+docker rm -f "$EGSOKCN" >/dev/null 2>&1 || true
 
 echo
 echo "== 15. git-key handling: brokered BY DEFAULT, usable by the agent, not readable =="
