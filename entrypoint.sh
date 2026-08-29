@@ -956,16 +956,31 @@ for _v in CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION BASH_DEFAULT_TIMEOUT_MS BASH_MAX
     [[ -n "${!_v:-}" ]] && log "CLI tuning           : ${_v}=${!_v}"
 done
 
-# Egress lockdown (opt-in): apply a default-deny firewall NOW, after the
-# entrypoint's own setup (clone, plugin install) has finished with open egress,
-# and as root (we still hold NET_ADMIN) before the unprivileged agent starts, so
-# the agent runs sealed and cannot alter its own rules. Fail-open by design.
+# --- 12a. Egress lockdown (opt-in) -------------------------------------------
+# Apply a default-deny firewall NOW, after the entrypoint's own setup (clone,
+# plugin install) has finished with open egress, and as root (we still hold
+# NET_ADMIN) before the unprivileged agent starts, so the agent runs sealed and
+# cannot alter its own rules. Fail-open by design.
+#
+# PER FAMILY, ALWAYS. A container can route IPv4 and IPv6, and the firewall can
+# succeed on one and fail on the other, so there is no honest single-sentence
+# answer to "is lockdown active". This block therefore never emits an unqualified
+# "active": every line below names BOTH families and says, for each, whether it
+# is default-deny or UNRESTRICTED. An operator reading `claude-logs` sees the
+# unprotected family by name, which is the whole point of the line.
+#
+# The firewall's exit status IS the per-family verdict (see bin/claude-egress-firewall):
+#   0 both default-deny · 2 IPv4 default-deny + IPv6 open · anything else both open.
+# Note `set -e` is on, so the status is captured with `|| rc=$?`, never bare.
+EGRESS_FIREWALL_BIN="/usr/local/bin/claude-egress-firewall"
 if [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]]; then
-    if /usr/local/bin/claude-egress-firewall; then
-        log "Egress lockdown      : default-deny active (allowlist + CLAUDE_EGRESS_EXTRA_HOSTS)"
-    else
-        log "Egress lockdown      : FAILED to apply, egress left OPEN (see [egress] lines above)"
-    fi
+    egress_rc=0
+    "$EGRESS_FIREWALL_BIN" || egress_rc=$?
+    case "$egress_rc" in
+        0) log "Egress lockdown      : IPv4 default-deny, IPv6 default-deny (allowlist + CLAUDE_EGRESS_EXTRA_HOSTS)" ;;
+        2) log "Egress lockdown      : IPv4 default-deny, IPv6 UNRESTRICTED (the IPv6 ruleset could not be applied, see [egress] lines above)" ;;
+        *) log "Egress lockdown      : IPv4 UNRESTRICTED, IPv6 UNRESTRICTED (FAILED to apply, egress left OPEN, see [egress] lines above)" ;;
+    esac
 fi
 
 # tmux server runs as the claude user; the main pane command falls back to an

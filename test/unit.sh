@@ -1049,5 +1049,128 @@ WLOG="$(mktemp)"; WCRED="$(mktemp)"
 rm -f "$WLOG" "$WCRED"
 
 echo
+echo "== entrypoint.sh §12a: the boot log states the posture of EACH address family =="
+
+# A container routes IPv4 and IPv6, and the firewall can succeed on one family and
+# fail on the other. The old line ("default-deny active") could not express that:
+# it reported containment while IPv6 egress was wide open, which is the exact
+# failure an operator cannot detect from the logs. The firewall now hands its
+# per-family verdict to the entrypoint as its EXIT STATUS, and this section drives
+# the shipped block with a stub firewall at each status.
+#
+# The block is EXTRACTED from entrypoint.sh and EXECUTED here, never mirrored, for
+# the same reason §5 is: a copy keeps passing after the shipped wording regresses.
+# Only its firewall path constant is redirected at a stub, and that redirect is
+# asserted below so this cannot degrade into a test that shells out to the real
+# /usr/local/bin/claude-egress-firewall (which is not even present on a CI host).
+EG_BLOCK="$(awk '/^# --- 12a\. Egress lockdown/{f=1} f{print} f&&/^fi$/{exit}' "$ENTRYPOINT")"
+EGD="$(mktemp -d)"; trap 'rm -rf "$STUB" "$APD" "$GKD" "$EGD"' EXIT
+
+eg_block() { printf '%s\n' "$EG_BLOCK" \
+    | sed -e "s#^EGRESS_FIREWALL_BIN=.*#EGRESS_FIREWALL_BIN=\"$1\"#"; }
+
+eg_probe="$(eg_block "$EGD/fw")"
+if [[ -n "$EG_BLOCK" ]] \
+   && grep -qF "EGRESS_FIREWALL_BIN=\"$EGD/fw\"" <<<"$eg_probe" \
+   && ! grep -qF "/usr/local/bin/claude-egress-firewall" <<<"$eg_probe"; then
+    ok "§12a extracted from entrypoint.sh and its firewall path redirected at a stub"
+else
+    bad "§12a did not extract, or its firewall path did not redirect: this would run the real firewall"
+fi
+
+# run_egress <firewall-exit-status> [VAR=VAL ...]
+# Executes the shipped §12a block under the entrypoint's REAL shell options
+# (set -euo pipefail) against a firewall stub that exits with the given status,
+# and prints the boot log plus a final block_continued=1 line. That last line is
+# load-bearing: under `set -e` it only appears if the block ran to completion, so
+# it is the evidence that boot carries on to the tmux launch (the agent session)
+# no matter which family failed.
+run_egress() {
+    local rc="$1"; shift
+    printf '#!/usr/bin/env bash\nexit %s\n' "$rc" > "$EGD/fw"; chmod +x "$EGD/fw"
+    local blk; blk="$(eg_block "$EGD/fw")"
+    ( export CLAUDE_EGRESS_LOCKDOWN=1
+      if [[ $# -gt 0 ]]; then export "$@"; fi
+      log() { echo "[entrypoint] $*"; }
+      set -euo pipefail
+      eval "$blk"
+      echo "block_continued=1" ) 2>&1
+}
+eg_line() { grep "Egress lockdown" <<<"$1" || true; }
+
+# 0 = both families contained.
+EG0="$(run_egress 0)"
+if grep -qE 'Egress lockdown +: IPv4 default-deny, IPv6 default-deny' <<<"$EG0"; then
+    ok "firewall exit 0: the boot log names BOTH families as default-deny"
+else
+    bad "firewall exit 0 did not report both families as default-deny: $(eg_line "$EG0")"
+fi
+
+# 2 = the case this spec exists for: IPv4 contained, IPv6 wide open. The operator
+# must be able to read the unprotected family BY NAME, so assert on IPv6 being
+# called UNRESTRICTED, not merely on the absence of a success word.
+EG2="$(run_egress 2)"
+if grep -qE 'Egress lockdown +: IPv4 default-deny, IPv6 UNRESTRICTED' <<<"$EG2"; then
+    ok "firewall exit 2: IPv6 is reported UNRESTRICTED BY NAME while IPv4 stays default-deny"
+else
+    bad "firewall exit 2 did not name IPv6 as UNRESTRICTED: $(eg_line "$EG2")"
+fi
+grep -qE 'IPv6 (default-deny|active)' <<<"$EG2" \
+    && bad "firewall exit 2 still claimed IPv6 lockdown somewhere: $(eg_line "$EG2")" \
+    || ok "firewall exit 2 makes no claim of IPv6 containment anywhere in the boot log"
+
+# 1 = fail-open. Both families are open and both must say so.
+EG1="$(run_egress 1)"
+if grep -qE 'Egress lockdown +: IPv4 UNRESTRICTED, IPv6 UNRESTRICTED' <<<"$EG1"; then
+    ok "firewall exit 1 (fail-open): BOTH families are reported UNRESTRICTED"
+else
+    bad "firewall exit 1 did not report both families as unrestricted: $(eg_line "$EG1")"
+fi
+
+# An unrecognised status is a status this entrypoint cannot interpret, so it must
+# claim nothing: the fail-open wording is the only safe reading.
+EG9="$(run_egress 9)"
+grep -qE 'Egress lockdown +: IPv4 UNRESTRICTED, IPv6 UNRESTRICTED' <<<"$EG9" \
+    && ok "an unrecognised firewall status claims NO containment (reports both families open)" \
+    || bad "an unrecognised firewall status was read as some kind of success: $(eg_line "$EG9")"
+
+# NO unqualified claim, at any status. Every "Egress lockdown" line must name both
+# families; a line that says only "default-deny active" is the regression this
+# whole section guards, so the check is a property over all four statuses rather
+# than a string match on one.
+eg_unqualified=0
+for _rc in 0 1 2 9; do
+    while IFS= read -r _l; do
+        [[ -z "$_l" ]] && continue
+        grep -q 'IPv4' <<<"$_l" && grep -q 'IPv6' <<<"$_l" || eg_unqualified=1
+    done <<<"$(eg_line "$(run_egress "$_rc")")"
+done
+[[ "$eg_unqualified" -eq 0 ]] \
+    && ok "every Egress lockdown line names BOTH families (no unqualified 'lockdown is active')" \
+    || bad "an Egress lockdown line claimed a posture without naming both address families"
+grep -q 'default-deny active' "$ENTRYPOINT" \
+    && bad "the old unqualified 'default-deny active' line is still in entrypoint.sh" \
+    || ok "the old unqualified 'default-deny active' line is gone from entrypoint.sh"
+
+# Boot must survive every one of them: a family that failed is a log line, never a
+# refusal to reach the agent session.
+eg_stopped=0
+for _rc in 0 1 2 9; do grep -qxF 'block_continued=1' <<<"$(run_egress "$_rc")" || eg_stopped=1; done
+[[ "$eg_stopped" -eq 0 ]] \
+    && ok "boot continues to the agent session at every firewall status (0/1/2/unknown)" \
+    || bad "some firewall status aborted the entrypoint: the container would never start the agent"
+
+# Lockdown OFF is still silent: no posture line at all, and the firewall is not run.
+printf '#!/usr/bin/env bash\ntouch "%s/ran"\nexit 0\n' "$EGD" > "$EGD/fw"; chmod +x "$EGD/fw"
+rm -f "$EGD/ran"
+EGOFF="$( ( export CLAUDE_EGRESS_LOCKDOWN=0
+            log() { echo "[entrypoint] $*"; }
+            set -euo pipefail
+            eval "$(eg_block "$EGD/fw")" ) 2>&1 )"
+[[ -z "$(eg_line "$EGOFF")" && ! -e "$EGD/ran" ]] \
+    && ok "CLAUDE_EGRESS_LOCKDOWN=0: the firewall is never invoked and no posture is claimed" \
+    || bad "lockdown off still ran the firewall or still logged a posture"
+
+echo
 echo "== $PASS passed, $FAIL failed =="
 exit $(( FAIL > 0 ? 1 : 0 ))

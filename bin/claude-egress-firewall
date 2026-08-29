@@ -13,16 +13,41 @@
 # stays open). Any earlier failure calls fail_open(). A misconfigured firewall
 # never bricks a homelab's connectivity; it logs loudly and stays open.
 #
+# TWO ADDRESS FAMILIES, INDEPENDENTLY. A container on an IPv6-capable Docker
+# network routes both families, so an IPv4-only ruleset is not lockdown: it is
+# lockdown on one family and open egress on the other, which is the worse of the
+# two failures because the boot log used to claim containment either way. So the
+# IPv4 pass runs first and is unchanged, then the IPv6 pass runs against its own
+# table. The two never interfere:
+#   - every IPv6 error path goes through v6_fail(), which logs, puts the IPv6
+#     OUTPUT policy back to ACCEPT and RETURNS. It never calls fail_open() and
+#     never exits, so a broken IPv6 pass cannot undo a committed IPv4 lockdown.
+#   - IPv6 success is not allowed to hide an IPv4 failure: fail_open() still
+#     exits 1 the moment the IPv4 pass fails, before IPv6 is even attempted.
+#   - ABSENT IPv6 TOOLING IS A FAILURE, NOT A SKIP. An image with no ip6tables
+#     cannot filter IPv6, so IPv6 egress is UNRESTRICTED and the log says so.
+#
+# EXIT STATUS is the per-family posture, and the entrypoint turns it into the
+# boot log's "Egress lockdown" line:
+#   0  IPv4 default-deny, IPv6 default-deny   (both families contained)
+#   2  IPv4 default-deny, IPv6 UNRESTRICTED   (IPv6 rules could not be applied)
+#   1  IPv4 UNRESTRICTED, IPv6 UNRESTRICTED   (fail_open(); nothing was applied)
+#
 # Allowlist = a baked default set (Claude API + OAuth + Remote Control feature
 # flags + npm + GitHub) plus CLAUDE_EGRESS_EXTRA_HOSTS (space/comma separated).
-# Allowed: 443/80/22 to allowlisted IPs, 53 (DNS) anywhere, loopback, established.
+# The SAME host set is pinned on both families; only the resolved addresses
+# differ (A records for IPv4, AAAA for IPv6).
+# Allowed: 443/80/22 to allowlisted IPs, 53 (DNS) anywhere, loopback, established
+# (plus, on IPv6 only, the ICMPv6 types IPv6 cannot function without: see below).
 set -uo pipefail
 [[ "${CLAUDE_EGRESS_DEBUG:-0}" == 1 ]] && set -x
 
 log() { echo "[egress] $*" >&2; }   # diagnostics on stderr (like fail_open): keeps stdout a clean data channel (e.g. the CLAUDE_EGRESS_PRINT_HOSTS host list)
 fail_open() {
     log "ERROR: $*, failing OPEN (egress UNRESTRICTED). Fix and restart the container." >&2
-    iptables -P OUTPUT ACCEPT 2>/dev/null || true
+    iptables  -P OUTPUT ACCEPT 2>/dev/null || true
+    ip6tables -P OUTPUT ACCEPT 2>/dev/null || true
+    log "egress posture: IPv4 UNRESTRICTED, IPv6 UNRESTRICTED"
     exit 1
 }
 
@@ -84,33 +109,62 @@ declare -A SEEN=()
 NETS=()
 add_net() { [[ -n "$1" && -z "${SEEN[$1]:-}" ]] && { SEEN[$1]=1; NETS+=("$1"); }; }
 
+# The IPv6 half of the same bookkeeping. Kept in its own array and its own seen-set
+# so nothing an IPv6 lookup returns can end up in the IPv4 table, or the reverse.
+declare -A SEEN6=()
+NETS6=()
+add_net6() { [[ -n "$1" && -z "${SEEN6[$1]:-}" ]] && { SEEN6[$1]=1; NETS6+=("$1"); }; }
+
 # GitHub serves git/clone/raw from a large, published IP space: resolving a few
 # hostnames misses codeload/objects mirrors. Pull the official ranges (best-
 # effort; falls back to per-host resolution below).
+#
+# ONE fetch feeds BOTH families: the published list carries v4 and v6 CIDRs mixed
+# together and they are told apart by the colon. Taking only the colon-free half
+# (as this did before IPv6 support) would have pinned GitHub's published range on
+# IPv4 and left the IPv6 ruleset to per-host AAAA records alone, so a `git clone`
+# from a codeload mirror would work on one family and hang on the other. That is
+# not a mirror of the IPv4 rules, which is what the IPv6 table has to be.
 if meta="$(curl -fsS --max-time 10 https://api.github.com/meta 2>/dev/null)"; then
     while IFS= read -r cidr; do add_net "$cidr"; done < <(
         echo "$meta" | jq -r '(.web // []) + (.api // []) + (.git // []) + (.packages // [])
                               | .[] | select(test(":")|not)' 2>/dev/null)
-    log "added GitHub published IPv4 ranges from api.github.com/meta"
+    while IFS= read -r cidr6; do add_net6 "$cidr6"; done < <(
+        echo "$meta" | jq -r '(.web // []) + (.api // []) + (.git // []) + (.packages // [])
+                              | .[] | select(test(":"))' 2>/dev/null)
+    log "added GitHub published IPv4 and IPv6 ranges from api.github.com/meta"
 else
     log "WARNING: could not fetch api.github.com/meta, relying on per-host DNS for GitHub"
 fi
 
-# Resolve each allowlist host to its current IPv4s and pin them. Docker's
+# Resolve each allowlist host to its current IPv4s AND IPv6s and pin them. Docker's
 # embedded DNS can take ~5s per name on the AAAA path, so resolve all hosts in
 # PARALLEL with a per-host timeout: total stays ~one lookup, not their sum, and
-# no single slow/hung name blocks boot.
+# no single slow/hung name blocks boot. Both families are resolved in the SAME
+# parallel wave for exactly that reason: two sequential waves would double the
+# worst case that shape was chosen to avoid.
 rdir="$(mktemp -d)"
 for h in $HOSTS; do
     [[ -z "$h" ]] && continue
-    ( timeout 6 getent ahostsv4 "$h" 2>/dev/null | awk '{print $1}' | sort -u > "$rdir/${h//\//_}" ) &
+    ( timeout 6 getent ahostsv4 "$h" 2>/dev/null | awk '{print $1}' | sort -u > "$rdir/4_${h//\//_}" ) &
+    ( timeout 6 getent ahostsv6 "$h" 2>/dev/null | awk '{print $1}' | sort -u > "$rdir/6_${h//\//_}" ) &
 done
 wait
 for h in $HOSTS; do
     [[ -z "$h" ]] && continue
-    ips="$(cat "$rdir/${h//\//_}" 2>/dev/null)"
+    ips="$(cat "$rdir/4_${h//\//_}" 2>/dev/null)"
     [[ -z "$ips" ]] && { log "WARNING: could not resolve $h (timeout/NXDOMAIN), skipping"; continue; }
     for ip in $ips; do add_net "$ip"; done
+done
+# A host with no AAAA is NAMED and SKIPPED, one host at a time. It is not a reason
+# to abort the IPv6 pass and it is certainly not a reason to leave IPv6 open: the
+# remaining hosts still get pinned, and a host that is IPv4-only is simply
+# unreachable over a family it does not publish an address on.
+for h in $HOSTS; do
+    [[ -z "$h" ]] && continue
+    ips6="$(cat "$rdir/6_${h//\//_}" 2>/dev/null)"
+    [[ -z "$ips6" ]] && { log "WARNING: could not resolve $h to an IPv6 address (no AAAA/timeout), skipping it in the IPv6 ruleset only"; continue; }
+    for ip in $ips6; do add_net6 "$ip"; done
 done
 rm -rf "$rdir"
 (( ${#NETS[@]} > 0 )) || fail_open "allowlist resolved to zero IPs"
@@ -146,4 +200,100 @@ fi
 [[ "$(iptables -S OUTPUT 2>/dev/null | head -1)" == "-P OUTPUT DROP" ]] \
     || fail_open "default-deny policy not in effect after restore"
 
-log "default-deny egress active (allow: loopback, established, DNS, + ${#NETS[@]} pinned nets on 22/80/443)"
+log "IPv4 default-deny egress active (allow: loopback, established, DNS, + ${#NETS[@]} pinned nets on 22/80/443)"
+
+# ---------------------------------------------------------------------------
+# IPv6. Everything below runs with the IPv4 lockdown ALREADY COMMITTED, and is
+# structurally incapable of undoing it: no path here calls fail_open(), none
+# touches `iptables`, and none exits. The worst case is v6_fail(), which reports
+# the family as UNRESTRICTED and returns.
+# ---------------------------------------------------------------------------
+V6_DENY=0
+v6_fail() {
+    log "IPv6 ERROR: $*, leaving IPv6 egress UNRESTRICTED (the IPv4 lockdown above is unaffected)"
+    ip6tables -P OUTPUT ACCEPT 2>/dev/null || true   # say what is true: report open, be open
+    V6_DENY=0
+}
+
+# ICMPv6 types the IPv6 ruleset MUST let out, from RFC 4890's "must not be
+# dropped" set, minus echo request/reply. This is the one place the IPv6 table is
+# not a byte-for-byte mirror of the IPv4 one, and it is not optional: on IPv4,
+# address resolution is ARP, which is below IP and never reaches the filter
+# table; on IPv6 it is Neighbor Discovery, which IS ICMPv6 and IS filtered. Drop
+# 133-137 and the container cannot resolve its own default router, so every
+# allowlisted host becomes unreachable and this stops being a default-deny
+# allowlist and becomes a deny-everything. 1-4 are the error/PMTU types TCP needs
+# to size its segments; 130-132/141-143 are MLD and inverse ND.
+# Echo (128/129) is deliberately EXCLUDED: it carries an attacker-chosen payload
+# to an arbitrary address, which is the exfiltration channel this whole script
+# exists to close, and nothing in the container needs to ping.
+ICMP6_TYPES="1 2 3 4 130 131 132 133 134 135 136 137 141 142 143"
+
+# The IPv6 mirror of build_rules: same policy, same loopback/established/DNS
+# allowances, same allowlist on 22/80/443, same rate-limited drop LOG.
+build_rules6() {
+    echo "*filter"
+    echo ":INPUT ACCEPT [0:0]"
+    echo ":FORWARD ACCEPT [0:0]"
+    echo ":OUTPUT DROP [0:0]"
+    echo "-A OUTPUT -o lo -j ACCEPT"
+    echo "-A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+    local t
+    for t in $ICMP6_TYPES; do
+        echo "-A OUTPUT -p ipv6-icmp -m icmp6 --icmpv6-type $t -j ACCEPT"
+    done
+    echo "-A OUTPUT -p udp --dport 53 -j ACCEPT"
+    echo "-A OUTPUT -p tcp --dport 53 -j ACCEPT"
+    # Guarded: an empty allowlist is a legal (fully sealed) IPv6 table, and
+    # "${NETS6[@]}" on an empty array is an unbound-variable error under `set -u`
+    # on older bash.
+    if (( ${#NETS6[@]} > 0 )); then
+        local net
+        for net in "${NETS6[@]}"; do
+            echo "-A OUTPUT -p tcp -d $net -m multiport --dports 22,80,443 -j ACCEPT"
+        done
+    fi
+    [[ "${1:-0}" == 1 ]] && echo '-A OUTPUT -m limit --limit 5/min -j LOG --log-prefix "[egress6-drop] "'
+    echo "COMMIT"
+}
+
+apply_v6() {
+    # ABSENT TOOLING IS A FAILURE, NOT A SKIP. An image without ip6tables cannot
+    # filter IPv6 at all, so IPv6 egress is wide open; calling that "skipped"
+    # would let the boot log stay quiet about an entire unprotected family. The
+    # honest report is UNRESTRICTED, and the fix is an image that ships the
+    # binary, never a quieter log line here.
+    command -v ip6tables         >/dev/null 2>&1 || { v6_fail "ip6tables not installed, so IPv6 egress cannot be filtered"; return; }
+    command -v ip6tables-restore >/dev/null 2>&1 || { v6_fail "ip6tables-restore not installed, so IPv6 egress cannot be filtered"; return; }
+
+    # Zero resolved nets is still default-deny, never open: a sealed IPv6 table
+    # does not brick the container (the IPv4 allowlist above is committed and
+    # carries the same hosts), whereas falling back to open IPv6 egress is the
+    # exact hole this script closes.
+    (( ${#NETS6[@]} > 0 )) \
+        || log "WARNING: the allowlist resolved to ZERO IPv6 nets; the IPv6 table will be default-deny with no allowlist punched through (IPv4 is unaffected)"
+    log "allowlist holds ${#NETS6[@]} IPv6 nets from $(echo "$HOSTS" | wc -w) hosts"
+
+    if   build_rules6 1 | ip6tables-restore 2>/dev/null; then :
+    elif build_rules6 0 | ip6tables-restore 2>/dev/null; then log "IPv6 applied without drop-logging (LOG target unavailable)"
+    else v6_fail "ip6tables-restore failed to apply the IPv6 ruleset"; return
+    fi
+
+    # Confirm the IPv6 policy actually flipped, exactly as the IPv4 pass does.
+    [[ "$(ip6tables -S OUTPUT 2>/dev/null | head -1)" == "-P OUTPUT DROP" ]] \
+        || { v6_fail "default-deny IPv6 policy not in effect after restore"; return; }
+
+    V6_DENY=1
+    log "IPv6 default-deny egress active (allow: loopback, established, DNS, NDP/PMTU ICMPv6, + ${#NETS6[@]} pinned nets on 22/80/443)"
+}
+apply_v6
+
+# Per-family posture, handed to the entrypoint as the exit status so the boot log
+# can name the family that is NOT covered. Reaching here at all means the IPv4
+# lockdown is committed and verified, so IPv6 is the only open question.
+if (( V6_DENY == 1 )); then
+    log "egress posture: IPv4 default-deny, IPv6 default-deny"
+    exit 0
+fi
+log "egress posture: IPv4 default-deny, IPv6 UNRESTRICTED"
+exit 2
