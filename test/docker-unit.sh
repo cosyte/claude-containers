@@ -152,6 +152,43 @@ else
     ok "entrypoint grants no --privileged (Sysbox's userns is the whole mechanism)"
 fi
 
+# --- the --docker egress-lockdown warning covers the strict spelling too ----------------
+echo "== claude-launch --docker: the egress-lockdown warning fires for strict as well =="
+# The warning says the allowlist no longer binds on a nested-Docker session (inner
+# traffic is FORWARDed, and container-root can flush the rules). `strict` is the
+# spelling an operator picks when they mean to CONTAIN the agent, so they are the very
+# last person who should have a strict request pass through here in silence.
+#
+# The guard is EXTRACTED from bin/claude-launch and EXECUTED with a local `warn`, never
+# mirrored: a copy of the warning text in this file would keep passing on the day the
+# shipped guard stopped matching `strict`, which is exactly the drift under test.
+EGWARN="$(awk '/^    if \[\[ "\$\{CLAUDE_EGRESS_LOCKDOWN:-0\}" =~ /{f=1} f{print} f&&/^    fi$/{exit}' "$LAUNCH")"
+egwarn() { ( warn() { echo "warn: $*"; }; export CLAUDE_EGRESS_LOCKDOWN="$1"; eval "$EGWARN" ) 2>&1; }
+if [[ -n "$EGWARN" ]] && grep -q 'no longer binds' <<<"$EGWARN"; then
+    ok "the --docker lockdown warning was extracted from claude-launch (not mirrored here)"
+    warn_missing=() warn_unnamed=()
+    for v in 1 true yes on strict; do
+        out="$(egwarn "$v")"
+        grep -q 'the egress allowlist no longer binds' <<<"$out" || warn_missing+=("$v")
+        grep -qF "CLAUDE_EGRESS_LOCKDOWN=$v" <<<"$out"           || warn_unnamed+=("$v")
+    done
+    [[ ${#warn_missing[@]} -eq 0 ]] \
+        && ok "every lockdown spelling, strict included, warns that the allowlist does not bind under --docker" \
+        || bad "these lockdown spellings pass through --docker SILENTLY: ${warn_missing[*]}"
+    [[ ${#warn_unnamed[@]} -eq 0 ]] \
+        && ok "the warning quotes the operator's own spelling back (a strict operator is not told they set =1)" \
+        || bad "the warning misreports the value for: ${warn_unnamed[*]}"
+    quiet=()
+    for v in 0 false no off "" stict; do
+        [[ -n "$(egwarn "$v")" ]] && quiet+=("${v:-empty}")
+    done
+    [[ ${#quiet[@]} -eq 0 ]] \
+        && ok "off values and unrecognised values produce no --docker lockdown warning (no false alarm)" \
+        || bad "these non-lockdown values warned anyway: ${quiet[*]}"
+else
+    bad "could not extract the --docker egress-lockdown warning from claude-launch (the guard is missing or moved)"
+fi
+
 # --- claude-compose-gen emission -------------------------------------------------------
 echo "== claude-compose-gen: per-service docker emission =="
 OUT="$TMPD/dc.yml"

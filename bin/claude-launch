@@ -271,8 +271,13 @@ if [[ "$DOCKER" == "1" ]]; then
         warn "  read it straight off the filesystem (docker run -v /:/rootfs). Treat the key as"
         warn "  readable by the agent, or drop --docker on this container."
     fi
-    if [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]]; then
-        warn "CLAUDE_EGRESS_LOCKDOWN=1 with --docker: the egress allowlist no longer binds."
+    # `strict` is in this test for a reason: it is the spelling an operator picks when
+    # they mean to CONTAIN the agent, so they are the last person who should discover
+    # by accident that the allowlist does not reach inner containers. Strict does not
+    # refuse here: the OUTPUT ruleset still applies inside this container, it simply
+    # does not cover what the inner daemon forwards.
+    if [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on|strict)$ ]]; then
+        warn "CLAUDE_EGRESS_LOCKDOWN=${CLAUDE_EGRESS_LOCKDOWN:-0} with --docker: the egress allowlist no longer binds."
         warn "  Inner containers' traffic is FORWARDed (the allowlist filters OUTPUT), and an"
         warn "  agent that can reach container-root can flush the rules outright. Do not rely"
         warn "  on it to contain a --docker session."

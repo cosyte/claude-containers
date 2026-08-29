@@ -112,8 +112,11 @@ harden_run_args() {
         local c; for c in $CLAUDE_MIN_CAPS; do out+=" --cap-add $c"; done
     fi
     # The egress firewall needs NET_ADMIN at boot (used by root only; the agent
-    # stays unprivileged and so cannot alter the rules).
-    [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on)$ ]] && out+=" --cap-add NET_ADMIN"
+    # stays unprivileged and so cannot alter the rules). `strict` is the fail-CLOSED
+    # spelling of the same request and MUST be granted the same capability: without
+    # it the firewall can never apply, and a strict container would refuse to start
+    # every single time, for a reason the operator never chose.
+    [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on|strict)$ ]] && out+=" --cap-add NET_ADMIN"
     echo "$out"
 }
 
