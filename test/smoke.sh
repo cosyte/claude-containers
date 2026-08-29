@@ -18,6 +18,14 @@ TMP="$(mktemp -d)"
 CN="claude-smoke-$$"
 OTELCN="claude-smoke-otel-$$"
 EGCN="claude-smoke-egress-$$"
+# IPv6 egress fixtures (section 14b): a throwaway ULA network plus one locked-down
+# container and two identical HTTP peers on it. The subnet is derived from the PID so
+# two smoke runs on one host do not collide on the same prefix.
+EG6NET="claude-smoke-egress6-$$"
+EG6SUBNET="fd00:5006:$(printf '%x' $(( $$ % 65536 )))::/64"
+EG6CN="claude-smoke-egress6-cn-$$"
+EG6ALLOW="claude-smoke-egress6-allow-$$"
+EG6DENY="claude-smoke-egress6-deny-$$"
 BRKCN="claude-smoke-broker-$$"
 BRKOFFCN="claude-smoke-broker-off-$$"
 BRKFAILCN="claude-smoke-broker-fail-$$"
@@ -32,7 +40,10 @@ PASS=0 FAIL=0
 
 cleanup() {
     docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" "$BRKOFFCN" "$BRKFAILCN" "$NOKEYCN" \
-                 "$BRWACN" "$BRWOCN" "$BRWFCN" "$BRWLCN" >/dev/null 2>&1 || true
+                 "$BRWACN" "$BRWOCN" "$BRWFCN" "$BRWLCN" \
+                 "$EG6CN" "$EG6ALLOW" "$EG6DENY" >/dev/null 2>&1 || true
+    # The network only goes after its containers do, or Docker refuses to remove it.
+    docker network rm "$EG6NET" >/dev/null 2>&1 || true
     docker volume rm "$AUTHVOL" "$WSVOL" >/dev/null 2>&1 || true
     rm -rf "$TMP"
 }
@@ -327,6 +338,101 @@ else
     echo "  SKIP  default-deny allow/deny checks (lockdown failed open, no network in test env)"
 fi
 docker rm -f "$EGCN" >/dev/null 2>&1 || true
+
+echo
+echo "== 14b. egress lockdown covers IPv6, on a network that actually routes it =="
+# Section 14 runs on the default bridge, which hands out no routable IPv6 address, so it
+# cannot see the family this section is about: a container there can be "default-deny"
+# on IPv4 and have no IPv6 at all, and the checks above would look identical either way.
+#
+# Here the container gets a real IPv6 address on a throwaway ULA network, and the
+# allow/deny pair is proved against TWO IDENTICAL PEERS on that same network, both the
+# same image serving the same port. The only difference between them is whether their
+# address is on the allowlist, so a passing deny check cannot be an offline test host
+# and a passing allow check cannot be a hole. Nothing here needs IPv6 internet access.
+#
+# If this host's Docker cannot give the container a routable IPv6 address, every live
+# check below is reported SKIPPED, never passed: a firewall test that silently degrades
+# into a no-op is worse than no test at all.
+EG6_OK=1
+docker network create --ipv6 --subnet "$EG6SUBNET" "$EG6NET" >/dev/null 2>&1 || EG6_OK=0
+if [[ "$EG6_OK" == 1 ]]; then
+    docker run -d --name "$EG6ALLOW" --network "$EG6NET" --entrypoint python3 "$IMAGE" \
+        -m http.server 80 --bind :: >/dev/null 2>&1 || EG6_OK=0
+    docker run -d --name "$EG6DENY" --network "$EG6NET" --entrypoint python3 "$IMAGE" \
+        -m http.server 80 --bind :: >/dev/null 2>&1 || EG6_OK=0
+fi
+# Each peer sits on exactly one network, so ranging over Networks yields its address.
+eg6addr() { docker inspect -f '{{range .NetworkSettings.Networks}}{{.GlobalIPv6Address}}{{end}}' "$1" 2>/dev/null || true; }
+eg4addr() { docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1" 2>/dev/null || true; }
+A6=""; A4=""; D6=""
+if [[ "$EG6_OK" == 1 ]]; then
+    A6="$(eg6addr "$EG6ALLOW")"; A4="$(eg4addr "$EG6ALLOW")"; D6="$(eg6addr "$EG6DENY")"
+    [[ -n "$A6" && -n "$A4" && -n "$D6" ]] || EG6_OK=0
+fi
+if [[ "$EG6_OK" == 1 ]]; then
+    # The allowlist carries the ALLOWED peer three ways: its container name (which the
+    # network's embedded DNS resolves to both families) and its two literal addresses
+    # (which getent returns as themselves). Any one of them is enough, and together they
+    # keep this test off a single resolver behaviour. The IPv4 entry also keeps the IPv4
+    # pass off its "resolved to zero IPs" fail-open path on an offline host, so what is
+    # under test here is the IPv6 ruleset rather than the test host's internet.
+    # shellcheck disable=SC2086
+    docker run -d --name "$EG6CN" $EGHARDEN --network "$EG6NET" \
+        -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=egress6 -e CLAUDE_EGRESS_LOCKDOWN=1 \
+        -e CLAUDE_EGRESS_EXTRA_HOSTS="$EG6ALLOW $A4 $A6" \
+        -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || EG6_OK=0
+    for _ in $(seq 1 90); do
+        docker logs "$EG6CN" 2>&1 | grep -qE "Egress lockdown" && break; sleep 1
+    done
+fi
+
+if [[ "$EG6_OK" != 1 ]]; then
+    echo "  SKIP  live IPv6 default-deny check (this host's Docker gave the container no routable IPv6 address)"
+    echo "  SKIP  live IPv6 allowlisted-host check (same reason)"
+    echo "  SKIP  live IPv6 non-allowlisted drop check (same reason)"
+    echo "  SKIP  live IPv6 agent-cannot-alter-the-rules check (same reason)"
+elif ! docker exec "$EG6CN" ip6tables -S OUTPUT 2>/dev/null | head -1 | grep -q "DROP"; then
+    # The IPv6 ruleset did not apply. That is a legal outcome (fail-open is the posture),
+    # but the boot log then owes the operator the word UNRESTRICTED, so check THAT and
+    # skip the live allow/deny pair rather than pretending it ran.
+    echo "  SKIP  live IPv6 allow/deny checks (the IPv6 ruleset did not apply on this host)"
+    check "an unapplied IPv6 ruleset is reported as UNRESTRICTED in the boot log, not as lockdown" \
+        'docker logs "$EG6CN" 2>&1 | grep -q "Egress lockdown.*IPv6 UNRESTRICTED"'
+else
+    check "IPv6 OUTPUT policy is default-deny inside the locked-down container" \
+        'p="$(docker exec "$EG6CN" ip6tables -S OUTPUT 2>/dev/null | head -1)"; [ "$p" = "-P OUTPUT DROP" ]'
+    check "default-deny was in force BEFORE the agent started (the firewall precedes the tmux launch)" \
+        'f="$(docker logs "$EG6CN" 2>&1 | grep -m1 -E "Egress lockdown|started in tmux")"; case "$f" in *"Egress lockdown"*) true ;; *) false ;; esac'
+    check "the boot log reports BOTH families by name, default-deny on each" \
+        'docker logs "$EG6CN" 2>&1 | grep -q "Egress lockdown.*IPv4 default-deny, IPv6 default-deny"'
+    check "an ALLOWLISTED peer is still reachable over IPv6" \
+        'c=$(docker exec "$EG6CN" gosu claude curl -6 -sS -m12 -o /dev/null -w "%{http_code}" "http://[$A6]/" 2>/dev/null); [ "$c" = 200 ]'
+    check "a NON-allowlisted IPv6 destination is dropped (identical peer, identical port, only the allowlist differs)" \
+        '! docker exec "$EG6CN" gosu claude curl -6 -sS -m8 -o /dev/null "http://[$D6]/" 2>/dev/null'
+    # AC11 needs the agent's attempt to fail for the RIGHT reason. Resolve ip6tables as
+    # root first and prove root can run it: then a failure as the claude user is the
+    # missing NET_ADMIN, not a binary that is missing or off the unprivileged PATH.
+    # `|| true` is load-bearing: this file runs under `set -e`, so an image with no
+    # ip6tables would abort the entire smoke run here instead of failing this one check.
+    IP6BIN="$(docker exec "$EG6CN" bash -lc 'command -v ip6tables' 2>/dev/null | tr -d '\r' || true)"
+    check "ip6tables works for root in this container (so the agent's failures below are permission, not a missing binary)" \
+        '[ -n "$IP6BIN" ] && docker exec "$EG6CN" "$IP6BIN" -S OUTPUT >/dev/null 2>&1'
+    check "the unprivileged agent CANNOT flip the IPv6 OUTPUT policy (it holds no NET_ADMIN)" \
+        '! docker exec "$EG6CN" gosu claude "$IP6BIN" -P OUTPUT ACCEPT 2>/dev/null'
+    check "the unprivileged agent CANNOT flush the IPv6 OUTPUT chain" \
+        '! docker exec "$EG6CN" gosu claude "$IP6BIN" -F OUTPUT 2>/dev/null'
+    check "the unprivileged agent CANNOT delete the IPv6 allowlist rule it dislikes" \
+        '! docker exec "$EG6CN" gosu claude "$IP6BIN" -D OUTPUT 1 2>/dev/null'
+    check "the IPv6 rules are STILL in force after the agent's attempts to remove them" \
+        'p="$(docker exec "$EG6CN" ip6tables -S OUTPUT 2>/dev/null | head -1)"; [ "$p" = "-P OUTPUT DROP" ]'
+    check "the non-allowlisted IPv6 destination is STILL dropped after those attempts" \
+        '! docker exec "$EG6CN" gosu claude curl -6 -sS -m8 -o /dev/null "http://[$D6]/" 2>/dev/null'
+    check "the ALLOWLISTED peer is still reachable after those attempts (the rules were not merely flushed)" \
+        'c=$(docker exec "$EG6CN" gosu claude curl -6 -sS -m12 -o /dev/null -w "%{http_code}" "http://[$A6]/" 2>/dev/null); [ "$c" = 200 ]'
+fi
+docker rm -f "$EG6CN" "$EG6ALLOW" "$EG6DENY" >/dev/null 2>&1 || true
+docker network rm "$EG6NET" >/dev/null 2>&1 || true
 
 echo
 echo "== 15. git-key handling: brokered BY DEFAULT, usable by the agent, not readable =="
