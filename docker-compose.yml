@@ -63,6 +63,11 @@ services:
       # (requires WITH_BROWSER=1 at build time).
       CLAUDE_BROWSER: ${CLAUDE_BROWSER:-0}
       CLAUDE_PERMISSION_MODE: ${CLAUDE_PERMISSION_MODE:-bypassPermissions}
+      # Managed policy is ON by default (entrypoint.sh §7a): the settings above
+      # that are policy are also written to the root-owned
+      # /etc/claude-code/managed-settings.json, which the session cannot rewrite.
+      # 0/false/no/off turns it off. See docs/managed-settings.md.
+      CLAUDE_MANAGED_POLICY: ${CLAUDE_MANAGED_POLICY:-1}
       # Native Claude Code CLI tuning (real upstream env vars, not a wrapper,
       # see .env.example). Unset by default = upstream's own defaults.
       CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION: ${CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION:-}

@@ -230,6 +230,24 @@ sets `permissions.defaultMode = bypassPermissions` and
 Claude Code regresses the interaction, set `CLAUDE_PERMISSION_MODE=acceptEdits`.
 See troubleshooting for the end-to-end verification.
 
+## Decision: policy is delivered where the agent user cannot write
+
+`~/.claude/settings.json` is owned by the agent user, sits on a volume that
+outlives the container, and the entrypoint's merge lets the existing file win, so
+the process being policed owned the file the policy was written in. The settings
+that are *policy* rather than preference are therefore also written to the
+root-owned `/etc/claude-code/managed-settings.json`, which Claude Code reads
+above every other settings level, before the agent process starts. Which settings
+count as policy, how an operator changes them from the host, and why
+`permissions.disableBypassPermissionsMode` is deliberately not set:
+[docs/managed-settings.md](managed-settings.md). It is additive by design: the
+`settings.json` composition above is unchanged, so a container whose managed file
+is missing or unparseable behaves exactly as it did before, and says so in the
+boot log rather than claiming an enforcement it does not have. The boot log is
+derived from the file on disk rather than from what the entrypoint attempted, so
+it is equally incapable of denying an enforcement that is there: a policy file an
+operator mounted is reported even on a boot where this image delivered none.
+
 ## Decision: telemetry stays ON (Remote Control depends on it)
 
 Remote Control eligibility is the GrowthBook feature flag `tengu_ccr_bridge`,

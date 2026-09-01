@@ -1367,5 +1367,422 @@ in_env CLAUDE_EGRESS_LOCKDOWN=0 -- '[[ "$(harden_run_args)" != *NET_ADMIN* ]]' \
     || bad "NET_ADMIN is granted with lockdown off: the default posture changed"
 
 echo
+echo "== entrypoint.sh §7a: operator policy is delivered where the agent user cannot write =="
+
+# §8b composes every setting this image asserts into $CLAUDE_CONFIG_DIR/settings.json:
+# owned by the agent user, on a per-project volume that outlives the container, merged
+# so the EXISTING file wins on conflict. §7a delivers the subset that is POLICY rather
+# than preference to /etc/claude-code/managed-settings.json instead, root-owned, before
+# the agent starts, which is the path Claude Code reads above every other settings level.
+#
+# The block is EXTRACTED from entrypoint.sh and EXECUTED here, never mirrored, for the
+# same reason §5 and §12a are: a mirrored copy keeps passing after the shipped block
+# regresses. Only its two root-only path constants are redirected into a sandbox so it
+# can run unprivileged, and that redirect is asserted below so this can never degrade
+# into a suite that writes to the real /etc.
+MS_BLOCK="$(awk '/^# --- 7a\. Managed settings/{f=1} f && /^# --- 8\. /{exit} f{print}' "$ENTRYPOINT")"
+MSD="$(mktemp -d)"; trap 'rm -rf "$STUB" "$APD" "$GKD" "$EGD" "$MSD"' EXIT
+
+ms_block() { printf '%s\n' "$MS_BLOCK" \
+    | sed -e "s#^MANAGED_DIR=.*#MANAGED_DIR=\"$1/managed\"#" \
+          -e "s#^MANAGED_STAMP=.*#MANAGED_STAMP=\"$1/managed-image-policy.sha256\"#"; }
+
+ms_probe="$(ms_block "$MSD/probe")"
+if [[ -n "$MS_BLOCK" ]] \
+   && grep -qF "MANAGED_DIR=\"$MSD/probe/managed\"" <<<"$ms_probe" \
+   && grep -qF "MANAGED_STAMP=\"$MSD/probe/managed-image-policy.sha256\"" <<<"$ms_probe" \
+   && ! grep -qE '^MANAGED_(DIR|STAMP)=' <<<"$(grep -vF "$MSD/probe" <<<"$ms_probe")"; then
+    ok "§7a extracted from entrypoint.sh and its two root-only paths redirected into a sandbox"
+else
+    bad "§7a did not extract, or its root-only paths did not redirect: these tests would write to the real /etc"
+fi
+
+# A uid that is NOT the one running this suite, standing in for the agent user. The
+# shipped block refuses to call a file enforced when the agent uid owns it, and every
+# case below except the one that tests that refusal must therefore differ from `id -u`.
+MS_AGENT_UID=$(( $(id -u) + 1 ))
+MS_FILE="managed/managed-settings.json"
+
+ms_fresh() { rm -rf "$MSD/$1"; mkdir -p "$MSD/$1"; }
+# ms_run <sandbox> [VAR=VAL ...]
+# Executes the shipped §7a block under the entrypoint's REAL shell options against the
+# named sandbox, and prints the boot log plus a final block_continued=1 line. That last
+# line is load-bearing: under `set -e` it appears only if the block ran to completion, so
+# it is the evidence that boot carries on to the agent rather than dying over a policy
+# file (this whole block is fail-safe by design and must never be fatal).
+ms_run() {
+    local sb="$MSD/$1"; shift
+    local blk; blk="$(ms_block "$sb")"
+    ( # START FROM NOTHING. This suite is itself run inside one of these containers,
+      # which exports CLAUDE_PERMISSION_MODE, so inheriting it would make the built-in
+      # default untestable and make these cases pass or fail by ambient posture.
+      unset CLAUDE_PERMISSION_MODE CLAUDE_MANAGED_POLICY CLAUDE_DOCKER
+      export CLAUDE_UID="$MS_AGENT_UID" CLAUDE_GID="$(id -g)" CLAUDE_USER=claude
+      if [[ $# -gt 0 ]]; then export "$@"; fi
+      log() { echo "[entrypoint] $*"; }
+      set -euo pipefail
+      eval "$blk"
+      echo "block_continued=1" ) 2>&1
+}
+ms_line()      { grep "Managed policy" <<<"$1" || true; }
+ms_enforced()  { grep -qE 'Managed policy +: ENFORCED' <<<"$1"; }
+ms_refused()   { grep -qE 'Managed policy +: NOT ENFORCED' <<<"$1"; }
+ms_continued() { grep -qxF 'block_continued=1' <<<"$1"; }
+
+# --- THE DELIVERY: root-owned, mode 644, before the agent starts ---------------------
+ms_fresh happy
+MS_OUT="$(ms_run happy)"
+MS_HAPPY="$MSD/happy/$MS_FILE"
+[[ -f "$MS_HAPPY" ]] \
+    && ok  "a container with no managed file gets one written at the vendor path" \
+    || bad "no managed settings file was written: $(ms_line "$MS_OUT")"
+if [[ -f "$MS_HAPPY" ]]; then
+    [[ -O "$MS_HAPPY" ]] \
+        && ok  "the managed file is owned by the uid the entrypoint runs as (root, in the image)" \
+        || bad "the managed file is not owned by the writing uid"
+    [[ "$(stat -c %a "$MS_HAPPY")" == "644" ]] \
+        && ok  "the managed file is mode 644: no write bit for group or other" \
+        || bad "the managed file is mode $(stat -c %a "$MS_HAPPY"), not 644: a non-root process could rewrite it"
+    [[ "$(stat -c %a "$MSD/happy/managed")" == "755" ]] \
+        && ok  "the managed directory is mode 755: the agent user cannot create or unlink in it" \
+        || bad "the managed directory is mode $(stat -c %a "$MSD/happy/managed"), not 755"
+fi
+ms_enforced "$MS_OUT"  && ok "the boot log reports policy as ENFORCED"       || bad "policy was written but not reported as enforced: $(ms_line "$MS_OUT")"
+ms_continued "$MS_OUT" && ok "boot carries on to the agent after §7a"        || bad "§7a aborted the boot: the container would never start the agent"
+
+# --- THE CLASSIFICATION: policy is carried, preference is not ------------------------
+# permissions.defaultMode is the containment posture the operator chose;
+# skipDangerousModePermissionPrompt is meaningless apart from it; DISABLE_AUTOUPDATER
+# keeps the session on the CLI version this image pins and verifies its flags against.
+# includeCoAuthoredBy is a commit-message preference: §8b still sets it and a session is
+# still free to change it, which is the whole difference this section encodes.
+ms_has() { jq -e "$1" "$MS_HAPPY" >/dev/null 2>&1; }
+ms_has '.permissions.defaultMode == "bypassPermissions"' \
+    && ok  "managed: permissions.defaultMode (the containment posture)" \
+    || bad "permissions.defaultMode is not delivered as managed policy"
+ms_has '.skipDangerousModePermissionPrompt == true' \
+    && ok  "managed: skipDangerousModePermissionPrompt (paired with the mode above)" \
+    || bad "skipDangerousModePermissionPrompt is not delivered as managed policy"
+ms_has '.env.DISABLE_AUTOUPDATER == "1"' \
+    && ok  "managed: env.DISABLE_AUTOUPDATER (a self-updating session leaves the pinned CLI)" \
+    || bad "env.DISABLE_AUTOUPDATER is not delivered as managed policy"
+ms_has 'has("includeCoAuthoredBy") | not' \
+    && ok  "NOT managed: includeCoAuthoredBy stays a preference a session may change" \
+    || bad "includeCoAuthoredBy was delivered as policy: a commit-message preference is not policy"
+# The telemetry kills must never appear in EITHER settings file: they break Remote
+# Control, which is the point of this image (§8b's own note, docs/troubleshooting.md).
+ms_has '.env // {} | has("DISABLE_TELEMETRY") or has("DO_NOT_TRACK") or has("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC") | not' \
+    && ok  "the managed file carries none of the Remote-Control-breaking telemetry kills" \
+    || bad "a telemetry kill reached the MANAGED file, where no session can strip it back out"
+# Explicitly out of scope for this phase: turning bypass mode off is an operator's call
+# about their own fleet, and this change only makes such a call enforceable.
+ms_has '.permissions // {} | has("disableBypassPermissionsMode") | not' \
+    && ok  "the managed file does NOT set permissions.disableBypassPermissionsMode (deliberately deferred)" \
+    || bad "the image now disables bypass mode by itself: that is the operator's call, not the image's"
+# Comments are allowed to name the key (§7a's own block explains why it is deferred);
+# a line of CODE that sets it is the regression, so the scan drops comment lines first.
+grep -vE '^[[:space:]]*#' "$ENTRYPOINT" | grep -q 'disableBypassPermissionsMode' \
+    && bad "entrypoint.sh sets disableBypassPermissionsMode in code: this change must not make that call" \
+    || ok  "no line of entrypoint.sh code sets disableBypassPermissionsMode"
+
+# --- A3: the log names WHICH settings are managed, and never their values ------------
+# The expected list is read out of the file the block just wrote, not hand-copied, so a
+# key added to the policy set is covered here the day it is added.
+MS_KEYS="$(jq -r '[paths(scalars) | map(tostring) | join(".")] | join(", ")' "$MS_HAPPY")"
+[[ -n "$MS_KEYS" ]] && grep -qF "$MS_KEYS" <<<"$MS_OUT" \
+    && ok  "the boot log names every managed setting by its dotted path ($MS_KEYS)" \
+    || bad "the boot log does not name the managed settings: $(ms_line "$MS_OUT")"
+grep -qiE 'NOT overridable' <<<"$MS_OUT" \
+    && ok  "the boot log says those settings are not overridable from inside the container" \
+    || bad "the boot log names the settings but never says they cannot be overridden from inside"
+
+# A managed file is a place an operator can legitimately put a token (under .env), and
+# the boot log is readable by anyone who can run `claude-logs`. Names, never values.
+ms_fresh secret
+mkdir -p "$MSD/secret/managed"
+printf '%s\n' '{"env":{"MY_TOKEN":"SMOKINGGUNPOLICYVALUE"}}' > "$MSD/secret/managed/managed-settings.json"
+chmod 644 "$MSD/secret/managed/managed-settings.json"
+MS_SEC="$(ms_run secret)"
+grep -qF 'env.MY_TOKEN' <<<"$MS_SEC" \
+    && ok  "an operator-supplied file's settings are named in the boot log too" \
+    || bad "an operator-supplied file's settings are not named: $(ms_line "$MS_SEC")"
+grep -qF 'SMOKINGGUNPOLICYVALUE' <<<"$MS_SEC" \
+    && bad "the boot log printed a managed setting's VALUE: an operator's token would leak into claude-logs" \
+    || ok  "the boot log prints setting NAMES only, never their values"
+
+# --- A8: the operator's launch-time value wins over the image's built-in default -----
+ms_fresh opval
+MS_OPVAL="$(ms_run opval CLAUDE_PERMISSION_MODE=acceptEdits)"
+jq -e '.permissions.defaultMode == "acceptEdits"' "$MSD/opval/$MS_FILE" >/dev/null 2>&1 \
+    && ok  "CLAUDE_PERMISSION_MODE=acceptEdits is what becomes policy, not the image default" \
+    || bad "the image's built-in default overrode the operator's CLAUDE_PERMISSION_MODE"
+ms_enforced "$MS_OPVAL" \
+    && ok  "and the operator's value is reported as enforced" \
+    || bad "the operator's value was written but not reported as enforced: $(ms_line "$MS_OPVAL")"
+
+# The SECOND boot of the same container must honour a changed value too. Without the
+# image stamp the block could not tell its own file from an operator's, so it would
+# either freeze the first boot's policy for ever or overwrite a mounted host policy.
+MS_SECOND="$(ms_run opval CLAUDE_PERMISSION_MODE=plan)"
+jq -e '.permissions.defaultMode == "plan"' "$MSD/opval/$MS_FILE" >/dev/null 2>&1 \
+    && ok  "a later boot with a changed CLAUDE_PERMISSION_MODE refreshes the image's own managed file" \
+    || bad "the image's own managed file went stale: a changed operator value never takes effect"
+ms_enforced "$MS_SECOND" || bad "the refreshed file was not reported as enforced: $(ms_line "$MS_SECOND")"
+
+# --- AN OPERATOR-SUPPLIED FILE IS THEIRS: never overwritten, never chmod'd -----------
+# This is how an operator changes policy from the host (a bind mount onto the vendor
+# path). The image must not clobber it on boot, or the mount would be pointless.
+ms_fresh opfile
+mkdir -p "$MSD/opfile/managed"
+printf '%s\n' '{"permissions":{"defaultMode":"plan","deny":["Read(./.env)"]}}' \
+    > "$MSD/opfile/managed/managed-settings.json"
+chmod 644 "$MSD/opfile/managed/managed-settings.json"
+MS_BEFORE="$(sha256sum < "$MSD/opfile/$MS_FILE" | cut -d' ' -f1)"
+MS_OPF="$(ms_run opfile)"
+[[ "$(sha256sum < "$MSD/opfile/$MS_FILE" | cut -d' ' -f1)" == "$MS_BEFORE" ]] \
+    && ok  "an operator-supplied managed file is left byte-for-byte as mounted" \
+    || bad "the image overwrote the operator's own managed file: a host-mounted policy would never survive a boot"
+ms_enforced "$MS_OPF" && grep -qF 'permissions.deny.0' <<<"$MS_OPF" \
+    && ok  "and it is reported as enforced, naming ITS settings rather than the image's" \
+    || bad "an operator-supplied file was not reported with its own settings: $(ms_line "$MS_OPF")"
+
+# --- A5: no managed file present means nothing is reported as managed ----------------
+# CLAUDE_MANAGED_POLICY is the operator's escape hatch from the host for the risk this
+# block introduces: a setting that genuinely cannot be overridden from inside is also no
+# longer loosenable by a session that needs it loosened.
+ms_absent_bad=()
+for _v in 0 false no off; do
+    ms_fresh "off-$_v"
+    out="$(ms_run "off-$_v" "CLAUDE_MANAGED_POLICY=$_v")"
+    [[ -e "$MSD/off-$_v/$MS_FILE" ]]     && ms_absent_bad+=("$_v: a file was written")
+    ms_enforced "$out"                   && ms_absent_bad+=("$_v: reported as enforced")
+    ms_refused  "$out"                   || ms_absent_bad+=("$_v: no NOT ENFORCED line")
+    ms_continued "$out"                  || ms_absent_bad+=("$_v: boot did not continue")
+    grep -qF 'CLAUDE_MANAGED_POLICY' <<<"$out" || ms_absent_bad+=("$_v: the reason does not name the flag")
+    grep -qF 'permissions.defaultMode' <<<"$out" && ms_absent_bad+=("$_v: a setting was still reported as managed")
+done
+[[ ${#ms_absent_bad[@]} -eq 0 ]] \
+    && ok  "no managed file present: nothing is reported as managed, boot continues with today's settings" \
+    || bad "the no-file path misreported: ${ms_absent_bad[*]}"
+
+# --- POLICY OFF *AND* A FILE ALREADY THERE: the log must not deny what is in force ---
+# The loop above always runs against an empty sandbox, so on its own it never combines
+# the two states an operator can perfectly well ask for at once: mount your own policy
+# onto the vendor path, and turn this image's own delivery off. The flag stops the IMAGE
+# delivering; it cannot unsay a root-owned file that is already there and that Claude
+# Code reads above every other settings level. A boot log that reported "NO setting is
+# managed" here would tell the operator the exact opposite of the truth, which is what
+# task 4's honesty rule forbids and what A3 asks for.
+ms_fresh offfile
+mkdir -p "$MSD/offfile/managed"
+printf '%s\n' '{"permissions":{"defaultMode":"plan","disableBypassPermissionsMode":"disable"}}' \
+    > "$MSD/offfile/$MS_FILE"
+chmod 644 "$MSD/offfile/$MS_FILE"
+MS_OFFFILE_BEFORE="$(sha256sum < "$MSD/offfile/$MS_FILE" | cut -d' ' -f1)"
+MS_OFFFILE="$(ms_run offfile CLAUDE_MANAGED_POLICY=0)"
+ms_enforced "$MS_OFFFILE" \
+    && ok  "policy off with a file already at the vendor path: it is still reported ENFORCED" \
+    || bad "policy off with a file already there was reported as if nothing were managed: $(ms_line "$MS_OFFFILE")"
+grep -qF 'permissions.disableBypassPermissionsMode' <<<"$MS_OFFFILE" \
+    && ok  "and the settings that ARE managed are named, flag or no flag" \
+    || bad "the settings in force are not named: $(ms_line "$MS_OFFFILE")"
+! grep -qF 'NO setting is managed' <<<"$MS_OFFFILE" \
+    && ! grep -qF 'everything stays overridable from inside the container' <<<"$MS_OFFFILE" \
+    && ok  "and the log never claims everything is overridable while that file is in force" \
+    || bad "the log denied an enforcement that is really there: $(ms_line "$MS_OFFFILE")"
+grep -qF 'CLAUDE_MANAGED_POLICY' <<<"$MS_OFFFILE" \
+    && ok  "and the flag is still reported: the operator learns it delivered nothing, not that it removed anything" \
+    || bad "the boot log does not mention CLAUDE_MANAGED_POLICY at all: $(ms_line "$MS_OFFFILE")"
+[[ "$(sha256sum < "$MSD/offfile/$MS_FILE" | cut -d' ' -f1)" == "$MS_OFFFILE_BEFORE" ]] \
+    && [[ ! -e "$MSD/offfile/managed-image-policy.sha256" ]] \
+    && ok  "the flag still delivers nothing: the operator's file is untouched and no stamp is written" \
+    || bad "policy off wrote something: the escape hatch must never establish or restamp a file"
+ms_continued "$MS_OFFFILE" \
+    && ok  "and boot carries on to the agent" \
+    || bad "the flag-off-with-a-file path aborted the boot"
+
+# The other way a file can already be there: an earlier boot of this same container
+# wrote it, and the flag was turned off afterwards. /etc survives a restart, so the
+# policy does too, and the second boot must report the file it finds rather than the
+# thing it did not do. It must also leave that file alone: the flag establishes nothing.
+ms_fresh offours
+MS_OURS_ON="$(ms_run offours)"
+MS_OURS_SHA="$(sha256sum < "$MSD/offours/$MS_FILE" | cut -d' ' -f1)"
+MS_OURS_OFF="$(ms_run offours CLAUDE_MANAGED_POLICY=0)"
+ms_enforced "$MS_OURS_OFF" && grep -qF 'permissions.defaultMode' <<<"$MS_OURS_OFF" \
+    && ! grep -qF 'NO setting is managed' <<<"$MS_OURS_OFF" \
+    && [[ "$(sha256sum < "$MSD/offours/$MS_FILE" | cut -d' ' -f1)" == "$MS_OURS_SHA" ]] \
+    && ms_continued "$MS_OURS_OFF" \
+    && ok  "a policy file an earlier boot wrote is still reported when the flag is turned off later" \
+    || bad "the flag hid a policy file this image had already written: $(ms_line "$MS_OURS_OFF")"
+ms_enforced "$MS_OURS_ON" || bad "the first boot of the flag-off-later case did not write a policy file: $(ms_line "$MS_OURS_ON")"
+
+# The same combination with a file that is NOT enforceable: here "NO setting is managed"
+# is the truth, so it must still be said, with the cause rather than the flag.
+ms_fresh offjunk
+mkdir -p "$MSD/offjunk/managed"
+printf '%s\n' 'not json at all {{{' > "$MSD/offjunk/$MS_FILE"
+chmod 644 "$MSD/offjunk/$MS_FILE"
+MS_OFFJUNK="$(ms_run offjunk CLAUDE_MANAGED_POLICY=0)"
+ms_refused "$MS_OFFJUNK" && ! ms_enforced "$MS_OFFJUNK" \
+    && grep -qiE 'UNREADABLE|not parseable' <<<"$MS_OFFJUNK" && ms_continued "$MS_OFFJUNK" \
+    && ok  "policy off with an unparseable file present: NOT ENFORCED, naming the file, boot continues" \
+    || bad "policy off with an unparseable file misreported: $(ms_line "$MS_OFFJUNK")"
+
+# An unrecognised value must never read as a deliberate off (the lesson §12a records).
+ms_unrec_bad=()
+for _v in of Off OFF disabled 2 "0 "; do
+    ms_fresh "unrec"
+    out="$(ms_run unrec "CLAUDE_MANAGED_POLICY=$_v")"
+    ms_enforced "$out" || ms_unrec_bad+=("$_v")
+    grep -qF "'$_v'" <<<"$out" || ms_unrec_bad+=("$_v (not quoted back)")
+done
+[[ ${#ms_unrec_bad[@]} -eq 0 ]] \
+    && ok  "an unrecognised CLAUDE_MANAGED_POLICY leaves policy ON and is quoted back in the log" \
+    || bad "an unrecognised value silently turned policy off, or was not reported: ${ms_unrec_bad[*]}"
+
+# --- A6: an unparseable managed file is reported unreadable, never as enforced -------
+ms_fresh junk
+mkdir -p "$MSD/junk/managed"
+printf '%s\n' 'this is not json {{{' > "$MSD/junk/managed/managed-settings.json"
+chmod 644 "$MSD/junk/managed/managed-settings.json"
+MS_JUNK_BEFORE="$(sha256sum < "$MSD/junk/$MS_FILE" | cut -d' ' -f1)"
+MS_JUNK="$(ms_run junk)"
+ms_refused "$MS_JUNK" && ! ms_enforced "$MS_JUNK" \
+    && ok  "an unparseable managed file is reported NOT ENFORCED" \
+    || bad "an unparseable managed file was reported as enforced: $(ms_line "$MS_JUNK")"
+grep -qiE 'UNREADABLE|not parseable' <<<"$MS_JUNK" \
+    && ok  "and the log says that file is unreadable, naming it" \
+    || bad "the log does not report the file as unreadable: $(ms_line "$MS_JUNK")"
+[[ "$(sha256sum < "$MSD/junk/$MS_FILE" | cut -d' ' -f1)" == "$MS_JUNK_BEFORE" ]] \
+    && ok  "the unparseable file is left exactly as it is (it may be a read-only mount)" \
+    || bad "the block rewrote an unparseable operator file"
+ms_continued "$MS_JUNK" \
+    && ok  "and boot still reaches the agent with the settings §8b produces today" \
+    || bad "an unparseable managed file aborted the boot"
+
+# --- A7: every way policy cannot be established is reported, and none is fatal -------
+# The requirement is the honest report, not a particular cause, so this drives each cause
+# and asserts the same three properties over all of them.
+ms_case() {  # ms_case <label> <sandbox> <setup-snippet> [VAR=VAL ...]
+    local label="$1" sb="$2" setup="$3"; shift 3
+    ms_fresh "$sb"
+    eval "$setup"
+    local out; out="$(ms_run "$sb" "$@")"
+    printf '%s\n' "$out"
+}
+ms_fail_bad=() ms_fail_names=0 ms_fail_total=0
+ms_expect_fail() {  # ms_expect_fail <label> <needle-in-the-reason> <output>
+    local label="$1" needle="$2" out="$3"
+    ms_fail_total=$((ms_fail_total+1))
+    ms_enforced "$out"  && ms_fail_bad+=("$label: claimed ENFORCED")
+    ms_refused  "$out"  || ms_fail_bad+=("$label: no NOT ENFORCED line")
+    ms_continued "$out" || ms_fail_bad+=("$label: the boot did not continue")
+    grep -qF "$needle" <<<"$out" && ms_fail_names=$((ms_fail_names+1)) \
+        || ms_fail_bad+=("$label: the reason does not name '$needle'")
+}
+# 1. the directory cannot be created (a regular file sits where it must go)
+ms_expect_fail "dir not creatable" "could not be created" \
+    "$(ms_case dirblocked dirblocked 'printf x > "$MSD/dirblocked/managed"')"
+# 2. the directory cannot be created because its own parent is not writable, which is
+#    what a read-only /etc looks like from in here
+ms_expect_fail "parent not writable" "could not be created" \
+    "$(ms_case parentro parentro 'chmod 500 "$MSD/parentro"')"
+chmod 700 "$MSD/parentro" 2>/dev/null || true
+# 3. the new policy cannot be written into the directory
+ms_expect_fail "file not writable" "could not be written" \
+    "$(ms_case tmpblocked tmpblocked 'mkdir -p "$MSD/tmpblocked/managed/managed-settings.json.tmp"')"
+# 4. the file is owned by the agent user, so the policed process could rewrite it
+ms_expect_fail "owned by the agent uid" "owned by the agent user" \
+    "$(ms_case agentowned agentowned \
+        'mkdir -p "$MSD/agentowned/managed"; printf "{\"a\":1}\n" > "$MSD/agentowned/$MS_FILE"; chmod 644 "$MSD/agentowned/$MS_FILE"' \
+        "CLAUDE_UID=$(id -u)")"
+# 5. the file is group/other writable, so a non-root process could rewrite it
+ms_expect_fail "group/other writable" "grants write to group or other" \
+    "$(ms_case wideopen wideopen \
+        'mkdir -p "$MSD/wideopen/managed"; printf "{\"a\":1}\n" > "$MSD/wideopen/$MS_FILE"; chmod 666 "$MSD/wideopen/$MS_FILE"')"
+# 6. the file is fine but its DIRECTORY is group/other writable, so a non-root process
+#    unlinks the file and puts its own there: a 644 root file is no protection alone
+ms_expect_fail "directory group/other writable" "unlink the policy file" \
+    "$(ms_case widedir widedir \
+        'mkdir -p "$MSD/widedir/managed"; printf "{\"a\":1}\n" > "$MSD/widedir/$MS_FILE"; chmod 644 "$MSD/widedir/$MS_FILE"; chmod 777 "$MSD/widedir/managed"')"
+# 7. the file parses but carries nothing, so there is no policy to enforce
+ms_expect_fail "empty policy" "carries no settings" \
+    "$(ms_case emptypol emptypol \
+        'mkdir -p "$MSD/emptypol/managed"; printf "{}\n" > "$MSD/emptypol/$MS_FILE"; chmod 644 "$MSD/emptypol/$MS_FILE"')"
+[[ ${#ms_fail_bad[@]} -eq 0 ]] \
+    && ok  "every way policy cannot be established reports NOT ENFORCED, names the cause, and still boots ($ms_fail_total causes)" \
+    || bad "a failure path misreported: ${ms_fail_bad[*]}"
+[[ "$ms_fail_names" -eq "$ms_fail_total" ]] \
+    && ok  "and each report names its own failure rather than a generic one" \
+    || bad "$(( ms_fail_total - ms_fail_names )) of $ms_fail_total failure reports did not name their cause"
+
+# §7a is fail-safe by construction: it must not reach for the entrypoint's die().
+grep -qE '(^|[^_[:alnum:]])die ' <<<"$MS_BLOCK" \
+    && bad "§7a calls die(): a policy file it cannot write would brick every session from this image" \
+    || ok  "§7a never calls die(): no failure here can stop a container reaching its agent"
+
+echo
+echo "== entrypoint.sh: managed policy is ADDITIVE, and lands before the agent starts =="
+
+# The phase's own fail-safe is that §8b keeps doing exactly what it did. These are
+# structural tripwires on that promise: if a later change "simplifies" §8b by deleting
+# what §7a now also delivers, a container whose managed file is missing or unparseable
+# stops behaving as it does today, and these go red.
+MS_8B="$(awk '/^# 8b\. settings.json/{f=1} f && /^# 8c\./{exit} f{print}' "$ENTRYPOINT")"
+[[ -n "$MS_8B" ]] && ok "§8b extracted from entrypoint.sh for the additive checks" \
+                  || bad "could not extract §8b: the additive checks below would be vacuous"
+ms_8b_missing=()
+for _needle in 'permissions: { defaultMode: $pm }' 'skipDangerousModePermissionPrompt: true' \
+               'includeCoAuthoredBy: true' 'DISABLE_AUTOUPDATER: "1"' \
+               'del(.DISABLE_TELEMETRY,.DO_NOT_TRACK,.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)' \
+               'STALE_HOOK_CMD' '> "$CLAUDE_CONFIG_DIR/settings.json"'; do
+    grep -qF "$_needle" <<<"$MS_8B" || ms_8b_missing+=("$_needle")
+done
+[[ ${#ms_8b_missing[@]} -eq 0 ]] \
+    && ok  "§8b still composes the same settings, still strips the telemetry kills, still self-heals the stale hook" \
+    || bad "§8b lost something managed policy does not replace: ${ms_8b_missing[*]}"
+grep -qF 'chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"' "$ENTRYPOINT" \
+    && ok  "§8b still hands settings.json to the agent user (managed policy did not take it away)" \
+    || bad "settings.json is no longer chowned to the agent user"
+grep -qF 'Merged baked-in plugin marketplaces/plugins into settings.json' "$ENTRYPOINT" \
+    && grep -qF 'Merged runtime plugin marketplaces/plugins into settings.json' "$ENTRYPOINT" \
+    && ok  "§8c and §8c-bis still merge the baked and runtime plugin sets" \
+    || bad "a plugin merge was lost: managed policy is additive and must not have touched them"
+
+# The two blocks must not drift apart on what the built-in default IS. Both defaults are
+# read out of entrypoint.sh; a hand-copied expectation here would keep passing after one
+# of them changed, and the container would then assert one posture and enforce another.
+MS_7A_DEFAULT="$(sed -n 's/^MANAGED_PERM_MODE="\${CLAUDE_PERMISSION_MODE:-\(.*\)}"$/\1/p' "$ENTRYPOINT")"
+MS_8B_DEFAULT="$(sed -n 's/^PERM_MODE="\${CLAUDE_PERMISSION_MODE:-\(.*\)}"$/\1/p' "$ENTRYPOINT")"
+[[ -n "$MS_7A_DEFAULT" && "$MS_7A_DEFAULT" == "$MS_8B_DEFAULT" ]] \
+    && ok  "§7a and §8b read the same operator input and share one built-in default ($MS_7A_DEFAULT)" \
+    || bad "§7a defaults the permission mode to '$MS_7A_DEFAULT' and §8b to '$MS_8B_DEFAULT': the container would assert one posture and enforce another"
+
+# The escape hatch is only an escape hatch on every launch route. `docker run -e` and a
+# compose `environment:` row each enumerate what they pass, so a flag missing from one of
+# them is silently inert there while `.env.example` and the docs say it works.
+ms_route_missing=()
+grep -qF 'CLAUDE_MANAGED_POLICY="${CLAUDE_MANAGED_POLICY:-1}"' "$REPO_ROOT/bin/claude-launch" \
+    || ms_route_missing+=(bin/claude-launch)
+grep -qF 'CLAUDE_MANAGED_POLICY: ${CLAUDE_MANAGED_POLICY:-1}' "$REPO_ROOT/docker-compose.yml" \
+    || ms_route_missing+=(docker-compose.yml)
+grep -qF 'CLAUDE_MANAGED_POLICY' "$REPO_ROOT/bin/claude-compose-gen" \
+    || ms_route_missing+=(bin/claude-compose-gen)
+grep -qF 'CLAUDE_MANAGED_POLICY' "$REPO_ROOT/.env.example" \
+    || ms_route_missing+=(.env.example)
+[[ ${#ms_route_missing[@]} -eq 0 ]] \
+    && ok  "CLAUDE_MANAGED_POLICY reaches the container by every launch route (launch, compose, compose-gen, .env)" \
+    || bad "CLAUDE_MANAGED_POLICY is inert on: ${ms_route_missing[*]}"
+
+# "Established before the agent process starts" is an ORDERING claim, so it is checked as
+# one: §7a has to sit above the tmux launch in the shipped file, not merely exist.
+MS_7A_LINE="$(grep -n '^# --- 7a\. Managed settings' "$ENTRYPOINT" | head -1 | cut -d: -f1)"
+MS_TMUX_LINE="$(grep -n '^asclaude tmux new-session' "$ENTRYPOINT" | head -1 | cut -d: -f1)"
+[[ -n "$MS_7A_LINE" && -n "$MS_TMUX_LINE" && "$MS_7A_LINE" -lt "$MS_TMUX_LINE" ]] \
+    && ok  "§7a runs before the tmux launch, so policy is in force before the agent exists" \
+    || bad "§7a does not precede the agent launch (7a at line ${MS_7A_LINE:-none}, tmux at line ${MS_TMUX_LINE:-none})"
+
+echo
 echo "== $PASS passed, $FAIL failed =="
 exit $(( FAIL > 0 ? 1 : 0 ))
