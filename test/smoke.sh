@@ -185,6 +185,123 @@ check "baked skill installed" \
     'cexec "test -f /home/claude/.claude/skills/example-skill/SKILL.md"'
 
 echo
+echo "== 5b. managed settings: operator policy at the root-owned vendor path =="
+# Section 5 proves the settings this image asserts reach ~/.claude/settings.json. That
+# file is owned by the AGENT user, on a per-project volume that outlives the container,
+# and section 8b's merge lets the existing file win, so it is the policed process that
+# owns the file the policy is written in. This section is the other half: the subset that
+# is POLICY is also delivered to /etc/claude-code/managed-settings.json, which Claude Code
+# reads above every other settings level (https://code.claude.com/docs/en/managed-settings)
+# and which root owns.
+#
+# These live here rather than in test/unit.sh because root ownership, mode bits, and a
+# write that the kernel refuses are only truly observable in a running container.
+MSFILE=/etc/claude-code/managed-settings.json
+MSDIR=/etc/claude-code
+MSSETTINGS=/home/claude/.claude/settings.json
+msjq()   { docker exec "$CN" jq -e "$1" "$2" >/dev/null 2>&1; }
+msstat() { docker exec "$CN" stat -c "$1" "$2" 2>/dev/null || true; }
+
+check "the managed settings file exists at the vendor path ($MSFILE)" \
+    'docker exec "$CN" test -f "$MSFILE"'
+check "it is owned by root (uid 0), not by the agent user" \
+    '[ "$(msstat %u "$MSFILE")" = 0 ]'
+check "it carries no write bit for group or other (mode 644)" \
+    '[ "$(msstat %a "$MSFILE")" = 644 ]'
+check "its directory is root-owned and not writable by the agent user (0:755)" \
+    '[ "$(msstat %u:%a "$MSDIR")" = "0:755" ]'
+
+# WHAT IS POLICY AND WHAT IS NOT. The containment posture and the pin that keeps the CLI
+# on the version this image verifies its flags against are policy; a commit-message
+# preference is not, and is deliberately left where a session can still change it.
+check "policy: permissions.defaultMode is delivered as managed" \
+    'msjq ".permissions.defaultMode == \"bypassPermissions\"" "$MSFILE"'
+check "policy: skipDangerousModePermissionPrompt is delivered as managed" \
+    'msjq ".skipDangerousModePermissionPrompt == true" "$MSFILE"'
+check "policy: env.DISABLE_AUTOUPDATER is delivered as managed" \
+    'msjq ".env.DISABLE_AUTOUPDATER == \"1\"" "$MSFILE"'
+check "preference: includeCoAuthoredBy is NOT managed (a session may still change it)" \
+    'msjq "has(\"includeCoAuthoredBy\") | not" "$MSFILE"'
+check "bypass mode is NOT disabled by this image (that call is deliberately the operator's)" \
+    'msjq "(.permissions // {}) | has(\"disableBypassPermissionsMode\") | not" "$MSFILE"'
+
+# The log is MATERIALIZED once and every assertion greps the variable: this file runs
+# under `pipefail`, where `docker logs … | grep -q X` fails the PIPELINE on a match.
+MSLOG="$(docker logs "$CN" 2>&1 || true)"
+check "the boot log reports policy as ENFORCED, naming the file" \
+    'grep -qE "Managed policy +: ENFORCED" <<<"$MSLOG" && grep -qF "$MSFILE" <<<"$MSLOG"'
+check "the boot log names WHICH settings are managed" \
+    'grep -qF "permissions.defaultMode" <<<"$MSLOG" && grep -qF "skipDangerousModePermissionPrompt" <<<"$MSLOG" && grep -qF "env.DISABLE_AUTOUPDATER" <<<"$MSLOG"'
+check "and says they are not overridable from inside the container" \
+    'grep -qiF "NOT overridable" <<<"$MSLOG"'
+check "policy was in force BEFORE the agent started (the managed line precedes the tmux launch)" \
+    'f="$(grep -m1 -E "Managed policy|started in tmux" <<<"$MSLOG")"; case "$f" in *"Managed policy"*) true ;; *) false ;; esac'
+
+# The property that matters, and the one no log line can establish: a session running as
+# the agent user cannot change this file. Every attempt is made AS THE AGENT, and the
+# file's bytes are compared before and after the whole sweep.
+MS_SHA_BEFORE="$(docker exec "$CN" sha256sum "$MSFILE" | cut -d' ' -f1)"
+ms_got=()
+for _attempt in \
+    'echo pwned > FILE' \
+    'echo pwned >> FILE' \
+    ': > FILE' \
+    'rm -f FILE' \
+    'mv FILE FILE.stolen' \
+    'cp /dev/null FILE' \
+    'ln -sf /dev/null FILE' \
+    'sed -i s/permissions/pwned/ FILE' \
+    'chmod 666 FILE' \
+    'touch DIR/managed-settings.json.new' \
+    'rm -rf DIR'
+do
+    _cmd="${_attempt//FILE/$MSFILE}"; _cmd="${_cmd//DIR/$MSDIR}"
+    asclaude_x "$_cmd" >/dev/null 2>&1 && ms_got+=("$_attempt")
+done
+[[ ${#ms_got[@]} -eq 0 ]] \
+    && ok "every write, replace and delete attempted as the agent user is denied (11 of them)" \
+    || bad "the agent user succeeded at: ${ms_got[*]}"
+check "and the managed file's contents are unchanged after every attempt" \
+    '[ "$(docker exec "$CN" sha256sum "$MSFILE" | cut -d" " -f1)" = "$MS_SHA_BEFORE" ]'
+
+# A2: the policy must not depend on the agent-writable file carrying it too. The agent
+# rewrites its own settings.json with contradicting values, and then empties it: neither
+# reaches the managed file, so the value Claude Code reads at the top of the hierarchy is
+# unchanged. settings.json is restored afterwards so later sections see what they expect.
+docker exec "$CN" cp "$MSSETTINGS" /tmp/settings.pre-a2.json
+MS_CONTRA='{"permissions":{"defaultMode":"plan"},"skipDangerousModePermissionPrompt":false,"env":{"DISABLE_AUTOUPDATER":"0"}}'
+asclaude_x "printf '%s' '$MS_CONTRA' > $MSSETTINGS" >/dev/null 2>&1 || true
+check "the agent really did rewrite its own ~/.claude/settings.json (the test is live)" \
+    'msjq ".permissions.defaultMode == \"plan\"" "$MSSETTINGS"'
+check "a contradicting ~/.claude/settings.json leaves the managed file byte-identical" \
+    '[ "$(docker exec "$CN" sha256sum "$MSFILE" | cut -d" " -f1)" = "$MS_SHA_BEFORE" ]'
+check "and the managed file still carries the image's value, not the session's" \
+    'msjq ".permissions.defaultMode == \"bypassPermissions\"" "$MSFILE"'
+asclaude_x "printf '%s' '{}' > $MSSETTINGS" >/dev/null 2>&1 || true
+check "emptying ~/.claude/settings.json to {} also leaves the managed policy in force" \
+    '[ "$(docker exec "$CN" sha256sum "$MSFILE" | cut -d" " -f1)" = "$MS_SHA_BEFORE" ] && msjq ".skipDangerousModePermissionPrompt == true" "$MSFILE"'
+
+# The remaining half of A2 is the CLI's own precedence. Claude Code reports the settings
+# source it selected through the interactive /status view, which needs a real OAuth
+# session: exactly the thing this suite deliberately does not have (`make login` is manual
+# and stays manual). `claude doctor` is the non-interactive route the vendor documents for
+# the same question, so it is asked; if it cannot answer in this environment the result is
+# a SKIP, never a PASS on an observable nobody read.
+MS_DOCTOR="$(docker exec "$CN" gosu claude env CLAUDE_CONFIG_DIR=/home/claude/.claude HOME=/home/claude \
+    timeout 60 claude doctor 2>&1 </dev/null || true)"
+if grep -qF "$MSFILE" <<<"$MS_DOCTOR"; then
+    ok "the CLI itself names $MSFILE as a settings source while settings.json contradicts it"
+elif grep -qiE 'managed settings|enterprise managed' <<<"$MS_DOCTOR"; then
+    ok "the CLI itself reports a managed settings source while settings.json contradicts it"
+else
+    echo "  SKIP  the CLI's own report of which settings source it selected ('claude doctor' said nothing about managed settings here; /status needs a real OAuth session, which this suite has by design not got)"
+fi
+# `cp` writes THROUGH the existing file, so settings.json keeps the agent's ownership.
+docker exec "$CN" cp /tmp/settings.pre-a2.json "$MSSETTINGS"
+check "settings.json was restored for the sections that follow" \
+    'msjq ".permissions.defaultMode == \"bypassPermissions\"" "$MSSETTINGS"'
+
+echo
 echo "== 6. workspace trust pre-accepted =="
 check "hasCompletedOnboarding == true" \
     'cexec "jq -e \".hasCompletedOnboarding==true\" /home/claude/.claude/.claude.json" >/dev/null 2>&1'

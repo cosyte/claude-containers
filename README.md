@@ -625,6 +625,23 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   `CLAUDE_PERMISSION_MODE=acceptEdits` (in-project edits auto-approved, shell/
   network still gated): now honored by **both** the interactive session and
   autopilot, not just the app prompt.
+- **Policy the session cannot rewrite.** The settings this image asserts as
+  *policy* (`permissions.defaultMode`, `skipDangerousModePermissionPrompt`, and
+  `env.DISABLE_AUTOUPDATER`) are delivered to
+  `/etc/claude-code/managed-settings.json`, which Claude Code reads above every
+  other settings level and which `root` owns, written before the agent process
+  starts. A session that rewrites or empties its own
+  `~/.claude/settings.json` does not change them. `includeCoAuthoredBy` stays a
+  preference and is deliberately not managed. The boot log's `Managed policy`
+  line names exactly which settings are managed, or says policy is **NOT
+  ENFORCED** and why: it never claims enforcement it does not have, and it never
+  refuses a boot. Change the policy from the host by setting
+  `CLAUDE_PERMISSION_MODE`, by mounting your own file onto that path (the image
+  never overwrites one it did not write), or by turning the whole mechanism off
+  with `CLAUDE_MANAGED_POLICY=0`. Turning bypass mode off outright
+  (`permissions.disableBypassPermissionsMode`) is available at this path and is
+  deliberately **not** set by this image: that call is the operator's. Full
+  guide: [docs/managed-settings.md](docs/managed-settings.md).
 - **Secret guard (on by default).** A fleet-wide git pre-commit hook
   (`CLAUDE_SECRET_GUARD=1`) blocks the autonomous agent from committing obvious
   secrets: `.env`, `*.pem`, `*.key`, `id_rsa`, files containing a `PRIVATE KEY`

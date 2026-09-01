@@ -735,6 +735,10 @@ EOF
       CLAUDE_PROJECT_NAME: "${svc}"
       CLAUDE_MODEL: "${svc_model}"
       CLAUDE_PERMISSION_MODE: "\${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
+      # Managed policy is the DEFAULT (entrypoint.sh §7a), so the compose default
+      # has to be 1: a stack whose operator never set this must get the policy
+      # delivered root-owned, not left only in the agent-writable settings.json.
+      CLAUDE_MANAGED_POLICY: "\${CLAUDE_MANAGED_POLICY:-1}"
       CLAUDE_SECRET_GUARD: "\${CLAUDE_SECRET_GUARD:-1}"
       # Brokering is the DEFAULT (entrypoint.sh §5): the compose default has to be
       # 1, not 0, or a stack whose operator never set this would receive an

@@ -32,6 +32,14 @@ in order: base → optional `claude-config/settings.json` → existing
 per-container settings (existing wins). Drop a `claude-config/settings.json` to
 add hooks, status line, etc. to every container.
 
+Anything customized here is a **default**, not policy: this file is owned by the
+agent user and a session can change it. The settings the image asserts as policy
+are ALSO delivered to the root-owned `/etc/claude-code/managed-settings.json`,
+which Claude Code reads above every other settings level and which a session
+cannot write, so changing them here does not change them for real. See
+[managed-settings.md](managed-settings.md) for what is policy and how to change
+it from the host.
+
 ## MCP servers
 
 One `*.json` per server in `claude-config/mcp/`; filename (sans `.json`) is the
