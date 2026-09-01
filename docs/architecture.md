@@ -243,7 +243,10 @@ count as policy, how an operator changes them from the host, and why
 [docs/managed-settings.md](managed-settings.md). It is additive by design: the
 `settings.json` composition above is unchanged, so a container whose managed file
 is missing or unparseable behaves exactly as it did before, and says so in the
-boot log rather than claiming an enforcement it does not have.
+boot log rather than claiming an enforcement it does not have. The boot log is
+derived from the file on disk rather than from what the entrypoint attempted, so
+it is equally incapable of denying an enforcement that is there: a policy file an
+operator mounted is reported even on a boot where this image delivered none.
 
 ## Decision: telemetry stays ON (Remote Control depends on it)
 

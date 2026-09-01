@@ -76,12 +76,28 @@ session can change it. The boot log names exactly which settings ended up
 managed, so read it after the first boot.
 
 **3. Turn the mechanism off.** `CLAUDE_MANAGED_POLICY=0` (or `false`/`no`/`off`)
-establishes no managed file at all and the container behaves exactly as it did
-before this existed. This is the escape hatch for the risk the mechanism
-introduces: a setting that genuinely cannot be overridden from inside is also no
-longer loosenable by a session that needs it loosened. Only those four spellings
-turn it off; anything else leaves policy on and is reported in the boot log, so a
-typo cannot read as a deliberate "off".
+makes the image establish no managed file of its own, and a container that has
+none behaves exactly as it did before this existed. This is the escape hatch for
+the risk the mechanism introduces: a setting that genuinely cannot be overridden
+from inside is also no longer loosenable by a session that needs it loosened.
+Only those four spellings turn it off; anything else leaves policy on and is
+reported in the boot log, so a typo cannot read as a deliberate "off".
+
+```
+CLAUDE_MANAGED_POLICY=0 ./bin/claude-launch myproj --workspace /srv/x
+```
+
+What it cannot do is unsay a file that is already at the vendor path. The flag
+governs what this image DELIVERS, not what Claude Code READS: if you also took
+route 2 and mounted your own policy, that file is still there and still applied
+above every other settings level, and the boot log says so rather than claiming
+nothing is managed. Turning route 2 off means dropping the mount, from the host.
+Combine the two and you get both lines:
+
+```
+[entrypoint] Managed policy       : ENFORCED from /etc/claude-code/managed-settings.json (operator-supplied, …). Managed settings, NOT overridable from inside the container: permissions.defaultMode, permissions.disableBypassPermissionsMode
+[entrypoint] Managed policy       : NOTE, CLAUDE_MANAGED_POLICY=0 turned it off, so this image established no managed settings file, but a managed file was ALREADY at /etc/claude-code/managed-settings.json and Claude Code reads it above every other settings level, so the settings named above ARE in force and are not overridable from inside this container. …
+```
 
 ## Turning bypass mode off, which this image does not do
 
@@ -107,13 +123,19 @@ changes what that flag can do, not whether it is passed.
 
 ## Reading the boot log
 
-`claude-logs <name>` carries one `Managed policy` line per boot, in the same
+`claude-logs <name>` carries a `Managed policy` line per boot, in the same
 plain-language style as `Egress lockdown` and `Deploy key readable`. It states
-the posture and never claims a control is active when it is not.
+the posture, and it is truthful in both directions: it never claims a control is
+active when it is not, and it never denies one that is. Which line you get is
+decided by the file on disk, not by what the entrypoint tried to do, so a policy
+this image did not deliver is reported exactly like one it did.
 
 ```
-[entrypoint] Managed policy       : ENFORCED from /etc/claude-code/managed-settings.json (image-supplied, owned by root, file mode 644 in a mode-755 directory, not writable by claude). Managed settings, NOT overridable from inside the container: permissions.defaultMode, skipDangerousModePermissionPrompt, env.DISABLE_AUTOUPDATER
+[entrypoint] Managed policy       : ENFORCED from /etc/claude-code/managed-settings.json (image-supplied, owned by uid 0 and not by the agent user claude (uid 1000), file mode 644 in a mode-755 directory, not writable by claude). Managed settings, NOT overridable from inside the container: permissions.defaultMode, skipDangerousModePermissionPrompt, env.DISABLE_AUTOUPDATER
 ```
+
+The owning uid is printed rather than the word "root" because the uid is what the
+entrypoint compared against; it is `0` in this image.
 
 ```
 [entrypoint] Managed policy       : NOT ENFORCED (the file at /etc/claude-code/managed-settings.json is UNREADABLE as policy: it is not parseable as JSON, so it was left exactly as it is and none of its settings are enforced). NO setting is managed: everything stays overridable from inside the container, exactly as it was before this image delivered any policy.

@@ -296,7 +296,10 @@ if grep -qF "$MSFILE" <<<"$MS_DOCTOR"; then
 elif grep -qiE 'managed settings|enterprise managed' <<<"$MS_DOCTOR"; then
     ok "the CLI itself reports a managed settings source while settings.json contradicts it"
 else
-    echo "  SKIP  the CLI's own report of which settings source it selected ('claude doctor' said nothing about managed settings here; /status needs a real OAuth session, which this suite has by design not got)"
+    # The byte count is deliberate: it separates "doctor ran and named no managed
+    # source" from "doctor produced nothing at all here", which is the difference
+    # between an observable this environment cannot reach and a branch that is dead.
+    echo "  SKIP  the CLI's own report of which settings source it selected ('claude doctor' produced ${#MS_DOCTOR} bytes and named no managed settings source; /status needs a real OAuth session, which this suite has by design not got). A2's mechanical half is asserted above, outside this SKIP."
 fi
 # `cp` writes THROUGH the existing file, so settings.json keeps the agent's ownership.
 docker exec "$CN" cp /tmp/settings.pre-a2.json "$MSSETTINGS" || true

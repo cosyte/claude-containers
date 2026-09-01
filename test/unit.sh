@@ -1565,6 +1565,70 @@ done
     && ok  "no managed file present: nothing is reported as managed, boot continues with today's settings" \
     || bad "the no-file path misreported: ${ms_absent_bad[*]}"
 
+# --- POLICY OFF *AND* A FILE ALREADY THERE: the log must not deny what is in force ---
+# The loop above always runs against an empty sandbox, so on its own it never combines
+# the two states an operator can perfectly well ask for at once: mount your own policy
+# onto the vendor path, and turn this image's own delivery off. The flag stops the IMAGE
+# delivering; it cannot unsay a root-owned file that is already there and that Claude
+# Code reads above every other settings level. A boot log that reported "NO setting is
+# managed" here would tell the operator the exact opposite of the truth, which is what
+# task 4's honesty rule forbids and what A3 asks for.
+ms_fresh offfile
+mkdir -p "$MSD/offfile/managed"
+printf '%s\n' '{"permissions":{"defaultMode":"plan","disableBypassPermissionsMode":"disable"}}' \
+    > "$MSD/offfile/$MS_FILE"
+chmod 644 "$MSD/offfile/$MS_FILE"
+MS_OFFFILE_BEFORE="$(sha256sum < "$MSD/offfile/$MS_FILE" | cut -d' ' -f1)"
+MS_OFFFILE="$(ms_run offfile CLAUDE_MANAGED_POLICY=0)"
+ms_enforced "$MS_OFFFILE" \
+    && ok  "policy off with a file already at the vendor path: it is still reported ENFORCED" \
+    || bad "policy off with a file already there was reported as if nothing were managed: $(ms_line "$MS_OFFFILE")"
+grep -qF 'permissions.disableBypassPermissionsMode' <<<"$MS_OFFFILE" \
+    && ok  "and the settings that ARE managed are named, flag or no flag" \
+    || bad "the settings in force are not named: $(ms_line "$MS_OFFFILE")"
+! grep -qF 'NO setting is managed' <<<"$MS_OFFFILE" \
+    && ! grep -qF 'everything stays overridable from inside the container' <<<"$MS_OFFFILE" \
+    && ok  "and the log never claims everything is overridable while that file is in force" \
+    || bad "the log denied an enforcement that is really there: $(ms_line "$MS_OFFFILE")"
+grep -qF 'CLAUDE_MANAGED_POLICY' <<<"$MS_OFFFILE" \
+    && ok  "and the flag is still reported: the operator learns it delivered nothing, not that it removed anything" \
+    || bad "the boot log does not mention CLAUDE_MANAGED_POLICY at all: $(ms_line "$MS_OFFFILE")"
+[[ "$(sha256sum < "$MSD/offfile/$MS_FILE" | cut -d' ' -f1)" == "$MS_OFFFILE_BEFORE" ]] \
+    && [[ ! -e "$MSD/offfile/managed-image-policy.sha256" ]] \
+    && ok  "the flag still delivers nothing: the operator's file is untouched and no stamp is written" \
+    || bad "policy off wrote something: the escape hatch must never establish or restamp a file"
+ms_continued "$MS_OFFFILE" \
+    && ok  "and boot carries on to the agent" \
+    || bad "the flag-off-with-a-file path aborted the boot"
+
+# The other way a file can already be there: an earlier boot of this same container
+# wrote it, and the flag was turned off afterwards. /etc survives a restart, so the
+# policy does too, and the second boot must report the file it finds rather than the
+# thing it did not do. It must also leave that file alone: the flag establishes nothing.
+ms_fresh offours
+MS_OURS_ON="$(ms_run offours)"
+MS_OURS_SHA="$(sha256sum < "$MSD/offours/$MS_FILE" | cut -d' ' -f1)"
+MS_OURS_OFF="$(ms_run offours CLAUDE_MANAGED_POLICY=0)"
+ms_enforced "$MS_OURS_OFF" && grep -qF 'permissions.defaultMode' <<<"$MS_OURS_OFF" \
+    && ! grep -qF 'NO setting is managed' <<<"$MS_OURS_OFF" \
+    && [[ "$(sha256sum < "$MSD/offours/$MS_FILE" | cut -d' ' -f1)" == "$MS_OURS_SHA" ]] \
+    && ms_continued "$MS_OURS_OFF" \
+    && ok  "a policy file an earlier boot wrote is still reported when the flag is turned off later" \
+    || bad "the flag hid a policy file this image had already written: $(ms_line "$MS_OURS_OFF")"
+ms_enforced "$MS_OURS_ON" || bad "the first boot of the flag-off-later case did not write a policy file: $(ms_line "$MS_OURS_ON")"
+
+# The same combination with a file that is NOT enforceable: here "NO setting is managed"
+# is the truth, so it must still be said, with the cause rather than the flag.
+ms_fresh offjunk
+mkdir -p "$MSD/offjunk/managed"
+printf '%s\n' 'not json at all {{{' > "$MSD/offjunk/$MS_FILE"
+chmod 644 "$MSD/offjunk/$MS_FILE"
+MS_OFFJUNK="$(ms_run offjunk CLAUDE_MANAGED_POLICY=0)"
+ms_refused "$MS_OFFJUNK" && ! ms_enforced "$MS_OFFJUNK" \
+    && grep -qiE 'UNREADABLE|not parseable' <<<"$MS_OFFJUNK" && ms_continued "$MS_OFFJUNK" \
+    && ok  "policy off with an unparseable file present: NOT ENFORCED, naming the file, boot continues" \
+    || bad "policy off with an unparseable file misreported: $(ms_line "$MS_OFFJUNK")"
+
 # An unrecognised value must never read as a deliberate off (the lesson §12a records).
 ms_unrec_bad=()
 for _v in of Off OFF disabled 2 "0 "; do
@@ -1694,6 +1758,22 @@ MS_8B_DEFAULT="$(sed -n 's/^PERM_MODE="\${CLAUDE_PERMISSION_MODE:-\(.*\)}"$/\1/p
 [[ -n "$MS_7A_DEFAULT" && "$MS_7A_DEFAULT" == "$MS_8B_DEFAULT" ]] \
     && ok  "§7a and §8b read the same operator input and share one built-in default ($MS_7A_DEFAULT)" \
     || bad "§7a defaults the permission mode to '$MS_7A_DEFAULT' and §8b to '$MS_8B_DEFAULT': the container would assert one posture and enforce another"
+
+# The escape hatch is only an escape hatch on every launch route. `docker run -e` and a
+# compose `environment:` row each enumerate what they pass, so a flag missing from one of
+# them is silently inert there while `.env.example` and the docs say it works.
+ms_route_missing=()
+grep -qF 'CLAUDE_MANAGED_POLICY="${CLAUDE_MANAGED_POLICY:-1}"' "$REPO_ROOT/bin/claude-launch" \
+    || ms_route_missing+=(bin/claude-launch)
+grep -qF 'CLAUDE_MANAGED_POLICY: ${CLAUDE_MANAGED_POLICY:-1}' "$REPO_ROOT/docker-compose.yml" \
+    || ms_route_missing+=(docker-compose.yml)
+grep -qF 'CLAUDE_MANAGED_POLICY' "$REPO_ROOT/bin/claude-compose-gen" \
+    || ms_route_missing+=(bin/claude-compose-gen)
+grep -qF 'CLAUDE_MANAGED_POLICY' "$REPO_ROOT/.env.example" \
+    || ms_route_missing+=(.env.example)
+[[ ${#ms_route_missing[@]} -eq 0 ]] \
+    && ok  "CLAUDE_MANAGED_POLICY reaches the container by every launch route (launch, compose, compose-gen, .env)" \
+    || bad "CLAUDE_MANAGED_POLICY is inert on: ${ms_route_missing[*]}"
 
 # "Established before the agent process starts" is an ORDERING claim, so it is checked as
 # one: §7a has to sit above the tmux launch in the shipped file, not merely exist.

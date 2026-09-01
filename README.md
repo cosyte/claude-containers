@@ -634,11 +634,12 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   `~/.claude/settings.json` does not change them. `includeCoAuthoredBy` stays a
   preference and is deliberately not managed. The boot log's `Managed policy`
   line names exactly which settings are managed, or says policy is **NOT
-  ENFORCED** and why: it never claims enforcement it does not have, and it never
-  refuses a boot. Change the policy from the host by setting
-  `CLAUDE_PERMISSION_MODE`, by mounting your own file onto that path (the image
-  never overwrites one it did not write), or by turning the whole mechanism off
-  with `CLAUDE_MANAGED_POLICY=0`. Turning bypass mode off outright
+  ENFORCED** and why: it reports the file on disk, so it never claims enforcement
+  it does not have and never denies one it does, and it never refuses a boot.
+  Change the policy from the host by setting `CLAUDE_PERMISSION_MODE`, by mounting
+  your own file onto that path (the image never overwrites one it did not write),
+  or by turning this image's own delivery off with `CLAUDE_MANAGED_POLICY=0`
+  (which cannot remove a file you mounted yourself). Turning bypass mode off outright
   (`permissions.disableBypassPermissionsMode`) is available at this path and is
   deliberately **not** set by this image: that call is the operator's. Full
   guide: [docs/managed-settings.md](docs/managed-settings.md).
