@@ -240,7 +240,7 @@ check "policy was in force BEFORE the agent started (the managed line precedes t
 # The property that matters, and the one no log line can establish: a session running as
 # the agent user cannot change this file. Every attempt is made AS THE AGENT, and the
 # file's bytes are compared before and after the whole sweep.
-MS_SHA_BEFORE="$(docker exec "$CN" sha256sum "$MSFILE" | cut -d' ' -f1)"
+MS_SHA_BEFORE="$(docker exec "$CN" sha256sum "$MSFILE" 2>/dev/null | cut -d' ' -f1 || true)"
 ms_got=()
 for _attempt in \
     'echo pwned > FILE' \
@@ -256,7 +256,9 @@ for _attempt in \
     'rm -rf DIR'
 do
     _cmd="${_attempt//FILE/$MSFILE}"; _cmd="${_cmd//DIR/$MSDIR}"
-    asclaude_x "$_cmd" >/dev/null 2>&1 && ms_got+=("$_attempt")
+    # `if`, not `A && B`: this file runs under `set -e`, and a denied write is the
+    # EXPECTED outcome here, so it must not be able to abort the suite.
+    if asclaude_x "$_cmd" >/dev/null 2>&1; then ms_got+=("$_attempt"); fi
 done
 [[ ${#ms_got[@]} -eq 0 ]] \
     && ok "every write, replace and delete attempted as the agent user is denied (11 of them)" \
@@ -268,7 +270,7 @@ check "and the managed file's contents are unchanged after every attempt" \
 # rewrites its own settings.json with contradicting values, and then empties it: neither
 # reaches the managed file, so the value Claude Code reads at the top of the hierarchy is
 # unchanged. settings.json is restored afterwards so later sections see what they expect.
-docker exec "$CN" cp "$MSSETTINGS" /tmp/settings.pre-a2.json
+docker exec "$CN" cp "$MSSETTINGS" /tmp/settings.pre-a2.json || true
 MS_CONTRA='{"permissions":{"defaultMode":"plan"},"skipDangerousModePermissionPrompt":false,"env":{"DISABLE_AUTOUPDATER":"0"}}'
 asclaude_x "printf '%s' '$MS_CONTRA' > $MSSETTINGS" >/dev/null 2>&1 || true
 check "the agent really did rewrite its own ~/.claude/settings.json (the test is live)" \
@@ -297,7 +299,7 @@ else
     echo "  SKIP  the CLI's own report of which settings source it selected ('claude doctor' said nothing about managed settings here; /status needs a real OAuth session, which this suite has by design not got)"
 fi
 # `cp` writes THROUGH the existing file, so settings.json keeps the agent's ownership.
-docker exec "$CN" cp /tmp/settings.pre-a2.json "$MSSETTINGS"
+docker exec "$CN" cp /tmp/settings.pre-a2.json "$MSSETTINGS" || true
 check "settings.json was restored for the sections that follow" \
     'msjq ".permissions.defaultMode == \"bypassPermissions\"" "$MSSETTINGS"'
 
@@ -641,7 +643,16 @@ echo "== 15. git-key handling: brokered BY DEFAULT, usable by the agent, not rea
 ssh-keygen -q -t ed25519 -f "$TMP/gitkey" -N ''
 printf 'not-a-private-key\n' > "$TMP/badkey"      # non-empty, so §5 engages; unloadable, so the broker fails
 GKPRIV="$(sed -n '2p' "$TMP/gitkey")"             # a base64 line of the PRIVATE key body
-wait_boot() { for _ in $(seq 1 40); do docker logs "$1" 2>&1 | grep -q "started in tmux" && return 0; sleep 1; done; return 1; }
+# Every assertion in this section reads its container's log through a HERE-STRING, never
+# through `docker logs … | grep -q`. This file runs under `pipefail`, where `grep -q`
+# exits on the first match, `docker logs` then takes SIGPIPE (141), and the PIPELINE fails
+# BECAUSE THE STRING WAS FOUND. Whether it fires depends on how much log follows the
+# matched line, so it shows up as assertions that pass or fail at random across runs and
+# move whenever the boot log grows. Sections 14b, 14c and 5b already materialize the log
+# for exactly this reason; this section now does the same.
+logof()    { docker logs "$1" 2>&1 || true; }
+loggrep()  { local cn="$1"; shift; grep "$@" <<<"$(logof "$cn")"; }
+wait_boot() { for _ in $(seq 1 40); do loggrep "$1" -q "started in tmux" && return 0; sleep 1; done; return 1; }
 
 # --- 15a. THE DEFAULT: no flag set at all -------------------------------------------
 docker run -d --name "$BRKCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=broker \
@@ -651,11 +662,11 @@ wait_boot "$BRKCN" || true
 brk()  { docker exec "$BRKCN" gosu claude bash -lc "$1"; }
 brksh(){ docker exec "$BRKCN" gosu claude sh -c "$1"; }
 check "broker engaged with NO operator flag set (key held in root ssh-agent)" \
-    'docker logs "$BRKCN" 2>&1 | grep -q "key broker.*root ssh-agent"'
+    'loggrep "$BRKCN" -q "key broker.*root ssh-agent"'
 check "the boot log STATES the key is not readable by the agent user" \
-    'docker logs "$BRKCN" 2>&1 | grep -q "Deploy key readable : NO"'
+    'loggrep "$BRKCN" -q "Deploy key readable : NO"'
 check "agent can USE the key (ssh-agent lists it via the relay)" \
-    'brk "ssh-add -l" 2>/dev/null | grep -qE "ED25519|SHA256"'
+    'grep -qE "ED25519|SHA256" <<<"$(brk "ssh-add -l" 2>/dev/null || true)"'
 check "agent CANNOT read the private key (no readable key file)" \
     '! brk "test -e ~/.ssh/id_ed25519"'
 check "no file ANYWHERE under the agent's home holds private key material" \
@@ -694,9 +705,9 @@ if [ -n "$BRKPID" ]; then
     check "the agent user CANNOT read the broker's process memory (/proc/<pid>/mem denied)" \
         '! brksh "cat /proc/'"$BRKPID"'/mem >/dev/null 2>&1"'
     check "the denial is a permission error, not a missing file" \
-        'brksh "cat /proc/'"$BRKPID"'/mem 2>&1 >/dev/null" | grep -qiE "permission denied|operation not permitted"'
+        'grep -qiE "permission denied|operation not permitted" <<<"$(brksh "cat /proc/'"$BRKPID"'/mem 2>&1 >/dev/null" || true)"'
     check "the /proc surfaces the agent CAN read carry no private key bytes" \
-        '! brksh "cat /proc/'"$BRKPID"'/cmdline /proc/'"$BRKPID"'/environ 2>/dev/null" | grep -qF "$GKPRIV"'
+        '! grep -qF "$GKPRIV" <<<"$(brksh "cat /proc/'"$BRKPID"'/cmdline /proc/'"$BRKPID"'/environ 2>/dev/null" || true)"'
 else
     bad "could not find the broker's root ssh-agent process: the memory-isolation checks did not run"
 fi
@@ -715,7 +726,7 @@ check "CLAUDE_BROKER_GIT_KEY=0 still installs the historical key file, agent-own
 check "the opt-out path points ssh at that key file (an operator relying on it is unaffected)" \
     'docker exec "$BRKOFFCN" grep -q "IdentityFile ~/.ssh/id_ed25519" /home/claude/.ssh/config'
 check "the opt-out boot log says plainly that the key IS readable by the agent user" \
-    'docker logs "$BRKOFFCN" 2>&1 | grep -q "Deploy key readable : YES"'
+    'loggrep "$BRKOFFCN" -q "Deploy key readable : YES"'
 docker rm -f "$BRKOFFCN" >/dev/null 2>&1 || true
 
 # --- 15c. FAIL CLOSED: brokering engaged, cannot be established ----------------------
@@ -726,13 +737,13 @@ docker run -d --name "$BRKFAILCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_
     -v "$TMP/badkey:/etc/claude/git-key:ro" "$IMAGE" >/dev/null 2>&1 || true
 wait_boot "$BRKFAILCN" || true
 check "a failed broker still lets the container BOOT (fail-closed must not brick the session)" \
-    'docker logs "$BRKFAILCN" 2>&1 | grep -q "started in tmux"'
+    'loggrep "$BRKFAILCN" -q "started in tmux"'
 check "a failed broker installs NO readable key file (the fail-open fallback is gone)" \
     '! docker exec "$BRKFAILCN" test -e /home/claude/.ssh/id_ed25519'
 check "the failure is logged loudly and says it is NOT falling back to a readable key" \
-    'docker logs "$BRKFAILCN" 2>&1 | grep -q "NOT falling back to a readable key file"'
+    'loggrep "$BRKFAILCN" -q "NOT falling back to a readable key file"'
 check "the failed-broker boot log still states the key's readability" \
-    'docker logs "$BRKFAILCN" 2>&1 | grep -q "Deploy key readable : NO"'
+    'loggrep "$BRKFAILCN" -q "Deploy key readable : NO"'
 check "no relay socket and no IdentityFile are left behind" \
     '! docker exec "$BRKFAILCN" test -S /run/claude/agent.sock \
      && ! docker exec "$BRKFAILCN" grep -q IdentityFile /home/claude/.ssh/config'
@@ -747,19 +758,19 @@ docker run -d --name "$NOKEYCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NA
     "$IMAGE" >/dev/null 2>&1 || true
 wait_boot "$NOKEYCN" || true
 check "no key mounted -> the boot log says exactly that" \
-    'docker logs "$NOKEYCN" 2>&1 | grep -q "No git SSH key mounted"'
+    'loggrep "$NOKEYCN" -q "No git SSH key mounted"'
 check "no key mounted -> no YES/NO readability is claimed about a key that does not exist" \
-    '! docker logs "$NOKEYCN" 2>&1 | grep -qE "Deploy key readable : (YES|NO)"'
+    '! loggrep "$NOKEYCN" -qE "Deploy key readable : (YES|NO)"'
 check "no key mounted -> the readability line reads n/a (nothing is left to infer)" \
-    'docker logs "$NOKEYCN" 2>&1 | grep -q "Deploy key readable : n/a"'
+    'loggrep "$NOKEYCN" -q "Deploy key readable : n/a"'
 check "no key mounted -> no key file, no ssh config and no relay are written" \
     '! docker exec "$NOKEYCN" test -e /home/claude/.ssh/id_ed25519 \
      && ! docker exec "$NOKEYCN" test -e /home/claude/.ssh/config \
      && ! docker exec "$NOKEYCN" test -e /run/claude/agent.sock'
 check "no key mounted -> HTTPS git is unchanged: GH_TOKEN still wires gh in as the helper" \
-    'docker logs "$NOKEYCN" 2>&1 | grep -q "gh wired in as git credential helper"'
+    'loggrep "$NOKEYCN" -q "gh wired in as git credential helper"'
 check "no key mounted -> the github.com HTTPS credential helper is really configured" \
-    'docker exec "$NOKEYCN" gosu claude env HOME=/home/claude git config --global --get-all credential.https://github.com.helper 2>/dev/null | grep -q "gh auth git-credential"'
+    'grep -q "gh auth git-credential" <<<"$(docker exec "$NOKEYCN" gosu claude env HOME=/home/claude git config --global --get-all credential.https://github.com.helper 2>/dev/null || true)"'
 docker rm -f "$NOKEYCN" >/dev/null 2>&1 || true
 
 echo

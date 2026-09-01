@@ -112,7 +112,7 @@ plain-language style as `Egress lockdown` and `Deploy key readable`. It states
 the posture and never claims a control is active when it is not.
 
 ```
-[entrypoint] Managed policy       : ENFORCED from /etc/claude-code/managed-settings.json (image-supplied, owned by root, mode 644, not writable by claude). Managed settings, NOT overridable from inside the container: permissions.defaultMode, skipDangerousModePermissionPrompt, env.DISABLE_AUTOUPDATER
+[entrypoint] Managed policy       : ENFORCED from /etc/claude-code/managed-settings.json (image-supplied, owned by root, file mode 644 in a mode-755 directory, not writable by claude). Managed settings, NOT overridable from inside the container: permissions.defaultMode, skipDangerousModePermissionPrompt, env.DISABLE_AUTOUPDATER
 ```
 
 ```
