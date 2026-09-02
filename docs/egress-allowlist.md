@@ -83,6 +83,19 @@ decision rather than an oversight.
 | `cdn.tailwindcss.com` | omitted | JavaScript libraries an artifact may load | Browser-side artifact rendering. Nothing the CLI does fetches from it |
 | `code.jquery.com` | omitted | JavaScript libraries an artifact may load | Browser-side artifact rendering. Nothing the CLI does fetches from it |
 
+### Two names that appear on the requirements page but are not requirements
+
+`assets.claude.ai` and `www.claude.com` occur in the published page and have **no row
+above and no pin**, which is correct rather than an omission anybody forgot. Both
+appear only in the documentation site's own furniture: `assets.claude.ai` in the
+page's `@font-face` CSS and in the analytics/script blob at the end of it,
+`www.claude.com` in that same blob. Neither is in the "Network access requirements"
+table, and neither is in the "Desktop and claude.ai" subsection, so neither is
+something the vendor asks a client to reach. They are recorded here because they are
+easy to find with a text search of the saved page and would otherwise be re-litigated
+by the next person who does one. A host that turns out to be genuinely required gets
+a row in a table above, not a mention here.
+
 ## Hosts this image pins that the vendor does not require
 
 These are this container's requirements, not Claude Code's published ones, and they

@@ -1365,8 +1365,31 @@ done
 # alone, so "iptables not installed" is a failure to apply and never a skip, and an
 # allowlist that resolved to nothing is not treated as a lesser failure than missing
 # tooling.
+#
+# WHAT THIS LOOP PROVES, EXACTLY: the ENTRYPOINT's reaction to status 1, once per reason
+# the shipped script can report, against a STUB firewall. It says nothing about whether
+# the script can still REACH each of those reasons, and it cannot: the stub is what
+# exits 1. That question belongs to the firewall's own suite, and
+# test/egress-packages-unit.sh answers it by running the shipped script against a
+# stubbed resolver that answers nothing ("a resolver that answers nothing at all still
+# reaches the fail-open guard, by name"). The two halves are only worth what they are
+# worth together, so the ordering invariant they both depend on is asserted here too.
 EGFW="$REPO_ROOT/bin/claude-egress-firewall"
 mapfile -t EG_REASONS < <(sed -n 's/.*fail_open "\([^"]*\)".*/\1/p' "$EGFW")
+
+# The zero-resolution guard is only a guard while it counts what RESOLUTION produced.
+# Anthropic's published inbound range is a constant that no lookup can add or remove, so
+# folding it into the IPv4 nets before that guard makes the guard count a constant and it
+# can never fire again: a container with a dead resolver comes up sealed to one /23,
+# exits 0, and strict has no status left to refuse on. The boot pass's call therefore
+# sits AFTER the guard, and this is the assertion that keeps it there.
+eg_guard_ln="$(grep -n 'fail_open "allowlist resolved to zero IPs"' "$EGFW" | head -1 | cut -d: -f1)"
+eg_pin_ln="$(grep -n '^add_anthropic_inbound 4$' "$EGFW" | head -1 | cut -d: -f1)"
+if [[ -n "$eg_guard_ln" && -n "$eg_pin_ln" ]] && (( eg_pin_ln > eg_guard_ln )); then
+    ok "the boot pass pins the published inbound range AFTER the zero-resolution guard (line $eg_pin_ln > $eg_guard_ln), so the guard still counts only what resolved"
+else
+    bad "bin/claude-egress-firewall seeds the published inbound range before its zero-resolution fail_open guard (guard='$eg_guard_ln' pin='$eg_pin_ln'): the guard can never fire and strict cannot refuse"
+fi
 if (( ${#EG_REASONS[@]} >= 5 )); then
     ok "read ${#EG_REASONS[@]} fail_open reasons out of bin/claude-egress-firewall (not a hand-copied list)"
 else

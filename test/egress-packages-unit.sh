@@ -556,12 +556,42 @@ else
     bad "pinning the published ranges replaced or reduced what per-host resolution produced"
 fi
 # The whole point of pinning from the publisher rather than from DNS: no lookup can
-# take it away.
+# take it away. Everything except one host answers with nothing here, so the pass
+# still has something to commit and the question is only whether the published range
+# survived a resolver that produced none of it.
+KEEPHOST=github.com
 SB="$(sb_new anthropic_nodns)"
-OUT="$(run_fw "$SB" STUB_NO_V4="$(hosts | tr '\n' ' ')" STUB_NO_V6="$(hosts | tr '\n' ' ')")"
-grep -qF -- "-d $ANTHROPIC_IN4 " "$SB/v4.rules" \
-    && ok "with every DNS answer empty the published inbound range is STILL pinned (it does not come from a lookup)" \
+NODNS="$(hosts | grep -vxF "$KEEPHOST" | tr '\n' ' ')"
+OUT="$(run_fw "$SB" STUB_NO_V4="$NODNS" STUB_NO_V6="$NODNS")"
+grep -qF -- "-d $ANTHROPIC_IN4 " "$SB/v4.rules" && grep -qF -- "-d $ANTHROPIC_IN6 " "$SB/v6.rules" \
+    && ok "with every DNS answer but one empty the published inbound ranges are STILL pinned (they do not come from a lookup)" \
     || bad "an empty resolver removed the published inbound range, which is the failure pinning it exists to prevent"
+[[ "$(sb_nets "$SB" v4)" -eq 2 && "$(sb_nets "$SB" v6)" -eq 2 ]] \
+    && ok "and each table is exactly the one host that answered plus the published range: nothing a failed lookup returned leaked in" \
+    || bad "the tables built from one answered host are not (that host + the published range): v4=$(sb_nets "$SB" v4) v6=$(sb_nets "$SB" v6)"
+
+# THE PUBLISHED RANGE IS NOT EVIDENCE THAT THE ALLOWLIST RESOLVED, and this is the
+# case that says so. It is a constant: it is in the composition whatever the resolver
+# did, so counting it when asking "did anything resolve" retires the boot pass's
+# fail-open guard altogether. A container whose resolver answers nothing would then
+# commit a default-deny table admitting exactly one /23, exit 0, and have the boot log
+# call that successful lockdown, while CLAUDE_EGRESS_LOCKDOWN=strict (which refuses on
+# status 1 and nothing else) would have no status left to refuse on. The posture on a
+# total resolution failure is UNRESTRICTED and loud, and it is asserted four ways.
+SB="$(sb_new nodns_at_all)"
+OUT="$(run_fw "$SB" STUB_NO_V4="$(hosts | tr '\n' ' ')" STUB_NO_V6="$(hosts | tr '\n' ' ')")"
+grep -q 'allowlist resolved to zero IPs, failing OPEN' <<<"$OUT" \
+    && ok "a resolver that answers nothing at all still reaches the fail-open guard, by name" \
+    || bad "the zero-resolution fail-open guard did not fire: the published range was counted as a resolved allowlist"
+grep -qxF 'fw_rc=1' <<<"$OUT" \
+    && ok "and it exits 1, the only status CLAUDE_EGRESS_LOCKDOWN=strict refuses on" \
+    || bad "a total resolution failure did not exit 1: $(grep '^fw_rc=' <<<"$OUT")"
+[[ "$(sb_pol "$SB" v4)" == "-P OUTPUT ACCEPT" && ! -e "$SB/v4.rules" ]] \
+    && ok "nothing is committed: the IPv4 policy is left ACCEPT (egress open), never sealed to the published range" \
+    || bad "a total resolution failure committed a ruleset anyway: policy $(sb_pol "$SB" v4), $(sb_nets "$SB" v4) rules"
+grep -q 'egress posture: IPv4 UNRESTRICTED, IPv6 UNRESTRICTED' <<<"$OUT" \
+    && ok "and the log says UNRESTRICTED on both families rather than claiming lockdown" \
+    || bad "a total resolution failure was reported as containment"
 
 echo
 echo "the periodic refresh: it re-commits, and it NEVER narrows"
@@ -689,9 +719,54 @@ JSON
         && grep -q -- '-d 2001:db8:beef::/48 -m multiport' "$SB/v6.rules" \
         && ok "a failed api.github.com/meta fetch REUSES the ranges in force instead of dropping them" \
         || bad "a failed meta fetch on refresh silently narrowed the allowlist by the published GitHub ranges"
+
+    # AND A FETCH THAT SUCCEEDS BUT PRODUCES NOTHING IS THE SAME EMPTY ANSWER. curl
+    # exiting 0 says the transport worked, not that the body carried an address: a
+    # proxy interstitial, a rate-limit body or a schema change all reduce to an empty
+    # list. Treating that as a successful re-fetch commits a live ruleset with GitHub's
+    # entire published address space removed AND overwrites the remembered copy with
+    # the empty result, so no later cycle can recover it either. Both halves are
+    # asserted, because the second is the one that makes the damage permanent.
+    SB="$(sb_new refresh_ghempty)"
+    cat > "$SB/meta.json" <<'JSON'
+{"web":["203.0.113.0/24","2001:db8:beef::/48"],"api":[],"git":[],"packages":[]}
+JSON
+    cat > "$SB/meta-noranges.json" <<'JSON'
+{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}
+JSON
+    run_fw "$SB" $RI STUB_CURL_META="$SB/meta.json" >/dev/null
+    OUT="$(run_fw_mode "$SB" --refresh-once $RI STUB_CURL_META="$SB/meta-noranges.json")"
+    grep -q 'REUSING the published GitHub ranges the ruleset in force already carries' <<<"$OUT" \
+        && grep -q -- '-d 203.0.113.0/24 -m multiport' "$SB/v4.rules" \
+        && grep -q -- '-d 2001:db8:beef::/48 -m multiport' "$SB/v6.rules" \
+        && ok "a 200 from api.github.com/meta that carries NO ranges is an empty answer too: the ranges in force are reused, not dropped" \
+        || bad "a meta response with no ranges narrowed the live allowlist by GitHub's entire published address space"
+    grep -q 'REFRESH: re-fetched the published GitHub ranges' <<<"$OUT" \
+        && bad "the log claimed a successful re-fetch on the cycle that produced no ranges (claude-logs would show no signal at all)" \
+        || ok "and the log does not claim a successful re-fetch on a cycle that produced no ranges"
+    [[ -s "$SB/state/github.4" && -s "$SB/state/github.6" ]] \
+        && ok "the remembered ranges survive, so the reuse fallback still has something to reuse next cycle" \
+        || bad "the remembered ranges were overwritten with the empty result: the fallback is destroyed for every later cycle"
 else
     bad "jq is unavailable, so the refresh's published-ranges retention could not be exercised"
 fi
+
+# THE ZERO-NETS RETAIN IS A LIVE GUARD, for the same reason the boot pass's fail-open
+# one is: the published inbound range is folded in AFTER the cycle is counted, never
+# before. A family whose cycle resolves nothing must retain what is in force rather
+# than commit a table sealed to that one range. The boot below leaves IPv6 with a
+# committed ruleset and no per-host answers at all, which is exactly the state that
+# reaches the guard on the next cycle.
+SB="$(sb_new refresh_zeronets)"
+ALLHOSTS="$(hosts | tr '\n' ' ')"
+run_fw "$SB" $RI STUB_NO_V6="$ALLHOSTS" >/dev/null
+OUT="$(run_fw_mode "$SB" --refresh-once $RI STUB_NO_V6="$ALLHOSTS")"
+grep -q 'the allowlist resolved to ZERO IPv6 nets this cycle, which would seal the family rather than refresh it' <<<"$OUT" \
+    && ok "a refresh cycle that resolves ZERO nets for a family RETAINS it (the guard is reachable, not decoration)" \
+    || bad "the zero-nets retain never fired: the published range was counted as this cycle's resolution"
+grep -q 'REFRESH: IPv4 allowlist re-resolved and the refreshed ruleset committed atomically' <<<"$OUT" \
+    && ok "and the family that did resolve still refreshes beside it" \
+    || bad "a zero-nets family stopped the other family's refresh"
 
 # --- lockdown off, and an unconfigured interval, start nothing ------------------------
 # Lockdown off never runs this script at all (entrypoint.sh §12a, covered in

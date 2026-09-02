@@ -505,7 +505,10 @@ if [[ "$EG6_OK" == 1 ]]; then
     # (which getent returns as themselves). Any one of them is enough, and together they
     # keep this test off a single resolver behaviour. The IPv4 entry also keeps the IPv4
     # pass off its "resolved to zero IPs" fail-open path on an offline host, so what is
-    # under test here is the IPv6 ruleset rather than the test host's internet.
+    # under test here is the IPv6 ruleset rather than the test host's internet. That path
+    # is live and is reached by resolution alone: the published inbound ranges are folded
+    # in after the guard, never before it, so they cannot stand in for an answer this
+    # peer address is here to provide (test/egress-packages-unit.sh asserts both halves).
     # shellcheck disable=SC2086
     docker run -d --name "$EG6CN" $EGHARDEN --network "$EG6NET" \
         -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=egress6 -e CLAUDE_EGRESS_LOCKDOWN=1 \
@@ -702,7 +705,10 @@ if grep -qE "Egress refresh +: every 10s" <<<"$EGRF_LOG"; then
         'p="$(docker exec "$EGRFCN" iptables -S OUTPUT 2>/dev/null | head -1)"; [ "$p" = "-P OUTPUT DROP" ]'
 else
     # No network in this test environment, so the allowlist resolved to nothing and the
-    # boot pass failed OPEN. A refresh over a container this same log reported as
+    # boot pass failed OPEN. It really does fail open here, and that is a property of the
+    # script rather than an assumption of this branch: the guard counts what resolution
+    # produced, and the published inbound ranges (which are a constant, not an answer)
+    # are folded in only after it. A refresh over a container this same log reported as
     # UNRESTRICTED would silently seal it mid-session, so the correct behaviour is to
     # start nothing and say why. Assert THAT rather than claiming a pass.
     echo "  SKIP  live refresh checks (the boot ruleset could not be applied in this environment)"
