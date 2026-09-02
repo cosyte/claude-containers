@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claude-tui: whiptail menu over the claude-* container fleet — stacks, auth
+# claude-tui: whiptail menu over the claude-* container fleet: stacks, auth
 # accounts, individual sessions, and fleet maintenance.
 #
 # Pure navigation: every action shells out to an existing claude-* script or
@@ -17,7 +17,7 @@
 # A stack's regen command is discovered by convention: the single *.conf file
 # next to its compose file (claude-compose-gen --scenario). Ambiguous (0 or
 # >1 matches) disables the "Regenerate" action for that stack with a pointer
-# to do it by hand — this file does not guess.
+# to do it by hand (this file does not guess).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 need_docker
@@ -106,7 +106,7 @@ stack_auth_volume() {
     fi
 }
 
-# env_set_var <file> KEY VALUE: idempotent upsert (volume names only — no
+# env_set_var <file> KEY VALUE: idempotent upsert (volume names only, no
 # shell metacharacters expected in VALUE).
 env_set_var() {
     local file="$1" key="$2" val="$3"
@@ -155,7 +155,7 @@ accounts_menu() {
 # compose.service label), not a bare `compose up -d`: a service can be
 # running today while sitting behind the "dormant" profile (started once by
 # hand), and a bare `up -d` silently skips anything outside the default
-# profile — it would leave that container on the OLD volume with no error.
+# profile: it would leave that container on the OLD volume with no error.
 switch_stack_auth() {
     local stack="$1"
     local file="${STACK_FILE[$stack]}" envf="${STACK_ENV[$stack]:-}"
@@ -234,7 +234,7 @@ regen_stack() {
         return 0
     fi
     whiptail --title "Regenerate: $stack" --yesno \
-        "Regenerate from:\n${scenario}\n\nThis rewrites docker-compose.yml only — no containers are touched until you also bring them up." \
+        "Regenerate from:\n${scenario}\n\nThis rewrites docker-compose.yml only, no containers are touched until you also bring them up." \
         12 78 || return 0
     run_interactive "claude-compose-gen --scenario $scenario" "$BIN/claude-compose-gen" --scenario "$scenario"
 }
@@ -312,10 +312,10 @@ launch_new() {
             [[ -n "$m" ]] && cmd_args+=(--model "$m") ;;
     esac
     extra="$(whiptail --title "Launch new session" --inputbox \
-        "Extra claude-launch flags (optional — e.g. --mcp foo --browser --expose 4321:4321):" 10 78 3>&1 1>&2 2>&3)" || extra=""
+        "Extra claude-launch flags (optional, e.g. --mcp foo --browser --expose 4321:4321):" 10 78 3>&1 1>&2 2>&3)" || extra=""
     clear
     # Intentional word-split of $extra: it becomes separate argv words for a
-    # direct exec of claude-launch, never passed through a shell — a stray
+    # direct exec of claude-launch, never passed through a shell, so a stray
     # ';' or '|' just lands as a literal (harmless) argument, not executed.
     if [[ -n "$extra" ]]; then
         # shellcheck disable=SC2086
@@ -346,7 +346,7 @@ container_menu() {  # container_menu <project>
         items+=(back    "◀ Back")
 
         local action
-        action="$(whiptail --title "$TITLE — $project" --menu "state: $state" 18 72 8 "${items[@]}" \
+        action="$(whiptail --title "$TITLE: $project" --menu "state: $state" 18 72 8 "${items[@]}" \
             3>&1 1>&2 2>&3)" || return 0
         case "$action" in
             attach)  clear; "$BIN/claude-attach" "$project" || true ;;
@@ -403,7 +403,7 @@ stack_menu() {  # stack_menu <stack>
         fi
         # Dormant services: defined in the compose file, no container created
         # yet. `config --services` alone only lists services in ACTIVE
-        # profiles — --profile dormant is required to see the rest too.
+        # profiles; --profile dormant is required to see the rest too.
         local all_services dsvc
         all_services="$(docker compose -f "$file" --profile dormant config --services 2>/dev/null || true)"
         if [[ -n "$all_services" ]]; then

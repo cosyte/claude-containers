@@ -595,13 +595,18 @@ chown "$CLAUDE_UID:$CLAUDE_GID" "$CJSON"
 # the container IS are delivered here:
 #   permissions.defaultMode            the containment posture the operator chose
 #   skipDangerousModePermissionPrompt  meaningless apart from the mode above
-#   env.DISABLE_AUTOUPDATER            a session that self-updates leaves the
-#                                      pinned CLI this image verifies its flags
-#                                      against, so the pin stops meaning anything
 # includeCoAuthoredBy is deliberately NOT here. It is a commit-message
 # preference: nothing about the container depends on it, and a session that
 # wants it off should be free to turn it off. Section 8b still sets it.
 # The telemetry kills stay out of BOTH files for the reason in 8b's own note.
+#
+# env.DISABLE_AUTOUPDATER is deliberately NOT here either, as of CC-CLAUDE-CODE-UPGRADE
+# (the 2.1.258 bump): auto-update is now the image's default posture (see that note
+# above ARG CLAUDE_CODE_VERSION in the Dockerfile), so there is no "pin stops meaning
+# anything" to protect any more, and root-enforcing it here would remove the one lever
+# (env, or a mounted settings/managed file) an operator has to opt back INTO staying
+# pinned. An operator who wants that posture fleet-wide and non-overridable should set
+# DISABLE_AUTOUPDATER=1 in their own file at $MANAGED_FILE below (never overwritten).
 #
 # NOT SET, DELIBERATELY: permissions.disableBypassPermissionsMode. This path is
 # where an operator turns --dangerously-skip-permissions off outright, and the
@@ -634,8 +639,7 @@ managed_owner_uid="$(id -u)"   # the uid this entrypoint runs as: root, in this 
 # the whole file, silently, with no policy in force and a happy-looking log.
 MANAGED_POLICY="$(jq -n --arg pm "$MANAGED_PERM_MODE" '{
     permissions: { defaultMode: $pm },
-    skipDangerousModePermissionPrompt: true,
-    env: { DISABLE_AUTOUPDATER: "1" }
+    skipDangerousModePermissionPrompt: true
 }' 2>/dev/null)" || MANAGED_POLICY=""
 
 # True when $MANAGED_FILE is byte-for-byte the file THIS image last wrote. The
@@ -810,10 +814,12 @@ fi
 #     Remote Control reports "not yet enabled for your account". RC is the point
 #     of this image, so they must never be set. See docs/troubleshooting.md.
 PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
-# Auto-update is on by default (no DISABLE_AUTOUPDATER here): see the
-# AUTO-UPDATER NOW ON BY DEFAULT note in the Dockerfile above ARG CLAUDE_CODE_VERSION.
-# An operator who wants a container to stay pinned to the baked CLAUDE_CODE_VERSION
-# should set DISABLE_AUTOUPDATER=1 (env, or their own mounted settings.json).
+# Auto-update is on by default (no DISABLE_AUTOUPDATER here, nor in §7a's managed
+# policy above): see the AUTO-UPDATER NOW ON BY DEFAULT note in the Dockerfile above
+# ARG CLAUDE_CODE_VERSION. An operator who wants a container to stay pinned to the
+# baked CLAUDE_CODE_VERSION should set DISABLE_AUTOUPDATER=1 themselves (env, their
+# own mounted settings.json, or, to make it non-overridable, their own file at
+# §7a's $MANAGED_FILE).
 BASE_SETTINGS="$(jq -n --arg pm "$PERM_MODE" '{
     permissions: { defaultMode: $pm },
     skipDangerousModePermissionPrompt: true,

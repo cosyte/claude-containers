@@ -293,7 +293,7 @@ claude-tui                        interactive whiptail menu over the whole fleet
                                    account, regenerate its compose), plus an Accounts screen
                                    (view/log in named OAuth accounts) and disk maintenance.
                                    Discovers stacks live from `com.docker.compose.project`
-                                   labels — set CLAUDE_TUI_STACKS to pre-seed one with no
+                                   labels; set CLAUDE_TUI_STACKS to pre-seed one with no
                                    containers created yet. Wraps the commands below; no new logic.
 claude-list                       table of all sessions
 claude-attach <name>              attach to its live tmux session (local host)
@@ -635,8 +635,8 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   network still gated): now honored by **both** the interactive session and
   autopilot, not just the app prompt.
 - **Policy the session cannot rewrite.** The settings this image asserts as
-  *policy* (`permissions.defaultMode`, `skipDangerousModePermissionPrompt`, and
-  `env.DISABLE_AUTOUPDATER`) are delivered to
+  *policy* (`permissions.defaultMode`, `skipDangerousModePermissionPrompt`) are
+  delivered to
   `/etc/claude-code/managed-settings.json`, which Claude Code reads above every
   other settings level and which `root` owns, written before the agent process
   starts. A session that rewrites or empties its own

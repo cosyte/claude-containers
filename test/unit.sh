@@ -1603,10 +1603,12 @@ ms_continued "$MS_OUT" && ok "boot carries on to the agent after §7a"        ||
 
 # --- THE CLASSIFICATION: policy is carried, preference is not ------------------------
 # permissions.defaultMode is the containment posture the operator chose;
-# skipDangerousModePermissionPrompt is meaningless apart from it; DISABLE_AUTOUPDATER
-# keeps the session on the CLI version this image pins and verifies its flags against.
+# skipDangerousModePermissionPrompt is meaningless apart from it.
 # includeCoAuthoredBy is a commit-message preference: §8b still sets it and a session is
 # still free to change it, which is the whole difference this section encodes.
+# DISABLE_AUTOUPDATER is ALSO deliberately not managed here (as of the 2.1.258 bump,
+# auto-update is this image's default posture, not something to root-enforce against):
+# see the "env.DISABLE_AUTOUPDATER is deliberately NOT here" note in §7a itself.
 ms_has() { jq -e "$1" "$MS_HAPPY" >/dev/null 2>&1; }
 ms_has '.permissions.defaultMode == "bypassPermissions"' \
     && ok  "managed: permissions.defaultMode (the containment posture)" \
@@ -1614,9 +1616,9 @@ ms_has '.permissions.defaultMode == "bypassPermissions"' \
 ms_has '.skipDangerousModePermissionPrompt == true' \
     && ok  "managed: skipDangerousModePermissionPrompt (paired with the mode above)" \
     || bad "skipDangerousModePermissionPrompt is not delivered as managed policy"
-ms_has '.env.DISABLE_AUTOUPDATER == "1"' \
-    && ok  "managed: env.DISABLE_AUTOUPDATER (a self-updating session leaves the pinned CLI)" \
-    || bad "env.DISABLE_AUTOUPDATER is not delivered as managed policy"
+ms_has 'has("env") | not' \
+    && ok  "NOT managed: no env key at all (DISABLE_AUTOUPDATER is a preference, not policy)" \
+    || bad "the managed file carries an env key: DISABLE_AUTOUPDATER should not be root-enforced"
 ms_has 'has("includeCoAuthoredBy") | not' \
     && ok  "NOT managed: includeCoAuthoredBy stays a preference a session may change" \
     || bad "includeCoAuthoredBy was delivered as policy: a commit-message preference is not policy"
@@ -1885,7 +1887,7 @@ MS_8B="$(awk '/^# 8b\. settings.json/{f=1} f && /^# 8c\./{exit} f{print}' "$ENTR
                   || bad "could not extract §8b: the additive checks below would be vacuous"
 ms_8b_missing=()
 for _needle in 'permissions: { defaultMode: $pm }' 'skipDangerousModePermissionPrompt: true' \
-               'includeCoAuthoredBy: true' 'DISABLE_AUTOUPDATER: "1"' \
+               'includeCoAuthoredBy: true' \
                'del(.DISABLE_TELEMETRY,.DO_NOT_TRACK,.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)' \
                'STALE_HOOK_CMD' '> "$CLAUDE_CONFIG_DIR/settings.json"'; do
     grep -qF "$_needle" <<<"$MS_8B" || ms_8b_missing+=("$_needle")

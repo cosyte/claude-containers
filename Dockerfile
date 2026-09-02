@@ -37,12 +37,16 @@ FROM node:${NODE_VERSION}-bookworm-slim
 # downgrade impossible; it stays a floor, not an equality.
 #
 # AUTO-UPDATER NOW ON BY DEFAULT (CC-CLAUDE-CODE-UPGRADE): DISABLE_AUTOUPDATER=1 was
-# removed from both this image's ENV (below) and the baked settings.json `env`
-# (entrypoint.sh §8b), so a running container's Claude Code binary can now self-update
-# past this pin. That reverses the previous pinned/reproducible-build posture on
-# purpose; an operator who needs a container to stay on exactly CLAUDE_CODE_VERSION
-# must set DISABLE_AUTOUPDATER=1 themselves (env, or a mounted settings.json — see
-# §8b's "everything baked is overridable at runtime" note). Relevant given that:
+# removed from this image's ENV (below), the baked settings.json `env`
+# (entrypoint.sh §8b), AND the root-owned managed-settings.json §7a composes (added by
+# a separate, later PR #48: see that section's own "env.DISABLE_AUTOUPDATER is
+# deliberately NOT here" note), so a running container's Claude Code binary can now
+# self-update past this pin at every layer. That reverses the previous
+# pinned/reproducible-build posture on purpose; an operator who needs a container to
+# stay on exactly CLAUDE_CODE_VERSION must set DISABLE_AUTOUPDATER=1 themselves (env, a
+# mounted settings.json, see §8b's "everything baked is overridable at runtime" note,
+# or, to make it non-overridable fleet-wide, their own file at §7a's managed path).
+# Relevant given that:
 #   - 2.1.243: native auto-update download is now zstd-compressed (~75MB vs ~340MB on
 #     Linux x64), so the self-update this now performs is much cheaper.
 #   - 2.1.246: fixed background sessions failing to open with EACCES when another

@@ -20,12 +20,19 @@ agent process exists.
 |---|---|
 | `permissions.defaultMode` | The containment posture the operator chose (`CLAUDE_PERMISSION_MODE`). It is what the container IS. |
 | `skipDangerousModePermissionPrompt` | Meaningless apart from the mode above; they are one decision. |
-| `env.DISABLE_AUTOUPDATER` | A session that updates itself leaves the CLI version this image pins and verifies its flags against, so the pin stops meaning anything. |
 
 `includeCoAuthoredBy` is deliberately **not** here. It is a commit-message
 preference: nothing about the container depends on it, and a session that wants
 it off should be free to turn it off. The entrypoint still sets it in
 `~/.claude/settings.json`, where a session can still change it.
+
+`env.DISABLE_AUTOUPDATER` is deliberately **not** here either, as of the
+CC-CLAUDE-CODE-UPGRADE 2.1.258 bump: auto-update is now this image's default
+posture (neither the Dockerfile `ENV` nor `~/.claude/settings.json` sets it),
+so there is no "the pin stops meaning anything" case left to root-enforce
+against. An operator who wants a fleet to stay pinned, non-overridable from
+inside, sets `DISABLE_AUTOUPDATER=1` in their own file at the managed path
+below (the image never overwrites one it did not write).
 
 The Remote-Control-breaking telemetry kills (`DISABLE_TELEMETRY`,
 `DO_NOT_TRACK`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) are in neither file,
@@ -131,7 +138,7 @@ decided by the file on disk, not by what the entrypoint tried to do, so a policy
 this image did not deliver is reported exactly like one it did.
 
 ```
-[entrypoint] Managed policy       : ENFORCED from /etc/claude-code/managed-settings.json (image-supplied, owned by uid 0 and not by the agent user claude (uid 1000), file mode 644 in a mode-755 directory, not writable by claude). Managed settings, NOT overridable from inside the container: permissions.defaultMode, skipDangerousModePermissionPrompt, env.DISABLE_AUTOUPDATER
+[entrypoint] Managed policy       : ENFORCED from /etc/claude-code/managed-settings.json (image-supplied, owned by uid 0 and not by the agent user claude (uid 1000), file mode 644 in a mode-755 directory, not writable by claude). Managed settings, NOT overridable from inside the container: permissions.defaultMode, skipDangerousModePermissionPrompt
 ```
 
 The owning uid is printed rather than the word "root" because the uid is what the

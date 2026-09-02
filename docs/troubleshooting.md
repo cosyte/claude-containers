@@ -171,7 +171,7 @@ prompt. If a future Claude Code version prompts anyway:
 - Set `CLAUDE_PERMISSION_MODE=acceptEdits` in `.env` and relaunch. Edits
   auto-apply; shell commands prompt in the app (you tap approve). Safer, still
   usable remotely.
-- Or pin back to a known-good `CLAUDE_CODE_VERSION` and rebuild — and set
+- Or pin back to a known-good `CLAUDE_CODE_VERSION` and rebuild, and set
   `DISABLE_AUTOUPDATER=1` too, since auto-update is on by default and would
   otherwise carry the container past the version you just pinned back to.
 
