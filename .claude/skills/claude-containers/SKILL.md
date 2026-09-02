@@ -66,7 +66,10 @@ small descriptive commits as you change things.
   Each short-circuits the GrowthBook fetch, so the `tengu_ccr_bridge` gate
   defaults false and Remote Control fails with "not yet enabled for your
   account": even on an eligible account. RC is the point of this image.
-  Only `DISABLE_AUTOUPDATER=1` is safe (unrelated to flags). The entrypoint
+  `DISABLE_AUTOUPDATER=1` is safe (unrelated to flags) but is NOT set by
+  default: auto-update is on by default now, so a running container's Claude
+  Code binary can self-update past the pinned CLAUDE_CODE_VERSION unless an
+  operator sets `DISABLE_AUTOUPDATER=1` themselves. The entrypoint
   self-heals older config volumes (strips these keys + clears the stale flag
   cache). This was a real, shipped-then-fixed defect: see
   docs/troubleshooting.md "Remote Control".
@@ -80,7 +83,7 @@ small descriptive commits as you change things.
   `claude plugin install` in the entrypoint.
 - **Workspace trust is pre-accepted** by seeding `.claude.json`
   (`hasCompletedOnboarding`, `projects["/workspace"].hasTrustDialogAccepted`).
-- Pinned/verified Claude Code: **2.1.220** (min 2.1.52 for Remote Control). `--model opus` tracks the LATEST Opus: **Opus 5** (1M context) from CLI 2.1.219, Opus 4.8 from 2.1.154, the 2.1.145 pin silently gave Opus 4.7. A bump can therefore change the fleet's MODEL, not just the CLI; pin `CLAUDE_MODEL=claude-opus-4-8` to hold a container back.
+- Pinned/verified Claude Code: **2.1.258** (min 2.1.52 for Remote Control). `--model opus` tracks the LATEST Opus: **Opus 5** (1M context) from CLI 2.1.219, Opus 4.8 from 2.1.154, the 2.1.145 pin silently gave Opus 4.7. A bump can therefore change the fleet's MODEL, not just the CLI; pin `CLAUDE_MODEL=claude-opus-4-8` to hold a container back.
   Everything was verified against that binary, not just docs.
 
 ## Codebase map
@@ -94,6 +97,7 @@ small descriptive commits as you change things.
 | `bin/_common.sh` | Shared lib: `.env` load, defaults, `sanitize`, volume names, `alloc_port` (2200–2299, skips used), state checks, `print_connect`. |
 | `bin/claude-launch` | Create/start a container; auto port; labels carry metadata; surfaces a fast-failing entrypoint. `--expose H:C` / `--dev-cmd` publish + auto-start a dev server; `--browser` enables the chrome-devtools MCP for frontend debugging (needs a WITH_BROWSER=1 image). |
 | `bin/claude-list/attach/stop/rm/logs` | Manage containers. `claude-attach` opens the live tmux session via `docker exec` (local, no SSH key). `claude-rm --purge` also deletes the per-project volumes. |
+| `bin/claude-tui` | `whiptail` menu over the whole fleet, grouped by compose stack (discovered live from `com.docker.compose.project*` labels, no hardcoded paths; pre-seed a stack with zero containers via `CLAUDE_TUI_STACKS`). Per-session: attach/start/stop/restart/logs/remove/connect-info. Per-stack: bring up a dormant (never-created) repo, switch which auth account it uses (edits its `.env`'s `AUTH_VOLUME`, regenerates via its sibling `*.conf`, recreates only the containers actually running, by service name, so an already-running dormant-profile container is never silently skipped by a bare `up -d`), regenerate its compose. Accounts screen wraps `claude-account-list`/`claude-account-login`. Disk screen wraps `claude-disk-gc`/`-verify`. Pure navigation: shells out to the scripts here, no duplicated logic. Needs `whiptail` (the `newt` package). |
 | `bin/claude-compose-gen` | Generate a multi-service `docker-compose.yml` (one session per repo in a GitHub org via `gh`, or explicit `repo[:branch]` args). Stable ports (reserves ports used by any `claude.managed` container host-wide), shared+per-repo volumes, `claude.managed` labels so `claude-list` sees them. `--scenario <file>` reads a persisted `.conf` of flags; `--env-file <file>` layers a per-stack env for multi-stack hosts. |
 | `scenarios/example.conf.example` | Documented template for a `--scenario` `.conf` (persisted generator flags). Real scenario files live with the compose, outside this repo. |
 | `bash_profile` | Interactive SSH → `exec tmux attach -t claude`; non-interactive SSH untouched. |
@@ -136,6 +140,7 @@ make login                    # one-time OAuth; opens a URL, paste the code
                                         #   launch options are ignored on resume
 ./bin/claude-rm <name> [--yes] [--purge]
 ./bin/claude-logs <name> [-n LINES]     # entrypoint/sshd log, not the session
+./bin/claude-tui                        # interactive whiptail menu: stacks, accounts, sessions, disk (wraps all of the above)
 ```
 Connect: the launcher prints `ssh -p <port> claude@<host>` and the app session
 name (= project name; green dot when online). `bin/` on `PATH` drops `./bin/`.
@@ -290,7 +295,7 @@ SSH-into-session. Real OAuth + the phone-app green-dot remain manual.
   empty workspace + no `--repo`, unreadable mounted key.
 - **App session missing / no green dot** → needs ≥2.1.52 + open outbound 443;
   check `claude-logs` shows "started in tmux"; same Max account as login.
-- **skip-permissions vs Remote Control** → works on pinned 2.1.220: the top-level launch
+- **skip-permissions vs Remote Control** → works on pinned 2.1.258: the top-level launch
   `claude --dangerously-skip-permissions --remote-control <name>` was verified to parse and
   start (as the unprivileged `claude` user), with no interlock between the two flags. This is
   why the CLI is pinned at all: re-verify on any bump. (The `claude remote-control`

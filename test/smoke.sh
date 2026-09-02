@@ -221,8 +221,8 @@ check "policy: permissions.defaultMode is delivered as managed" \
     'msjq ".permissions.defaultMode == \"bypassPermissions\"" "$MSFILE"'
 check "policy: skipDangerousModePermissionPrompt is delivered as managed" \
     'msjq ".skipDangerousModePermissionPrompt == true" "$MSFILE"'
-check "policy: env.DISABLE_AUTOUPDATER is delivered as managed" \
-    'msjq ".env.DISABLE_AUTOUPDATER == \"1\"" "$MSFILE"'
+check "preference: DISABLE_AUTOUPDATER is NOT managed (auto-update is on by default)" \
+    'msjq "has(\"env\") | not" "$MSFILE"'
 check "preference: includeCoAuthoredBy is NOT managed (a session may still change it)" \
     'msjq "has(\"includeCoAuthoredBy\") | not" "$MSFILE"'
 check "bypass mode is NOT disabled by this image (that call is deliberately the operator's)" \
@@ -234,7 +234,7 @@ MSLOG="$(docker logs "$CN" 2>&1 || true)"
 check "the boot log reports policy as ENFORCED, naming the file" \
     'grep -qE "Managed policy +: ENFORCED" <<<"$MSLOG" && grep -qF "$MSFILE" <<<"$MSLOG"'
 check "the boot log names WHICH settings are managed" \
-    'grep -qF "permissions.defaultMode" <<<"$MSLOG" && grep -qF "skipDangerousModePermissionPrompt" <<<"$MSLOG" && grep -qF "env.DISABLE_AUTOUPDATER" <<<"$MSLOG"'
+    'grep -qF "permissions.defaultMode" <<<"$MSLOG" && grep -qF "skipDangerousModePermissionPrompt" <<<"$MSLOG"'
 check "and says they are not overridable from inside the container" \
     'grep -qiF "NOT overridable" <<<"$MSLOG"'
 check "policy was in force BEFORE the agent started (the managed line precedes the tmux launch)" \
@@ -274,7 +274,7 @@ check "and the managed file's contents are unchanged after every attempt" \
 # reaches the managed file, so the value Claude Code reads at the top of the hierarchy is
 # unchanged. settings.json is restored afterwards so later sections see what they expect.
 docker exec "$CN" cp "$MSSETTINGS" /tmp/settings.pre-a2.json || true
-MS_CONTRA='{"permissions":{"defaultMode":"plan"},"skipDangerousModePermissionPrompt":false,"env":{"DISABLE_AUTOUPDATER":"0"}}'
+MS_CONTRA='{"permissions":{"defaultMode":"plan"},"skipDangerousModePermissionPrompt":false}'
 asclaude_x "printf '%s' '$MS_CONTRA' > $MSSETTINGS" >/dev/null 2>&1 || true
 check "the agent really did rewrite its own ~/.claude/settings.json (the test is live)" \
     'msjq ".permissions.defaultMode == \"plan\"" "$MSSETTINGS"'

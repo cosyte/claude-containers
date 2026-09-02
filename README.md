@@ -209,13 +209,13 @@ vars override `.env`. Full reference: `.env.example`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `CLAUDE_IMAGE` | `claude-code-box:latest` | Image tag built/run |
-| `CLAUDE_CODE_VERSION` | `2.1.220` | Pinned Claude Code npm version (min 2.1.52). `opus` resolves to the latest Opus: **Opus 5 from CLI 2.1.219**, Opus 4.8 from 2.1.154 |
+| `CLAUDE_CODE_VERSION` | `2.1.258` | Pinned Claude Code npm version (min 2.1.52). `opus` resolves to the latest Opus: **Opus 5 from CLI 2.1.219**, Opus 4.8 from 2.1.154. Auto-update is on by default (`DISABLE_AUTOUPDATER` is unset), so a running container's binary can self-update past this pin unless the operator sets `DISABLE_AUTOUPDATER=1` |
 | `NODE_VERSION` | `24` | Base Node LTS |
 | `UV_VERSION` | `latest` | `uv` version (pin for reproducibility) |
 | `PNPM_VERSION` | `latest` | `pnpm` version baked in (pin for reproducibility) |
 | `CLAUDE_UID`/`CLAUDE_GID`/`CLAUDE_USER` | `1000`/`1000`/`claude` | Container user |
 | `CLAUDE_MODEL` | `opus` | Model the session runs. Defaults to the best available model (the `opus` alias always resolves to the latest Opus, **Opus 5**, 1M context, on the pinned CLI; it became the default Opus in 2.1.219, so the 2.1.207→2.1.220 bump moved the fleet off Opus 4.8). Passed through to `--model` verbatim, so use an alias the pinned CLI actually ships (`opus`/`sonnet`/`haiku`/`opusplan`/`fable`/`best`) or a full id like `claude-opus-5` / `claude-opus-4-8` (set the latter to hold a container on 4.8). **`default` is not in the pinned CLI's alias table**, don't rely on it to defer to Claude Code's own pick. Both launchers now default to `opus` when this is unset, so a session can never silently fall back to Claude Code's default (which is Sonnet 5 from CLI 2.1.197). Per-container via `claude-launch --model`, per-repo via `claude-compose-gen --model REPO=MODEL` |
-| `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `acceptEdits`/`auto`/`bypassPermissions`/`manual`/`dontAsk`/`plan`: the choice set the pinned CLI accepts. Honored by both the interactive session and autopilot; `acceptEdits` is the safer fleet posture (gates shell/network). **`default` was renamed `manual` upstream in CLI 2.1.200** and no longer appears in `claude --help`; it is still accepted for now (re-verified on 2.1.220, a bogus mode is rejected with the allowed-choices list, `default` is not), so existing `.env` files keep working, but prefer `manual`, since an undocumented alias can be dropped |
+| `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `acceptEdits`/`auto`/`bypassPermissions`/`manual`/`dontAsk`/`plan`: the choice set the pinned CLI accepts. Honored by both the interactive session and autopilot; `acceptEdits` is the safer fleet posture (gates shell/network). **`default` was renamed `manual` upstream in CLI 2.1.200** and no longer appears in `claude --help`; it is still accepted for now (re-verified on 2.1.241, a bogus mode is rejected with the allowed-choices list, `default` is not), so existing `.env` files keep working, but prefer `manual`, since an undocumented alias can be dropped |
 | `CLAUDE_SECRET_GUARD` | `1` | `1` installs a fleet-wide git pre-commit hook that blocks committing secrets (`.env`, `*.pem`, `*.key`, `id_rsa`, PRIVATE KEY blocks). Bypass once with `git commit --no-verify`; extend via `CLAUDE_SECRET_GUARD_EXTRA` |
 | `CLAUDE_AUTOPILOT` | `0` | `1` = unattended mode: main pane runs a headless `claude -p` loop instead of Remote Control (see [Unattended autopilot](#unattended-autopilot)) |
 | `CLAUDE_AUTOPILOT_CMD` | **none, required** | What the autopilot loop runs each cycle. **No default**, it must be a command the workspace you mount actually defines. Unset + no queue = the autopilot refuses to run |
@@ -287,6 +287,14 @@ holds `CLAUDE.md`, `mcp/`, `plugins/`, `commands/`, `skills/`. MCP secrets are
 claude-launch <name> [--repo URL | --workspace PATH] [--branch B] [--depth N]
                       [--port N] [--model NAME] [--mcp NAME ...] [--browser|--no-browser]
                       [--extra-args "…"] [--expose H:C ...] [--dev-cmd "…"]
+claude-tui                        interactive whiptail menu over the whole fleet: per-session
+                                   (attach/start/stop/restart/logs/remove/launch), grouped by
+                                   compose stack (bring up a dormant repo, switch a stack's auth
+                                   account, regenerate its compose), plus an Accounts screen
+                                   (view/log in named OAuth accounts) and disk maintenance.
+                                   Discovers stacks live from `com.docker.compose.project`
+                                   labels; set CLAUDE_TUI_STACKS to pre-seed one with no
+                                   containers created yet. Wraps the commands below; no new logic.
 claude-list                       table of all sessions
 claude-attach <name>              attach to its live tmux session (local host)
 claude-stop  <name>               graceful stop (state preserved)
@@ -602,7 +610,7 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   egress isn't firewalled. The name in the app is the project name.
 - **`--dangerously-skip-permissions` vs Remote Control**: there were earlier
   reports that skip-permissions didn't fully apply under Remote Control. On the
-  pinned **2.1.220** both flags are accepted together with no interlock, and the
+  pinned **2.1.258** both flags are accepted together with no interlock, and the
   launch (`claude --dangerously-skip-permissions --remote-control <name>`) combines
   them, so it works. This is the reason the CLI version is pinned at all: re-verify
   it on any bump. If a future version regresses, set
@@ -627,8 +635,8 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   network still gated): now honored by **both** the interactive session and
   autopilot, not just the app prompt.
 - **Policy the session cannot rewrite.** The settings this image asserts as
-  *policy* (`permissions.defaultMode`, `skipDangerousModePermissionPrompt`, and
-  `env.DISABLE_AUTOUPDATER`) are delivered to
+  *policy* (`permissions.defaultMode`, `skipDangerousModePermissionPrompt`) are
+  delivered to
   `/etc/claude-code/managed-settings.json`, which Claude Code reads above every
   other settings level and which `root` owns, written before the agent process
   starts. A session that rewrites or empties its own

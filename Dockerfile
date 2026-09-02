@@ -17,28 +17,106 @@ FROM node:${NODE_VERSION}-bookworm-slim
 # --- Build-time configuration -------------------------------------------------
 # CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control.
 #
-# 2.1.220 (npm `latest` on 2026-07-25) is verified to support the exact launch this
+# 2.1.258 (npm `latest` on 2026-09-01) is verified to support the exact launch this
 # image makes: `claude --dangerously-skip-permissions --remote-control <name>`
 # (bin/claude-session): with both flags accepted TOGETHER and no interlock between
 # them. That combination is the reason this ARG is pinned at all; re-verify it on any
 # future bump (test/cli-version-unit.sh asserts the pin is consistent; the live
 # --remote-control handshake is the on-host check, CC-CLAUDE-CODE-UPGRADE-SMOKE).
 #
-# ⚠️ WHAT THE 2.1.207 -> 2.1.220 BUMP CHANGES ABOUT THE MODEL. CLI 2.1.219 introduced
-# Claude Opus 5 (`claude-opus-5`, 1M context) as the NEW DEFAULT Opus. The `opus` alias
-# this image passes resolves to the LATEST Opus, so the fleet moves Opus 4.8 -> Opus 5
-# on this bump. That is an UPGRADE and clears ADR 0009, but it is a real behavior change
-# (different model, far larger context) and not a no-op: it is the headline reason to
-# re-verify rather than assume. Pin CLAUDE_MODEL=claude-opus-4-8 on a container that
-# must stay on 4.8. Note 2.1.219 also dropped Opus 4.7 from fast mode.
+# NO DEFAULT-MODEL CHANGE IN THIS BUMP. Opus 5 (`claude-opus-5`, 1M context) has been
+# the `opus` alias's target since CLI 2.1.219 (the 2.1.207 -> 2.1.220 bump) and stays so
+# through 2.1.258: no new Opus release landed in this range (Fable 5.1 landed in
+# 2.1.257, irrelevant unless CLAUDE_MODEL=fable). Pin CLAUDE_MODEL=claude-opus-4-8 on a
+# container that must stay off Opus 5.
 #
 # WHY THE FLOOR EXISTS (CC-CLAUDE-CODE-UPGRADE): the `opus` alias resolves to the LATEST
 # Opus, and Opus 4.8 shipped in CLI 2.1.154, so the old 2.1.145 pin silently resolved
 # `--model opus` (this image's default) to Opus 4.7, quietly downgrading every gate
 # agent below what ADR 0009 requires. The >=2.1.154 floor below is what makes that
-# downgrade impossible; it stays a floor, not an equality, and 2.1.220 clears it.
+# downgrade impossible; it stays a floor, not an equality.
 #
-# Landed between 2.1.207 and 2.1.220, and relevant to this image:
+# AUTO-UPDATER NOW ON BY DEFAULT (CC-CLAUDE-CODE-UPGRADE): DISABLE_AUTOUPDATER=1 was
+# removed from this image's ENV (below), the baked settings.json `env`
+# (entrypoint.sh §8b), AND the root-owned managed-settings.json §7a composes (added by
+# a separate, later PR #48: see that section's own "env.DISABLE_AUTOUPDATER is
+# deliberately NOT here" note), so a running container's Claude Code binary can now
+# self-update past this pin at every layer. That reverses the previous
+# pinned/reproducible-build posture on purpose; an operator who needs a container to
+# stay on exactly CLAUDE_CODE_VERSION must set DISABLE_AUTOUPDATER=1 themselves (env, a
+# mounted settings.json, see §8b's "everything baked is overridable at runtime" note,
+# or, to make it non-overridable fleet-wide, their own file at §7a's managed path).
+# Relevant given that:
+#   - 2.1.243: native auto-update download is now zstd-compressed (~75MB vs ~340MB on
+#     Linux x64), so the self-update this now performs is much cheaper.
+#   - 2.1.246: fixed background sessions failing to open with EACCES when another
+#     Claude Code process on the same host was mid-self-update: relevant since a
+#     container can run more than one `claude` process (RC session + subagents).
+#   - 2.1.257: fixed background sessions left running an older binary piling up
+#     across auto-updates instead of being retired.
+#
+# Landed between 2.1.241 and 2.1.258, and relevant to this image:
+#   - 2.1.243: fixed cross-session messaging (SendMessage/ListAgents) silently
+#     disabling itself inside user namespaces and rootless containers after the
+#     2.1.232 socket-directory hardening: directly hits this repo's containers.
+#   - 2.1.243: fixed `claude remote-control` exiting and stranding attached RC
+#     sessions when the server drops its environment mid-session (now recovers), and
+#     fixed RC sessions served by `claude remote-control` sometimes getting stuck
+#     after a stop/restart.
+#   - 2.1.246: fixed the background retention sweep deleting git worktrees under
+#     `.claude/worktrees/` that a user created themselves, when a stale
+#     background-session record pointed at them: this repo's primary parallelism
+#     path (worktree-isolated subagents, post Sysbox-broker retirement) creates
+#     exactly those worktrees.
+#   - 2.1.248: fixed backgrounded worktree sessions losing their checkout; the
+#     background session now holds the worktree's lock for as long as it runs.
+#   - 2.1.251: fixed background sessions and their subagents being unable to edit
+#     files inside a git worktree they themselves created with `git worktree add`:
+#     same worktree-isolated-subagent path as above.
+#   - 2.1.251: fixed TUI lag with many parallel subagents (per-second progress ticks
+#     now replace their predecessor instead of piling up in the transcript).
+#   - 2.1.257: fixed dismissing the Remote Control consent prompt (Esc, or `n` at
+#     `claude remote-control`) counting as consent, letting the next request connect
+#     unasked.
+#   - 2.1.257: fixed `--resume` listing a backgrounded conversation twice and
+#     `--continue` reopening its stalled pre-background copy. Directly relevant: the
+#     RC watchdog (`claude-rc-watchdog`, PR #36) respawns dead panes with
+#     `claude-session --continue` (docs/troubleshooting.md).
+#   - 2.1.257: changed `defaultMode: "bypassPermissions"` in a PROJECT-scope
+#     `.claude/settings.json`/`.claude/settings.local.json` to be ignored, like
+#     `"auto"`. Does NOT affect this image: the baked default is written to the
+#     USER-scope `$CLAUDE_CONFIG_DIR/settings.json` (entrypoint.sh §8b), not a
+#     project-scope file under /workspace.
+#   - 2.1.258: fixed remote and scheduled sessions failing with "user messages must
+#     have non-empty content" after a re-sent permission approval could not be
+#     applied: RC-relevant, the reason to move to 2.1.258 rather than stop at 2.1.257.
+#
+# Landed between 2.1.220 and 2.1.241, still relevant:
+#   - 2.1.224: removed the 200-subagent spawn cap entirely (the concurrency-20 /
+#     nesting-depth-3 limits from 2.1.212-2.1.219 remain). Loosens a ceiling this
+#     repo's worktree-isolated-subagent parallelism path (post Sysbox-broker retirement)
+#     could otherwise hit on a large fan-out.
+#   - 2.1.232: fixed Remote Control sessions appearing as new claude.ai sessions on
+#     resume, and fixed RC sessions going unreachable to new clients while idle: both
+#     upstream fixes for the exact RC-flakiness family entrypoint.sh's watchdog
+#     (`claude-rc-watchdog`, PR #36) works around from the outside. Keep the watchdog:
+#     it covers OAuth-credential expiry, a different trigger than either of these.
+#   - 2.1.234: fixed `--dangerously-skip-permissions` mode not persisting on restart.
+#     Directly relevant here: the RC watchdog respawns the tmux pane with
+#     `claude-session --continue` on a confirmed-dead link (docs/troubleshooting.md),
+#     and this bug could have silently dropped that respawned pane back into a
+#     prompting permission mode instead of bypassPermissions.
+#   - 2.1.222: Remote Control auto-start can no longer be enabled by repo-level
+#     settings, only user scope: harmless here, this image's baked settings.json sets
+#     it at user scope.
+#   - 2.1.227: fixed feature flags (GrowthBook) evaluating without subscription tier on
+#     an expired login: a contributing cause of `tengu_ccr_bridge` misfiring, tangential
+#     to the "never disable telemetry" invariant in the skill/README.
+#   - 2.1.238: fixed unbounded memory growth in long interactive sessions: relevant
+#     given this image's CLAUDE_MEM_LIMIT hard memory cap (OOM instead of a graceful
+#     GC used to be the failure mode this papered over).
+#
+# Landed between 2.1.207 and 2.1.220, still relevant:
 #   - 2.1.211: parallel sessions no longer all log out simultaneously on wake, and
 #     2.1.214 fixed feature flags going stale after a token rotation. Both are upstream
 #     fixes for the exact fleet-wide auth/Remote-Control failure mode this repo worked
@@ -70,7 +148,7 @@ FROM node:${NODE_VERSION}-bookworm-slim
 #     tmux pane would die on an invalid-choice refusal.
 #   - 2.1.198: Remote Control is disabled when ANTHROPIC_BASE_URL points at a
 #     non-Anthropic host. This image never sets it (and §1 refuses API-key auth).
-ARG CLAUDE_CODE_VERSION=2.1.220
+ARG CLAUDE_CODE_VERSION=2.1.258
 # PNPM_VERSION: pnpm baked into the image. "latest" works but isn't
 # reproducible: pin a real version (e.g. 10.4.1), same as UV_VERSION.
 ARG PNPM_VERSION=latest
@@ -213,6 +291,36 @@ RUN set -eux; \
     install -m 0755 /tmp/mise /usr/local/bin/mise; \
     rm -f /tmp/mise; \
     mise --version
+
+# --- just: command runner ------------------------------------------------
+# Bake `just` (https://github.com/casey/just) so every session has a task
+# runner available with no per-container provisioning step.
+#
+# Pinned + checksummed IN-REPO, same rationale as mise above: no piping a
+# remote install script into a shell. Download the pinned release tarball
+# straight from GitHub releases and verify its SHA256 against a digest
+# hardcoded here BEFORE installing: a tampered/served-wrong tarball fails
+# the build. Reproducible, not "latest".
+# Bump: change JUST_VERSION and BOTH digests together, from the release's
+# published SHA256SUMS (the `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl` rows).
+ARG JUST_VERSION=1.58.0
+ARG JUST_SHA256_AMD64=4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b84931d
+ARG JUST_SHA256_ARM64=748237128c4c40cbdabc65e841d05ceba13cc23a91eaba395495894c1d9764df
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) justarch=x86_64;  sha="${JUST_SHA256_AMD64}" ;; \
+      arm64) justarch=aarch64; sha="${JUST_SHA256_ARM64}" ;; \
+      *) echo "just: unsupported arch '$arch'" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+      "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-${justarch}-unknown-linux-musl.tar.gz" \
+      -o /tmp/just.tar.gz; \
+    echo "${sha}  /tmp/just.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/just.tar.gz -C /tmp just; \
+    install -m 0755 /tmp/just /usr/local/bin/just; \
+    rm -f /tmp/just.tar.gz /tmp/just; \
+    just --version
 
 # --- Shared, persistent tool cache -----------------------------------
 # One shared /cache tree holds mise's install store + the language package-manager
@@ -469,7 +577,10 @@ RUN set -eux; \
 # `tengu_ccr_bridge` gate falls back to its `false` default and Remote Control
 # reports "not yet enabled for your account": even on an eligible account.
 # Remote Control is the whole point of this image, so telemetry stays on.
-# DISABLE_AUTOUPDATER is unrelated to the flag fetch and is kept (pinned version).
+# DISABLE_AUTOUPDATER is unrelated to the flag fetch. It is intentionally NOT set
+# here (see the AUTO-UPDATER NOW ON BY DEFAULT note above the CLAUDE_CODE_VERSION
+# ARG): auto-update is on by default, and an operator who wants a container to
+# stay pinned must set DISABLE_AUTOUPDATER=1 themselves.
 #
 # mise + shared tool cache:
 #  - MISE_DATA_DIR + CARGO_HOME/GOPATH/GOMODCACHE + npm/uv/pip caches point at the
@@ -490,7 +601,6 @@ RUN set -eux; \
 ENV CLAUDE_USER=${CLAUDE_USER} \
     CLAUDE_CONFIG_DIR=/home/${CLAUDE_USER}/.claude \
     CLAUDE_RC_DEBUG_LOG=/tmp/claude-rc-debug.log \
-    DISABLE_AUTOUPDATER=1 \
     NODE_NO_WARNINGS=1 \
     MISE_TRUSTED_CONFIG_PATHS=/workspace \
     MISE_DATA_DIR=/cache/mise \
