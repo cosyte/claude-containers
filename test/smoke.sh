@@ -30,6 +30,9 @@ EG6DENY="claude-smoke-egress6-deny-$$"
 # and must therefore never reach an agent session, and one that can and must.
 EGSFCN="claude-smoke-egress-strict-fail-$$"
 EGSOKCN="claude-smoke-egress-strict-ok-$$"
+# Periodic-refresh fixture (section 14d): one lockdown container with a deliberately
+# short interval, so a live refresh happens inside the life of a smoke run.
+EGRFCN="claude-smoke-egress-refresh-$$"
 BRKCN="claude-smoke-broker-$$"
 BRKOFFCN="claude-smoke-broker-off-$$"
 BRKFAILCN="claude-smoke-broker-fail-$$"
@@ -45,7 +48,7 @@ PASS=0 FAIL=0
 cleanup() {
     docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" "$BRKOFFCN" "$BRKFAILCN" "$NOKEYCN" \
                  "$BRWACN" "$BRWOCN" "$BRWFCN" "$BRWLCN" \
-                 "$EG6CN" "$EG6ALLOW" "$EG6DENY" "$EGSFCN" "$EGSOKCN" >/dev/null 2>&1 || true
+                 "$EG6CN" "$EG6ALLOW" "$EG6DENY" "$EGSFCN" "$EGSOKCN" "$EGRFCN" >/dev/null 2>&1 || true
     # The network only goes after its containers do, or Docker refuses to remove it.
     docker network rm "$EG6NET" >/dev/null 2>&1 || true
     docker volume rm "$AUTHVOL" "$WSVOL" >/dev/null 2>&1 || true
@@ -632,6 +635,83 @@ else
         '! docker exec "$EGSOKCN" gosu claude tmux has-session -t claude >/dev/null 2>&1'
 fi
 docker rm -f "$EGSOKCN" >/dev/null 2>&1 || true
+
+echo
+echo "== 14d. the allowlist is RE-RESOLVED on an interval, by a process the agent cannot reach =="
+# Everything above pins the allowlist ONCE, at boot. This container is meant to run for
+# weeks, and an IP-pinned allowlist is a snapshot: CDNs rotate, the rules end up pointing
+# at addresses nobody serves, and the agent's tooling starts failing at a moment nobody is
+# watching. CLAUDE_EGRESS_REFRESH_INTERVAL re-resolves and re-commits on a timer.
+#
+# THIS SECTION NEEDS A LIVE CONTAINER, which is why it is here and not in the unit suites:
+# the unit suites prove the DECISIONS against a fake kernel, and what only a real container
+# can show is that a second ruleset really commits into a running kernel and that the
+# unprivileged agent can neither alter it nor stop the thing committing it. The interval is
+# 10s so a refresh lands inside the life of a smoke run; an operator would use minutes.
+#
+# The log is materialized into a variable before every grep, for the pipefail/SIGPIPE
+# reason spelled out in section 15 below.
+# shellcheck disable=SC2086
+docker run -d --name "$EGRFCN" $EGHARDEN \
+    -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=egress-refresh -e CLAUDE_EGRESS_LOCKDOWN=1 \
+    -e CLAUDE_EGRESS_REFRESH_INTERVAL=10 \
+    -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+for _ in $(seq 1 60); do
+    grep -qE "Egress refresh" <<<"$(docker logs "$EGRFCN" 2>&1 || true)" && break; sleep 1
+done
+EGRF_LOG="$(docker logs "$EGRFCN" 2>&1 || true)"
+check "the boot log states the refresh posture it chose (an operator can read the interval back)" \
+    'grep -qE "Egress refresh +:" <<<"$EGRF_LOG"'
+check "a lockdown container still boots with a refresh configured (the feature never blocks the agent session)" \
+    'docker exec "$EGRFCN" gosu claude tmux has-session -t claude >/dev/null 2>&1'
+
+if grep -qE "Egress refresh +: every 10s" <<<"$EGRF_LOG"; then
+    # Wait for a SECOND commit, on top of the boot one. The line names the family, so a
+    # refresh that logged but committed nothing cannot pass this.
+    for _ in $(seq 1 90); do
+        grep -q "REFRESH: IPv4 allowlist re-resolved and the refreshed ruleset committed atomically" \
+            <<<"$(docker logs "$EGRFCN" 2>&1 || true)" && break
+        sleep 1
+    done
+    EGRF_LOG="$(docker logs "$EGRFCN" 2>&1 || true)"
+    check "the allowlist is re-resolved and the refreshed ruleset is COMMITTED, atomically, after boot" \
+        'grep -q "REFRESH: IPv4 allowlist re-resolved and the refreshed ruleset committed atomically" <<<"$EGRF_LOG"'
+    check "the container is still default-deny after the refresh (a refresh never opens a family)" \
+        'p="$(docker exec "$EGRFCN" iptables -S OUTPUT 2>/dev/null | head -1)"; [ "$p" = "-P OUTPUT DROP" ]'
+    check "the refreshed ruleset still carries an allowlist (it re-committed the list, it did not seal the container)" \
+        '[ "$(docker exec "$EGRFCN" iptables -S OUTPUT 2>/dev/null | grep -c -- "-d ")" -gt 0 ]'
+    check "no refresh path ever failed open (the boot pass's posture is not this one's)" \
+        '! grep -q "REFRESH:.*failing OPEN" <<<"$EGRF_LOG"'
+
+    # --- AC11: the same privilege ownership as the boot pass -------------------------
+    # The boot pass runs as root before the privilege drop, which is what makes its rules
+    # unalterable from inside the session. A refresh that ran any other way would hand a
+    # prompt-injected agent the one thing the whole design withholds.
+    EGRF_PID="$(docker exec "$EGRFCN" cat /run/claude-egress/daemon.pid 2>/dev/null || true)"
+    check "the refresh daemon is running, and it is running as root" \
+        '[ -n "$EGRF_PID" ] && [ "$(docker exec "$EGRFCN" stat -c %u "/proc/$EGRF_PID" 2>/dev/null)" = 0 ]'
+    check "the agent user cannot even read the refresh state directory (root-only, mode 700)" \
+        '! docker exec "$EGRFCN" gosu claude cat /run/claude-egress/daemon.pid >/dev/null 2>&1'
+    check "the agent user CANNOT stop the refresh (an unprivileged process cannot signal a root one)" \
+        '! docker exec "$EGRFCN" gosu claude kill -TERM "$EGRF_PID" 2>/dev/null'
+    check "and the refresh daemon is still alive after the agent tried" \
+        'docker exec "$EGRFCN" test -d "/proc/$EGRF_PID"'
+    check "the agent user CANNOT alter the refreshed ruleset (no NET_ADMIN, by construction)" \
+        '! docker exec "$EGRFCN" gosu claude iptables -P OUTPUT ACCEPT 2>/dev/null'
+    check "and the refreshed ruleset is still default-deny after the agent tried" \
+        'p="$(docker exec "$EGRFCN" iptables -S OUTPUT 2>/dev/null | head -1)"; [ "$p" = "-P OUTPUT DROP" ]'
+else
+    # No network in this test environment, so the allowlist resolved to nothing and the
+    # boot pass failed OPEN. A refresh over a container this same log reported as
+    # UNRESTRICTED would silently seal it mid-session, so the correct behaviour is to
+    # start nothing and say why. Assert THAT rather than claiming a pass.
+    echo "  SKIP  live refresh checks (the boot ruleset could not be applied in this environment)"
+    check "a boot pass that committed nothing starts no refresh, and the boot log says why" \
+        'grep -qE "Egress refresh +: OFF \(the boot pass committed no ruleset" <<<"$EGRF_LOG"'
+    check "and no refresh daemon is running in that container" \
+        '! docker exec "$EGRFCN" test -e /run/claude-egress/daemon.pid'
+fi
+docker rm -f "$EGRFCN" >/dev/null 2>&1 || true
 
 echo
 echo "== 15. git-key handling: brokered BY DEFAULT, usable by the agent, not readable =="

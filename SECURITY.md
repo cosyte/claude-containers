@@ -63,6 +63,17 @@ What the stack does enforce, and therefore what a bypass of *is* a valid report:
   `strict` still contains only as well as the ruleset underneath it: a container
   whose IPv4 lockdown applied and whose IPv6 pass did not starts, and says
   `IPv6 UNRESTRICTED` in its boot log.
+- **Allowlist refresh** (`CLAUDE_EGRESS_REFRESH_INTERVAL=<seconds>`) re-resolves
+  and re-commits the same allowlist on an interval, as root, with the same
+  privilege ownership as the boot pass. A path by which the unprivileged agent
+  alters what a refresh commits, stops a refresh, or influences what it resolves
+  (the state it reads is root-owned and mode 700) is in scope. Note that a refresh
+  **retains rather than narrows**, always: a lookup that comes back empty, a
+  restore that will not commit and a failed fetch of a published range all leave
+  the ruleset already in force exactly as it is, and are logged. A report that a
+  refresh failed to tighten an allowlist is therefore not a vulnerability;
+  narrowing a live container's egress on a transient DNS failure would be the
+  worse outcome and is the behaviour being deliberately avoided.
 - **Secret guard** installs a git pre-commit hook blocking obvious secret
   material. It is a backstop against an agent committing a credential, not a
   DLP control; `--no-verify` bypasses it by design.
