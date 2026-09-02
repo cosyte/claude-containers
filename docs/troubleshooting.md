@@ -79,7 +79,7 @@ contact Anthropic.
 
 ### Session present but not showing
 
-1. Needs Claude Code ≥ 2.1.52 (this image pins 2.1.241). Confirm in
+1. Needs Claude Code ≥ 2.1.52 (this image pins 2.1.258). Confirm in
    `claude-logs <name>` ("Claude Code session 'claude' started in tmux").
 2. Remote Control is **outbound HTTPS only**: no inbound port. If egress is
    firewalled/allowlisted, the session can't register. Temporarily allow
@@ -152,7 +152,7 @@ container to see which condition fails.
 ## `--dangerously-skip-permissions` with Remote Control
 
 There were earlier reports that skip-permissions didn't fully apply under
-Remote Control. On the pinned 2.1.241 the launch this image actually makes:
+Remote Control. On the pinned 2.1.258 the launch this image actually makes:
 `claude --dangerously-skip-permissions --remote-control "<project>"`: was
 verified to parse and start (as the unprivileged `claude` user), with no
 interlock between the two flags. Re-verify this on a TTY (`docker run -t`): with
@@ -171,7 +171,9 @@ prompt. If a future Claude Code version prompts anyway:
 - Set `CLAUDE_PERMISSION_MODE=acceptEdits` in `.env` and relaunch. Edits
   auto-apply; shell commands prompt in the app (you tap approve). Safer, still
   usable remotely.
-- Or pin back to a known-good `CLAUDE_CODE_VERSION` and rebuild.
+- Or pin back to a known-good `CLAUDE_CODE_VERSION` and rebuild — and set
+  `DISABLE_AUTOUPDATER=1` too, since auto-update is on by default and would
+  otherwise carry the container past the version you just pinned back to.
 
 ## Git auth failures
 

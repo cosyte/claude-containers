@@ -810,11 +810,14 @@ fi
 #     Remote Control reports "not yet enabled for your account". RC is the point
 #     of this image, so they must never be set. See docs/troubleshooting.md.
 PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
+# Auto-update is on by default (no DISABLE_AUTOUPDATER here): see the
+# AUTO-UPDATER NOW ON BY DEFAULT note in the Dockerfile above ARG CLAUDE_CODE_VERSION.
+# An operator who wants a container to stay pinned to the baked CLAUDE_CODE_VERSION
+# should set DISABLE_AUTOUPDATER=1 (env, or their own mounted settings.json).
 BASE_SETTINGS="$(jq -n --arg pm "$PERM_MODE" '{
     permissions: { defaultMode: $pm },
     skipDangerousModePermissionPrompt: true,
-    includeCoAuthoredBy: true,
-    env: { DISABLE_AUTOUPDATER: "1" }
+    includeCoAuthoredBy: true
 }')"
 [[ -f "$BAKE_DIR/settings.json" ]] && \
     BASE_SETTINGS="$(jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") "$BAKE_DIR/settings.json")"

@@ -66,7 +66,10 @@ small descriptive commits as you change things.
   Each short-circuits the GrowthBook fetch, so the `tengu_ccr_bridge` gate
   defaults false and Remote Control fails with "not yet enabled for your
   account": even on an eligible account. RC is the point of this image.
-  Only `DISABLE_AUTOUPDATER=1` is safe (unrelated to flags). The entrypoint
+  `DISABLE_AUTOUPDATER=1` is safe (unrelated to flags) but is NOT set by
+  default: auto-update is on by default now, so a running container's Claude
+  Code binary can self-update past the pinned CLAUDE_CODE_VERSION unless an
+  operator sets `DISABLE_AUTOUPDATER=1` themselves. The entrypoint
   self-heals older config volumes (strips these keys + clears the stale flag
   cache). This was a real, shipped-then-fixed defect: see
   docs/troubleshooting.md "Remote Control".
@@ -80,7 +83,7 @@ small descriptive commits as you change things.
   `claude plugin install` in the entrypoint.
 - **Workspace trust is pre-accepted** by seeding `.claude.json`
   (`hasCompletedOnboarding`, `projects["/workspace"].hasTrustDialogAccepted`).
-- Pinned/verified Claude Code: **2.1.241** (min 2.1.52 for Remote Control). `--model opus` tracks the LATEST Opus: **Opus 5** (1M context) from CLI 2.1.219, Opus 4.8 from 2.1.154, the 2.1.145 pin silently gave Opus 4.7. A bump can therefore change the fleet's MODEL, not just the CLI; pin `CLAUDE_MODEL=claude-opus-4-8` to hold a container back.
+- Pinned/verified Claude Code: **2.1.258** (min 2.1.52 for Remote Control). `--model opus` tracks the LATEST Opus: **Opus 5** (1M context) from CLI 2.1.219, Opus 4.8 from 2.1.154, the 2.1.145 pin silently gave Opus 4.7. A bump can therefore change the fleet's MODEL, not just the CLI; pin `CLAUDE_MODEL=claude-opus-4-8` to hold a container back.
   Everything was verified against that binary, not just docs.
 
 ## Codebase map
@@ -292,7 +295,7 @@ SSH-into-session. Real OAuth + the phone-app green-dot remain manual.
   empty workspace + no `--repo`, unreadable mounted key.
 - **App session missing / no green dot** → needs ≥2.1.52 + open outbound 443;
   check `claude-logs` shows "started in tmux"; same Max account as login.
-- **skip-permissions vs Remote Control** → works on pinned 2.1.241: the top-level launch
+- **skip-permissions vs Remote Control** → works on pinned 2.1.258: the top-level launch
   `claude --dangerously-skip-permissions --remote-control <name>` was verified to parse and
   start (as the unprivileged `claude` user), with no interlock between the two flags. This is
   why the CLI is pinned at all: re-verify on any bump. (The `claude remote-control`

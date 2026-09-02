@@ -209,7 +209,7 @@ vars override `.env`. Full reference: `.env.example`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `CLAUDE_IMAGE` | `claude-code-box:latest` | Image tag built/run |
-| `CLAUDE_CODE_VERSION` | `2.1.241` | Pinned Claude Code npm version (min 2.1.52). `opus` resolves to the latest Opus: **Opus 5 from CLI 2.1.219**, Opus 4.8 from 2.1.154 |
+| `CLAUDE_CODE_VERSION` | `2.1.258` | Pinned Claude Code npm version (min 2.1.52). `opus` resolves to the latest Opus: **Opus 5 from CLI 2.1.219**, Opus 4.8 from 2.1.154. Auto-update is on by default (`DISABLE_AUTOUPDATER` is unset), so a running container's binary can self-update past this pin unless the operator sets `DISABLE_AUTOUPDATER=1` |
 | `NODE_VERSION` | `24` | Base Node LTS |
 | `UV_VERSION` | `latest` | `uv` version (pin for reproducibility) |
 | `PNPM_VERSION` | `latest` | `pnpm` version baked in (pin for reproducibility) |
@@ -610,7 +610,7 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   egress isn't firewalled. The name in the app is the project name.
 - **`--dangerously-skip-permissions` vs Remote Control**: there were earlier
   reports that skip-permissions didn't fully apply under Remote Control. On the
-  pinned **2.1.241** both flags are accepted together with no interlock, and the
+  pinned **2.1.258** both flags are accepted together with no interlock, and the
   launch (`claude --dangerously-skip-permissions --remote-control <name>`) combines
   them, so it works. This is the reason the CLI version is pinned at all: re-verify
   it on any bump. If a future version regresses, set
