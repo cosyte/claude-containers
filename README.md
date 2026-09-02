@@ -287,6 +287,14 @@ holds `CLAUDE.md`, `mcp/`, `plugins/`, `commands/`, `skills/`. MCP secrets are
 claude-launch <name> [--repo URL | --workspace PATH] [--branch B] [--depth N]
                       [--port N] [--model NAME] [--mcp NAME ...] [--browser|--no-browser]
                       [--extra-args "…"] [--expose H:C ...] [--dev-cmd "…"]
+claude-tui                        interactive whiptail menu over the whole fleet: per-session
+                                   (attach/start/stop/restart/logs/remove/launch), grouped by
+                                   compose stack (bring up a dormant repo, switch a stack's auth
+                                   account, regenerate its compose), plus an Accounts screen
+                                   (view/log in named OAuth accounts) and disk maintenance.
+                                   Discovers stacks live from `com.docker.compose.project`
+                                   labels — set CLAUDE_TUI_STACKS to pre-seed one with no
+                                   containers created yet. Wraps the commands below; no new logic.
 claude-list                       table of all sessions
 claude-attach <name>              attach to its live tmux session (local host)
 claude-stop  <name>               graceful stop (state preserved)

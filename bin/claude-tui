@@ -1,0 +1,487 @@
+#!/usr/bin/env bash
+# claude-tui: whiptail menu over the claude-* container fleet — stacks, auth
+# accounts, individual sessions, and fleet maintenance.
+#
+# Pure navigation: every action shells out to an existing claude-* script or
+# a plain `docker compose` invocation. There is exactly one place each piece
+# of behavior (launch/stop/rm/logs/attach/account-login/compose-gen) is
+# actually implemented; this file only wires menus to it.
+#
+# Stack discovery is fully live: it reads the `com.docker.compose.project` /
+# `.config_files` labels docker compose stamps on every container it creates,
+# so it needs no hardcoded paths and works for any deployment of this repo.
+# The one gap: a stack with ZERO containers ever created is invisible (there
+# is nothing to read labels off of). Pre-seed it with CLAUDE_TUI_STACKS, a
+# space/newline-separated list of its docker-compose.yml path(s).
+#
+# A stack's regen command is discovered by convention: the single *.conf file
+# next to its compose file (claude-compose-gen --scenario). Ambiguous (0 or
+# >1 matches) disables the "Regenerate" action for that stack with a pointer
+# to do it by hand — this file does not guess.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+need_docker
+command -v whiptail >/dev/null 2>&1 \
+    || die "claude-tui needs 'whiptail' (Debian/Ubuntu: apt install whiptail, part of the 'newt' package)"
+
+BIN="$CLAUDE_DOCKER_ROOT/bin"
+TITLE="claude-containers"
+
+pause() { echo; read -rp "Press Enter to continue… " _ || true; }
+
+# run_interactive <description> <cmd...>: break out of whiptail into the real
+# terminal, run something that may itself be interactive (OAuth login) or
+# just chatty (compose up), never let its exit status kill this script.
+run_interactive() {
+    local desc="$1"; shift
+    clear
+    echo "== $desc =="
+    "$@" || warn "'$desc' exited non-zero"
+    pause
+}
+
+# --- Fleet data ---------------------------------------------------------------
+# One managed container per line:
+# NAME\tSTATE\tPROJECT\tSSH_PORT\tREPO\tSTATUS\tCOMPOSE_PROJECT\tCOMPOSE_FILE\tCOMPOSE_SERVICE
+# COMPOSE_* are empty for a standalone (non-compose, ad-hoc claude-launch) container.
+fleet_rows() {
+    docker ps -a --filter 'label=claude.managed=1' --format \
+        '{{.Names}}\t{{.State}}\t{{.Label "claude.project"}}\t{{.Label "claude.ssh_port"}}\t{{.Label "claude.repo"}}\t{{.Status}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.project.config_files"}}\t{{.Label "com.docker.compose.service"}}' \
+        2>/dev/null || true
+}
+
+has_standalone_containers() {
+    fleet_rows | awk -F'\t' '$7==""{f=1} END{exit !f}'
+}
+
+# container_auth_volume <container-name>: the volume actually backing /auth
+# right now (read from the live mount, never guessed from a config file).
+container_auth_volume() {
+    docker inspect -f '{{range .Mounts}}{{if eq .Destination "/auth"}}{{.Name}}{{end}}{{end}}' "$1" 2>/dev/null || true
+}
+
+declare -gA STACK_FILE=()      # stack name -> its docker-compose.yml path
+declare -gA STACK_ENV=()       # stack name -> the .env compose auto-loads beside that file
+declare -gA STACK_SCENARIO=()  # stack name -> its *.conf, only when exactly one exists
+
+discover_stacks() {
+    STACK_FILE=(); STACK_ENV=(); STACK_SCENARIO=()
+    local name state project port repo status cproj cfgfile csvc
+    while IFS=$'\t' read -r name state project port repo status cproj cfgfile csvc; do
+        [[ -n "$cproj" && -n "$cfgfile" ]] && STACK_FILE["$cproj"]="$cfgfile"
+    done < <(fleet_rows)
+    # Pre-seed stacks that have no containers created yet (see header note).
+    if [[ -n "${CLAUDE_TUI_STACKS:-}" ]]; then
+        local f base
+        for f in ${CLAUDE_TUI_STACKS}; do
+            if [[ -f "$f" ]]; then
+                base="$(basename "$(dirname "$f")")"
+                STACK_FILE["$base"]="$f"
+            else
+                warn "CLAUDE_TUI_STACKS entry not found, skipping: $f"
+            fi
+        done
+    fi
+    local stack dir matches n_matches
+    for stack in "${!STACK_FILE[@]}"; do
+        dir="$(dirname "${STACK_FILE[$stack]}")"
+        [[ -f "$dir/.env" ]] && STACK_ENV["$stack"]="$dir/.env"
+        matches="$(compgen -G "$dir/*.conf" || true)"
+        n_matches="$(grep -c . <<<"$matches" || true)"
+        [[ "$n_matches" == "1" ]] && STACK_SCENARIO["$stack"]="$matches"
+    done
+}
+
+# stack_auth_volume <stack>: the live volume if any container is up, else a
+# best-effort read of AUTH_VOLUME from its .env, else the process default.
+stack_auth_volume() {
+    local stack="$1" cn
+    cn="$(fleet_rows | awk -F'\t' -v s="$stack" '$7==s{print $1; exit}')"
+    if [[ -n "$cn" ]]; then
+        container_auth_volume "$cn"
+    elif [[ -n "${STACK_ENV[$stack]:-}" ]]; then
+        awk -F= '/^AUTH_VOLUME=/{print $2; exit}' "${STACK_ENV[$stack]}" 2>/dev/null || true
+    else
+        echo "$AUTH_VOLUME"
+    fi
+}
+
+# env_set_var <file> KEY VALUE: idempotent upsert (volume names only — no
+# shell metacharacters expected in VALUE).
+env_set_var() {
+    local file="$1" key="$2" val="$3"
+    if grep -qE "^${key}=" "$file" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${val}|" "$file"
+    else
+        printf '%s=%s\n' "$key" "$val" >>"$file"
+    fi
+}
+
+# --- Accounts (Phase 1 + 2: auth visibility and actions) ---------------------
+account_login_flow() {
+    local name
+    name="$(whiptail --title "Log in an account" --inputbox \
+        "Account name (credentials land in volume 'claude-auth-<name>'):" 10 65 3>&1 1>&2 2>&3)" || return 0
+    [[ -n "$name" ]] || return 0
+    run_interactive "OAuth login: $name" "$BIN/claude-account-login" "$name"
+}
+
+accounts_menu() {
+    while true; do
+        local pick
+        pick="$(whiptail --title "Accounts (auth)" --menu "Named OAuth credential volumes" 15 70 4 \
+            view  "View accounts (token/email status)" \
+            login "Log in a new account" \
+            back  "◀ Back" \
+            3>&1 1>&2 2>&3)" || return 0
+        case "$pick" in
+            view)
+                local f; f="$(mktemp)"
+                "$BIN/claude-account-list" >"$f" 2>&1 || true
+                whiptail --title "Accounts" --scrolltext --textbox "$f" 20 90 || true
+                rm -f "$f"
+                ;;
+            login) account_login_flow ;;
+            back|"") return 0 ;;
+        esac
+    done
+}
+
+# switch_stack_auth <stack>: point a compose stack's shared auth volume at a
+# different account, regenerate its compose file, and recreate exactly the
+# containers that are actually running right now.
+#
+# Deliberately targets running containers BY NAME (via `docker inspect`'s
+# compose.service label), not a bare `compose up -d`: a service can be
+# running today while sitting behind the "dormant" profile (started once by
+# hand), and a bare `up -d` silently skips anything outside the default
+# profile — it would leave that container on the OLD volume with no error.
+switch_stack_auth() {
+    local stack="$1"
+    local file="${STACK_FILE[$stack]}" envf="${STACK_ENV[$stack]:-}"
+    if [[ -z "$envf" ]]; then
+        whiptail --title "Switch auth: $stack" --msgbox \
+            "No .env found next to:\n$file\n\nCan't auto-switch; edit AUTH_VOLUME there by hand and regenerate." 12 74 || true
+        return 0
+    fi
+
+    local vols choices=() v name
+    vols="$(docker volume ls --format '{{.Name}}' | grep -E '^claude-auth(-|$)' || true)"
+    while IFS= read -r v; do
+        [[ -z "$v" ]] && continue
+        name="${v#claude-auth}"; name="${name#-}"; [[ -z "$name" ]] && name="(default)"
+        choices+=("$v" "$name")
+    done <<<"$vols"
+    choices+=("__new__" "+ Log in a new account first")
+    if [[ ${#choices[@]} -eq 2 ]]; then
+        whiptail --title "Switch auth: $stack" --msgbox \
+            "No auth volumes found yet. Log in an account first." 10 60 || true
+        return 0
+    fi
+
+    local pick
+    pick="$(whiptail --title "Switch auth: $stack" --menu "Currently: $(stack_auth_volume "$stack")" \
+        20 78 10 "${choices[@]}" 3>&1 1>&2 2>&3)" || return 0
+    if [[ "$pick" == "__new__" ]]; then
+        account_login_flow
+        return 0
+    fi
+
+    local running
+    running="$(fleet_rows | awk -F'\t' -v s="$stack" '$7==s && $2=="running"{print $1}')"
+    whiptail --title "Switch auth: $stack" --yesno \
+        "Set AUTH_VOLUME=${pick} in:\n${envf}\n\nregenerate this stack's compose, then recreate.\n\nContainers that will RESTART:\n${running:-  (none currently running)}\n\nProceed?" \
+        20 78 || return 0
+
+    env_set_var "$envf" "AUTH_VOLUME" "$pick"
+
+    local scenario="${STACK_SCENARIO[$stack]:-}"
+    if [[ -z "$scenario" ]]; then
+        whiptail --title "Switch auth: $stack" --msgbox \
+            "AUTH_VOLUME=${pick} written to ${envf}.\n\nCouldn't find a single *.conf next to the compose file to auto-regenerate. Run manually:\n  claude-compose-gen --scenario <that stack's .conf>" \
+            14 78 || true
+        return 0
+    fi
+
+    clear
+    echo "== regenerating $stack from $scenario =="
+    if ! "$BIN/claude-compose-gen" --scenario "$scenario"; then
+        warn "regen failed; AUTH_VOLUME was still written to $envf"
+        pause
+        return 0
+    fi
+
+    if [[ -n "$running" ]]; then
+        echo
+        echo "== recreating running containers: $running =="
+        local svc_args=() cn svc
+        while IFS= read -r cn; do
+            svc="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$cn" 2>/dev/null || true)"
+            [[ -n "$svc" ]] && svc_args+=("$svc")
+        done <<<"$running"
+        if [[ ${#svc_args[@]} -gt 0 ]]; then
+            docker compose -f "$file" up -d "${svc_args[@]}" || warn "recreate failed"
+        fi
+    fi
+    pause
+}
+
+regen_stack() {
+    local stack="$1"
+    local scenario="${STACK_SCENARIO[$stack]:-}"
+    if [[ -z "$scenario" ]]; then
+        whiptail --title "Regenerate: $stack" --msgbox "No single *.conf found next to this stack's compose file." 10 60 || true
+        return 0
+    fi
+    whiptail --title "Regenerate: $stack" --yesno \
+        "Regenerate from:\n${scenario}\n\nThis rewrites docker-compose.yml only — no containers are touched until you also bring them up." \
+        12 78 || return 0
+    run_interactive "claude-compose-gen --scenario $scenario" "$BIN/claude-compose-gen" --scenario "$scenario"
+}
+
+# --- Per-container actions ----------------------------------------------------
+show_logs() {  # show_logs <project> <container-name>
+    local project="$1" cn="$2" f
+    f="$(mktemp)"
+    docker logs --tail 300 "$cn" >"$f" 2>&1 || true
+    whiptail --title "logs: $project (entrypoint/sshd, last 300 lines)" \
+        --scrolltext --textbox "$f" 30 120 || true
+    rm -f "$f"
+}
+
+show_connect() {  # show_connect <project>
+    local project="$1" cn port
+    cn="$(cname "$project")"
+    port="$(container_ssh_port "$cn")"
+    clear
+    print_connect "$project" "$port"
+    pause
+}
+
+remove_flow() {  # remove_flow <project>
+    local project="$1" purge=0
+    whiptail --title "Remove $project" --yesno \
+        "Remove container 'claude-${project}'?\n\nWorkspace and config volumes are kept unless you also choose to purge them next." \
+        12 70 || return 0
+    if whiptail --title "Remove $project" --yesno \
+        "Also PURGE the workspace + config volumes?\n\nThis deletes the repo checkout and conversation history for this session. Cannot be undone." \
+        12 70; then
+        purge=1
+    fi
+    clear
+    if [[ "$purge" == 1 ]]; then
+        "$BIN/claude-rm" "$project" --yes --purge || true
+    else
+        "$BIN/claude-rm" "$project" --yes || true
+    fi
+    pause
+}
+
+launch_new() {
+    local name mode src branch model extra cmd_args=()
+    name="$(whiptail --title "Launch new session" --inputbox "Project name:" 10 60 3>&1 1>&2 2>&3)" || return 0
+    [[ -n "$name" ]] || return 0
+    mode="$(whiptail --title "Launch new session" --menu "Source" 12 65 2 \
+        repo      "Clone a git repo (--repo)" \
+        workspace "Use an existing local checkout (--workspace)" \
+        3>&1 1>&2 2>&3)" || return 0
+    case "$mode" in
+        repo)
+            src="$(whiptail --title "Launch new session" --inputbox \
+                "Git repo URL (e.g. git@github.com:you/x.git):" 10 70 3>&1 1>&2 2>&3)" || return 0
+            [[ -n "$src" ]] || return 0
+            cmd_args+=(--repo "$src") ;;
+        workspace)
+            src="$(whiptail --title "Launch new session" --inputbox \
+                "Absolute path to local checkout:" 10 70 3>&1 1>&2 2>&3)" || return 0
+            [[ -n "$src" ]] || return 0
+            cmd_args+=(--workspace "$src") ;;
+        *) return 0 ;;
+    esac
+    branch="$(whiptail --title "Launch new session" --inputbox "Branch (blank = default):" 10 60 3>&1 1>&2 2>&3)" || branch=""
+    [[ -n "$branch" ]] && cmd_args+=(--branch "$branch")
+    model="$(whiptail --title "Launch new session" --menu "Model (Cancel = image default)" 14 60 4 \
+        opus   "opus" \
+        sonnet "sonnet" \
+        custom "type a value" \
+        3>&1 1>&2 2>&3)" || model=""
+    case "$model" in
+        opus|sonnet) cmd_args+=(--model "$model") ;;
+        custom)
+            local m; m="$(whiptail --title "Launch new session" --inputbox "Model value:" 10 60 3>&1 1>&2 2>&3)" || m=""
+            [[ -n "$m" ]] && cmd_args+=(--model "$m") ;;
+    esac
+    extra="$(whiptail --title "Launch new session" --inputbox \
+        "Extra claude-launch flags (optional — e.g. --mcp foo --browser --expose 4321:4321):" 10 78 3>&1 1>&2 2>&3)" || extra=""
+    clear
+    # Intentional word-split of $extra: it becomes separate argv words for a
+    # direct exec of claude-launch, never passed through a shell — a stray
+    # ';' or '|' just lands as a literal (harmless) argument, not executed.
+    if [[ -n "$extra" ]]; then
+        # shellcheck disable=SC2086
+        "$BIN/claude-launch" "$name" "${cmd_args[@]}" $extra || true
+    else
+        "$BIN/claude-launch" "$name" "${cmd_args[@]}" || true
+    fi
+    pause
+}
+
+container_menu() {  # container_menu <project>
+    local project="$1" cn state
+    while true; do
+        cn="$(cname "$project")"
+        state="$(container_state "$cn")"
+        local items=()
+        if [[ "$state" == running ]]; then
+            items+=(attach  "Attach to live tmux session")
+            items+=(logs    "View recent entrypoint/sshd logs")
+            items+=(restart "Restart (stop + launch)")
+            items+=(stop    "Stop (graceful; state preserved)")
+        else
+            items+=(start   "Start / resume")
+            items+=(logs    "View recent entrypoint/sshd logs")
+        fi
+        items+=(connect "Show SSH / Remote Control connect info")
+        items+=(remove  "Remove…")
+        items+=(back    "◀ Back")
+
+        local action
+        action="$(whiptail --title "$TITLE — $project" --menu "state: $state" 18 72 8 "${items[@]}" \
+            3>&1 1>&2 2>&3)" || return 0
+        case "$action" in
+            attach)  clear; "$BIN/claude-attach" "$project" || true ;;
+            start)   clear; "$BIN/claude-launch" "$project" || true; pause ;;
+            stop)    clear; "$BIN/claude-stop" "$project" || true; pause ;;
+            restart) clear; ( "$BIN/claude-stop" "$project" && "$BIN/claude-launch" "$project" ) || true; pause ;;
+            logs)    show_logs "$project" "$cn" ;;
+            connect) show_connect "$project" ;;
+            remove)  remove_flow "$project"; return 0 ;;
+            back|"") return 0 ;;
+        esac
+    done
+}
+
+standalone_menu() {
+    while true; do
+        local rows menu_items=() name state project port repo status cproj cfgfile csvc icon
+        rows="$(fleet_rows | awk -F'\t' '$7==""')"
+        menu_items=()
+        if [[ -n "$rows" ]]; then
+            while IFS=$'\t' read -r name state project port repo status cproj cfgfile csvc; do
+                [[ -z "$name" ]] && continue
+                icon="○"; [[ "$state" == running ]] && icon="●"
+                menu_items+=("$project" "$icon $state  ssh:$port  auth:$(container_auth_volume "$name")  ${repo:-(no repo)}")
+            done <<<"$rows"
+        fi
+        menu_items+=("back" "◀ Back")
+
+        local choice
+        choice="$(whiptail --title "Standalone containers" --menu "Not managed by a compose stack" \
+            20 100 10 "${menu_items[@]}" 3>&1 1>&2 2>&3)" || return 0
+        case "$choice" in
+            back|"") return 0 ;;
+            *) container_menu "$choice" ;;
+        esac
+    done
+}
+
+# --- Stacks (Phase 1 grouping + Phase 3 dormant-service lifecycle) -----------
+stack_menu() {  # stack_menu <stack>
+    local stack="$1"
+    local file="${STACK_FILE[$stack]}"
+    while true; do
+        local rows known=() menu_items=() name state project port repo status cproj cfgfile csvc icon auth
+        rows="$(fleet_rows | awk -F'\t' -v s="$stack" '$7==s')"
+        auth="$(stack_auth_volume "$stack")"
+        if [[ -n "$rows" ]]; then
+            while IFS=$'\t' read -r name state project port repo status cproj cfgfile csvc; do
+                [[ -z "$name" ]] && continue
+                known+=("$csvc")
+                icon="○"; [[ "$state" == running ]] && icon="●"
+                menu_items+=("$csvc" "$icon $state  ssh:$port  $project")
+            done <<<"$rows"
+        fi
+        # Dormant services: defined in the compose file, no container created
+        # yet. `config --services` alone only lists services in ACTIVE
+        # profiles — --profile dormant is required to see the rest too.
+        local all_services dsvc
+        all_services="$(docker compose -f "$file" --profile dormant config --services 2>/dev/null || true)"
+        if [[ -n "$all_services" ]]; then
+            while IFS= read -r dsvc; do
+                [[ -z "$dsvc" ]] && continue
+                if ! printf '%s\n' "${known[@]:-}" | grep -qx "$dsvc"; then
+                    menu_items+=("new:$dsvc" "◌ not created (dormant)  $dsvc")
+                fi
+            done <<<"$all_services"
+        fi
+        menu_items+=("__switch_auth__" "Switch auth account for this stack")
+        [[ -n "${STACK_SCENARIO[$stack]:-}" ]] && menu_items+=("__regen__" "Regenerate compose from scenario")
+        menu_items+=("__up_active__" "Bring up active services")
+        menu_items+=("__up_all__"    "Bring up ALL services (incl. dormant)")
+        menu_items+=("back" "◀ Back to stacks")
+
+        local choice
+        choice="$(whiptail --title "Stack: $stack" --menu "auth: $auth   file: $file" \
+            24 110 14 "${menu_items[@]}" 3>&1 1>&2 2>&3)" || return 0
+        case "$choice" in
+            new:*)            run_interactive "bringing up ${choice#new:} ($stack)" \
+                                   docker compose -f "$file" up -d "${choice#new:}" ;;
+            __switch_auth__)  switch_stack_auth "$stack" ;;
+            __regen__)        regen_stack "$stack" ;;
+            __up_active__)    run_interactive "up -d ($stack)" docker compose -f "$file" up -d ;;
+            __up_all__)       run_interactive "up -d --profile dormant ($stack)" \
+                                   docker compose -f "$file" --profile dormant up -d ;;
+            back|"")          return 0 ;;
+            *)                container_menu "$choice" ;;
+        esac
+    done
+}
+
+# --- Disk / maintenance (Phase 5) --------------------------------------------
+disk_menu() {
+    while true; do
+        local pick
+        pick="$(whiptail --title "Disk / maintenance" --menu "Fleet-wide, no single container" 15 72 4 \
+            gc     "Run claude-disk-gc once (image/build-cache prune + cache trim)" \
+            verify "Run claude-disk-verify (docker-free sanity pass)" \
+            back   "◀ Back" \
+            3>&1 1>&2 2>&3)" || return 0
+        case "$pick" in
+            gc)      run_interactive "claude-disk-gc" "$BIN/claude-disk-gc" ;;
+            verify)  run_interactive "claude-disk-verify" "$BIN/claude-disk-verify" ;;
+            back|"") return 0 ;;
+        esac
+    done
+}
+
+# --- Top level -----------------------------------------------------------------
+main_menu() {
+    while true; do
+        discover_stacks
+        local menu_items=("__launch__" "+ Launch new session" "__accounts__" "Accounts (auth)")
+        local stacks=()
+        mapfile -t stacks < <(printf '%s\n' "${!STACK_FILE[@]}" | sort)
+        local s
+        for s in "${stacks[@]}"; do
+            menu_items+=("__stack__$s" "Stack: $s  (auth: $(stack_auth_volume "$s"))")
+        done
+        has_standalone_containers && menu_items+=("__standalone__" "Standalone containers")
+        menu_items+=("__disk__" "Disk / maintenance")
+        menu_items+=("__quit__" "Quit")
+
+        local choice
+        choice="$(whiptail --title "$TITLE" --menu "Manage stacks, accounts, and sessions" \
+            24 100 14 "${menu_items[@]}" 3>&1 1>&2 2>&3)" || break
+        case "$choice" in
+            __quit__|"")     break ;;
+            __launch__)      launch_new ;;
+            __accounts__)    accounts_menu ;;
+            __standalone__)  standalone_menu ;;
+            __disk__)        disk_menu ;;
+            __stack__*)      stack_menu "${choice#__stack__}" ;;
+        esac
+    done
+    clear
+}
+
+main_menu

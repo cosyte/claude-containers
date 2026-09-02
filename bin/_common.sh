@@ -375,7 +375,7 @@ alloc_port() {
 }
 
 container_ssh_port() {
-    docker inspect -f '{{ index .Config.Labels "claude.ssh_port" }}' "$1" 2>/dev/null
+    docker inspect -f '{{ index .Config.Labels "claude.ssh_port" }}' "$1" 2>/dev/null || true
 }
 
 print_connect() {
