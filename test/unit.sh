@@ -1518,6 +1518,76 @@ in_env CLAUDE_EGRESS_LOCKDOWN=0 -- '[[ "$(harden_run_args)" != *NET_ADMIN* ]]' \
     || bad "NET_ADMIN is granted with lockdown off: the default posture changed"
 
 echo
+echo "== entrypoint.sh §7: cached oauthAccount self-heals on an account switch =="
+
+# §7 seeds $CLAUDE_CONFIG_DIR/.claude.json's oauthAccount from $AUTH_DIR/.claude.json, but
+# only fills MISSING keys: a container whose config volume already has a cached account
+# from a PRIOR AUTH_VOLUME never gets it refreshed by that rule alone, even after the
+# mounted auth source (claude-account-login, or --accounts) moves to a different account.
+# Self-heal 3 compares accountUuid to detect exactly that case. Reproduced live 2026-09-02:
+# 4 containers switched from the shared claude-auth volume to a named claude-auth-personal
+# volume kept showing the OLD account in the Claude app indefinitely.
+S7D="$(mktemp -d)"
+S7_BLOCK="$(awk '/^# --- 7\. Seed/{f=1} f && /^# --- 7a\./{exit} f{print}' "$ENTRYPOINT")"
+[[ -n "$S7_BLOCK" ]] && ok "section 7 extracted from entrypoint.sh for the self-heal checks" \
+                     || bad "could not extract section 7: the checks below would be vacuous"
+
+# s7_run <sandbox-name> <cached-oauth-json-or-empty> <auth-oauth-json-or-empty>
+# Seeds a fresh config/.claude.json (with the given cached oauthAccount, if any) and a
+# fresh auth/.claude.json (with the given mounted oauthAccount, if any), runs the REAL
+# extracted block against them, and prints the resulting config/.claude.json.
+s7_run() {
+    local sb="$S7D/$1" cached="$2" auth="$3"
+    rm -rf "$sb"; mkdir -p "$sb/config" "$sb/auth"
+    if [[ -n "$cached" ]]; then
+        jq -n --argjson o "$cached" '{oauthAccount:$o}' > "$sb/config/.claude.json"
+    fi
+    if [[ -n "$auth" ]]; then
+        jq -n --argjson o "$auth" '{oauthAccount:$o}' > "$sb/auth/.claude.json"
+    fi
+    (
+        export CLAUDE_CONFIG_DIR="$sb/config" AUTH_DIR="$sb/auth" WORKSPACE="/workspace"
+        export CLAUDE_UID="$(id -u)" CLAUDE_GID="$(id -g)"
+        log() { : ; }  # section 7's own log line is asserted separately, via ms_run-style capture below
+        set -euo pipefail
+        eval "$S7_BLOCK"
+    ) >/dev/null
+    cat "$sb/config/.claude.json"
+}
+
+OLD_ACCT='{"accountUuid":"uuid-old","emailAddress":"old@cosyte.example"}'
+NEW_ACCT='{"accountUuid":"uuid-new","emailAddress":"new@personal.example","hasExtraUsageEnabled":false}'
+
+S7_SWITCH="$(s7_run switch "$OLD_ACCT" "$NEW_ACCT")"
+[[ "$(jq -r '.oauthAccount.accountUuid' <<<"$S7_SWITCH")" == "uuid-new" ]] \
+    && ok  "a STALE cached account (different accountUuid than the mounted auth) is self-healed to the fresh one" \
+    || bad "the cached account was not refreshed: $(jq -c '.oauthAccount' <<<"$S7_SWITCH")"
+[[ "$(jq -r '.oauthAccount.emailAddress' <<<"$S7_SWITCH")" == "new@personal.example" ]] \
+    && ok  "the refreshed account carries the new email, not the stale cached one" \
+    || bad "emailAddress after self-heal is wrong: $(jq -c '.oauthAccount' <<<"$S7_SWITCH")"
+
+SAME_NEW='{"accountUuid":"uuid-new","emailAddress":"new@personal.example","hasExtraUsageEnabled":true}'
+S7_SAME="$(s7_run same "$NEW_ACCT" "$SAME_NEW")"
+[[ "$(jq -r '.oauthAccount.hasExtraUsageEnabled' <<<"$S7_SAME")" == "false" ]] \
+    && ok  "SAME accountUuid: the cached object is left exactly as it was (no clobber of other per-container state)" \
+    || bad "a same-account boot changed cached fields it should not have touched: $(jq -c '.oauthAccount' <<<"$S7_SAME")"
+
+S7_FRESH="$(s7_run fresh "" "$NEW_ACCT")"
+[[ "$(jq -r '.oauthAccount.accountUuid' <<<"$S7_FRESH")" == "uuid-new" ]] \
+    && ok  "a container with NO cached account yet still gets seeded from the mounted auth (unchanged prior behavior)" \
+    || bad "brand-new container did not get seeded: $(jq -c '.oauthAccount' <<<"$S7_FRESH")"
+
+S7_NOAUTH="$(s7_run noauth "$OLD_ACCT" "")"
+[[ "$(jq -r '.oauthAccount.accountUuid' <<<"$S7_NOAUTH")" == "uuid-old" ]] \
+    && ok  "no mounted auth account at all: the cached account is left alone, never wiped to null" \
+    || bad "the cached account was lost when no auth source was present: $(jq -c '.oauthAccount' <<<"$S7_NOAUTH")"
+
+grep -qF 'SELF-HEALED' "$ENTRYPOINT" \
+    && ok  "the self-heal is logged (an operator can see it happened, not just infer it)" \
+    || bad "no log line announces the self-heal"
+rm -rf "$S7D"
+
+echo
 echo "== entrypoint.sh §7a: operator policy is delivered where the agent user cannot write =="
 
 # §8b composes every setting this image asserts into $CLAUDE_CONFIG_DIR/settings.json:
