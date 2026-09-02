@@ -747,6 +747,10 @@ EOF
       CLAUDE_BROKER_GIT_KEY: "\${CLAUDE_BROKER_GIT_KEY:-1}"
       CLAUDE_EGRESS_LOCKDOWN: "\${CLAUDE_EGRESS_LOCKDOWN:-0}"
       CLAUDE_EGRESS_EXTRA_HOSTS: "\${CLAUDE_EGRESS_EXTRA_HOSTS:-}"
+      # Empty by default = no periodic re-resolve, which is byte-identical to a build
+      # without the feature. Set it to a number of seconds in .env to keep a long-lived
+      # stack's pinned allowlist current (see .env.example).
+      CLAUDE_EGRESS_REFRESH_INTERVAL: "\${CLAUDE_EGRESS_REFRESH_INTERVAL:-}"
       CLAUDE_OTEL_ENABLED: "\${CLAUDE_OTEL_ENABLED:-0}"
       CLAUDE_OTEL_TRACES: "\${CLAUDE_OTEL_TRACES:-0}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "\${OTEL_EXPORTER_OTLP_ENDPOINT:-}"

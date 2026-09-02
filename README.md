@@ -246,6 +246,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_HARDEN_CAPS` | `1` | `1` = `--cap-drop ALL` + minimal `--cap-add` (drops NET_RAW/MKNOD/SETFCAP); `0` = Docker defaults. `no-new-privileges` is always set. Override the set with `CLAUDE_MIN_CAPS` |
 | `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1`/`true`/`yes`/`on` = default-deny network firewall (iptables, IP-pinned allowlist) applied at boot before the unprivileged agent starts, **fail-open on error** (logs loudly, starts the agent anyway). `strict` = the same firewall **fail-closed**: if the ruleset cannot be applied the container refuses to start the agent and exits nonzero. `0`/`false`/`no`/`off`, unset or empty = off; any other value is off and is reported in the boot log. Extend the allowlist with `CLAUDE_EGRESS_EXTRA_HOSTS` |
 | `CLAUDE_EGRESS_PACKAGES` | `0` | `1` = additively allowlist the curated **package registries** (PyPI, crates.io, Go proxy, `mise.run`, `ghcr.io`) so agent-driven `pip`/`cargo`/`go`/`mise` installs work under lockdown. Opt-in and curated (not open); nothing else broadens. Debian/apt system libs have no self-service path (see [docs/package-provisioning-security.md](docs/package-provisioning-security.md)) |
+| `CLAUDE_EGRESS_REFRESH_INTERVAL` | unset (no refresh) | Seconds between **re-resolves of the allowlist** in a container that is already under lockdown, e.g. `900`. Unset, the allowlist is pinned once at boot and goes stale as CDNs rotate addresses. Set, a root-owned loop re-resolves the same host set and re-commits each family through the same atomic restore the boot pass used, so the agent can neither alter the refreshed rules nor stop the refresh. **It never narrows on a failed lookup**: a host that comes back empty leaves the ruleset in force alone and is logged by name. Absent, malformed or non-positive values all mean off, and the boot log states which posture it chose and why. Needs `CLAUDE_EGRESS_LOCKDOWN`; ignored without it, and not started when the boot pass applied no ruleset |
 | `CLAUDE_BROKER_GIT_KEY` | `1` (brokered) | **Brokering is the default.** Unset, the SSH deploy key is held in a root ssh-agent: the agent signs/pushes with it but cannot read the key bytes. `0`/`false`/`no`/`off` is the explicit opt-out back to a readable `~/.ssh/id_ed25519`; any other value (including a typo) brokers. If brokering cannot be established there is **no** readable-file fallback: git is left unable to authenticate with that key and the boot log says so |
 | `CLAUDE_DISK_DATA_ROOT` | `/var/lib/docker` | Path whose free space `claude-disk-gc` reports before/after each cycle |
 | `CLAUDE_DISK_GC_INTERVAL` | `3600` | Seconds between `claude-disk-gc --loop` cycles (standalone tool; nothing auto-starts it) |
@@ -705,13 +706,31 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   Claude Code's own app-layer allowlist was bypassable (a SOCKS5 null-byte parser
   differential) and SNI/CONNECT proxy allowlists are evadable by domain fronting.
   The baked allowlist covers the Claude API, OAuth, the Remote Control feature
-  flags (`statsig.*`/`growthbook.*`, blocking those breaks RC), npm, and GitHub
-  (via its published IP ranges); extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. It adds
-  ~10s to boot and the `NET_ADMIN` cap. On the `1`/`true`/`yes`/`on` spellings it
+  flags (`statsig.*`/`growthbook.*`, blocking those breaks RC), npm, GitHub
+  (via its published IP ranges) and Anthropic's own published **inbound** ranges;
+  extend with `CLAUDE_EGRESS_EXTRA_HOSTS`. It adds ~10s to boot and the
+  `NET_ADMIN` cap. On the `1`/`true`/`yes`/`on` spellings it
   **fails open** (logs loudly, leaves egress unrestricted) rather than bricking
-  connectivity, and that is still the default posture. Caveat: an IP-pinned
-  allowlist can go stale as CDNs rotate IPs, and `statsig.anthropic.com` isn't
-  publicly resolvable so it can't be pinned: re-verify if RC eligibility fails.
+  connectivity, and that is still the default posture. Every host Claude Code's
+  published network requirements name is either pinned or recorded, with a reason,
+  in [docs/egress-allowlist.md](docs/egress-allowlist.md), including the wildcard
+  entries an IP allowlist can never admit: those are named in the boot log
+  together with the feature they cost, rather than left to fail silently. Caveat:
+  `statsig.anthropic.com` isn't publicly resolvable so it can't be pinned:
+  re-verify if RC eligibility fails.
+- **Keeping the allowlist current (`CLAUDE_EGRESS_REFRESH_INTERVAL`).** A pinned
+  address is a snapshot, and a container that runs for weeks outlives it: set the
+  variable to a number of seconds (`900` is a reasonable start) and the same
+  allowlist is re-resolved on that interval and re-committed, as root, through the
+  same atomic restore the boot pass used. The agent has no `NET_ADMIN` and cannot
+  signal a root process, so it can neither alter the refreshed rules nor stop the
+  refresh. **A failed lookup never narrows the allowlist**: a host that previously
+  resolved and now comes back empty retains the ruleset already in force and is
+  logged by name, because an empty answer under a live session is evidence about
+  the resolver rather than about the host, and a ruleset narrowed on it takes a
+  working container off the network mid-task. The same holds for a restore that
+  cannot commit and for a failed fetch of the published GitHub ranges. Unset (the
+  default) nothing is refreshed and the boot log says so.
 - **Egress lockdown, fail-closed (`CLAUDE_EGRESS_LOCKDOWN=strict`).** Same
   firewall, opposite trade: if the ruleset cannot be applied, the container
   **refuses to start the agent** and exits nonzero, naming egress lockdown in the

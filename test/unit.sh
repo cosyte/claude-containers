@@ -1195,6 +1195,134 @@ EGOFF="$( ( export CLAUDE_EGRESS_LOCKDOWN=0
     || bad "lockdown off still ran the firewall or still logged a posture"
 
 echo
+echo "== entrypoint.sh §12a: the PERIODIC REFRESH is configured, reported, and never changes the boot contract =="
+
+# An IP-pinned allowlist is a snapshot of DNS, and this container is built to run for
+# weeks: without a re-resolve the rules end up pointing at addresses nobody serves any
+# more and the agent's tooling starts failing at a moment nobody is watching. The
+# refresh fixes that, and everything in this section is about it NOT costing anything:
+# the per-family status contract above is untouched, the boot log still says the same
+# things, and a container that never asked for a refresh starts nothing.
+#
+# Same extraction, same stub, same real die(): only the stub gains the ability to
+# record the ARGUMENTS it was called with, because "was a daemon started, and was it
+# started as the same root-owned binary the boot pass ran" is an argv question.
+eg_stub_rec() {   # eg_stub_rec <exit-status>: records every invocation's argv in $EGD/argv
+    printf '#!/usr/bin/env bash\nprintf "[%%s]\\n" "$*" >> %q\nexit %s\n' "$EGD/argv" "$1" > "$EGD/fw"
+    chmod +x "$EGD/fw"
+}
+# run_refresh <firewall-status> <interval value, or UNSET> [lockdown value]
+# Runs the shipped block with that interval in the environment and leaves the argv
+# record in $EGD/argv. The background daemon start inherits the block's stdout, so the
+# command substitution below does not return until the stub has actually run: the argv
+# assertions are not racing anything.
+run_refresh() {
+    eg_stub_rec "$1"
+    rm -f "$EGD/argv"
+    ( if [[ "$2" == "UNSET" ]]; then unset CLAUDE_EGRESS_REFRESH_INTERVAL
+      else export CLAUDE_EGRESS_REFRESH_INTERVAL="$2"; fi
+      eg_exec "${3:-1}" )
+}
+eg_rline() { grep "Egress refresh" <<<"$1" || true; }
+eg_argv()  { cat "$EGD/argv" 2>/dev/null || true; }
+
+# --- a configured interval starts the daemon, as the same binary, and says so --------
+EGR="$(run_refresh 0 900)"
+grep -qE 'Egress refresh +: every 900s, as root' <<<"$EGR" \
+    && ok "a positive interval is reported in the boot log with the interval it will use" \
+    || bad "a configured refresh interval was not reported in the boot log: $(eg_rline "$EGR")"
+grep -qxF '[--refresh-daemon]' <<<"$(eg_argv)" \
+    && ok "the refresh daemon is started as the SAME root-owned firewall binary the boot pass ran" \
+    || bad "no --refresh-daemon invocation happened: the interval would be accepted and ignored"
+grep -qxF '[]' <<<"$(eg_argv)" \
+    && ok "and the boot pass still runs first, with no arguments (the daemon is in addition to it, not instead)" \
+    || bad "the boot pass was replaced by the daemon invocation"
+grep -qF 'RETAINS the ruleset in force' <<<"$EGR" \
+    && ok "the refresh line states the fail-safe an operator is trusting: a failed lookup retains, never narrows" \
+    || bad "the refresh line does not say what happens when a lookup fails"
+
+# --- absent / malformed / non-positive: one case, and the boot log says WHY ----------
+EGR="$(run_refresh 0 UNSET)"
+grep -qE 'Egress refresh +: OFF \(CLAUDE_EGRESS_REFRESH_INTERVAL is not set' <<<"$EGR" \
+    && ok "an ABSENT interval is reported as OFF, with the reason (silence would look like a working refresh)" \
+    || bad "an absent refresh interval produced no posture line: $(eg_rline "$EGR")"
+[[ -z "$(grep -F -- '--refresh-daemon' <<<"$(eg_argv)")" ]] \
+    && ok "an absent interval starts no daemon at all" \
+    || bad "an absent interval still started a refresh daemon"
+eg_bad_quiet=() eg_bad_started=()
+for _v in 0 -1 abc 15m 1.5 " " 00; do
+    EGR="$(run_refresh 0 "$_v")"
+    grep -qE 'Egress refresh +: OFF \(' <<<"$EGR" || eg_bad_quiet+=("$_v")
+    grep -qF -- '--refresh-daemon' <<<"$(eg_argv)" && eg_bad_started+=("$_v")
+done
+[[ ${#eg_bad_quiet[@]} -eq 0 ]] \
+    && ok "every malformed / non-positive interval is reported as OFF with a reason (0, -1, abc, 15m, 1.5, blank, 00)" \
+    || bad "these interval values produced no posture line: ${eg_bad_quiet[*]}"
+[[ ${#eg_bad_started[@]} -eq 0 ]] \
+    && ok "and none of them starts a daemon: a mistyped interval is never read as some interval" \
+    || bad "these malformed interval values started a refresh daemon anyway: ${eg_bad_started[*]}"
+EGR="$(run_refresh 0 15m)"
+grep -qF "CLAUDE_EGRESS_REFRESH_INTERVAL='15m'" <<<"$EGR" \
+    && ok "a malformed interval is QUOTED BACK in the boot log, so the operator can see their own typo" \
+    || bad "the malformed-interval line does not quote the value: $(eg_rline "$EGR")"
+
+# --- a boot pass that committed nothing is never refreshed into containment ----------
+# Fail-open told the operator, in this same log, that egress is UNRESTRICTED. A refresh
+# that later succeeded would silently seal a container carrying live work, which is
+# exactly the mid-task disconnection the retain rules exist to prevent.
+for _rc in 1 9 127; do
+    EGR="$(run_refresh "$_rc" 900)"
+    grep -qE 'Egress refresh +: OFF \(the boot pass committed no ruleset' <<<"$EGR" \
+        || bad "firewall status $_rc + an interval did not explain why no refresh runs"
+    grep -qF -- '--refresh-daemon' <<<"$(eg_argv)" \
+        && bad "firewall status $_rc started a refresh daemon over a container reported as UNRESTRICTED"
+done
+ok "a boot pass that applied nothing starts no refresh, and the log says why (never seals a container silently)"
+# The half-applied case is the one that MUST refresh: IPv4 is committed and stale
+# addresses there are exactly the problem this feature exists for.
+EGR="$(run_refresh 2 900)"
+grep -qF -- '--refresh-daemon' <<<"$(eg_argv)" \
+    && ok "firewall status 2 (IPv4 committed, IPv6 open) still refreshes the family that IS in force" \
+    || bad "a half-applied lockdown got no refresh, leaving its committed IPv4 rules to go stale"
+
+# --- THE BOOT CONTRACT IS UNCHANGED --------------------------------------------------
+# The exit status IS the per-family posture and the entrypoint reads nothing else. If
+# configuring a refresh changed which status meant what, every lockdown container's
+# boot log would start lying about which family is contained.
+eg_contract=0
+for _rc in 0 2 1 9; do
+    a="$(eg_line "$(run_refresh "$_rc" UNSET)")"
+    b="$(eg_line "$(run_refresh "$_rc" 900)")"
+    [[ "$a" == "$b" ]] || eg_contract=1
+done
+[[ "$eg_contract" -eq 0 ]] \
+    && ok "the per-family Egress lockdown line is IDENTICAL with and without a refresh interval, at every status" \
+    || bad "configuring a refresh changed the per-family boot log line"
+grep -qE 'Egress lockdown +: IPv4 default-deny, IPv6 default-deny' <<<"$(run_refresh 0 900)" \
+    && grep -qE 'Egress lockdown +: IPv4 default-deny, IPv6 UNRESTRICTED' <<<"$(run_refresh 2 900)" \
+    && grep -qE 'Egress lockdown +: IPv4 UNRESTRICTED, IPv6 UNRESTRICTED' <<<"$(run_refresh 1 900)" \
+    && grep -qE 'Egress lockdown +: IPv4 UNRESTRICTED, IPv6 UNRESTRICTED' <<<"$(run_refresh 9 900)" \
+    && ok "0 = both contained, 2 = IPv4 contained + IPv6 open, anything else = both open: the contract, unchanged" \
+    || bad "the firewall exit-status contract no longer maps to the same per-family boot log lines"
+eg_ref_stopped=0
+for _rc in 0 1 2 9; do
+    grep -qxF 'block_continued=1' <<<"$(run_refresh "$_rc" 900)" || eg_ref_stopped=1
+done
+[[ "$eg_ref_stopped" -eq 0 ]] \
+    && ok "boot still continues to the agent session at every status with a refresh configured" \
+    || bad "the refresh block aborted the entrypoint at some firewall status"
+
+# --- lockdown OFF starts nothing, and says nothing -----------------------------------
+eg_stub_rec 0; rm -f "$EGD/argv"
+EGROFF="$( ( export CLAUDE_EGRESS_LOCKDOWN=0 CLAUDE_EGRESS_REFRESH_INTERVAL=30
+             log() { echo "[entrypoint] $*"; }
+             set -euo pipefail
+             eval "$(eg_block "$EGD/fw")" ) 2>&1 )"
+[[ -z "$(eg_rline "$EGROFF")" && -z "$(eg_argv)" ]] \
+    && ok "CLAUDE_EGRESS_LOCKDOWN=0 with an interval set: no refresh is started and none is claimed" \
+    || bad "lockdown off still started refresh activity or logged a refresh posture"
+
+echo
 echo "== entrypoint.sh §12a: CLAUDE_EGRESS_LOCKDOWN=strict fails CLOSED =="
 
 # `strict` turns lockdown from a REQUEST into a REQUIREMENT. Everything about it
@@ -1237,8 +1365,31 @@ done
 # alone, so "iptables not installed" is a failure to apply and never a skip, and an
 # allowlist that resolved to nothing is not treated as a lesser failure than missing
 # tooling.
+#
+# WHAT THIS LOOP PROVES, EXACTLY: the ENTRYPOINT's reaction to status 1, once per reason
+# the shipped script can report, against a STUB firewall. It says nothing about whether
+# the script can still REACH each of those reasons, and it cannot: the stub is what
+# exits 1. That question belongs to the firewall's own suite, and
+# test/egress-packages-unit.sh answers it by running the shipped script against a
+# stubbed resolver that answers nothing ("a resolver that answers nothing at all still
+# reaches the fail-open guard, by name"). The two halves are only worth what they are
+# worth together, so the ordering invariant they both depend on is asserted here too.
 EGFW="$REPO_ROOT/bin/claude-egress-firewall"
 mapfile -t EG_REASONS < <(sed -n 's/.*fail_open "\([^"]*\)".*/\1/p' "$EGFW")
+
+# The zero-resolution guard is only a guard while it counts what RESOLUTION produced.
+# Anthropic's published inbound range is a constant that no lookup can add or remove, so
+# folding it into the IPv4 nets before that guard makes the guard count a constant and it
+# can never fire again: a container with a dead resolver comes up sealed to one /23,
+# exits 0, and strict has no status left to refuse on. The boot pass's call therefore
+# sits AFTER the guard, and this is the assertion that keeps it there.
+eg_guard_ln="$(grep -n 'fail_open "allowlist resolved to zero IPs"' "$EGFW" | head -1 | cut -d: -f1)"
+eg_pin_ln="$(grep -n '^add_anthropic_inbound 4$' "$EGFW" | head -1 | cut -d: -f1)"
+if [[ -n "$eg_guard_ln" && -n "$eg_pin_ln" ]] && (( eg_pin_ln > eg_guard_ln )); then
+    ok "the boot pass pins the published inbound range AFTER the zero-resolution guard (line $eg_pin_ln > $eg_guard_ln), so the guard still counts only what resolved"
+else
+    bad "bin/claude-egress-firewall seeds the published inbound range before its zero-resolution fail_open guard (guard='$eg_guard_ln' pin='$eg_pin_ln'): the guard can never fire and strict cannot refuse"
+fi
 if (( ${#EG_REASONS[@]} >= 5 )); then
     ok "read ${#EG_REASONS[@]} fail_open reasons out of bin/claude-egress-firewall (not a hand-copied list)"
 else

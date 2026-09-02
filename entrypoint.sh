@@ -1226,6 +1226,33 @@ if [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on|strict)$ ]]; then
        CLAUDE_EGRESS_LOCKDOWN=1 for the fail-open posture that logs and boots anyway."
            fi ;;
     esac
+    # PERIODIC RE-RESOLVE. The allowlist above is a snapshot of DNS at boot, and this
+    # container is meant to run for weeks: a CDN that rotates addresses turns the
+    # snapshot into a set of rules pointing at hosts nobody serves any more, and the
+    # agent's tooling starts failing at a moment nobody is watching. So a container
+    # under lockdown can re-resolve on an interval, committing each refreshed ruleset
+    # through the same atomic restore the boot pass used.
+    #
+    # IT RUNS HERE, AS ROOT, and it is started BEFORE the privilege drop for the same
+    # reason the boot pass is: the agent has no NET_ADMIN and cannot signal a root
+    # process, so it can neither alter what the refresh commits nor stop it happening.
+    #
+    # THE POSTURE IS ALWAYS STATED. Absent, malformed and non-positive intervals are
+    # one case (no refresh), and silence about it would leave an operator who typed
+    # `CLAUDE_EGRESS_REFRESH_INTERVAL=15m` believing their allowlist was being kept
+    # current when it never will be. Only the "Egress lockdown" lines above are the
+    # per-family posture contract; this is a separate line and does not touch it.
+    egress_refresh="${CLAUDE_EGRESS_REFRESH_INTERVAL:-}"
+    if [[ -z "$egress_refresh" ]]; then
+        log "Egress refresh       : OFF (CLAUDE_EGRESS_REFRESH_INTERVAL is not set; the allowlist is resolved once, at boot, and pinned addresses go stale as CDNs rotate)"
+    elif [[ ! "$egress_refresh" =~ ^[0-9]+$ ]] || (( 10#$egress_refresh <= 0 )); then
+        log "Egress refresh       : OFF (CLAUDE_EGRESS_REFRESH_INTERVAL='${egress_refresh}' is not a positive whole number of seconds, so it cannot be an interval; the allowlist is resolved once, at boot)"
+    elif [[ "$egress_rc" != 0 && "$egress_rc" != 2 ]]; then
+        log "Egress refresh       : OFF (the boot pass committed no ruleset, so there is nothing to refresh; re-committing later would seal a container this log has already reported as UNRESTRICTED)"
+    else
+        "$EGRESS_FIREWALL_BIN" --refresh-daemon &
+        log "Egress refresh       : every ${egress_refresh}s, as root (re-resolves the same allowlist and re-commits it atomically; a lookup that comes back empty RETAINS the ruleset in force and is logged by name, never narrowed)"
+    fi
 elif [[ -n "${CLAUDE_EGRESS_LOCKDOWN:-}" ]] && [[ ! "${CLAUDE_EGRESS_LOCKDOWN}" =~ ^(0|false|no|off)$ ]]; then
     # An unrecognised value: neither an off value nor an on/strict spelling. Silence
     # here is the failure mode strict exists to end, because a mistyped `stict` (or a

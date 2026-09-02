@@ -39,6 +39,27 @@
 # differ (A records for IPv4, AAAA for IPv6).
 # Allowed: 443/80/22 to allowlisted IPs, 53 (DNS) anywhere, loopback, established
 # (plus, on IPv6 only, the ICMPv6 types IPv6 cannot function without: see below).
+#
+# THREE MODES, ONE SCRIPT. Composition (the host set, the wildcard report, the
+# published ranges) is shared by all three; only what happens after it differs:
+#   (no argument)      the BOOT pass described above. Fails OPEN, exits with the
+#                      per-family status contract, and is what the entrypoint runs.
+#   --refresh-once     ONE re-resolve-and-commit cycle against the ruleset already
+#                      in force. Never fails open, never exits non-zero.
+#   --refresh-daemon   --refresh-once every CLAUDE_EGRESS_REFRESH_INTERVAL seconds,
+#                      forever. Started by the entrypoint AS ROOT, so the
+#                      unprivileged agent can neither alter what it commits nor
+#                      signal it.
+#
+# NEVER NARROW ON A FAILED LOOKUP. That rule separates the two paths and is the
+# reason the refresh is not simply the boot pass on a timer. The boot pass may skip
+# a host that will not resolve: nothing is in force yet and the container has no
+# work to lose. A refresh may not. Once a ruleset is committed and a session is
+# running, an empty answer is evidence about the RESOLVER, not about the host, and
+# a ruleset narrowed on it takes a working container off the network mid-task,
+# which no later pass undoes. So every refresh failure RETAINS what is in force:
+# a host that came back empty abandons that family's cycle, a restore that will
+# not commit leaves the table alone, and neither ever calls fail_open().
 set -uo pipefail
 [[ "${CLAUDE_EGRESS_DEBUG:-0}" == 1 ]] && set -x
 
@@ -48,8 +69,43 @@ fail_open() {
     iptables  -P OUTPUT ACCEPT 2>/dev/null || true
     ip6tables -P OUTPUT ACCEPT 2>/dev/null || true
     log "egress posture: IPv4 UNRESTRICTED, IPv6 UNRESTRICTED"
+    [[ -n "${rdir:-}"  ]] && rm -rf "$rdir"    # the boot pass's scratch dirs, if it got that far
+    [[ -n "${ghdir:-}" ]] && rm -rf "$ghdir"
     exit 1
 }
+
+# fail_open() belongs to the BOOT pass alone. The refresh path's equivalent is this,
+# and the difference is the whole point: it puts no policy back to ACCEPT, commits
+# nothing, and returns rather than exiting, so the ruleset already in force survives
+# the failure untouched and the running session never notices.
+refresh_retain() { log "REFRESH: $*; the ruleset already in force is RETAINED unchanged and the session continues"; }
+
+MODE=boot
+case "${1:-}" in
+    "")               MODE=boot ;;
+    --refresh-once)   MODE=refresh-once ;;
+    --refresh-daemon) MODE=refresh-daemon ;;
+    *) log "ERROR: unknown argument '$1' (usage: claude-egress-firewall [--refresh-once|--refresh-daemon])"; exit 64 ;;
+esac
+
+# Refresh interval, in whole seconds. ABSENT, MALFORMED and NON-POSITIVE are one
+# case and it is the safe one: no refresh at all, and a boot pass byte-identical to
+# a build that never had this feature (nothing extra is resolved, nothing extra is
+# written to disk). The entrypoint states the posture it chose, and why, in the boot
+# log; this is only the parse.
+REFRESH_INTERVAL=0
+if [[ "${CLAUDE_EGRESS_REFRESH_INTERVAL:-}" =~ ^[0-9]+$ ]]; then
+    REFRESH_INTERVAL=$(( 10#${CLAUDE_EGRESS_REFRESH_INTERVAL} ))
+fi
+
+# Where the refresh remembers what the ruleset IN FORCE was built from: the per-host
+# answers each committed family used, the published GitHub ranges it carried, and one
+# marker per family the boot pass actually committed. Root-owned and mode 700, like
+# every other root-only path here: the agent must not be able to read it, and above
+# all must not be able to plant a "previously resolved nothing" answer that would let
+# a later refresh narrow its own allowlist. Written ONLY when a refresh interval is
+# configured, so an unconfigured container touches no new path at all.
+STATE_DIR="${CLAUDE_EGRESS_STATE_DIR:-/run/claude-egress}"
 
 # NOTE: the `iptables`/`iptables-restore` availability check is deferred until AFTER the
 # CLAUDE_EGRESS_PRINT_HOSTS dry-run seam below: the dry run is a pure host dump that needs neither
@@ -57,14 +113,27 @@ fail_open() {
 # them, see below).
 
 # Default allowlist. Wildcards can't be IP-resolved, so we list the concrete
-# hosts the CLI actually dials (the artifact viewer's *.claudeusercontent.com is
-# browser-only and intentionally omitted). See the egress-allowlist memo.
+# hosts the CLI actually dials.
+#
+# THIS SET IS ANSWERABLE TO THE VENDOR'S PUBLISHED LIST, and docs/egress-allowlist.md
+# is where that answer is written down: every host Claude Code's published network
+# access requirements name is either pinned here or has a row in that memo saying why
+# it is not. Do not add or drop a host here without moving its row there; the memo is
+# not commentary, it is the record test/egress-packages-unit.sh grades this list
+# against, and a documented host that is neither pinned nor recorded fails the suite.
+#
+# Beyond the published CLI requirements this also carries the Remote Control feature
+# flag hosts (statsig/growthbook), error reporting (sentry) and the GitHub hosts the
+# container's own git workflow needs. Those are this image's requirements, not the
+# vendor's, and the memo says so.
 DEFAULT_HOSTS="
-api.anthropic.com claude.ai platform.claude.com downloads.claude.ai
+api.anthropic.com claude.ai claude.com platform.claude.com downloads.claude.ai
+mcp-proxy.anthropic.com code.claude.com
 bridge.claudeusercontent.com raw.githubusercontent.com objects.githubusercontent.com
 storage.googleapis.com
 statsig.anthropic.com statsig.com api.growthbook.io cdn.growthbook.io
 us.sentry.io downloads.sentry-cdn.com
+http-intake.logs.us5.datadoghq.com browser-intake-us5-datadoghq.com
 registry.npmjs.org
 github.com api.github.com codeload.github.com
 "
@@ -89,6 +158,46 @@ fi
 
 HOSTS="$DEFAULT_HOSTS $EXTRA $PACKAGES_HOSTS"
 
+# ---------------------------------------------------------------------------
+# WILDCARDS: NAME THE FEATURE, DO NOT LEAVE IT TO FAIL SILENTLY.
+#
+# An IP-pinned allowlist pins ADDRESSES. A vendor requirement written as a name
+# PATTERN (`*.frame.claudeusercontent.com`) has no address to pin: there is nothing
+# to resolve, so the host is not in $HOSTS and never can be. That much is a fact
+# about netfilter and is not fixable here. What IS fixable is the silence: without
+# this report the operator gets a container where one vendor feature simply does not
+# work, with no line in the boot log connecting it to the allowlist, and diagnoses it
+# as a bug in the feature.
+#
+# So every wildcard the published requirements name is listed here WITH THE FEATURE
+# THAT WILL NOT WORK, in the operator's words rather than the allowlist's, and is
+# reported at composition time on every run (boot and refresh alike, and visible
+# through the dry-run seam). The rows here are the same rows as the wildcard entries
+# in docs/egress-allowlist.md, and the unit suite checks they agree.
+report_wildcards() {
+    local pattern feature
+    while IFS='|' read -r pattern feature; do
+        [[ -z "$pattern" ]] && continue
+        log "WILDCARD NOT PINNED: $pattern is a name pattern, not an address, so a default-deny IP allowlist cannot admit it. WHAT WILL NOT WORK: $feature. See docs/egress-allowlist.md."
+    done <<'WILDCARDS'
+*.frame.claudeusercontent.com|Artifact content reads. The CLI fetches an artifact's files from this host when Claude opens one, so opening an artifact fails under lockdown. Turn the tool off (CLAUDE_CODE_DISABLE_ARTIFACT=1) to drop the requirement instead of hitting it
+*.claudeusercontent.com|Artifact rendering in the Claude Desktop app and in claude.ai in a browser. Nothing the CLI in this container does depends on it; it is reported so an operator who also proxies a browser through this container knows the origin is unreachable
+WILDCARDS
+    # An operator can also write a pattern into CLAUDE_EGRESS_EXTRA_HOSTS, where it
+    # would otherwise reach the resolver, come back empty and read as one more
+    # "could not resolve" line among many. Name it for what it is instead. It is
+    # left in $HOSTS deliberately: the dry run reports what was REQUESTED, and
+    # silently deleting an operator's entry is the same silence this block exists
+    # to end.
+    local h
+    for h in $HOSTS; do
+        case "$h" in
+            *'*'*) log "WILDCARD NOT PINNED: $h came from CLAUDE_EGRESS_EXTRA_HOSTS and is a name pattern, not an address, so it cannot be pinned and WILL NOT be reachable under lockdown. WHAT WILL NOT WORK: whatever you added it for. Pin the concrete hosts behind it instead." ;;
+        esac
+    done
+}
+report_wildcards
+
 # Dry-run seam for CI/tests (CLAUDE_EGRESS_PRINT_HOSTS accepts the same 1|true|yes|on spellings as the
 # package flag): print the composed allowlist hosts, one per line, IN THE ORDER the resolution loop
 # below iterates them (a faithful witness of the enforcement input, not a sorted/deduped view), and
@@ -100,9 +209,11 @@ if [[ "${CLAUDE_EGRESS_PRINT_HOSTS:-0}" =~ ^(1|true|yes|on)$ ]]; then
     exit 0
 fi
 
-# Enforcement path only from here: now the iptables tooling is actually required.
-command -v iptables         >/dev/null 2>&1 || fail_open "iptables not installed"
-command -v iptables-restore >/dev/null 2>&1 || fail_open "iptables-restore not installed"
+# ===========================================================================
+# Shared primitives. Everything from here to the mode dispatch is used by BOTH
+# the boot pass and the refresh pass, so the two can never drift into resolving
+# different host sets or committing differently-shaped rulesets.
+# ===========================================================================
 
 # Collect the allowed IPv4 nets (single IPs and CIDRs) while egress is still open.
 declare -A SEEN=()
@@ -115,6 +226,68 @@ declare -A SEEN6=()
 NETS6=()
 add_net6() { [[ -n "$1" && -z "${SEEN6[$1]:-}" ]] && { SEEN6[$1]=1; NETS6+=("$1"); }; }
 
+# add_fam <family> <net>: the family-parameterised form the refresh needs, and always
+# 0 so a caller can use it in a loop without an already-seen address reading as an error.
+add_fam() {
+    if [[ "$1" == 4 ]]; then add_net "$2"; else add_net6 "$2"; fi
+    return 0
+}
+
+# A refresh rebuilds both arrays from scratch, so it needs them empty first. The
+# seen-sets are re-declared with -g because this runs inside a function and a plain
+# `declare -A` there would build a LOCAL set, leaving the global one full and every
+# re-resolved address silently deduplicated away into an empty ruleset.
+reset_nets() {
+    unset SEEN NETS SEEN6 NETS6
+    declare -gA SEEN=() SEEN6=()
+    NETS=(); NETS6=()
+}
+
+# Anthropic's OWN published address space, pinned from the publisher's list rather
+# than from a DNS answer alone, so a CDN answer that moves between refreshes cannot
+# take the API with it. ADDITIVE: these are added to what per-host resolution
+# produced, never instead of it, because a host that resolves outside these ranges
+# (every non-Anthropic host in the allowlist, for a start) has to stay reachable.
+#
+# INBOUND ONLY, AND THE DISTINCTION IS NOT COSMETIC. The publisher's page has three
+# sections and only the first is a destination. INBOUND is where Anthropic services
+# RECEIVE connections, which is exactly what a container dials. OUTBOUND
+# (160.79.104.0/21) is the source addresses Anthropic uses when IT calls out, which
+# belongs in someone else's INGRESS allowlist and is an eightfold wider prefix, so
+# pinning it here would broaden egress by 2048 addresses to buy nothing the CLI
+# dials. PHASED OUT (five 34.162.x.x/32) the publisher asks people to REMOVE. Neither
+# of the last two is here, and neither may be added.
+# Source: https://platform.claude.com/docs/en/api/ip-addresses ("Inbound IP addresses").
+# The full reconciliation, host by host, is in docs/egress-allowlist.md.
+#
+# WHERE THIS IS CALLED IS PART OF THE CONTRACT, AND IT IS ALWAYS *AFTER* THE PASS
+# HAS ASKED WHAT RESOLUTION PRODUCED. These ranges are a CONSTANT: they come from
+# the publisher's list, not from a lookup, so they are there on every run whatever
+# the resolver said. Fold them in BEFORE a check that asks "did resolution produce
+# anything" and that check is counting the constant, so it can never fire again.
+# Two live guards depend on the ordering:
+#   - the boot pass's `fail_open "allowlist resolved to zero IPs"`. Seed NETS first
+#     and a container whose resolver answers nothing stops failing OPEN: it commits
+#     a default-deny table holding exactly one /23, exits 0, and the boot log calls
+#     that successful lockdown. CLAUDE_EGRESS_LOCKDOWN=strict then has no status to
+#     refuse on, and the fail-open spellings come up airgapped instead of open.
+#   - refresh_family()'s zero-nets retain, for the same reason on the refresh side.
+# So each call site sits after its guard and before the ruleset is built, and the
+# family is passed in because the two guards are decided one family at a time.
+ANTHROPIC_INBOUND_4="160.79.104.0/23"
+ANTHROPIC_INBOUND_6="2607:6bc0::/48"
+add_anthropic_inbound() {   # <family>
+    local n
+    if [[ "$1" == 4 ]]; then
+        for n in $ANTHROPIC_INBOUND_4; do add_net "$n"; done
+        log "pinned Anthropic's published INBOUND range ($ANTHROPIC_INBOUND_4) on IPv4, in addition to per-host resolution; the published OUTBOUND source addresses are deliberately NOT in this destination allowlist"
+    else
+        for n in $ANTHROPIC_INBOUND_6; do add_net6 "$n"; done
+        log "pinned Anthropic's published INBOUND range ($ANTHROPIC_INBOUND_6) on IPv6, in addition to per-host resolution; the published OUTBOUND source addresses are deliberately NOT in this destination allowlist"
+    fi
+    return 0
+}
+
 # GitHub serves git/clone/raw from a large, published IP space: resolving a few
 # hostnames misses codeload/objects mirrors. Pull the official ranges (best-
 # effort; falls back to per-host resolution below).
@@ -125,50 +298,49 @@ add_net6() { [[ -n "$1" && -z "${SEEN6[$1]:-}" ]] && { SEEN6[$1]=1; NETS6+=("$1"
 # IPv4 and left the IPv6 ruleset to per-host AAAA records alone, so a `git clone`
 # from a codeload mirror would work on one family and hang on the other. That is
 # not a mirror of the IPv4 rules, which is what the IPv6 table has to be.
-if meta="$(curl -fsS --max-time 10 https://api.github.com/meta 2>/dev/null)"; then
-    while IFS= read -r cidr; do add_net "$cidr"; done < <(
-        echo "$meta" | jq -r '(.web // []) + (.api // []) + (.git // []) + (.packages // [])
-                              | .[] | select(test(":")|not)' 2>/dev/null)
-    while IFS= read -r cidr6; do add_net6 "$cidr6"; done < <(
-        echo "$meta" | jq -r '(.web // []) + (.api // []) + (.git // []) + (.packages // [])
-                              | .[] | select(test(":"))' 2>/dev/null)
-    log "added GitHub published IPv4 and IPv6 ranges from api.github.com/meta"
-else
-    log "WARNING: could not fetch api.github.com/meta, relying on per-host DNS for GitHub"
-fi
+#
+# SUCCESS HERE IS RANGES, NOT A 2xx. curl exiting 0 says the transport worked, not
+# that the body carried an address in it: an intercepting proxy answering 200 with an
+# interstitial, a rate-limit or not-found JSON, or a /meta whose schema moved all
+# return a body this filter reduces to NOTHING. Reporting that as success is how a
+# refresh comes to commit a ruleset with GitHub's entire published address space
+# removed, and then remembers the empty result as the ranges in force, so the reuse
+# fallback has nothing left on any later cycle. Both callers below decide what to do
+# about an empty answer (retain, reuse, or fall back to per-host DNS); what this
+# function owes them is the truth about whether it produced anything.
+#
+# gh_fetch <v4-file> <v6-file>: 0 and at least one range written across the two files,
+# or non-zero with both files present and empty.
+gh_fetch() {
+    local meta
+    : > "$1"; : > "$2"
+    meta="$(curl -fsS --max-time 10 https://api.github.com/meta 2>/dev/null)" || return 1
+    echo "$meta" | jq -r '(.web // []) + (.api // []) + (.git // []) + (.packages // [])
+                          | .[] | select(test(":")|not)' 2>/dev/null > "$1"
+    echo "$meta" | jq -r '(.web // []) + (.api // []) + (.git // []) + (.packages // [])
+                          | .[] | select(test(":"))'      2>/dev/null > "$2"
+    [[ -s "$1" || -s "$2" ]] || { : > "$1"; : > "$2"; return 1; }
+    return 0
+}
 
-# Resolve each allowlist host to its current IPv4s AND IPv6s and pin them. Docker's
-# embedded DNS can take ~5s per name on the AAAA path, so resolve all hosts in
-# PARALLEL with a per-host timeout: total stays ~one lookup, not their sum, and
-# no single slow/hung name blocks boot. Both families are resolved in the SAME
-# parallel wave for exactly that reason: two sequential waves would double the
-# worst case that shape was chosen to avoid.
-rdir="$(mktemp -d)"
-for h in $HOSTS; do
-    [[ -z "$h" ]] && continue
-    ( timeout 6 getent ahostsv4 "$h" 2>/dev/null | awk '{print $1}' | sort -u > "$rdir/4_${h//\//_}" ) &
-    ( timeout 6 getent ahostsv6 "$h" 2>/dev/null | awk '{print $1}' | sort -u > "$rdir/6_${h//\//_}" ) &
-done
-wait
-for h in $HOSTS; do
-    [[ -z "$h" ]] && continue
-    ips="$(cat "$rdir/4_${h//\//_}" 2>/dev/null)"
-    [[ -z "$ips" ]] && { log "WARNING: could not resolve $h (timeout/NXDOMAIN), skipping"; continue; }
-    for ip in $ips; do add_net "$ip"; done
-done
-# A host with no AAAA is NAMED and SKIPPED, one host at a time. It is not a reason
-# to abort the IPv6 pass and it is certainly not a reason to leave IPv6 open: the
-# remaining hosts still get pinned, and a host that is IPv4-only is simply
-# unreachable over a family it does not publish an address on.
-for h in $HOSTS; do
-    [[ -z "$h" ]] && continue
-    ips6="$(cat "$rdir/6_${h//\//_}" 2>/dev/null)"
-    [[ -z "$ips6" ]] && { log "WARNING: could not resolve $h to an IPv6 address (no AAAA/timeout), skipping it in the IPv6 ruleset only"; continue; }
-    for ip in $ips6; do add_net6 "$ip"; done
-done
-rm -rf "$rdir"
-(( ${#NETS[@]} > 0 )) || fail_open "allowlist resolved to zero IPs"
-log "allowlist holds ${#NETS[@]} IPv4 nets from $(echo "$HOSTS" | wc -w) hosts"
+# Resolve each allowlist host to its current IPv4s AND IPv6s. Docker's embedded DNS
+# can take ~5s per name on the AAAA path, so resolve all hosts in PARALLEL with a
+# per-host timeout: total stays ~one lookup, not their sum, and no single slow/hung
+# name blocks boot. Both families are resolved in the SAME parallel wave for exactly
+# that reason: two sequential waves would double the worst case that shape was
+# chosen to avoid.
+#
+# resolve_wave <dir>: writes "<dir>/4_<host>" and "<dir>/6_<host>", one address per
+# line, empty when the name did not answer on that family.
+resolve_wave() {
+    local dir="$1" h
+    for h in $HOSTS; do
+        [[ -z "$h" ]] && continue
+        ( timeout 6 getent ahostsv4 "$h" 2>/dev/null | awk '{print $1}' | sort -u > "$dir/4_${h//\//_}" ) &
+        ( timeout 6 getent ahostsv6 "$h" 2>/dev/null | awk '{print $1}' | sort -u > "$dir/6_${h//\//_}" ) &
+    done
+    wait
+}
 
 # Build the filter-table ruleset and apply it atomically. INPUT stays ACCEPT
 # (inbound SSH; replies ride conntrack), OUTPUT defaults to DROP with the
@@ -189,30 +361,6 @@ build_rules() {
     done
     [[ "${1:-0}" == 1 ]] && echo '-A OUTPUT -m limit --limit 5/min -j LOG --log-prefix "[egress-drop] "'
     echo "COMMIT"
-}
-
-if   build_rules 1 | iptables-restore 2>/dev/null; then :
-elif build_rules 0 | iptables-restore 2>/dev/null; then log "applied without drop-logging (LOG target unavailable)"
-else fail_open "iptables-restore failed to apply the ruleset"
-fi
-
-# Confirm the policy actually flipped (atomic restore should guarantee it).
-[[ "$(iptables -S OUTPUT 2>/dev/null | head -1)" == "-P OUTPUT DROP" ]] \
-    || fail_open "default-deny policy not in effect after restore"
-
-log "IPv4 default-deny egress active (allow: loopback, established, DNS, + ${#NETS[@]} pinned nets on 22/80/443)"
-
-# ---------------------------------------------------------------------------
-# IPv6. Everything below runs with the IPv4 lockdown ALREADY COMMITTED, and is
-# structurally incapable of undoing it: no path here calls fail_open(), none
-# touches `iptables`, and none exits. The worst case is v6_fail(), which reports
-# the family as UNRESTRICTED and returns.
-# ---------------------------------------------------------------------------
-V6_DENY=0
-v6_fail() {
-    log "IPv6 ERROR: $*, leaving IPv6 egress UNRESTRICTED (the IPv4 lockdown above is unaffected)"
-    ip6tables -P OUTPUT ACCEPT 2>/dev/null || true   # say what is true: report open, be open
-    V6_DENY=0
 }
 
 # ICMPv6 types the IPv6 ruleset MUST let out, from RFC 4890's "must not be
@@ -257,6 +405,271 @@ build_rules6() {
     echo "COMMIT"
 }
 
+# ===========================================================================
+# The refresh pass: what a container that has ALREADY been locked down does
+# every CLAUDE_EGRESS_REFRESH_INTERVAL seconds. See the header for why this is
+# not simply the boot pass on a timer.
+# ===========================================================================
+
+ensure_state_dir() {
+    [[ -d "$STATE_DIR" ]] && return 0
+    ( umask 077; mkdir -p "$STATE_DIR" ) 2>/dev/null
+}
+
+# state_get <file> <host>: the addresses that host contributed to the ruleset in
+# force, or nothing if it contributed none (or if there is no memory at all).
+state_get() {
+    [[ -f "$1" ]] || return 0
+    awk -v h="$2" -F'\t' '$1==h{print $2; exit}' "$1" 2>/dev/null
+}
+
+# state_save <family> <resolve-dir> [github-dir]: record what the ruleset now in
+# force for that family was built from, and mark the family as committed. Only a
+# COMMITTED family gets a marker, which is what stops a refresh from sealing a
+# family the boot log reported as UNRESTRICTED: a family the boot pass could not
+# commit is left alone forever rather than quietly tightened under a live session.
+state_save() {
+    local fam="$1" rdir="$2" ghdir="${3:-}" h ips
+    (( REFRESH_INTERVAL > 0 )) || return 0
+    ensure_state_dir || return 0
+    : > "$STATE_DIR/resolved.$fam" 2>/dev/null || return 0
+    for h in $HOSTS; do
+        [[ -z "$h" ]] && continue
+        ips="$(cat "$rdir/${fam}_${h//\//_}" 2>/dev/null)"
+        ips="${ips//$'\n'/ }"
+        [[ -z "${ips// }" ]] && continue
+        printf '%s\t%s\n' "$h" "$ips" >> "$STATE_DIR/resolved.$fam" 2>/dev/null
+    done
+    [[ -n "$ghdir" && -f "$ghdir/$fam" ]] && cat "$ghdir/$fam" > "$STATE_DIR/github.$fam" 2>/dev/null
+    : > "$STATE_DIR/family.$fam" 2>/dev/null
+    return 0
+}
+
+# refresh_family <family> <resolve-dir> <github-dir>: re-commit one family, or
+# retain it. Returns 0 either way, always: a refresh is never allowed to be the
+# reason a running session stops.
+refresh_family() {
+    local fam="$1" rdir="$2" ghdir="$3"
+    local famname="IPv$fam" restore="iptables-restore"
+    [[ "$fam" == 6 ]] && restore="ip6tables-restore"
+
+    if [[ ! -f "$STATE_DIR/family.$fam" ]]; then
+        log "REFRESH: the boot pass never committed a $famname ruleset, so there is nothing to refresh on that family and it is left exactly as it is"
+        return 0
+    fi
+
+    # 1. THE RETAIN RULE. A host that contributed addresses to the ruleset in force
+    #    and now answers with nothing is a statement about the resolver, not about
+    #    the host. Name it, abandon this family's cycle, and leave the committed
+    #    table alone: the next cycle retries, and nothing a transient DNS failure
+    #    says can take a running session off the network.
+    local lost=() h ips prev
+    for h in $HOSTS; do
+        [[ -z "$h" ]] && continue
+        ips="$(cat "$rdir/${fam}_${h//\//_}" 2>/dev/null)"
+        prev="$(state_get "$STATE_DIR/resolved.$fam" "$h")"
+        [[ -z "${ips// }" && -n "${prev// }" ]] && lost+=("$h")
+    done
+    if (( ${#lost[@]} > 0 )); then
+        for h in "${lost[@]}"; do
+            log "REFRESH: $h returned NO $famname address this cycle but is pinned in the ruleset in force"
+        done
+        refresh_retain "${#lost[@]} host(s) that previously resolved came back empty on $famname (${lost[*]}), and narrowing the allowlist on a failed lookup is never correct"
+        return 0
+    fi
+
+    # 2. Rebuild this family's net list from the fresh answers, through the very
+    #    same helpers the boot pass uses. add_fam() rather than an `&&/||` chain on
+    #    purpose: add_net returns FALSE for an address it has already seen, so
+    #    `[[ fam == 4 ]] && add_net || add_net6` would put an IPv4 duplicate into the
+    #    IPv6 table, which is precisely the cross-family leak the two separate
+    #    seen-sets exist to make impossible.
+    local n ip
+    while IFS= read -r n; do add_fam "$fam" "$n"; done < "$ghdir/$fam"
+    for h in $HOSTS; do
+        [[ -z "$h" ]] && continue
+        ips="$(cat "$rdir/${fam}_${h//\//_}" 2>/dev/null)"
+        [[ -z "${ips// }" ]] && continue
+        for ip in $ips; do add_fam "$fam" "$ip"; done
+    done
+
+    # 3. Zero nets is the retain rule taken to its limit. At BOOT a sealed IPv6
+    #    table is correct (nothing is in force, nothing is lost). At refresh it is
+    #    the narrowest possible ruleset, so it is never committed: retain instead.
+    #    This asks what THIS CYCLE RESOLVED, which is why the published ranges are
+    #    not folded in until the next step: they are a constant, and a guard that
+    #    counts a constant is a comment, not a guard.
+    local count
+    if [[ "$fam" == 4 ]]; then count=${#NETS[@]}; else count=${#NETS6[@]}; fi
+    if (( count == 0 )); then
+        refresh_retain "the allowlist resolved to ZERO $famname nets this cycle, which would seal the family rather than refresh it"
+        return 0
+    fi
+
+    # 3b. The cycle produced something, so the published INBOUND range joins it, the
+    #     same way and in the same additive direction as at boot.
+    add_anthropic_inbound "$fam"
+    if [[ "$fam" == 4 ]]; then count=${#NETS[@]}; else count=${#NETS6[@]}; fi
+
+    # 4. ABSENT TOOLING RETAINS, it does not fail open and it does not stop the
+    #    session. There is a committed table in the kernel and no binary to replace
+    #    it with, so the only correct move is to leave it there.
+    if ! command -v "$restore" >/dev/null 2>&1; then
+        refresh_retain "$restore is not installed, so the $famname ruleset cannot be re-committed"
+        return 0
+    fi
+
+    # 5. The SAME atomic restore the boot pass uses: either the whole refreshed
+    #    default-deny table commits, or the previous table is left untouched. That
+    #    is what makes a rejected restore safe to simply report.
+    local applied=0
+    if [[ "$fam" == 4 ]]; then
+        if   build_rules 1 | iptables-restore 2>/dev/null; then applied=1
+        elif build_rules 0 | iptables-restore 2>/dev/null; then applied=1; log "REFRESH: $famname re-committed without drop-logging (LOG target unavailable)"
+        fi
+    else
+        if   build_rules6 1 | ip6tables-restore 2>/dev/null; then applied=1
+        elif build_rules6 0 | ip6tables-restore 2>/dev/null; then applied=1; log "REFRESH: $famname re-committed without drop-logging (LOG target unavailable)"
+        fi
+    fi
+    if (( applied == 0 )); then
+        refresh_retain "$restore rejected the refreshed $famname ruleset"
+        return 0
+    fi
+
+    state_save "$fam" "$rdir" "$ghdir"
+    log "REFRESH: $famname allowlist re-resolved and the refreshed ruleset committed atomically ($count nets from $(echo "$HOSTS" | wc -w) hosts)"
+    return 0
+}
+
+# One full cycle: resolve once for both families, then decide per family.
+refresh_pass() {
+    local w
+    w="$(mktemp -d 2>/dev/null)" || { refresh_retain "no work directory could be created for this cycle"; return 0; }
+    reset_nets
+    resolve_wave "$w"
+
+    # The published GitHub ranges are a lookup like any other, so the same rule binds:
+    # a lookup that came back empty must not shrink the allowlist. THE QUESTION IS
+    # WHAT THE FETCH PRODUCED, NEVER WHETHER curl EXITED 0. A 200 carrying no CIDRs
+    # (a proxy interstitial, a rate-limit body, a schema change) is an empty answer
+    # dressed as a success, and committing it would remove GitHub's entire published
+    # address space from a live ruleset and then overwrite the remembered copy with
+    # the empty result, so no later cycle could recover it either. It is decided per
+    # family because they are pinned per family: one family coming back empty must not
+    # cost the other its ranges, and must not cost itself the ones in force.
+    local fetched=0 reused=() fam
+    gh_fetch "$w/4" "$w/6" && fetched=1
+    for fam in 4 6; do
+        [[ -s "$w/$fam" ]] && continue
+        [[ -s "$STATE_DIR/github.$fam" ]] || continue
+        cat "$STATE_DIR/github.$fam" > "$w/$fam" 2>/dev/null || : > "$w/$fam"
+        reused+=("IPv$fam")
+    done
+    if (( ${#reused[@]} > 0 )); then
+        local reused_txt="${reused[*]}"
+        log "REFRESH: WARNING: the api.github.com/meta fetch produced no ranges for ${reused_txt// / and } this cycle, REUSING the published GitHub ranges the ruleset in force already carries (a lookup that came back empty never narrows the allowlist)"
+    elif (( fetched == 1 )); then
+        log "REFRESH: re-fetched the published GitHub ranges from api.github.com/meta"
+    else
+        log "REFRESH: WARNING: could not fetch any published ranges from api.github.com/meta and none are pinned, relying on per-host DNS for GitHub"
+    fi
+
+    refresh_family 4 "$w" "$w"
+    # The IPv4 arrays are already committed above; the IPv6 pass reuses NETS6,
+    # which reset_nets emptied at the top of this cycle and nothing else touched.
+    refresh_family 6 "$w" "$w"
+    rm -rf "$w"
+    return 0
+}
+
+refresh_daemon() {
+    if (( REFRESH_INTERVAL <= 0 )); then
+        log "REFRESH: CLAUDE_EGRESS_REFRESH_INTERVAL is absent, malformed or not positive, so the daemon has nothing to do and is not starting; the boot ruleset stays in force, resolved once"
+        exit 0
+    fi
+    ensure_state_dir && { echo "$$" > "$STATE_DIR/daemon.pid" 2>/dev/null || true; }
+    log "REFRESH: daemon started (pid $$, euid $EUID, every ${REFRESH_INTERVAL}s). It runs with the boot pass's privileges, outside the agent user's reach, and NEVER narrows the allowlist on a failed lookup."
+    while :; do
+        sleep "$REFRESH_INTERVAL"
+        refresh_pass
+    done
+}
+
+case "$MODE" in
+    refresh-once)   refresh_pass; exit 0 ;;
+    refresh-daemon) refresh_daemon ;;   # never returns
+esac
+
+# ===========================================================================
+# The boot pass. Enforcement path only from here: now the iptables tooling is
+# actually required, and a failure here still fails OPEN.
+# ===========================================================================
+command -v iptables         >/dev/null 2>&1 || fail_open "iptables not installed"
+command -v iptables-restore >/dev/null 2>&1 || fail_open "iptables-restore not installed"
+
+ghdir="$(mktemp -d)"
+if gh_fetch "$ghdir/4" "$ghdir/6"; then
+    while IFS= read -r cidr;  do add_net  "$cidr";  done < "$ghdir/4"
+    while IFS= read -r cidr6; do add_net6 "$cidr6"; done < "$ghdir/6"
+    log "added GitHub published IPv4 and IPv6 ranges from api.github.com/meta"
+else
+    log "WARNING: could not fetch any published ranges from api.github.com/meta, relying on per-host DNS for GitHub"
+fi
+
+rdir="$(mktemp -d)"
+resolve_wave "$rdir"
+for h in $HOSTS; do
+    [[ -z "$h" ]] && continue
+    ips="$(cat "$rdir/4_${h//\//_}" 2>/dev/null)"
+    [[ -z "$ips" ]] && { log "WARNING: could not resolve $h (timeout/NXDOMAIN), skipping"; continue; }
+    for ip in $ips; do add_net "$ip"; done
+done
+# A host with no AAAA is NAMED and SKIPPED, one host at a time. It is not a reason
+# to abort the IPv6 pass and it is certainly not a reason to leave IPv6 open: the
+# remaining hosts still get pinned, and a host that is IPv4-only is simply
+# unreachable over a family it does not publish an address on.
+for h in $HOSTS; do
+    [[ -z "$h" ]] && continue
+    ips6="$(cat "$rdir/6_${h//\//_}" 2>/dev/null)"
+    [[ -z "$ips6" ]] && { log "WARNING: could not resolve $h to an IPv6 address (no AAAA/timeout), skipping it in the IPv6 ruleset only"; continue; }
+    for ip in $ips6; do add_net6 "$ip"; done
+done
+# THE FAIL-OPEN GUARD, and it counts ONLY what this pass resolved: the published
+# ranges above (GitHub's, best-effort) and per-host DNS. Anthropic's published
+# INBOUND range is deliberately not folded in until the line after, because it is a
+# constant that no lookup can remove, and a guard that counts it is one that can
+# never fire: a container whose resolver answers nothing would seal itself to a
+# single /23, exit 0, and have the boot log call it lockdown.
+(( ${#NETS[@]} > 0 )) || fail_open "allowlist resolved to zero IPs"
+add_anthropic_inbound 4
+log "allowlist holds ${#NETS[@]} IPv4 nets from $(echo "$HOSTS" | wc -w) hosts"
+
+if   build_rules 1 | iptables-restore 2>/dev/null; then :
+elif build_rules 0 | iptables-restore 2>/dev/null; then log "applied without drop-logging (LOG target unavailable)"
+else fail_open "iptables-restore failed to apply the ruleset"
+fi
+
+# Confirm the policy actually flipped (atomic restore should guarantee it).
+[[ "$(iptables -S OUTPUT 2>/dev/null | head -1)" == "-P OUTPUT DROP" ]] \
+    || fail_open "default-deny policy not in effect after restore"
+
+log "IPv4 default-deny egress active (allow: loopback, established, DNS, + ${#NETS[@]} pinned nets on 22/80/443)"
+state_save 4 "$rdir" "$ghdir"
+
+# ---------------------------------------------------------------------------
+# IPv6. Everything below runs with the IPv4 lockdown ALREADY COMMITTED, and is
+# structurally incapable of undoing it: no path here calls fail_open(), none
+# touches `iptables`, and none exits. The worst case is v6_fail(), which reports
+# the family as UNRESTRICTED and returns.
+# ---------------------------------------------------------------------------
+V6_DENY=0
+v6_fail() {
+    log "IPv6 ERROR: $*, leaving IPv6 egress UNRESTRICTED (the IPv4 lockdown above is unaffected)"
+    ip6tables -P OUTPUT ACCEPT 2>/dev/null || true   # say what is true: report open, be open
+    V6_DENY=0
+}
+
 apply_v6() {
     # ABSENT TOOLING IS A FAILURE, NOT A SKIP. An image without ip6tables cannot
     # filter IPv6 at all, so IPv6 egress is wide open; calling that "skipped"
@@ -266,12 +679,15 @@ apply_v6() {
     command -v ip6tables         >/dev/null 2>&1 || { v6_fail "ip6tables not installed, so IPv6 egress cannot be filtered"; return; }
     command -v ip6tables-restore >/dev/null 2>&1 || { v6_fail "ip6tables-restore not installed, so IPv6 egress cannot be filtered"; return; }
 
-    # Zero resolved nets is still default-deny, never open: a sealed IPv6 table
-    # does not brick the container (the IPv4 allowlist above is committed and
+    # Zero resolved nets is still default-deny, never open: a nearly sealed IPv6
+    # table does not brick the container (the IPv4 allowlist above is committed and
     # carries the same hosts), whereas falling back to open IPv6 egress is the
-    # exact hole this script closes.
+    # exact hole this script closes. Asked BEFORE the published range is folded in,
+    # for the reason given at add_anthropic_inbound: this question is about what
+    # resolution produced, and the published range is not an answer to it.
     (( ${#NETS6[@]} > 0 )) \
-        || log "WARNING: the allowlist resolved to ZERO IPv6 nets; the IPv6 table will be default-deny with no allowlist punched through (IPv4 is unaffected)"
+        || log "WARNING: no host in the allowlist resolved to an IPv6 address; the IPv6 table will carry Anthropic's published inbound range and nothing else (IPv4 is unaffected)"
+    add_anthropic_inbound 6
     log "allowlist holds ${#NETS6[@]} IPv6 nets from $(echo "$HOSTS" | wc -w) hosts"
 
     if   build_rules6 1 | ip6tables-restore 2>/dev/null; then :
@@ -285,8 +701,10 @@ apply_v6() {
 
     V6_DENY=1
     log "IPv6 default-deny egress active (allow: loopback, established, DNS, NDP/PMTU ICMPv6, + ${#NETS6[@]} pinned nets on 22/80/443)"
+    state_save 6 "$rdir" "$ghdir"
 }
 apply_v6
+rm -rf "$rdir" "$ghdir"
 
 # Per-family posture, handed to the entrypoint as the exit status so the boot log
 # can name the family that is NOT covered. Reaching here at all means the IPv4
