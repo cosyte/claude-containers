@@ -462,8 +462,40 @@ DOCKER_BROWSER_IMAGE="${CLAUDE_IMAGE_DOCKER_BROWSER:-claude-code-box:docker-brow
 # of jobs wedged in uninterruptible D-state and the container went unkillable (super,
 # 2026-07-24). Non-browser build-repos keep disk /scratch so big pip/uv installs don't
 # ENOSPC (see the TMPDIR note below). Override sizes via the env vars.
-BROWSER_SCRATCH_TMPFS="${CLAUDE_BROWSER_SCRATCH_TMPFS:-6g}"
+#
+# 3g, not the original 6g: a --docker+--browser service now ALSO carries
+# DOCKER_STORAGE_TMPFS (below) in the same CLAUDE_MEM_LIMIT cgroup (default 16g), and
+# chromium/lighthouse/ffmpeg temp churn needs far less headroom than an image/layer
+# cache does. Bumped down 2026-09-02 to make room; raise it back per-service via
+# CLAUDE_BROWSER_SCRATCH_TMPFS if a build genuinely needs more scratch space.
+BROWSER_SCRATCH_TMPFS="${CLAUDE_BROWSER_SCRATCH_TMPFS:-3g}"
 BROWSER_PIDS_LIMIT="${CLAUDE_BROWSER_PIDS_LIMIT:-1024}"
+# --docker services: same class of problem, a DIFFERENT disk-backed path the above fix
+# never covered. The inner Docker engine's own image/layer store (/var/lib/docker,
+# normally the claude-docker-<repo> volume below) sits on the SAME all-HDD rpool mirror,
+# and inner-dockerd's shutdown teardown (overlay2 unmount/flush) can stall there in
+# uninterruptible D-state exactly like the chromium temp churn did: reproduced live on
+# `super` again on 2026-09-02, this time via the docker-engine path rather than /scratch,
+# and unrecoverable short of a host reboot (a genuinely D-state process cannot be
+# SIGKILLed). Default ON, mirroring BROWSER_SCRATCH_TMPFS.
+#
+# 8g: observed real usage was ~2.7G on one service and ~10.4G on another (an
+# accumulated, prunable cache, not a hard floor). Combined with BROWSER_SCRATCH_TMPFS
+# (3g) and /tmp (1g), a --docker+--browser service's tmpfs floor is 12g, leaving 4g of
+# CLAUDE_MEM_LIMIT's default 16g for the actual session, chromium, and dockerd process
+# memory: chosen to fit inside 16g rather than raising the limit, per operator
+# preference on 2026-09-02. A service that consistently needs more than 8g of image
+# cache will hit ENOSPC on its own tmpfs (a build/pull failure, not a host-level wedge):
+# either raise CLAUDE_MEM_LIMIT + this size for that service (--mem, and
+# CLAUDE_DOCKER_STORAGE_TMPFS in its own scenario .conf), or run `docker system prune`
+# inside it periodically.
+#
+# TRADE-OFF, accepted: unlike the persistent volume this replaces, a RAM-backed store is
+# wiped on every container recreate, so every recreate re-pulls every base image and
+# rebuilds every layer cold (the exact cost the volume existed to avoid). Set to "" to
+# keep the old disk-backed claude-docker-<repo> volume instead (recreate-safe cache, but
+# exposed to this wedge class again).
+DOCKER_STORAGE_TMPFS="${CLAUDE_DOCKER_STORAGE_TMPFS-8g}"
 
 # --- Collect repos as "owner<TAB>name<TAB>branch" -----------------------------
 # Two independent sources, combined: (1) gh enumeration of --org (owner=ORG for
@@ -623,6 +655,21 @@ for row in "${FINAL[@]}"; do
         svc_scratch_tmpfs=""
         svc_scratch_vol=$'\n      - claude-scratch-'"${svc}"':/scratch'
     fi
+    # --docker services: /var/lib/docker on a RAM tmpfs (svc_docker_tmpfs, appended to
+    # the tmpfs list) with NO disk volume, by default: see DOCKER_STORAGE_TMPFS above.
+    # DOCKER_STORAGE_TMPFS="" opts back into the old disk-backed claude-docker-<repo>
+    # volume (svc_docker_vol), which survives a recreate but is exposed to the same
+    # D-state wedge class the tmpfs exists to avoid.
+    if [[ -n "${DOCKER[$svc]:-}" && -n "$DOCKER_STORAGE_TMPFS" ]]; then
+        svc_docker_tmpfs=$'\n      - /var/lib/docker:rw,nosuid,nodev,exec,size='"${DOCKER_STORAGE_TMPFS}"
+        svc_docker_vol=""
+    elif [[ -n "${DOCKER[$svc]:-}" ]]; then
+        svc_docker_tmpfs=""
+        svc_docker_vol=$'\n      - claude-docker-'"${svc}"':/var/lib/docker'
+    else
+        svc_docker_tmpfs=""
+        svc_docker_vol=""
+    fi
     # Auth mount: either the single shared claude-auth volume (default), or one
     # read-write mount per named account (--accounts) at /auth-accounts/<name>:
     # mutually exclusive per service, mirroring claude-launch --accounts. Read-write:
@@ -686,7 +733,7 @@ for row in "${FINAL[@]}"; do
     pids_limit: ${svc_pids}
     stop_grace_period: ${CLAUDE_STOP_TIMEOUT}s
     tmpfs:
-      - /tmp:rw,nosuid,nodev,exec,size=1g${svc_scratch_tmpfs}
+      - /tmp:rw,nosuid,nodev,exec,size=1g${svc_scratch_tmpfs}${svc_docker_tmpfs}
     ports:
       - "${BIND_PREFIX}${port}:22"
 EOF
@@ -816,11 +863,14 @@ EOF
       - ${AK}:/etc/claude/authorized_keys:ro
       - ${GK}:/etc/claude/git-key:ro
 EOF
-    # Inner Docker image store. Sysbox gives the container its own /var/lib/docker, but it
-    # dies WITH the container, so without this volume every recreate re-pulls every base
-    # image and rebuilds every layer cold. Per-service, never shared: two daemons must not
-    # write one image store.
-    [[ -n "${DOCKER[$svc]:-}" ]] && echo "      - claude-docker-${svc}:/var/lib/docker"
+    # Inner Docker image store. Sysbox gives the container its own /var/lib/docker.
+    # DOCKER_STORAGE_TMPFS above puts it on RAM by default (svc_docker_tmpfs, already
+    # emitted into the tmpfs list); this volume line only fires when that is turned off
+    # (CLAUDE_DOCKER_STORAGE_TMPFS=""), the old disk-backed behavior: it dies WITH the
+    # container, so without EITHER the tmpfs or this volume every recreate re-pulls every
+    # base image and rebuilds every layer cold. Per-service, never shared: two daemons
+    # must not write one image store.
+    [[ -n "$svc_docker_vol" ]] && echo "      - claude-docker-${svc}:/var/lib/docker"
     cat <<EOF
     labels:
       claude.managed: "1"
@@ -884,13 +934,14 @@ for row in "${FINAL[@]}"; do
         printf '  claude-scratch-%s:\n    name: claude-scratch-%s\n' "$svc" "$svc"
         OWNED_VOLS["claude-scratch-$svc"]=1
     fi
-    # Only --docker services get an image store; declaring it for every service would
-    # create empty volumes for sessions that will never run a daemon. It is OWNED by this
-    # stack like the config/ws volumes, so register it too: otherwise a --mount naming it
-    # would slip past the guard below and get declared a SECOND time as external (a
-    # duplicate YAML key), and a `down -v` here would delete an image store another stack
-    # believed it had mounted read-only.
-    if [[ -n "${DOCKER[$svc]:-}" ]]; then
+    # Only --docker services with DOCKER_STORAGE_TMPFS turned OFF get a disk image-store
+    # volume; the default (RAM tmpfs, see DOCKER_STORAGE_TMPFS above) needs no volume at
+    # all. Declaring one for every --docker service would create empty/unused volumes.
+    # It is OWNED by this stack like the config/ws volumes, so register it too: otherwise
+    # a --mount naming it would slip past the guard below and get declared a SECOND time
+    # as external (a duplicate YAML key), and a `down -v` here would delete an image
+    # store another stack believed it had mounted read-only.
+    if [[ -n "${DOCKER[$svc]:-}" && -z "$DOCKER_STORAGE_TMPFS" ]]; then
         printf '  claude-docker-%s:\n    name: claude-docker-%s\n' "$svc" "$svc"
         OWNED_VOLS["claude-docker-$svc"]=1
     fi

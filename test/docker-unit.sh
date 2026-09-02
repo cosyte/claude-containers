@@ -223,9 +223,12 @@ else
     [[ "$api" == *'CLAUDE_DOCKER: "1"'* ]] \
         && ok "a --docker service gets CLAUDE_DOCKER=1 (the entrypoint's dockerd gate)" \
         || bad "a --docker service must set CLAUDE_DOCKER=1"
-    [[ "$api" == *"claude-docker-api:/var/lib/docker"* ]] \
-        && ok "a --docker service mounts its own image store at /var/lib/docker" \
-        || bad "a --docker service must mount claude-docker-<svc> at /var/lib/docker"
+    [[ "$api" == *"/var/lib/docker:rw,nosuid,nodev,exec,size="* ]] \
+        && ok "a --docker service mounts its own image store at /var/lib/docker, on RAM by default" \
+        || bad "a --docker service must mount /var/lib/docker (RAM tmpfs, by default)"
+    [[ "$api" != *"claude-docker-api:/var/lib/docker"* ]] \
+        && ok "the default RAM-tmpfs image store gets no disk volume mount" \
+        || bad "a --docker service defaulted to tmpfs must not ALSO mount the disk volume"
     [[ "$api" != *"cap_drop"* ]] \
         && ok "a --docker service does not cap-drop (the daemon needs the caps Sysbox scopes)" \
         || bad "a --docker service must not cap_drop"
@@ -247,13 +250,34 @@ else
         && ok "--docker + --browser selects the combined image" \
         || bad "--docker + --browser must select the docker-browser image"
 
-    # Top-level volume declarations, only for docker services.
+    # Top-level volume declarations: NONE for a RAM-tmpfs image store (the default), same
+    # as none for a non-docker service.
     grep -qE '^  claude-docker-api:' "$OUT" \
-        && ok "the image store is declared as a top-level volume" \
-        || bad "claude-docker-api must be declared under volumes:"
+        && bad "claude-docker-api must not be declared: the default image store is a tmpfs, not a volume" \
+        || ok "no top-level volume is declared for the default RAM-tmpfs image store"
     grep -qE '^  claude-docker-plain:' "$OUT" \
         && bad "a non-docker service must not get an image-store volume declaration" \
         || ok "no image-store volume is declared for the non-docker service"
+
+    # Opt-out (CLAUDE_DOCKER_STORAGE_TMPFS=""): the old disk-backed volume, recreate-safe
+    # but exposed to the D-state wedge class the tmpfs default exists to avoid.
+    OUT2="$TMPD/docker-storage-optout.yml"
+    PATH="$PATH_STUB:$PATH" CLAUDE_DOCKER_STORAGE_TMPFS="" "$REPO_ROOT/bin/claude-compose-gen" \
+        --out "$OUT2" --active api --docker api acme/api >/dev/null 2>&1
+    if [[ ! -s "$OUT2" ]]; then
+        bad "compose-gen with CLAUDE_DOCKER_STORAGE_TMPFS='' produced no file"
+    else
+        api2="$(awk -v s="  api:" 'index($0,s)==1{f=1;next} f && /^  [a-z0-9-]+:$/{exit} f{print}' "$OUT2")"
+        [[ "$api2" == *"claude-docker-api:/var/lib/docker"* ]] \
+            && ok  "CLAUDE_DOCKER_STORAGE_TMPFS='' opts back into the disk-backed volume" \
+            || bad "the opt-out must still mount claude-docker-<svc> at /var/lib/docker"
+        [[ "$api2" != *"/var/lib/docker:rw,nosuid,nodev,exec,size="* ]] \
+            && ok  "the opt-out mounts no /var/lib/docker tmpfs" \
+            || bad "the opt-out must not ALSO put /var/lib/docker on a tmpfs"
+        grep -qE '^  claude-docker-api:' "$OUT2" \
+            && ok  "the opt-out still declares claude-docker-api as a top-level volume" \
+            || bad "the opt-out must declare claude-docker-api under volumes:"
+    fi
 
     # Never the forbidden shortcuts, in generated YAML either.
     grep -qE 'privileged:\s*true|/var/run/docker\.sock' "$OUT" \
