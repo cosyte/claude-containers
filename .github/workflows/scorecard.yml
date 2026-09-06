@@ -1,0 +1,43 @@
+name: Scorecard
+
+# Thin caller of the org reusable in cosyte/.github, which runs OpenSSF Scorecard
+# over this repository's supply-chain posture and uploads the SARIF to the Security
+# tab.
+#
+# NO `pull_request` TRIGGER, and that omission is the point. Publishing needs the
+# default branch, and the analysis reads repository state (branch protection, the
+# permissions on the token, the workflow set) that a pull request's token does not
+# see the same way, so a pull-request run would publish a result about the wrong
+# thing. The trigger set is a weekly schedule plus push to main, and nothing else.
+# A consequence worth stating: this workflow cannot be exercised on the pull request
+# that introduces it. Its first real run is the post-merge push to main.
+#
+# PUBLICATION IS ON, deliberately, and it is one way. The reusable defaults
+# `publish-results` to true, which sends this repository's score, weaknesses
+# included, to the public OpenSSF REST API; a published datapoint is not retracted
+# by a later run. That is the right default here because cosyte/claude-containers is
+# a PUBLIC repository (measured with `gh repo view --json visibility` on 2026-09-06:
+# "PUBLIC"), so its posture is already inspectable and the published score buys the
+# badge and the ecosystem signal. The default is left in place rather than restated
+# as an input, so this caller stays a caller. If this repository is ever made
+# private, pass `publish-results: false` here: that keeps the SARIF upload and drops
+# the publication.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "27 3 * * 2"
+
+permissions:
+  contents: read
+
+jobs:
+  scorecard:
+    permissions:
+      contents: read # resolve the reusable workflow (contents:none is a startup failure)
+      security-events: write # upload the SARIF to the Security tab
+      id-token: write # publish results to the OpenSSF API (for the badge)
+    # A PUBLISHED REFERENCE, never @main. See the same note in codeql.yml: a
+    # reference at the default branch moves under this repo on someone else's clock.
+    uses: cosyte/.github/.github/workflows/scorecard.yml@workflows-2026-09-04-f29e9cc83cac
