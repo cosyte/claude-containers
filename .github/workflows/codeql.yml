@@ -1,0 +1,56 @@
+name: CodeQL
+
+# Thin caller of the org reusable in cosyte/.github. The pipeline is defined once
+# there; this file only declares when it runs, what it is allowed to do, and which
+# languages this tree actually contains.
+#
+# THE LANGUAGE SET IS LOAD-BEARING, and it is measured, not defaulted. The reusable
+# defaults `languages` to '["javascript-typescript"]'. This repository contains zero
+# .js, .mjs, .cjs, .ts or .tsx files: it is bash (bin/*, entrypoint.sh, test/*.sh,
+# scripts/*.sh), a Dockerfile, a Makefile, markdown, JSON and YAML, and its
+# package.json is a private task-runner shim with no dependencies. Accepting the
+# default would initialize CodeQL for a language that is not here, and an analysis
+# that extracts no source is a green check over nothing, which is worse than the
+# gap it closed.
+#
+# CodeQL has no bash analyser, so the one supported language this tree does contain
+# is `actions`, which extracts the GitHub Actions workflows under .github/workflows/.
+# That is not a consolation target: those workflows run with this repository's
+# credentials, so untrusted-input and unpinned-action findings there are the highest
+# value CodeQL can return on a repo shaped like this one. Adding this file and
+# scorecard.yml takes the analysed set from two workflows to four.
+#
+# If a compiled or interpreted language is ever added here, add it to the array
+# below. Never widen the array to a language the tree lacks, and never reach green
+# with continue-on-error, a paths-ignore that empties the analysis, or an empty
+# array: `fromJSON('[]')` produces zero analyze jobs and zero jobs report as a
+# satisfied check.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "27 3 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    permissions:
+      security-events: write # upload the SARIF to the Security tab
+      contents: read # resolve the reusable workflow and check this repo out
+      actions: read
+    # A PUBLISHED REFERENCE, never @main. A reference at the default branch would
+    # deliver every later change made in cosyte/.github on that repository's clock
+    # rather than this one's, reviewed by nobody here. A published reference names
+    # one commit and never moves.
+    uses: cosyte/.github/.github/workflows/codeql.yml@workflows-2026-09-04-f29e9cc83cac
+    with:
+      languages: '["actions"]'
