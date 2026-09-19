@@ -22,7 +22,7 @@ updates:
     commit-message:
       prefix: ci
 
-  # The base image (node:*-bookworm-slim) only. Dependabot rewrites the FROM tag;
+  # The base image (node:*-trixie-slim) only. Dependabot rewrites the FROM tag;
   # it does not touch anything installed inside the image.
   - package-ecosystem: docker
     directory: /

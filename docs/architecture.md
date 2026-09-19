@@ -2,7 +2,7 @@
 
 ## Component map
 
-- **Dockerfile**: `node:24-bookworm-slim`, system packages, `gh`, `uv`,
+- **Dockerfile**: `node:24-trixie-slim`, system packages, `gh`, `uv`,
   Claude Code via npm (pinned), non-root `claude` user, hardened sshd config,
   baked-in `claude-config/`.
 - **entrypoint.sh**: runs as root: refuses API-key auth, sets up sshd, fixes

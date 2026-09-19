@@ -12,7 +12,17 @@ ARG UV_VERSION=latest
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
 # --- Base image ---------------------------------------------------------------
-FROM node:${NODE_VERSION}-bookworm-slim
+#
+# trixie (Debian 13), not bookworm (12), and the reason is glibc. Bookworm ships
+# 2.36; trixie ships 2.41. Anything a session needs to run as a prebuilt Linux
+# binary sets a floor here, and the first one to bite was the OrcaSlicer
+# AppImage, whose binaries want GLIBC_2.38 -- on bookworm it will not load at
+# all, so the 3d repo could design a part in here and never slice it. Upstream
+# ships no older build, and an AppImage bundles its libraries but not its libc.
+#
+# Kept as a literal tag rather than an ARG: dependabot rewrites this FROM line
+# (see .github/dependabot.yml) and cannot do that through a variable.
+FROM node:${NODE_VERSION}-trixie-slim
 
 # --- Build-time configuration -------------------------------------------------
 # CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control.
