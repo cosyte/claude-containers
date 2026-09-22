@@ -1,0 +1,36 @@
+#!/bin/bash
+# claude: installed as /usr/local/bin/claude. Launches the npm-installed Claude Code
+# in the claude-owned prefix /opt/claude-code, repairing it first if a self-update
+# left it broken.
+#
+# The claude user's ~/.npmrc sets ignore-scripts=true (supply-chain hardening for
+# agent installs), and npm has no per-package exception. So when Claude Code
+# auto-updates itself with `npm install -g`, the package's postinstall (install.cjs,
+# which hardlinks the platform-native binary over the bin/claude.exe placeholder)
+# never runs, and `claude` becomes a stub that only prints "claude native binary not
+# installed". The placeholder is under 4 KiB, the real binary is hundreds of MiB, so
+# size is a reliable test (install.cjs itself uses the same 4096 cutoff).
+set -u
+
+PREFIX=/opt/claude-code
+PKG="$PREFIX/lib/node_modules/@anthropic-ai/claude-code"
+
+is_stub() {
+    local size
+    size="$(stat -c %s "$PKG/bin/claude.exe" 2>/dev/null)" || return 1
+    [ "$size" -lt 4096 ]
+}
+
+if is_stub && [ -f "$PKG/install.cjs" ]; then
+    # Lock on the package dir: several claude processes (session, watchdog respawn,
+    # an SSH shell) can start at once right after an update. Re-check under the lock.
+    (
+        flock -w 120 9 || exit 0
+        if is_stub; then
+            echo "claude: finishing the last Claude Code update (linking the native binary)..." >&2
+            cd "$PKG" && node install.cjs >&2
+        fi
+    ) 9<"$PKG"
+fi
+
+exec "$PREFIX/bin/claude" "$@"

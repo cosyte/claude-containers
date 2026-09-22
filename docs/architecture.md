@@ -19,14 +19,14 @@
   opened in Claude Code, it teaches the model the architecture, invariants,
   and operational playbook so it can drive build/login/launch/customize/debug.
 
-## Verified facts (Claude Code 2.1.258)
+## Verified facts (Claude Code 2.1.280)
 
 Everything below was checked against the installed binary, not just docs:
 
 - `--remote-control [name]` is a real top-level flag; `-n/--name` is a separate
   display-name flag. The **top-level** launch this image actually makes:
   `claude --dangerously-skip-permissions --remote-control "<project>"`: was
-  verified to parse and start on 2.1.258 (as the unprivileged `claude` user; the
+  verified to parse and start on 2.1.280 (as the unprivileged `claude` user; the
   CLI refuses skip-permissions when running as root, by design). Verify it on a
   TTY: with no tty the CLI falls into `--print` mode and exits on missing input
   *before* proving anything about the interactive launch.
@@ -224,7 +224,7 @@ no `-p`: those each disable features we need.
 ## Permission mode & Remote Control
 
 Launch is `claude --dangerously-skip-permissions --remote-control "<project>"`.
-On 2.1.258 these compose correctly. Belt-and-suspenders: `settings.json` also
+On 2.1.280 these compose correctly. Belt-and-suspenders: `settings.json` also
 sets `permissions.defaultMode = bypassPermissions` and
 `skipDangerousModePermissionPrompt: true` (a real settings key). If a future
 Claude Code regresses the interaction, set `CLAUDE_PERMISSION_MODE=acceptEdits`.
@@ -262,7 +262,12 @@ and that was the sole reason Remote Control never appeared. They are now never
 set. `DISABLE_AUTOUPDATER=1` (unrelated to flags) is no longer set either: as of
 CC-CLAUDE-CODE-UPGRADE (the 2.1.258 bump), auto-update is ON by default, so a
 running container's binary can self-update past the pinned `CLAUDE_CODE_VERSION`
-unless an operator sets `DISABLE_AUTOUPDATER=1` themselves. The entrypoint
+unless an operator sets `DISABLE_AUTOUPDATER=1` themselves. (Until the 2.1.280
+bump that was only nominal: the CLI sat in root-owned `/usr/local`, so every
+update failed with "Insufficient permissions to install update". It now lives in
+the claude-owned npm prefix `/opt/claude-code`, and `/usr/local/bin/claude` is
+`bin/claude-launcher`, which re-runs the postinstall that the claude user's
+`ignore-scripts=true` skips during a self-update.) The entrypoint
 also self-heals pre-existing per-container config volumes: it strips these keys
 from `settings.json` and, if any were present, clears
 `cachedGrowthBookFeatures`/`statsig` so the next run re-resolves the gate.

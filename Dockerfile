@@ -27,18 +27,17 @@ FROM node:${NODE_VERSION}-trixie-slim
 # --- Build-time configuration -------------------------------------------------
 # CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control.
 #
-# 2.1.258 (npm `latest` on 2026-09-01) is verified to support the exact launch this
+# 2.1.280 (npm `latest` on 2026-09-22) is verified to support the exact launch this
 # image makes: `claude --dangerously-skip-permissions --remote-control <name>`
 # (bin/claude-session): with both flags accepted TOGETHER and no interlock between
 # them. That combination is the reason this ARG is pinned at all; re-verify it on any
 # future bump (test/cli-version-unit.sh asserts the pin is consistent; the live
 # --remote-control handshake is the on-host check, CC-CLAUDE-CODE-UPGRADE-SMOKE).
 #
-# NO DEFAULT-MODEL CHANGE IN THIS BUMP. Opus 5 (`claude-opus-5`, 1M context) has been
-# the `opus` alias's target since CLI 2.1.219 (the 2.1.207 -> 2.1.220 bump) and stays so
-# through 2.1.258: no new Opus release landed in this range (Fable 5.1 landed in
-# 2.1.257, irrelevant unless CLAUDE_MODEL=fable). Pin CLAUDE_MODEL=claude-opus-4-8 on a
-# container that must stay off Opus 5.
+# DEFAULT-MODEL CHANGE IN THIS BUMP. 2.1.280 added Opus 5.5 (`claude-opus-5-5`, 1M
+# context) and made it the `opus` alias's target, so `--model opus` (this image's
+# default) moves the fleet from Opus 5 (the target since CLI 2.1.219) to Opus 5.5.
+# Pin CLAUDE_MODEL=claude-opus-5 on a container that must stay on Opus 5.
 #
 # WHY THE FLOOR EXISTS (CC-CLAUDE-CODE-UPGRADE): the `opus` alias resolves to the LATEST
 # Opus, and Opus 4.8 shipped in CLI 2.1.154, so the old 2.1.145 pin silently resolved
@@ -64,6 +63,19 @@ FROM node:${NODE_VERSION}-trixie-slim
 #     container can run more than one `claude` process (RC session + subagents).
 #   - 2.1.257: fixed background sessions left running an older binary piling up
 #     across auto-updates instead of being retired.
+#
+# Landed between 2.1.258 and 2.1.280, and relevant to this image:
+#   - 2.1.271: fixed `--resume` dropping the 1M context window when the resumed
+#     session's model family differs from the configured default (hits the RC
+#     watchdog's `--continue` respawn across this bump's Opus 5 -> 5.5 change).
+#   - 2.1.271: Remote Control leaves fewer empty claude.ai sessions when setup fails
+#     on a flaky network.
+#   - 2.1.273: fixed a subshell hiding a dangerous `rm` from bypass mode's checks.
+#   - 2.1.277: fixed failed auto-updates leaving large staged downloads behind in
+#     `~/.cache/claude/staging`, and RC session bookkeeping failing on a malformed
+#     `~/.claude.json` placeholder record.
+#   - 2.1.280: Opus 5.5 becomes the default Opus (see above); fixed resuming a
+#     session with unfinished background agents starting a model turn on its own.
 #
 # Landed between 2.1.241 and 2.1.258, and relevant to this image:
 #   - 2.1.243: fixed cross-session messaging (SendMessage/ListAgents) silently
@@ -158,7 +170,7 @@ FROM node:${NODE_VERSION}-trixie-slim
 #     tmux pane would die on an invalid-choice refusal.
 #   - 2.1.198: Remote Control is disabled when ANTHROPIC_BASE_URL points at a
 #     non-Anthropic host. This image never sets it (and §1 refuses API-key auth).
-ARG CLAUDE_CODE_VERSION=2.1.258
+ARG CLAUDE_CODE_VERSION=2.1.280
 # PNPM_VERSION: pnpm baked into the image. "latest" works but isn't
 # reproducible: pin a real version (e.g. 10.4.1), same as UV_VERSION.
 ARG PNPM_VERSION=latest
@@ -197,9 +209,23 @@ RUN set -eux; \
 COPY --from=uv /uv /uvx /usr/local/bin/
 
 # --- Claude Code (npm global, NOT the native installer) -----------------------
-# The native installer auto-updates and has historically done an aggressive
-# startup filesystem scan that OOM'd containers. The npm global package does
-# neither, so the pinned version stays pinned.
+# The native installer has historically done an aggressive startup filesystem scan
+# that OOM'd containers, so this stays on the npm package.
+#
+# SELF-UPDATABLE PREFIX: the CLI lives in its OWN npm prefix, /opt/claude-code, owned
+# by the claude user, not in root's /usr/local. Sessions run as `claude`, and the
+# auto-updater's "global" method runs `npm install -g` as that user: under root-owned
+# /usr/local every attempt died with "Insufficient permissions to install update".
+# /usr/local/etc/npmrc points npm's global prefix here (set at the END of this file,
+# after the root `npm install -g` layers for pnpm/chrome-devtools-mcp, which stay in
+# /usr/local), so the updater installs into a tree it can write.
+#
+# /usr/local/bin/claude is NOT npm's bin link but bin/claude-launcher (root-owned): the
+# claude user's ~/.npmrc has ignore-scripts=true, so a self-update skips the package's
+# postinstall and leaves bin/claude.exe as a 500-byte stub that only prints "claude
+# native binary not installed". The launcher re-runs that postinstall (under a lock)
+# when it finds the stub, then execs the real binary. It sits before
+# /opt/claude-code/bin on PATH, and every caller in this image resolves `claude` by name.
 RUN set -eu; \
     # --- GUARD 1: the effective version must clear the Opus-4.8 floor -------------
     # This is NOT hygiene. `--model opus` (this image's default) resolves to the LATEST
@@ -235,13 +261,14 @@ RUN set -eu; \
         echo "       Fix: update (or delete) CLAUDE_CODE_VERSION in your .env, then rebuild." >&2; \
         exit 1; \
     fi; \
-    npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}; \
+    npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} --prefix /opt/claude-code; \
     npm cache clean --force; \
+    chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-code; \
     # --- GUARD 2: the installed binary really IS the pinned version ---------------
     # Without this the pin is decorative: a RUN that resolved `@latest`, or an npm that
     # served something else, would go unnoticed (the old line ran `claude --version` but
     # compared it to nothing).
-    installed="$(claude --version | awk '{print $1}')"; \
+    installed="$(/opt/claude-code/bin/claude --version | awk '{print $1}')"; \
     if [ "$installed" != "${CLAUDE_CODE_VERSION}" ]; then \
         echo "ERROR: pinned CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} but the installed CLI reports '$installed'." >&2; \
         exit 1; \
@@ -483,6 +510,7 @@ COPY sshd_config /etc/ssh/sshd_config
 # --- Baked-in Claude config + entrypoint --------------------------------------
 COPY claude-config/ /opt/claude-config/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY bin/claude-launcher /usr/local/bin/claude
 COPY bin/claude-session /usr/local/bin/claude-session
 COPY bin/claude-dev /usr/local/bin/claude-dev
 COPY bin/claude-autopilot /usr/local/bin/claude-autopilot
@@ -508,7 +536,7 @@ COPY bin/claude-deps-check /usr/local/bin/claude-deps-check
 # only the retired broker ever wrote to, and the controller had collapsed to a
 # pass-through to claude-autopilot. See docs/legacy-sysbox-broker.md.
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude /usr/local/bin/claude-session \
         /usr/local/bin/claude-dev /usr/local/bin/claude-autopilot \
         /usr/local/bin/claude-enqueue /usr/local/bin/claude-scm-observer \
         /usr/local/bin/claude-egress-firewall \
@@ -620,7 +648,13 @@ ENV CLAUDE_USER=${CLAUDE_USER} \
     npm_config_cache=/cache/npm \
     UV_CACHE_DIR=/cache/uv \
     PIP_CACHE_DIR=/cache/pip \
-    PATH=/cache/mise/shims:/cache/cargo/bin:/cache/go/bin:${PATH}
+    PATH=/cache/mise/shims:/cache/cargo/bin:/cache/go/bin:${PATH}:/opt/claude-code/bin
+
+# Global npm prefix -> the claude-owned /opt/claude-code (see the Claude Code install
+# section): what lets the auto-updater, and any agent `npm i -g`, write without root.
+# Set only here, after every root `npm install -g` layer. It goes in the global npmrc,
+# not ENV, so an SSH shell that did not inherit the Dockerfile ENV still resolves it.
+RUN printf 'prefix=/opt/claude-code\n' >> /usr/local/etc/npmrc
 
 EXPOSE 22
 
