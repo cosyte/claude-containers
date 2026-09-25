@@ -195,7 +195,7 @@ prompt. If a future Claude Code version prompts anyway:
   `SSH_AUTHORIZED_KEYS`. Point it at a file containing your public key and
   relaunch. (Remote Control still works without SSH.)
 - Wrong port: `claude-list` shows the assigned port; `claude-launch <name>`
-  reprints the connect line. Ports are auto-assigned in 2200–2299.
+  reprints the connect line. Ports are auto-assigned in 2200-2299.
 - Host key changed after `docker volume rm claude-sshkeys`: clear the stale
   entry with `ssh-keygen -R "[host]:<port>"`.
 - Connects then immediately closes: that's the tmux attach exiting because the
@@ -280,6 +280,69 @@ tri-state: unset = auto (browser image self-enables), `1`/`--browser` = force on
 - **The flag is per-session.** SSH remotes / on-disk state aren't affected; if
   you stop and `claude-launch <name>` resumes, the MCP registration is in the
   per-container config volume and persists across restarts.
+
+## GPU sessions (`--gpu`)
+
+NVIDIA only. Start with `claude-gpu status` inside the session (or `docker exec <name>
+claude-gpu status`): `ok` names the card, driver, free VRAM, NVENC sessions and
+utilization; `degraded (<reason>)` quotes what broke; `off` means the container was not
+created with `--gpu`. The boot-time verdict is in `/run/claude-gpu/state` and in
+`docker logs <name>` (a `GPU DEGRADED` banner), and `claude-healthcheck` prints it as
+`healthy; gpu: ...`. A degraded GPU never makes the container unhealthy.
+
+**The service will not start at all: `CDI device injection failed: unresolvable CDI
+devices nvidia.com/gpu=all`.** The host has no CDI spec for the GPU (never generated, or
+deleted). Docker refuses to create a container whose device it cannot resolve, so this is
+the one GPU failure that cannot degrade. On the host, as root:
+`nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml` (or enable the toolkit's
+`nvidia-cdi-refresh` path/service units, which regenerate it after driver changes), then
+`docker info | grep nvidia.com/gpu` must list `nvidia.com/gpu=all`. To run the session
+without the GPU meanwhile, drop `--gpu` from the `.conf` (or the launch), regenerate and
+recreate. `claude-launch --gpu` and `claude-compose-gen` check for the device up front.
+
+**`gpu: degraded (nvidia-smi failed ...: Failed to initialize NVML: Driver/library version
+mismatch)`.** The host's kernel module and user-space driver disagree, almost always a
+driver update without a reboot. Nothing inside the container can fix it: reboot the host
+(or reload the NVIDIA kernel modules), check `nvidia-smi` on the host, then restart the
+container so CDI mounts the matching libraries. Until then GPU work runs on CPU.
+
+**`gpu: degraded (nvidia-smi is not in this container ...)`.** `CLAUDE_GPU=1` is set but no
+device was attached (the service was created without the CDI device, e.g. by hand).
+Recreate it through the generator or `claude-launch --gpu`.
+
+**Jobs keep landing on CPU: `device=CPU (GPU still busy ...)`.** The card is shared and the
+guard is being polite: another tenant (a media server's hardware transcodes, another GPU
+session) holds VRAM, keeps the SMs busy, or has NVENC sessions open. The line names the
+number that failed. Wait, lower the job's needs, or tune `--min-free-mib`, `--max-util`,
+`--max-nvenc` and `--wait` (or their `CLAUDE_GPU_*` defaults). Per-process attribution is
+only visible from the host (`nvidia-smi pmon -c 1`, then map the PID through
+`/proc/<pid>/cgroup` to a container); inside a container `nvidia-smi` shows only the
+device-wide numbers.
+
+**Out of memory on the GPU.** `claude-gpu run` and `claude-gpu blender` retry a GPU run
+that failed with an out-of-memory error once on CPU and say so. Make the scene or batch
+smaller, or raise `--min-free-mib` so it waits for more headroom.
+
+**EGL or OpenGL picks Mesa (`llvmpipe`) on a GPU session.** Check, in order:
+`/usr/share/glvnd/egl_vendor.d/10_nvidia.json` exists (CDI mounts it; if not, the device
+is not attached); `__EGL_VENDOR_LIBRARY_FILENAMES` is not set (the guard sets it only for
+CPU runs); nothing puts a private `libGL`/`libEGL` on `LD_LIBRARY_PATH` (a bundled copy
+shadows glvnd's dispatch and therefore NVIDIA); `DISPLAY` is unset (headless programs
+should go straight to EGL). Blender's OpenGL backend does not log its renderer: ask it
+(`blender -b --python-expr "import gpu; print(gpu.platform.renderer_get())"`). Note that
+`eglinfo`'s default platforms can crash on NVIDIA without `/dev/dri`; use
+`eglinfo -B -p surfaceless`.
+
+**`claude-blender-install` fails.** `CHECKSUM MISMATCH` means the download is not the
+pinned build: it was deleted and nothing was installed; do not work around it, re-run
+(another mirror is tried) or check the pin. blender.org can answer scripted downloads
+with a bot challenge, which is why two official mirrors follow it in the source list.
+The install lives in the shared `/cache/blender`, so a half-installed tree is never
+visible: the install is renamed into place only after it is complete.
+
+**CUDA says the device or architecture is unsupported.** CUDA 13 dropped compute
+capability below 7.5. Use userspace built for CUDA 12.x on such a card (for example
+`cupy-cuda12x` plus the `nvidia-*-cu12` runtime wheels).
 
 ## Container restart-loops
 

@@ -18,6 +18,13 @@
 #                              WITH_BROWSER=1, i.e. `make build-browser`; a browser
 #                              image auto-enables it even without this flag)
 #   --no-browser               opt out of the chrome-devtools MCP on a browser image
+#   --gpu                      give the session the host's NVIDIA GPU: the CDI device
+#                              nvidia.com/gpu=all on plain runc (cap-drop ALL kept),
+#                              /scratch on a RAM tmpfs (CLAUDE_GPU_SCRATCH_TMPFS, 4g)
+#                              and CLAUDE_GPU=1 for the claude-gpu guard. Needs the NVIDIA
+#                              Container Toolkit's CDI spec on the host. CLAUDE_GPU=1 in
+#                              .env makes it the default.
+#   --no-gpu                   opt out when CLAUDE_GPU=1 is set in .env
 #   --extra-args "<args>"      extra args passed to claude via CLAUDE_EXTRA_ARGS
 #   --expose <h:c>             publish an extra host:container port (repeatable)
 #   --dev-cmd <command>        auto-start a dev server on boot in a tmux 'dev' window
@@ -46,7 +53,7 @@ set -euo pipefail
 LAUNCH_BIN_DIR="$(dirname "${BASH_SOURCE[0]}")"
 source "$LAUNCH_BIN_DIR/_common.sh"
 
-usage() { sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
 # EXTRA/MCP_LIST/DEVCMD/MKTS/PLUGINS default from .env (sourced by _common.sh);
@@ -77,6 +84,8 @@ CLAUDE_BROKER_GIT_KEY="${CLAUDE_BROKER_GIT_KEY:-1}"
 # (claude-cache) is mounted at /cache; --cache <vol> overrides the name;
 # --cache off / --no-cache disables it (per-container installs).
 EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER="" BROWSER_EXPLICIT=0 IMAGE_EXPLICIT=0 CACHE_ARG=""
+# GPU: "" = follow CLAUDE_GPU from .env/env (off when unset), 1 = on, 0 = explicit opt-out.
+GPU=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --repo)        REPO="$2"; OPTS_GIVEN=1; shift 2 ;;
@@ -89,6 +98,8 @@ while [[ $# -gt 0 ]]; do
         --mcp)         MCP_LIST="${MCP_LIST:+$MCP_LIST,}$2"; OPTS_GIVEN=1; shift 2 ;;
         --browser)     BROWSER=1; BROWSER_EXPLICIT=1; OPTS_GIVEN=1; shift ;;
         --no-browser)  BROWSER=0; BROWSER_EXPLICIT=1; OPTS_GIVEN=1; shift ;;
+        --gpu)         GPU=1; OPTS_GIVEN=1; shift ;;
+        --no-gpu)      GPU=0; OPTS_GIVEN=1; shift ;;
         --extra-args)  EXTRA="$2"; OPTS_GIVEN=1; shift 2 ;;
         --expose)      EXPOSE_RAW+=("$2"); OPTS_GIVEN=1; shift 2 ;;
         --dev-cmd)     DEVCMD="$2"; OPTS_GIVEN=1; shift 2 ;;
@@ -128,6 +139,12 @@ case "$(printf '%s' "${CLAUDE_DOCKER:-}" | tr -d '[:space:]' | tr '[:upper:]' '[
        (it needed the Sysbox runtime on the host). Delete the line from your .env.
        (History: docs/legacy-sysbox-broker.md.)" ;;
 esac
+if [[ -z "$GPU" ]]; then
+    case "$(printf '%s' "${CLAUDE_GPU:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) GPU=1 ;;
+        *)             GPU=0 ;;
+    esac
+fi
 [[ -n "$PROJECT" ]] || usage 1
 [[ -n "$REPO" && -n "$WS_PATH" ]] && die "--repo and --workspace are mutually exclusive"
 
@@ -204,6 +221,25 @@ if [[ "$BROWSER" == "1" ]]; then
         fi
     fi
 fi
+# GPU: the CDI device must be resolvable NOW, because Docker refuses to create a container
+# whose CDI device it cannot find, and that refusal cannot degrade into a CPU-only session.
+# Everything the device needs arrives through the CDI spec: no runtime, no capability.
+GPU_ARGS=() SCRATCH_ARGS=(-v "$(scratch_volume "$PROJECT"):/scratch")
+if [[ "$GPU" == "1" ]]; then
+    cdi="$(docker info --format '{{range .DiscoveredDevices}}{{.ID}} {{end}}' 2>/dev/null || true)"
+    [[ " $cdi " == *" nvidia.com/gpu=all "* ]] || die "--gpu: Docker lists no CDI device nvidia.com/gpu=all on this host.
+       Install the NVIDIA Container Toolkit and generate its CDI spec (as root):
+         nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml
+       then check:  docker info | grep nvidia.com/gpu
+       Or drop --gpu to launch without the GPU."
+    gpu_scratch="${CLAUDE_GPU_SCRATCH_TMPFS:-4g}"
+    size_to_mib "$gpu_scratch" >/dev/null || die "CLAUDE_GPU_SCRATCH_TMPFS '$gpu_scratch' is not a size like 4g"
+    GPU_ARGS=(--device nvidia.com/gpu=all -e CLAUDE_GPU=1)
+    # /scratch (TMPDIR) on RAM, like the generator does for GPU services: render temp and
+    # kernel caches stay off the disk pool. Charged to --memory; see .env.example.
+    SCRATCH_ARGS=(--tmpfs "/scratch:rw,nosuid,nodev,exec,size=${gpu_scratch}")
+fi
+
 [[ -n "$PORT" ]] || PORT="$(alloc_port)"
 host_port_free "$PORT" || warn "host port $PORT looks busy; Docker may refuse it"
 
@@ -313,7 +349,8 @@ docker run -d \
     -p "$SSH_PUBLISH" \
     "${EXPOSE_ARGS[@]}" \
     "${ENV_FILE_ARG[@]}" \
-    -v "$(scratch_volume "$PROJECT"):/scratch" \
+    "${GPU_ARGS[@]}" \
+    "${SCRATCH_ARGS[@]}" \
     -e TMPDIR=/scratch \
     -e CLAUDE_PROJECT_NAME="$PROJECT" \
     -e CLAUDE_MODEL="$MODEL" \
@@ -373,6 +410,8 @@ info "Model: ${MODEL:-opus (best available, container default)}"
     info "Dev server auto-starts on boot in tmux window 'dev' (claude-attach, then: tmux select-window -t claude:dev)"
 # Only announce an explicit choice; in auto mode the entrypoint decides by image
 # (a browser image auto-registers, a lean image stays silent): no noise here.
+[[ "$GPU" == "1" ]] && \
+    info "GPU: nvidia.com/gpu=all via CDI; run 'claude-gpu status' inside (see docs/troubleshooting.md, GPU)"
 case "$BROWSER" in
     1) info "Frontend debug: chrome-devtools MCP force-enabled (headless Chromium in-container)" ;;
     0) info "Frontend debug: chrome-devtools MCP opted out (--no-browser)" ;;

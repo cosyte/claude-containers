@@ -182,6 +182,49 @@ if [[ -n "$SCRATCH_DIR" && "$SCRATCH_DIR" != "/tmp" ]]; then
     fi
 fi
 
+# --- 2b. GPU probe (CLAUDE_GPU=1, a --gpu session) ----------------------------
+# A --gpu session has the host's NVIDIA device injected by CDI at creation. Probe it once,
+# BOUNDED (a wedged driver must never hang boot), and record the result where the
+# healthcheck, the guard and anyone who SSHes in can read it. A GPU that is unusable at
+# boot DEGRADES the session loudly instead of failing it: the session still starts, CPU
+# fallbacks still work, and the operator sees why in this log, on the tmux status line
+# and in `claude-healthcheck`. The usual cause is a host driver update without a reboot
+# (NVML "Driver/library version mismatch"). A MISSING CDI spec on the host is different:
+# Docker refuses to create the container at all, so that case never reaches this code.
+# GPU_STATE_FILE / GPU_GUARD are named (not inlined) so test/gpu-unit.sh can run this
+# exact block unprivileged against a sandbox and a fake guard.
+GPU_STATE_FILE=/run/claude-gpu/state
+GPU_GUARD=/usr/local/bin/claude-gpu
+GPU_DEGRADED_REASON=""
+if [[ "${CLAUDE_GPU:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    mkdir -p "${GPU_STATE_FILE%/*}" && chmod 755 "${GPU_STATE_FILE%/*}"
+    # `&& ... ||` keeps a non-zero probe from tripping `set -e`: a degraded GPU is a
+    # result to report, not a reason to stop booting.
+    gpu_line="$(CLAUDE_GPU_PROBE_TIMEOUT="${CLAUDE_GPU_PROBE_TIMEOUT:-10}" \
+        timeout 20 "$GPU_GUARD" status --oneline 2>&1)" && gpu_rc=0 || gpu_rc=$?
+    case "$gpu_rc" in
+        0)   ;;
+        124) gpu_line="gpu: degraded (the boot probe timed out after 20s)" ;;
+        3)   ;;
+        *)   gpu_line="gpu: degraded (the boot probe failed, exit ${gpu_rc}: ${gpu_line:-no output})" ;;
+    esac
+    printf '%s\n' "$gpu_line" > "$GPU_STATE_FILE.tmp" && mv -f "$GPU_STATE_FILE.tmp" "$GPU_STATE_FILE"
+    chmod 644 "$GPU_STATE_FILE" 2>/dev/null || true
+    if [[ "$gpu_line" == "gpu: ok"* ]]; then
+        log "GPU                 : ${gpu_line#gpu: }"
+    else
+        GPU_DEGRADED_REASON="${gpu_line#gpu: degraded (}"; GPU_DEGRADED_REASON="${GPU_DEGRADED_REASON%)}"
+        log "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        log "GPU DEGRADED: ${GPU_DEGRADED_REASON}"
+        log "This --gpu session is starting WITHOUT a usable GPU. Everything else works, and"
+        log "GPU jobs fall back to CPU through claude-gpu. Fix it on the host (a driver update"
+        log "needs a reboot; 'nvidia-smi' on the host must work), then restart this container."
+        log "Details: docs/troubleshooting.md, GPU."
+        log "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    fi
+    unset gpu_line gpu_rc
+fi
+
 # --- 3. SSH host keys (persistent) -------------------------------------------
 if [[ ! -f "$HOSTKEY_DIR/ssh_host_ed25519_key" ]]; then
     log "Generating persistent SSH host keys"
@@ -759,6 +802,25 @@ else
     log "Managed policy       : NOT ENFORCED ($managed_why). NO setting is managed: everything stays overridable from inside the container, exactly as it was before this image delivered any policy."
 fi
 
+# --- 7b. GPU note for the session (CLAUDE_GPU=1) -----------------------------------
+# The session has to discover the GPU tooling on its own, so a GPU session gets a short
+# note in Claude Code's MANAGED memory file (root-owned, read above the user's own
+# CLAUDE.md). Written only when CLAUDE_GPU=1, rewritten on every boot (it lives in the
+# container layer), and never over a file an operator put there: ours carries a marker.
+GPU_NOTE_SRC="/opt/claude-config/CLAUDE.gpu.md"
+GPU_NOTE_DST="/etc/claude-code/CLAUDE.md"
+GPU_NOTE_MARK="claude-containers: GPU session note"
+if [[ "${CLAUDE_GPU:-0}" =~ ^(1|true|yes|on)$ && -f "$GPU_NOTE_SRC" ]]; then
+    if [[ -e "$GPU_NOTE_DST" ]] && ! grep -qF "$GPU_NOTE_MARK" "$GPU_NOTE_DST" 2>/dev/null; then
+        log "GPU note            : NOT written, $GPU_NOTE_DST is an operator's own file"
+    elif mkdir -p "${GPU_NOTE_DST%/*}" && chmod 755 "${GPU_NOTE_DST%/*}" \
+            && install -o root -g root -m 644 "$GPU_NOTE_SRC" "$GPU_NOTE_DST"; then
+        log "GPU note            : $GPU_NOTE_DST (claude-gpu, claude-blender-install)"
+    else
+        log "GPU note            : WARNING, could not write $GPU_NOTE_DST"
+    fi
+fi
+
 # --- 8. Merge baked-in config ------------------------------------------------
 # Everything baked into the image is overridable at runtime by mounting onto
 # the target path (we only fill what's absent).
@@ -1240,6 +1302,12 @@ fi
 # interactive shell if it exits, so SSH stays usable. The pane lives in window
 # 'main' (the RC watchdog respawns it by name in interactive mode).
 asclaude tmux new-session -d -s claude -n main -x 220 -y 50 "$MAIN_PANE_CMD"
+# A degraded GPU (§2b) stays visible to anyone attached, not only in the boot log.
+if [[ -n "$GPU_DEGRADED_REASON" ]]; then
+    asclaude tmux set-option -t claude status-right-length 120 >/dev/null 2>&1 || true
+    asclaude tmux set-option -t claude status-right \
+        "#[bg=red,fg=white,bold] GPU DEGRADED: ${GPU_DEGRADED_REASON//#/##} (claude-gpu status) " >/dev/null 2>&1 || true
+fi
 log "Claude Code session 'claude' started in tmux (mode: $CLAUDE_MODE)"
 
 # Optional dev server: runs $CLAUDE_DEV_CMD in its own 'dev' tmux window so it

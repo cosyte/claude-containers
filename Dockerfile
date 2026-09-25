@@ -204,6 +204,35 @@ RUN set -eux; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
+# --- GL / EGL userspace (every variant) ---------------------------------------
+# A --gpu session gets the NVIDIA driver's own user libraries (libcuda, libEGL_nvidia,
+# libGLX_nvidia, OptiX, the Vulkan ICD, nvidia-smi) injected by CDI at container
+# creation, matched to the host driver. What CDI does NOT bring is the vendor-neutral
+# side those libraries plug into, so it is baked here, in EVERY variant: a GPU session
+# must be able to start on any image, and a CPU-only one still needs GL to render a
+# preview in software. Never add an NVIDIA driver library here: a copy in the image
+# would drift from the host driver and shadow the one CDI mounts.
+#   libglvnd0 libegl1 libgl1 libopengl0 libglx0
+#       glvnd, the GL/EGL dispatch layer. It reads /usr/share/glvnd/egl_vendor.d and picks
+#       NVIDIA (10_nvidia.json, mounted by CDI) when the GPU is attached, else Mesa. OCP
+#       (build123d) and VTK hard-link libGL.so.1, Blender links libGL and libOpenGL.
+#   libegl-mesa0 libgl1-mesa-dri libglx-mesa0 libosmesa6
+#       Mesa llvmpipe, the software renderer: the CPU fallback for EGL/GLX (EEVEE, VTK)
+#       and the only renderer a session without the GPU has. libosmesa6 serves VTK's
+#       OSMesa window. (glvnd's libegl1/libglx0 pull the Mesa vendor packages anyway.)
+#   libx11-6 libxext6 libxi6 libxrender1 libxfixes3 libxxf86vm1 libxkbcommon0 libsm6 libice6
+#       the X client libraries Blender's official Linux build links against even when it
+#       runs headless (`-b`; it then renders offscreen through EGL, with no X server).
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        libglvnd0 libegl1 libgl1 libopengl0 libglx0 \
+        libegl-mesa0 libgl1-mesa-dri libglx-mesa0 libosmesa6 \
+        libx11-6 libxext6 libxi6 libxrender1 libxfixes3 libxxf86vm1 libxkbcommon0 libsm6 libice6; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*; \
+    test -f /usr/share/glvnd/egl_vendor.d/50_mesa.json
+
 # --- uv / uvx (multi-arch via the official distroless image) ------------------
 COPY --from=uv /uv /uvx /usr/local/bin/
 
@@ -380,7 +409,7 @@ RUN set -eux; \
 # the installed toolchains are kept.
 RUN set -eux; \
     mkdir -p /cache/mise /cache/cargo /cache/go/pkg/mod /cache/go/bin \
-             /cache/npm /cache/uv /cache/pip; \
+             /cache/npm /cache/uv /cache/pip /cache/blender; \
     chown -R ${CLAUDE_UID}:${CLAUDE_GID} /cache
 
 # --- Optional: headless Chromium + chrome-devtools-mcp (frontend debugging) --
@@ -473,6 +502,19 @@ COPY bin/claude-rc-watchdog /usr/local/bin/claude-rc-watchdog
 COPY bin/claude-usage-watchdog /usr/local/bin/claude-usage-watchdog
 COPY bin/claude-session-id /usr/local/bin/claude-session-id
 COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
+# The GPU guard (--gpu sessions; says "off" elsewhere) and the pinned Blender installer.
+# `blender` on PATH runs the build claude-blender-install put in the shared /cache, or says
+# how to install it. Wrapped rather than symlinked so the message names the fix.
+COPY bin/claude-gpu /usr/local/bin/claude-gpu
+COPY bin/claude-blender-install /usr/local/bin/claude-blender-install
+RUN printf '%s\n' \
+      '#!/usr/bin/env bash' \
+      '# blender: runs the pinned Blender that claude-blender-install put in the shared cache.' \
+      'bin="${CLAUDE_BLENDER_ROOT:-/cache/blender}/current/blender"' \
+      '[[ -x "$bin" ]] || { echo "blender: not installed yet. Run claude-blender-install (pinned, checksum-verified, into the shared /cache)." >&2; exit 127; }' \
+      'exec "$bin" "$@"' \
+      > /usr/local/bin/blender \
+    && chmod 755 /usr/local/bin/blender
 # _common.sh rides along because claude-disk-gc sources it.
 COPY bin/_common.sh /usr/local/bin/_common.sh
 # Storage/disk safety: claude-disk-gc is a standalone maintenance tool (docker system +
@@ -496,6 +538,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude /usr/local/bin/c
         /usr/local/bin/claude-usage-watchdog \
         /usr/local/bin/claude-session-id \
         /usr/local/bin/claude-healthcheck \
+        /usr/local/bin/claude-gpu \
+        /usr/local/bin/claude-blender-install \
         /usr/local/bin/claude-disk-gc \
         /usr/local/bin/claude-deps-check \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
@@ -587,7 +631,12 @@ RUN set -eux; \
 #    NOT a blanket "/", so the agent's own repo toolchain auto-applies while
 #    any config outside /workspace still refuses to auto-run. See
 #    docs/toolchain-provisioning.md and docs/shared-tool-cache.md.
+#  - VTK_DEFAULT_OPENGL_WINDOW: VTK (and PyVista, build123d previews) renders offscreen
+#    through EGL, which picks the NVIDIA driver on a --gpu session and Mesa llvmpipe
+#    otherwise. Without it VTK first tries X, warns that there is no display, and only
+#    then falls back to EGL.
 ENV CLAUDE_USER=${CLAUDE_USER} \
+    VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow \
     CLAUDE_CONFIG_DIR=/home/${CLAUDE_USER}/.claude \
     CLAUDE_RC_DEBUG_LOG=/tmp/claude-rc-debug.log \
     NODE_NO_WARNINGS=1 \

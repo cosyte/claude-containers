@@ -93,7 +93,7 @@ small descriptive commits as you change things.
 | `entrypoint.sh` | Root → refuse API key → (login mode) → fix volume perms → host keys → authorized_keys → git key/identity → credential reconcile loop → seed `.claude.json` trust → merge bake-ins (CLAUDE.md, settings, plugins, commands, skills) → workspace (use/clone/fail) → register MCP via CLI → `sshd` → `gosu claude tmux` running `claude-session` → stay PID 1 with signal traps. |
 | `bin/claude-session` | tmux pane cmd: `cd /workspace`, `exec claude --dangerously-skip-permissions --remote-control "<project>" $EXTRA`; falls back to a shell so SSH stays usable. |
 | `bin/claude-dev` | tmux `dev`-window cmd: runs `$CLAUDE_DEV_CMD` (a dev server) in `/workspace` on boot, shell fallback. Started by the entrypoint only when `CLAUDE_DEV_CMD` is set. |
-| `bin/_common.sh` | Shared lib: `.env` load, defaults, `sanitize`, volume names, `alloc_port` (2200–2299, skips used), state checks, `print_connect`. |
+| `bin/_common.sh` | Shared lib: `.env` load, defaults, `sanitize`, volume names, `alloc_port` (2200-2299, skips used), state checks, `print_connect`. |
 | `bin/claude-launch` | Create/start a container; auto port; labels carry metadata; surfaces a fast-failing entrypoint. `--expose H:C` / `--dev-cmd` publish + auto-start a dev server; `--browser` enables the chrome-devtools MCP for frontend debugging (needs a WITH_BROWSER=1 image). |
 | `bin/claude-list/attach/stop/rm/logs` | Manage containers. `claude-attach` opens the live tmux session via `docker exec` (local, no SSH key). `claude-rm --purge` also deletes the per-project volumes. |
 | `bin/claude-tui` | `whiptail` menu over the whole fleet, grouped by compose stack (discovered live from `com.docker.compose.project*` labels, no hardcoded paths; pre-seed a stack with zero containers via `CLAUDE_TUI_STACKS`). Per-session: attach/start/stop/restart/logs/remove/connect-info. Per-stack: bring up a dormant (never-created) repo, switch which auth account it uses (edits its `.env`'s `AUTH_VOLUME`, regenerates via its sibling `*.conf`, recreates only the containers actually running, by service name, so an already-running dormant-profile container is never silently skipped by a bare `up -d`), regenerate its compose. Accounts screen wraps `claude-account-list`/`claude-account-login`. Disk screen wraps `claude-disk-gc`/`-verify`. Pure navigation: shells out to the scripts here, no duplicated logic. Needs `whiptail` (the `newt` package). |
@@ -107,6 +107,9 @@ small descriptive commits as you change things.
 | `.env.example` | Every tunable, documented. Copy to `.env`. |
 | `test/smoke.sh` | Automated acceptance for everything that doesn't need real OAuth/phone. |
 | `test/unit.sh` | Docker-free unit tests (version-floor helper, warn-only runc posture, the §0 retired-env guard, and the prune gates: the removed bins stay removed, `CLAUDE_CONTROLLER=1` is refused, and the autopilot never invokes `claude` without a command). Also pins that the removed per-session Docker engine stays removed at every live site. |
+| `bin/claude-gpu` | In-container NVIDIA GPU guard (baked): `status` (ok / degraded (reason) / off), `run -- cmd` (waits for free VRAM, low utilization and few NVENC sessions on the SHARED card, else CPU; retries a GPU OOM once on CPU; says which device ran), `blender` (Cycles OptiX, else CUDA, else CPU via `--cycles-device`), `env gpu|cpu` (the device contract). |
+| `bin/claude-blender-install` | Baked: installs the pinned, SHA-256-verified Blender LTS rootless into the shared `/cache/blender/<ver>` under a lock (fail closed on a checksum mismatch; blender.org then two official mirrors). `blender` on PATH runs it. |
+| `test/gpu-unit.sh` | Docker-free `--gpu` tests: generator emission (CDI device, RAM `/scratch`, `CLAUDE_GPU=1`, runc, cap_drop kept, non-GPU services byte-identical, unknown repo refused), `claude-launch --gpu` args against a stubbed docker, the guard against a fake `nvidia-smi` (idle / busy co-tenant / short VRAM / OOM then CPU / NVML failure / hang), the installer failing closed, §2b degrading without failing the boot, the healthcheck GPU line: CI. |
 | `test/launch-unit.sh` | Docker-free tests for the container boundary: `harden_run_args` (cap-drop ALL + no-new-privileges), no `--privileged` / host socket anywhere, the removed `--docker`/`--no-docker`/`--sysbox` flags refusing, every compose service on plain runc, and the disk-backed `/scratch`: CI. |
 | `test/sizing-unit.sh` | Docker-free sizing tests (size/reservation math, K resolution from config, compose reservation/pids emission): CI. |
 | `test/disk-unit.sh` | Docker-free disk tests (`disk_free_mib` parse/fail-closed, `claude-disk-gc`'s plan safety): CI. |
@@ -131,6 +134,7 @@ make login                    # one-time OAuth; opens a URL, paste the code
 ./bin/claude-launch <name> --workspace /abs/path/to/checkout
 ./bin/claude-launch <name> [--port N] [--mcp foo] [--browser] [--extra-args "…"]
 ./bin/claude-launch <name> [--expose 4321:4321] [--dev-cmd "npm run dev …"]
+./bin/claude-launch <name> --gpu               # the host's NVIDIA GPU via CDI (needs the toolkit's CDI spec)
 ./bin/claude-list                       # name, state, ssh port, repo, uptime
 ./bin/claude-attach <name>              # attach to its live tmux session (local)
 ./bin/claude-stop <name>                # graceful; state preserved
@@ -231,6 +235,22 @@ Chromium is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
 `claude.browser` LABEL and warns early if `--browser` is used against the
 lean image. Pair `--browser` with `--dev-cmd`/`--expose` so the agent both
 runs and debugs the dev server.
+
+**GPU sessions (`--gpu`, NVIDIA only):** `compose-gen --gpu REPO` (repeatable; the repo
+must be in the stack) or `claude-launch --gpu` / `CLAUDE_GPU=1` gives the service the CDI
+device `nvidia.com/gpu=all` on plain runc: `cap_drop: ALL` + the minimal set +
+`no-new-privileges` unchanged, NO `runtime: nvidia`, no extra cap, no privilege.
+`/scratch` becomes a RAM tmpfs (`CLAUDE_GPU_SCRATCH_TMPFS`, 4g), `CLAUDE_GPU=1` is set, and
+the session gets a GPU note in `/etc/claude-code/CLAUDE.md` (managed memory, root-owned).
+Toggling is regenerate + `docker compose up -d <svc>` (creation-time). Every image ships
+glvnd + Mesa + Blender's X client libs; NEVER bake NVIDIA driver libs (CDI injects them,
+matched to the host). Host needs the NVIDIA Container Toolkit's CDI spec: without it Docker
+refuses to create the container (`unresolvable CDI devices`); the fix is on the host
+(`nvidia-ctk cdi generate`), or drop `--gpu`. A broken driver (NVML mismatch after an
+update without reboot) DEGRADES: banner in the log, red tmux status, healthcheck
+`healthy; gpu: degraded (<reason>)`, never unhealthy. Inside, the agent uses
+`claude-gpu status|run|blender` and `claude-blender-install`. The card is shared (media
+server NVENC): always go through the guard.
 
 **No Docker inside a session.** The per-session Docker engine (`--docker`) and the
 Sysbox runtime it needed were removed; `--docker`, `--no-docker` and `--sysbox` now

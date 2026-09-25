@@ -524,7 +524,11 @@ if [[ "$EG6_OK" != 1 ]]; then
     echo "  SKIP  live IPv6 allowlisted-host check (same reason)"
     echo "  SKIP  live IPv6 non-allowlisted drop check (same reason)"
     echo "  SKIP  live IPv6 agent-cannot-alter-the-rules check (same reason)"
-elif ! docker exec "$EG6CN" ip6tables -S OUTPUT 2>/dev/null | head -1 | grep -q "DROP"; then
+# Materialize, then test: under pipefail, `docker exec … | head -1 | grep -q` fails when
+# head exits before the producer has written everything (SIGPIPE, 141), and with a
+# realistic allowlist the ruleset is long enough for that to happen at random, which
+# sent a correctly applied ruleset down the "not applied" branch.
+elif eg6_policy="$(docker exec "$EG6CN" ip6tables -S OUTPUT 2>/dev/null || true)"; [[ "${eg6_policy%%$'\n'*}" != *DROP* ]]; then
     # The IPv6 ruleset did not apply. That is a legal outcome (fail-open is the posture),
     # but the boot log then owes the operator the word UNRESTRICTED, so check THAT and
     # skip the live allow/deny pair rather than pretending it ran.
@@ -732,6 +736,13 @@ echo "== 15. git-key handling: brokered BY DEFAULT, usable by the agent, not rea
 ssh-keygen -q -t ed25519 -f "$TMP/gitkey" -N ''
 printf 'not-a-private-key\n' > "$TMP/badkey"      # non-empty, so §5 engages; unloadable, so the broker fails
 GKPRIV="$(sed -n '2p' "$TMP/gitkey")"             # a base64 line of the PRIVATE key body
+# Make the fixture root-only for the agent WHATEVER uid runs this smoke. A key file the
+# runner owns at 0600 is readable by the agent whenever the runner's uid is the agent's
+# (1000, the common single-user host), because bind mounts keep host ownership: the check
+# below would then fail on the host's file mode, not on anything the image does. Mode 000
+# is what a root-owned 0600 key looks like to the agent (unreadable), while container root
+# still reads it through CAP_DAC_OVERRIDE, which the minimal capability set keeps.
+chmod 000 "$TMP/gitkey"
 # Every assertion in this section reads its container's log through a HERE-STRING, never
 # through `docker logs … | grep -q`. This file runs under `pipefail`, where `grep -q`
 # exits on the first match, `docker logs` then takes SIGPIPE (141), and the PIPELINE fails
@@ -1003,9 +1014,9 @@ PROBE
 fi
 
 # --- 16f. Disk-backed scratch (TMPDIR) ----------------------------------------
-# /tmp is a 1g tmpfs in RAM. Anything honoring TMPDIR (pip/uv wheel builds, docker
-# save|load, the inner containerd) hits that wall and ENOSPCs while the pool has terabytes
-# free, so temp must land on a disk-backed volume instead.
+# /tmp is a 1g tmpfs in RAM. Anything honoring TMPDIR (pip/uv wheel builds, big
+# archives) hits that wall and ENOSPCs while the pool has terabytes free, so temp must
+# land on a disk-backed volume instead.
 #
 # Needs its OWN container: the scratch volume + TMPDIR are supplied by claude-launch, not
 # baked into the image, so $CN (a bare `docker run` above) has neither. Reproduce the
@@ -1050,6 +1061,70 @@ docker volume rm "$SCRVOL" >/dev/null 2>&1 || true
 # privileged runtime back.
 check "the image ships no Docker daemon (the per-session engine was removed)" \
     '! docker run --rm --entrypoint sh "$IMAGE" -c "command -v dockerd || command -v containerd"'
+
+# --- 18. GPU sessions (--gpu) ----------------------------------------------------
+# 18a needs the NVIDIA Container Toolkit's CDI device on this host (a skip says so).
+# 18b needs no GPU at all: it is the "GPU unusable at boot" case, simulated the way it
+# happens for real (CLAUDE_GPU=1, but no usable device), and the session must still
+# start, say so loudly, and stay healthy.
+GPU_CDI=0
+[[ " $(docker info --format '{{range .DiscoveredDevices}}{{.ID}} {{end}}' 2>/dev/null) " == *" nvidia.com/gpu=all "* ]] && GPU_CDI=1
+GPUHARDEN="$(source "$REPO_ROOT/bin/_common.sh"; harden_run_args)"
+# The real healthcheck, in the real image, with only its liveness probe (pgrep) shimmed:
+# smoke has no OAuth, so `claude` is not running and the probe would stop at "unhealthy"
+# before it ever reached the GPU line this section is about.
+hc_gpu() {
+    docker exec "$1" sh -c 'd="$(mktemp -d)"; printf "#!/bin/sh\nexit 0\n" > "$d/pgrep"; chmod +x "$d/pgrep"; PATH="$d:$PATH" /usr/local/bin/claude-healthcheck; echo "rc=$?"' 2>&1
+}
+echo "== 18a. a --gpu session sees the card through CDI, on runc, fully hardened =="
+if [[ "$GPU_CDI" != 1 ]]; then
+    echo "  SKIP  18a GPU checks (this host's Docker lists no CDI device nvidia.com/gpu=all)"
+else
+    GPUCN="claude-smoke-gpu-$$"
+    # shellcheck disable=SC2086
+    docker run -d --name "$GPUCN" $GPUHARDEN --device nvidia.com/gpu=all -e CLAUDE_GPU=1 \
+        -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=gpusmoke -e TMPDIR=/scratch \
+        --tmpfs /scratch:rw,nosuid,nodev,exec,size=4g \
+        -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+    wait_tmux "$GPUCN" || true
+    gpulog="$(docker logs "$GPUCN" 2>&1 || true)"
+    check "the boot probe reports the GPU ok" 'grep -q "GPU                 : ok (" <<<"$gpulog"'
+    check "claude-gpu status is ok inside the session (exit 0)" \
+        'st="$(docker exec "$GPUCN" gosu claude claude-gpu status 2>&1)"; grep -qx "gpu: ok" <<<"$st"'
+    check "the healthcheck says 'healthy; gpu: ok' (exit 0)" \
+        '[[ "$(hc_gpu "$GPUCN")" == $'"'"'healthy; gpu: ok\nrc=0'"'"' ]]'
+    check "runtime is runc, CapDrop is ALL, and the CDI device is requested" \
+        '[[ "$(docker inspect -f "{{.HostConfig.Runtime}} {{.HostConfig.CapDrop}} {{json .HostConfig.DeviceRequests}}" "$GPUCN")" == "runc [ALL] "*"nvidia.com/gpu=all"* ]]'
+    check "glvnd sees both EGL vendors: NVIDIA (from CDI) and Mesa (from the image)" \
+        'docker exec "$GPUCN" test -f /usr/share/glvnd/egl_vendor.d/10_nvidia.json && docker exec "$GPUCN" test -f /usr/share/glvnd/egl_vendor.d/50_mesa.json'
+    check "the session's managed memory carries the GPU note" \
+        'docker exec "$GPUCN" grep -q "claude-gpu status" /etc/claude-code/CLAUDE.md'
+    check "blender on PATH explains how to install it (exit 127) before claude-blender-install" \
+        '! docker exec "$GPUCN" gosu claude blender --version >/dev/null 2>&1; [ "$(docker exec "$GPUCN" gosu claude sh -c "blender --version >/dev/null 2>&1; echo \$?")" = 127 ]'
+    docker rm -f "$GPUCN" >/dev/null 2>&1 || true
+fi
+echo "== 18b. GPU unusable at boot: the session degrades loudly, never fails =="
+GPUDCN="claude-smoke-gpu-degraded-$$"
+# shellcheck disable=SC2086
+docker run -d --name "$GPUDCN" $GPUHARDEN -e CLAUDE_GPU=1 \
+    -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=gpudegraded \
+    -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+wait_tmux "$GPUDCN" || true
+gpudlog="$(docker logs "$GPUDCN" 2>&1 || true)"
+check "the session still starts (tmux up) with CLAUDE_GPU=1 and no usable GPU" 'grep -q "started in tmux" <<<"$gpudlog"'
+check "the boot log carries the GPU DEGRADED banner with the reason" \
+    'grep -q "GPU DEGRADED: nvidia-smi is not in this container" <<<"$gpudlog"'
+check "claude-gpu status says degraded (exit 3)" \
+    '[ "$(docker exec "$GPUDCN" gosu claude sh -c "claude-gpu status >/dev/null; echo \$?")" = 3 ]'
+check "the healthcheck reports 'gpu: degraded (<reason>)' and still exits 0 (never fails health)" \
+    'hl="$(hc_gpu "$GPUDCN")"; [[ "$hl" == "healthy; gpu: degraded (nvidia-smi is not in this container"*"rc=0" ]]'
+check "the tmux status line shows GPU DEGRADED to anyone attached" \
+    'so="$(docker exec "$GPUDCN" gosu claude tmux show-options -t claude status-right 2>&1)"; grep -q "GPU DEGRADED" <<<"$so"'
+check "GPU work falls back to CPU and says so" \
+    'ro="$(docker exec "$GPUDCN" gosu claude claude-gpu run -- true 2>&1)"; grep -q "device=CPU (GPU degraded" <<<"$ro"'
+docker rm -f "$GPUDCN" >/dev/null 2>&1 || true
+check "a session WITHOUT --gpu gets no GPU note" \
+    '! docker exec "$CN" test -e /etc/claude-code/CLAUDE.md 2>/dev/null || ! docker exec "$CN" grep -q "GPU session note" /etc/claude-code/CLAUDE.md'
 
 echo
 echo "==============================================="
