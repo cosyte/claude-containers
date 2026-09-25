@@ -937,9 +937,9 @@ else
         -e CLAUDE_BROWSER=1 -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
     wait_tmux "$BRWFCN" || true
     check "CLAUDE_BROWSER=1 on a non-browser image fails LOUD (ERROR, not a buried warn)" \
-        'docker logs "$BRWFCN" 2>&1 | grep -q "ERROR: CLAUDE_BROWSER=1"'
+        'grep -q "ERROR: CLAUDE_BROWSER=1" <<<"$(docker logs "$BRWFCN" 2>&1)"'
     check "the loud failure is actionable (names the rebuild command)" \
-        'docker logs "$BRWFCN" 2>&1 | grep -q "make build-browser"'
+        'grep -q "make build-browser" <<<"$(docker logs "$BRWFCN" 2>&1)"'
     check "no MCP is registered when the request cannot be satisfied (no silent op)" \
         '! mcp_get "$BRWFCN"'
     docker rm -f "$BRWFCN" >/dev/null 2>&1 || true
@@ -1064,6 +1064,35 @@ docker volume rm "$SCRVOL" >/dev/null 2>&1 || true
 # privileged runtime back.
 check "the image ships no Docker daemon (the per-session engine was removed)" \
     '! docker run --rm --entrypoint sh "$IMAGE" -c "command -v dockerd || command -v containerd"'
+
+# --- 17b. Several repos in one workspace (GIT_REPOS) ---------------------------------
+# Two local bare repos, mounted read-only and cloned over file://, so this needs no network
+# and no key. The session must boot, each repo must land in /workspace/<repo>, and the
+# Claude pane must start in /workspace, the parent of both.
+echo "== 17b. multi-repo workspace =="
+mkdir -p "$TMP/mr-bare"
+for r in alpha beta; do
+    git init -q -b main "$TMP/mr-src-$r"
+    echo "$r" > "$TMP/mr-src-$r/README"
+    git -C "$TMP/mr-src-$r" add README
+    GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+        git -C "$TMP/mr-src-$r" commit -qm init
+    git clone -q --bare "$TMP/mr-src-$r" "$TMP/mr-bare/$r.git"
+done
+chmod -R a+rX "$TMP/mr-bare"
+MRCN="claude-smoke-multirepo-$$"
+docker run -d --name "$MRCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=multirepo \
+    -e GIT_REPOS="file:///repos/alpha.git file:///repos/beta.git" \
+    -v "$TMP/mr-bare:/repos:ro" "$IMAGE" >/dev/null 2>&1 || true
+wait_tmux "$MRCN" || true
+mrlog="$(docker logs "$MRCN" 2>&1 || true)"
+check "the boot log says the workspace holds both repos" \
+    'grep -q "Workspace           : /workspace holds 2 repos (alpha beta)" <<<"$mrlog"'
+check "each repo is a checkout at /workspace/<repo>, owned by the agent" \
+    '[ "$(docker exec "$MRCN" gosu claude sh -c "cat /workspace/alpha/README /workspace/beta/README; git -C /workspace/beta rev-parse --is-inside-work-tree" | tr "\n" " ")" = "alpha beta true " ]'
+check "the Claude pane starts in /workspace, the parent of both" \
+    '[ "$(docker exec "$MRCN" gosu claude tmux display-message -p -t claude:main "#{pane_current_path}")" = "/workspace" ]'
+docker rm -f "$MRCN" >/dev/null 2>&1 || true
 
 # --- 18. GPU sessions (--gpu) ----------------------------------------------------
 # 18a needs the NVIDIA Container Toolkit's CDI device on this host (a skip says so).

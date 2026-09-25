@@ -5,7 +5,7 @@
   "description": "Task-runner shim only: this repo is bash + Make + Docker, ships no package, and has zero dependencies. The scripts below exist so a consuming repo's verify script and CI drive the same gates.",
   "scripts": {
     "lint": "make lint && bash scripts/check-no-emdash.sh",
-    "test": "test/unit.sh && test/cli-version-unit.sh && test/sizing-unit.sh && test/disk-unit.sh && test/compose-gen-unit.sh && test/launch-unit.sh && test/gpu-unit.sh && test/egress-packages-unit.sh && test/mise-unit.sh && test/cache-unit.sh && test/manifest-hardening-unit.sh && test/pkg-install-guide-unit.sh",
+    "test": "test/unit.sh && test/cli-version-unit.sh && test/sizing-unit.sh && test/disk-unit.sh && test/compose-gen-unit.sh && test/launch-unit.sh && test/gpu-unit.sh && test/workspace-unit.sh && test/egress-packages-unit.sh && test/mise-unit.sh && test/cache-unit.sh && test/manifest-hardening-unit.sh && test/pkg-install-guide-unit.sh",
     "check:no-emdash": "bash scripts/check-no-emdash.sh"
   }
 }

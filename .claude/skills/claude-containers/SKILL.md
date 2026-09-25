@@ -14,7 +14,7 @@ description: >-
 
 A self-hostable Docker image plus bash launchers for running many isolated,
 long-lived Claude Code coding sessions on one host. One container = one session
-= one git repo, reachable two ways at once: SSH into a persistent tmux session,
+= one git repo (or several, as sibling checkouts under /workspace), reachable two ways at once: SSH into a persistent tmux session,
 and the Claude mobile app's Remote Control (Code tab). Auth is a Claude **Max**
 subscription via OAuth, **never API keys**.
 
@@ -135,6 +135,7 @@ make login                    # one-time OAuth; opens a URL, paste the code
 ./bin/claude-launch <name> [--port N] [--mcp foo] [--browser] [--extra-args "…"]
 ./bin/claude-launch <name> [--expose 4321:4321] [--dev-cmd "npm run dev …"]
 ./bin/claude-launch <name> --gpu               # the host's NVIDIA GPU via CDI (needs the toolkit's CDI spec)
+./bin/claude-launch <name> --repo URL --repo URL#BRANCH   # several repos: /workspace/<repo> each
 ./bin/claude-list                       # name, state, ssh port, repo, uptime
 ./bin/claude-attach <name>              # attach to its live tmux session (local)
 ./bin/claude-stop <name>                # graceful; state preserved
@@ -235,6 +236,14 @@ Chromium is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
 `claude.browser` LABEL and warns early if `--browser` is used against the
 lean image. Pair `--browser` with `--dev-cmd`/`--expose` so the agent both
 runs and debugs the dev server.
+
+**Several repos in one container:** `compose-gen --group NAME=REPO[:BRANCH],REPO,...`
+(NAME is the service and takes every per-repo flag; it must not also be a single-repo
+service) or `claude-launch` with several `--repo` (branch as `URL#BRANCH`). The entrypoint
+clones each into `/workspace/<repo>` from `GIT_REPOS` and the session starts in
+`/workspace`. Each boot clones only what is missing; existing checkouts are never touched.
+Never combine with a single-repo workspace (refused: no nested repos), so a new group needs
+a fresh `claude-ws-NAME` volume. `test/workspace-unit.sh` covers it.
 
 **GPU sessions (`--gpu`, NVIDIA only):** `compose-gen --gpu REPO` (repeatable; the repo
 must be in the stack) or `claude-launch --gpu` / `CLAUDE_GPU=1` gives the service the CDI

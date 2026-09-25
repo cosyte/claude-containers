@@ -123,6 +123,20 @@ Chrome is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
 (required in unprivileged Docker; Chrome's user-namespace sandbox conflicts
 with the default seccomp).
 
+## Decision: several repos share one workspace as sibling checkouts
+
+`claude-compose-gen --group NAME=REPO,REPO,...` and a repeated `claude-launch --repo`
+give one container several repos. The entrypoint clones each into `/workspace/<repo>`
+(the list travels as `GIT_REPOS`, whitespace-separated `URL[#BRANCH]`) and the session
+starts in `/workspace`. Sibling checkouts, not submodules or a monorepo: every repo keeps
+its own history, remote, branch and `CLAUDE.md`, and nothing about the repos themselves
+changes. Each boot clones only what is missing and never touches an existing checkout, so
+growing the list is a restart, and a session's uncommitted work survives it. The single
+repo layout (`/workspace` is the repo) is unchanged and the two never mix: `GIT_REPOS`
+with `GIT_REPO_URL`, or on a workspace that already has a repo at its root, refuses to
+boot rather than nest one repo inside another. Workspace trust and mise's trusted paths
+already cover `/workspace` and everything below it.
+
 ## Decision: GPU sessions are CDI devices on plain runc
 
 `--gpu` (`claude-compose-gen --gpu REPO`, `claude-launch --gpu`, `CLAUDE_GPU=1`) gives a
