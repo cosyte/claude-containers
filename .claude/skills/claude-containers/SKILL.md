@@ -40,12 +40,11 @@ small descriptive commits as you change things.
     `--workspace <path>` bind-mounts a host checkout instead.
   - `claude-scratch-<project>`: **per container**, `/scratch`, and **`TMPDIR`
     points at it**. `/tmp` is a tmpfs (RAM, 1g, charged to the memory cgroup), so
-    without this a pip/uv wheel build, a `docker save|load`, or the inner
-    containerd dies at 1 GiB with ENOSPC while the pool has TBs free, and a
-    bigger tmpfs would just turn that into an OOM kill instead. Cleared on every
-    boot (it is scratch, not state); `claude-rm --purge` deletes it. `dockerd`/
-    `containerd` inherit TMPDIR; `bash_profile` re-exports it for SSH logins,
-    which get a fresh env from sshd.
+    without this a pip/uv wheel build or a big archive dies at 1 GiB with
+    ENOSPC while the pool has TBs free, and a bigger tmpfs would just turn that
+    into an OOM kill instead. Cleared on every boot (it is scratch, not state);
+    `claude-rm --purge` deletes it. `bash_profile` re-exports TMPDIR for SSH
+    logins, which get a fresh env from sshd.
   - Rationale: a single shared `~/.claude` would corrupt concurrent sessions
     and collide on the `/workspace` project key. A background loop in the
     entrypoint keeps `.credentials.json` converged between `/auth` and each
@@ -107,8 +106,8 @@ small descriptive commits as you change things.
 | `Makefile` | `build` (host arch, loaded), `build-all`/`push` (amd64+arm64 via buildx), `login`, `launch/list/attach/stop/rm/logs`, `lint`, `smoke` (build + smoke test), `clean`. |
 | `.env.example` | Every tunable, documented. Copy to `.env`. |
 | `test/smoke.sh` | Automated acceptance for everything that doesn't need real OAuth/phone. |
-| `test/unit.sh` | Docker-free unit tests (version-floor helper, warn-only runc posture, the §0 retired-env guard, and the prune gates: the removed bins stay removed, `CLAUDE_CONTROLLER=1` is refused, and the autopilot never invokes `claude` without a command). Also pins the `--docker` WIRING: engine baked + entrypoint starts it + launcher supplies the runtime, since the engine was once deleted precisely because nothing could start it. |
-| `test/docker-unit.sh` | Docker-free tests for `--docker`: the cap-drop is skipped ONLY in docker mode (a lean sibling in the same compose stack keeps it), `preflight_sysbox` fails closed, the per-service compose emission, and the standing assertion that nothing ever reaches for `--privileged` or the host docker socket, CI. |
+| `test/unit.sh` | Docker-free unit tests (version-floor helper, warn-only runc posture, the §0 retired-env guard, and the prune gates: the removed bins stay removed, `CLAUDE_CONTROLLER=1` is refused, and the autopilot never invokes `claude` without a command). Also pins that the removed per-session Docker engine stays removed at every live site. |
+| `test/launch-unit.sh` | Docker-free tests for the container boundary: `harden_run_args` (cap-drop ALL + no-new-privileges), no `--privileged` / host socket anywhere, the removed `--docker`/`--no-docker`/`--sysbox` flags refusing, every compose service on plain runc, and the disk-backed `/scratch`: CI. |
 | `test/sizing-unit.sh` | Docker-free sizing tests (size/reservation math, K resolution from config, compose reservation/pids emission): CI. |
 | `test/disk-unit.sh` | Docker-free disk tests (`disk_free_mib` parse/fail-closed, `claude-disk-gc`'s plan safety): CI. |
 | `bin/claude-disk-gc` | Standalone maintenance tool: `docker system prune -f` + `docker builder prune -f` (a fixed plan, never `-a`/`--volumes`), plus the shared-cache trim; one-shot or `--loop`; fail-safe. No entrypoint path auto-starts it. |
@@ -131,7 +130,6 @@ make login                    # one-time OAuth; opens a URL, paste the code
 ./bin/claude-launch <name> --repo git@github.com:you/x.git [--branch B] [--depth N]
 ./bin/claude-launch <name> --workspace /abs/path/to/checkout
 ./bin/claude-launch <name> [--port N] [--mcp foo] [--browser] [--extra-args "…"]
-./bin/claude-launch <name> --docker            # own Docker engine (needs Sysbox + :docker image)
 ./bin/claude-launch <name> [--expose 4321:4321] [--dev-cmd "npm run dev …"]
 ./bin/claude-list                       # name, state, ssh port, repo, uptime
 ./bin/claude-attach <name>              # attach to its live tmux session (local)
@@ -234,37 +232,11 @@ Chromium is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
 lean image. Pair `--browser` with `--dev-cmd`/`--expose` so the agent both
 runs and debugs the dev server.
 
-**Container workflows (`--docker`):** `make build-docker` builds a
-`claude-code-box:docker` variant baking the Docker engine + CLI + containerd +
-compose/buildx plugins (+~400 MB); `make build-docker-browser` bakes engine AND
-Chromium. Launch with `--docker` (or `CLAUDE_DOCKER=1`, or
-`compose-gen --docker REPO`) and the session gets its OWN Docker daemon: the
-agent runs `docker build` / `docker run` / `docker compose up` as the
-unprivileged `claude` user (the entrypoint puts it in the `docker` group).
-- **Requires Sysbox on the host.** The container runs under
-  `--runtime=sysbox-runc`, whose user namespace maps container-root to an
-  unprivileged host uid. That is the ONLY reason nested Docker is safe here:
-  **`--privileged` and mounting the host `/var/run/docker.sock` are FORBIDDEN**
-  (either gives a prompt-injectable agent root on the host) and are asserted
-  against in `test/unit.sh` + `test/docker-unit.sh`. `preflight_sysbox` fails the
-  launch closed if the runtime is missing, never "work around" it.
-- **`--cap-drop ALL` is skipped** for these containers (an inner daemon can't
-  start under the minimal cap set). Safe *only* because Sysbox namespaces the
-  caps: measured `CapEff 000001ffffffffff` with `uid_map 0→165536`.
-  `no-new-privileges` stays on (setuid inside an INNER container won't elevate).
-- **It voids two in-container controls.** Socket access ⇒ the agent can reach
-  root inside its own container, so `CLAUDE_BROKER_GIT_KEY` (root-owned
-  ssh-agent hiding the deploy key) and `CLAUDE_EGRESS_LOCKDOWN` (OUTPUT-chain
-  allowlist; inner traffic is FORWARDed) no longer bind. Both default off; the
-  launcher warns on the combination. Don't claim they protect a `--docker` box.
-- **Sizing/disk.** Inner containers share the session's cgroup (8g+ floor; the
-  launcher warns below it). The inner image store lives in a per-project
-  `claude-docker-<name>` volume (deleted by `claude-rm --purge`; can be tens of GB).
-- Debugging a *false* failure: `docker exec -u claude` does NOT apply
-  supplementary groups, so it reports a bogus "permission denied" on the socket.
-  Use `gosu claude` (what the entrypoint actually uses) or SSH in.
-- This is NOT the retired worker broker: it reuses that era's runtime and
-  nothing else (no broker/worker/spool). See `docs/legacy-sysbox-broker.md`.
+**No Docker inside a session.** The per-session Docker engine (`--docker`) and the
+Sysbox runtime it needed were removed; `--docker`, `--no-docker` and `--sysbox` now
+refuse, naming the removal. Build and run containers on the host or in CI. Never
+"restore" it with `--privileged` or a host socket mount: either hands a
+prompt-injectable agent the host.
 
 **Validate changes:** `make lint` (shell syntax, incl. `test/*.sh`), `npm test`
 (all the docker-free suites listed in `package.json`'s `test` script, the same

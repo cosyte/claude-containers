@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
-# Unit tests for the surviving resource-sizing surface: NO docker, NO sysbox, NO root.
+# Unit tests for the surviving resource-sizing surface: NO docker, NO root.
 #
-# The substrate strip removed the K-aware Sysbox-controller-envelope sizing (controller_envelope,
-# CLAUDE_WORKER_*/CLAUDE_CTRL_* profile, resolve_parallel_k, bin/claude-controller-size,
-# and the broker's capacity fail-safe), that machinery existed solely to size a
-# controller for K nested Sysbox workers, which no longer exist; see
-# docs/legacy-sysbox-broker.md. What survives, and what this covers, is the
-# non-broker sizing surface in bin/_common.sh:
+# What this covers is the sizing surface in bin/_common.sh:
 #   - size_to_mib / mem_reservation_for (docker size parsing + the 75% derivation)
 #   - the flat-session CLAUDE_MEM_RESERVATION derivation at source time
 #   - claude-compose-gen's per-service mem_reservation/pids_limit emission

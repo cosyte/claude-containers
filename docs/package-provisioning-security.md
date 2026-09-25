@@ -8,7 +8,7 @@ provisioning = curated-allowlist + contained install"; that repo is not public a
 requires it, the decisions are stated in full below.) It **gates the mise provisioner, the shared cache and the manifest hardening**, nothing
 that lets the agent fetch packages builds until the containment described here is in place.
 (§3.4 and §3.7 below are **RETIRED**, they documented the worker-tier `apt` provisioner and the
-pull-through cache proxy, both retired along with the Sysbox nested-worker-broker substrate
+pull-through cache proxy, both retired along with the nested worker-broker substrate
 they were scoped to: see [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md). Read §3.1, §3.2,
 §3.3, §3.5 and §3.6 as the live containment rules.)
 
@@ -147,7 +147,7 @@ exfil path; the two controls above are.)
 **This rule no longer holds and nothing on `main` implements it.** It described the brokered
 `apt`, which opened the Debian mirrors for the install window and re-locked egress afterward
 (`bin/claude-apt-provision` + `CLAUDE_EGRESS_APT`). Both were retired with the
-Sysbox/broker substrate (§3.7), and with them the only code that ever opened and
+worker-broker substrate (§3.7), and with them the only code that ever opened and
 re-locked a window. `grep -rn -i 'relock\|re-lock' bin/ entrypoint.sh` now returns nothing.
 
 **The true posture on `main`:** `bin/claude-egress-firewall` is a **one-shot boot script**, it runs
@@ -206,9 +206,9 @@ reduce the *drift* and *unpinned-resolution* surface, and compose with the egres
 
 Two further containment tiers used to build on top of the above: a worker-tier curated `apt`
 (`bin/claude-apt-provision` + `claude-config/apt-manifest.txt`) that closed the system-`.so`-library
-gap `mise` can't fill, in the Sysbox nested-worker tier only; and a controller-side pull-through
+gap `mise` can't fill, in the nested-worker tier only; and a controller-side pull-through
 package cache (`bin/claude-cache-proxy`) that collapsed all package egress to one audited
-proxy host. Both were retired along with the Sysbox nested-worker-broker substrate they
+proxy host. Both were retired along with the nested worker-broker substrate they
 were scoped to: see [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md) for the frozen
 implementation. System `.so` libraries currently have **no** self-service provisioning path in this
 repo (a documented non-goal, see §4); a plain leaf container never had `apt` access, and now
@@ -219,9 +219,9 @@ neither does anything else.
 - **System libraries (`apt`) are not a self-service capability at all.** The agent runs as non-root
   UID 1000 with no `sudo`; `apt-get install <syslib>` is impossible in a plain container by design.
   A worker-tier `apt` path used to close this gap (§3.7) but was retired along with the
-  Sysbox substrate it depended on. The Debian mirrors are intentionally absent from this profile
+  worker broker it depended on. The Debian mirrors are intentionally absent from this profile
   for this reason. Getting a system library today means a base-image rebuild (add it to the Dockerfile).
-  There is no in-session provisioning path, and none is planned unless the Sysbox substrate returns.
+  There is no in-session provisioning path, and none is planned.
 - **`ghcr.io`'s blob CDN may need follow-up host additions.** The profile pins `ghcr.io`, but OCI blob
   layers can be served from a separate CDN host; if aqua/OCI pulls fail on a blob fetch, the specific
   CDN host is a follow-up allowlist addition: this profile does not claim to have enumerated every
@@ -253,7 +253,7 @@ neither does anything else.
 
 > **Amended by the substrate strip (2026-07-12).** The **install-then-relock** window (§3.4) was the apt tier's
 > mechanism: `bin/claude-apt-provision` opened `deb.debian.org` egress for the install and
-> re-locked it. Both were **retired with the Sysbox/broker substrate** (§3.7), so
+> re-locked it. Both were **retired with the worker-broker substrate** (§3.7), so
 > there is no longer any in-session system-package install path to contain, which is why the
 > bullet above states there is no self-service path at all. The surviving containment is the
 > curated **registry** allowlist (§3.1), scripts-off-by-default (§3.2), credential

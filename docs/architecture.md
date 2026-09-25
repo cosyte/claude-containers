@@ -122,83 +122,6 @@ Chrome is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
 (required in unprivileged Docker; Chrome's user-namespace sandbox conflicts
 with the default seccomp).
 
-## Decision: container workflows are an opt-in image variant on Sysbox
-
-A session whose job involves containers (a Dockerfile, a compose stack,
-testcontainers) needs a real Docker engine. `WITH_DOCKER=1`
-(`make build-docker`, tag `claude-code-box:docker`) bakes dockerd + CLI +
-containerd + the compose and buildx plugins, ~400 MB. `--docker` (or
-`CLAUDE_DOCKER=1`, or `claude-compose-gen --docker REPO`) starts that daemon
-**inside** the session container and puts the agent in the `docker` group.
-Orthogonal to `WITH_BROWSER`: `make build-docker-browser` bakes both.
-
-**Why an inner daemon under Sysbox, and not the two obvious alternatives.**
-There are exactly three ways to give a container Docker, and two of them end the
-same way:
-
-| approach | what the agent gets | host blast radius |
-|---|---|---|
-| mount `/var/run/docker.sock` | the **host** daemon | `docker run -v /:/host` → host root |
-| `--privileged` DinD | its own daemon, full host caps | mknod/mount host devices → host root |
-| **Sysbox** (`--runtime=sysbox-runc`) | its own daemon in a **user namespace** | container-root is an unprivileged host uid |
-
-The first two are FORBIDDEN in this repo and asserted against in
-`test/unit.sh` + `test/docker-unit.sh`: with `--dangerously-skip-permissions`
-on by design, a prompt-injectable agent plus either shortcut is host root.
-Sysbox is the only option that keeps nested Docker a *boundary*. Measured on
-the r730xd (`docker run --runtime=sysbox-runc alpine cat /proc/self/status
-/proc/self/uid_map`):
-
-```
-runc         CapEff 00000000a80425fb   uid_map 0 0 4294967295   → container-root IS host root
-sysbox-runc  CapEff 000001ffffffffff   uid_map 0 165536 65536   → container-root is host uid 165536
-```
-
-So the `--docker` container carries the **full** capability set and that is
-fine: the caps are namespaced, and root maps to a host nobody. This is why
-`harden_run_args` **skips `--cap-drop ALL`** in docker mode: an inner daemon
-cannot start under the minimal set (it needs `NET_ADMIN` for its bridge and
-`SYS_ADMIN` to mount layers; neither is in Docker's *default* set either), and
-why skipping it costs nothing the userns isn't already providing. Verified end
-to end: with `no-new-privileges` still on, an inner dockerd starts, builds an
-image and runs a container, and the inner daemon selects `overlayfs` (not the
-slow `vfs` fallback). `no-new-privileges` is therefore kept; its one real cost
-is that setuid binaries *inside an inner container* (`sudo`, `ping`) cannot
-elevate. `preflight_sysbox` fails the launch closed if the runtime is absent
-rather than degrading to something unsafe.
-
-**What this deliberately gives up.** Socket access is a path to root *inside*
-the container. The host boundary holds, but two in-container controls assume
-root is separate from the agent, and on a `--docker` session they do not bind:
-`CLAUDE_BROKER_GIT_KEY` (root-owned `ssh-agent` hiding the deploy key, an agent
-with Docker reads the key file directly) and `CLAUDE_EGRESS_LOCKDOWN` (filters
-`OUTPUT`; inner-container traffic is `FORWARD`ed, and container-root can flush
-the rules). Egress lockdown defaults off; git-key brokering defaults ON, so the
-first one applies to a plain `--docker` session unless the operator opted out
-with `CLAUDE_BROKER_GIT_KEY=0`. The launcher and generator warn on the
-combination rather than refusing, since the operator may not care about either
-on a given box. Do not treat them as active on a `--docker` container.
-
-**Not the worker broker.** This reuses the retired substrate's *runtime* and
-nothing else: no broker, no worker plane, no spool, no controller
-([legacy-sysbox-broker.md](legacy-sysbox-broker.md)). It also inverts that
-design's central move: the broker chowned the socket to root and mediated every
-launch to keep the agent OFF the daemon; here the agent using Docker *is* the
-feature. Note the earlier prune had deleted `WITH_DOCKER` on the correct grounds that
-nothing could start the baked engine (no runtime, no privilege, no socket): the
-Sysbox runtime is precisely the missing piece, and `test/unit.sh` now pins the
-wiring (entrypoint starts it, launcher supplies the runtime) instead of pinning
-its absence.
-
-**Operational consequences.** Inner containers share the session's cgroup, so
-`CLAUDE_MEM_LIMIT`/`CPU`/`PIDS` must cover the whole stack (the launcher warns
-below 8g). The inner image store is a per-project `claude-docker-<name>` volume
-so a recreate doesn't re-pull every base image; it can reach tens of GB and
-`claude-rm --purge` deletes it. The entrypoint's shutdown trap stops inner
-containers and the daemon before PID 1 exits: without that, force-killing a
-Sysbox container with a live inner daemon makes Docker fail the removal with
-"did not receive an exit event", which stranded volumes mid-purge.
-
 ## Decision: one substantive build stage
 
 A heavy builder stage was considered and rejected: the image weight is the
@@ -274,7 +197,7 @@ from `settings.json` and, if any were present, clears
 Trade-off accepted: this image cannot be fully telemetry-silent and also
 provide Remote Control; RC is the product, so telemetry stays on.
 
-## Retired: the nested-Sysbox worker-broker substrate
+## Retired: the nested-Sysbox worker-broker substrate, and the per-session Docker engine
 
 An earlier revision of this repo ran a nested-Sysbox "worker broker" substrate so a
 controller container could spawn autonomous nested workers: a root-owned
@@ -289,12 +212,21 @@ That whole substrate was retired on 2026-07-12 in favor of Claude Code subagents
 per-worktree git worktrees, and stripped from `main`. A follow-up prune
 (2026-07-14), pruned the residue the strip left behind: `bin/claude-controller` (by then
 a pass-through to `claude-autopilot`; `CLAUDE_CONTROLLER=1` now refuses to boot),
-`bin/claude-reaper` (it pruned a spool nothing writes to), the `WITH_DOCKER` controller
-image variant (an unreachable `dockerd`), and the autopilot's default command
-(`CLAUDE_AUTOPILOT_CMD` is now required). The frozen implementation, the full rationale,
-and the follow-up resolution live in
+`bin/claude-reaper` (it pruned a spool nothing writes to), the controller image variant
+(an unreachable `dockerd`), and the autopilot's default command
+(`CLAUDE_AUTOPILOT_CMD` is now required).
+
+A later per-session Docker engine (`--docker`: an inner `dockerd` in the session, under
+the same user-namespaced runtime, so the agent could build images and run containers)
+was removed as well. It was the last thing that needed a non-default runtime on the host,
+it had to skip the capability drop every other session keeps, and it voided two
+in-container controls (the git-key broker and egress lockdown) because socket access is
+a route to root inside the container. Every session now runs on plain `runc` with
+`--cap-drop ALL`; the removed flags refuse, naming the removal.
+
+The frozen implementation, the full rationale, and the follow-up resolution live in
 [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md); nothing above or below this
-note describes it.
+note describes either.
 
 ## Acceptance
 

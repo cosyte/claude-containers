@@ -170,11 +170,9 @@ hole:
   (script hardening); it does not replace them. It does not add isolation between co-tenant
   workers beyond what they already share.
 - **No cross-host sharing.** `/cache` is a per-host docker volume. Sharing a store across
-  physically different hosts is exactly mise's cross-machine caveat¹; a pull-through proxy
- used to offer that, but was retired (docs/legacy-sysbox-broker.md).
+  physically different hosts is exactly mise's cross-machine caveat¹.
 - **No system `.so` libraries.** Inherited from the mise provisioner: the cache holds binaries and language
-  packages, never system libraries: no self-service path provisions those (the worker-tier apt
-  path that used to close that gap has been retired; see docs/legacy-sysbox-broker.md).
+  packages, never system libraries: no self-service path provisions those.
 
 ---
 

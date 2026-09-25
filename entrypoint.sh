@@ -63,6 +63,14 @@ if (( ${#_retired_set[@]} > 0 )); then
         esac
     done
 fi
+# CLAUDE_DOCKER=1 asked for the per-session Docker engine, which was removed along with
+# the host runtime it needed. A container created by an old launcher or compose file can
+# still carry it: boot (it is a leftover, not an unsafe request) but say plainly that
+# there is no engine, instead of letting the session discover it one failed build later.
+if [[ "${CLAUDE_DOCKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    log "WARNING: CLAUDE_DOCKER=${CLAUDE_DOCKER} is IGNORED: the per-session Docker engine was removed."
+    log "WARNING: This session has no Docker daemon. Recreate the container without it."
+fi
 unset _v _retired_set RETIRED_VARS
 
 # --- 0b. Refuse the retired CLAUDE_CONTROLLER mode ------------------
@@ -149,16 +157,16 @@ chmod 700 "$CLAUDE_HOME/.ssh"
 
 # --- 2a. Disk-backed scratch (TMPDIR) ----------------------------------------
 # /tmp is a tmpfs: RAM, ~1g, charged to the memory cgroup. With TMPDIR unset everything
-# large lands there: pip/uv wheel builds, `docker save|load` tarballs, the inner
-# containerd's mount dirs, and dies at the cap with an ENOSPC that reads like a bug, while
-# the host has terabytes free. So point TMPDIR at a disk-backed volume. TMPDIR is exported
-# by the launcher/compose (so dockerd, containerd and every child inherit it); this block
+# large lands there: pip/uv wheel builds, big archives, compiler temp files, and dies at
+# the cap with an ENOSPC that reads like a bug, while the host has terabytes free. So point
+# TMPDIR at a disk-backed volume. TMPDIR is exported by the launcher/compose (so every
+# child inherits it); this block
 # just makes the directory usable, and tolerates its absence so an older container (or a
 # plain `docker run` of this image) still boots with the historical /tmp behaviour.
 SCRATCH_DIR="${TMPDIR:-}"
 if [[ -n "$SCRATCH_DIR" && "$SCRATCH_DIR" != "/tmp" ]]; then
     if mkdir -p "$SCRATCH_DIR" 2>/dev/null; then
-        # 1777 like /tmp: the agent is unprivileged, but root writes here too (dockerd).
+        # 1777 like /tmp: the agent is unprivileged, but root writes here too.
         chown "$CLAUDE_UID:$CLAUDE_GID" "$SCRATCH_DIR" 2>/dev/null || true
         chmod 1777 "$SCRATCH_DIR" 2>/dev/null || true
         # Clear stale contents on boot. This is scratch, not state: a volume (unlike a tmpfs)
@@ -341,70 +349,6 @@ if [[ -n "${GH_TOKEN:-}" ]]; then
     fi
 else
     log "No GH_TOKEN: git uses the SSH deploy key only; gh CLI is unauthenticated"
-fi
-
-# --- 5a. Inner Docker daemon (CLAUDE_DOCKER=1, the :docker image variant) ------
-# Gives the session a REAL Docker engine of its own, so the agent can build images and
-# run containers (Dockerfiles, compose stacks, testcontainers) as part of normal work.
-#
-# The daemon runs INSIDE this container. It is never the host daemon: mounting the host's
-# /var/run/docker.sock, or running --privileged, would each hand a prompt-injectable agent
-# root on the host, and both stay FORBIDDEN. What makes an inner daemon safe *without*
-# privilege is the runtime: under Sysbox (--runtime=sysbox-runc) this container's root is
-# mapped into a user namespace onto an unprivileged host uid, so dockerd gets the caps it
-# needs over its OWN namespace and none over the host. bin/claude-launch --docker selects it.
-#
-# NOTE: this deliberately INVERTS the retired worker-broker (docs/legacy-sysbox-broker.md),
-# which chowned the socket to root and brokered every launch to keep the agent OFF the inner
-# daemon. Here the agent using Docker IS the feature, so we put it in the `docker` group and
-# hand it the socket. The honest consequence: socket access is a path to root INSIDE this
-# container (`docker run -v /:/rootfs …`). Under Sysbox that root is still an unprivileged
-# nobody on the host: the boundary that matters holds, but it does mean in-container
-# controls that assume "root is separate from the agent" no longer bind. Two exist:
-# CLAUDE_BROKER_GIT_KEY (§5, root-owned ssh-agent hiding the deploy key) and
-# CLAUDE_EGRESS_LOCKDOWN (root-owned iptables). claude-launch warns when either is combined
-# with --docker; see README "Container workflows" and docs/architecture.md.
-if [[ "${CLAUDE_DOCKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
-    command -v dockerd >/dev/null 2>&1 \
-        || die "CLAUDE_DOCKER=1 needs the Docker engine, but 'dockerd' is not in this image.
-       Rebuild the docker variant:  make build-docker
-         (or:  make build WITH_DOCKER=1 CLAUDE_IMAGE=<tag>, then set CLAUDE_IMAGE)
-       and launch it with --docker (which selects --runtime=sysbox-runc)."
-
-    # Let the unprivileged agent talk to the socket. dockerd creates /var/run/docker.sock as
-    # root:docker 0660, so group membership is the whole mechanism. `groupadd -f` is a no-op
-    # when the docker-ce postinst already made the group; usermod is idempotent.
-    groupadd -f docker
-    usermod -aG docker "$CLAUDE_USER"
-
-    if docker info >/dev/null 2>&1; then
-        log "Inner dockerd       : already reachable, reusing it (not starting a second daemon)"
-    else
-        DOCKERD_WAIT="${CLAUDE_DOCKERD_WAIT:-60}"
-        # A POSITIVE integer with no leading zero: `(( … ))` reads a leading-zero value as
-        # octal (090 → error, spins forever), and 0 would time out before dockerd could even
-        # create its socket. Both are refused up front (fail closed, clear message).
-        [[ "$DOCKERD_WAIT" =~ ^[1-9][0-9]*$ ]] \
-            || die "CLAUDE_DOCKERD_WAIT '$DOCKERD_WAIT' is not a positive integer (no leading zero)"
-        # Clear a stale pidfile an ungracefully-killed daemon left behind, so a container
-        # restart (--restart unless-stopped) doesn't boot-loop on 'pidfile exists'.
-        rm -f /run/docker.pid /var/run/docker.pid 2>/dev/null || true
-        log "Inner dockerd       : starting (Sysbox-contained; log at /var/log/inner-dockerd.log)"
-        dockerd >> /var/log/inner-dockerd.log 2>&1 &
-        dwaited=0
-        until docker info >/dev/null 2>&1; do
-            if (( dwaited >= DOCKERD_WAIT )); then
-                log "inner dockerd did not become ready within ${DOCKERD_WAIT}s: last log lines:"
-                tail -n 20 /var/log/inner-dockerd.log 2>/dev/null | sed 's/^/    /' >&2 || true
-                die "inner dockerd failed to start. The usual cause is a missing
-       --runtime=sysbox-runc: without the user namespace Sysbox provides, an unprivileged
-       container cannot run a Docker daemon. Check 'docker info | grep sysbox' on the HOST,
-       and launch with --docker (claude-launch selects the runtime for you)."
-            fi
-            sleep 1; dwaited=$((dwaited + 1))
-        done
-        log "Inner dockerd       : ready after ${dwaited}s ($(docker --version 2>/dev/null))"
-    fi
 fi
 
 # --- 6. Credentials reconcile (shared auth volume) ---------------------------
@@ -813,11 +757,6 @@ if (( managed_ok == 1 )); then
     fi
 else
     log "Managed policy       : NOT ENFORCED ($managed_why). NO setting is managed: everything stays overridable from inside the container, exactly as it was before this image delivered any policy."
-fi
-if [[ "${CLAUDE_DOCKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
-    # Same caveat CLAUDE_BROKER_GIT_KEY and CLAUDE_EGRESS_LOCKDOWN carry: an inner
-    # daemon hands the session a route to root inside its own container.
-    log "Managed policy       : NOTE, this container runs an inner Docker daemon (CLAUDE_DOCKER), which gives the session a route to root inside the container. A session that takes it CAN rewrite $MANAGED_FILE, so read the line above as advisory here, not as containment."
 fi
 
 # --- 8. Merge baked-in config ------------------------------------------------
@@ -1380,27 +1319,6 @@ shutdown() {
     [[ -n "${ACCT_SWITCH_PID:-}" ]] && kill "$ACCT_SWITCH_PID" >/dev/null 2>&1 || true
     [[ -n "${RC_WATCHDOG_PID:-}" ]] && kill "$RC_WATCHDOG_PID" >/dev/null 2>&1 || true
     [[ -n "${USAGE_WATCHDOG_PID:-}" ]] && kill "$USAGE_WATCHDOG_PID" >/dev/null 2>&1 || true
-    # Tear the inner Docker down BEFORE PID 1 exits (docker mode only). Without this, the
-    # inner containers and their containerd-shims are still alive when the container dies;
-    # the runtime then SIGKILLs the tree and the exit event can arrive after Docker has
-    # stopped waiting for it: surfacing on the host as
-    #   "could not kill container: tried to kill container, but did not receive an exit event"
-    # which aborts `docker rm -f` (observed: claude-rm --purge died mid-way, leaking volumes).
-    # Stopping the children first makes the teardown orderly and the exit event prompt.
-    # Best-effort throughout: a shutdown path must never be the reason a container won't die.
-    if [[ "${CLAUDE_DOCKER:-0}" =~ ^(1|true|yes|on)$ ]] && command -v docker >/dev/null 2>&1; then
-        log "Inner dockerd       : stopping inner containers, then the daemon"
-        # Bound this hard. The whole trap must finish inside the OUTER stop timeout
-        # (CLAUDE_STOP_TIMEOUT, default 20s): overrun it and Docker SIGKILLs PID 1, which is
-        # the very failure this trap exists to prevent. `-t 5` caps each inner container
-        # (Docker's default is 10s, and a process that ignores SIGTERM burns all of it), and
-        # `timeout 15` caps the batch.
-        # shellcheck disable=SC2046
-        timeout 15 docker stop -t 5 $(docker ps -q 2>/dev/null) >/dev/null 2>&1 || true
-        pkill -TERM -x dockerd >/dev/null 2>&1 || true
-        for _ in $(seq 10); do pgrep -x dockerd >/dev/null 2>&1 || break; sleep 1; done
-        pkill -KILL -x dockerd >/dev/null 2>&1 || true
-    fi
     exit 0
 }
 trap shutdown TERM INT
@@ -1410,8 +1328,7 @@ trap shutdown TERM INT
 #
 # Require several CONSECUTIVE failures, not one. This probe is not a pure read:
 # `asclaude` is gosu + env + tmux, so every check costs three forks. When the container
-# is out of PIDs: the cgroup pids.max counts THREADS, so a browser or inner-dockerd
-# session reaches it long before the process count suggests: fork returns EAGAIN and
+# is out of PIDs: the cgroup pids.max counts THREADS, so a browser session reaches it long before the process count suggests: fork returns EAGAIN and
 # the probe fails against a tmux that is perfectly alive. Treating that one failure as
 # "tmux died" tore a healthy container down, and the restart policy then brought it back
 # with an empty session, losing the user's work. Observed twice in 16h on a real host:

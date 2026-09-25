@@ -66,14 +66,6 @@
 #                       these repos (repeatable; comma/space lists ok). Their
 #                       service uses CLAUDE_IMAGE_BROWSER (default
 #                       claude-code-box:browser; `make build-browser`).
-#     --docker <repos>  give these repos their own Docker engine, so the session can
-#                       build images and run containers/compose stacks (repeatable;
-#                       comma/space lists ok). The service runs under the Sysbox
-#                       runtime (runtime: sysbox-runc) so the inner daemon needs no
-#                       --privileged and no host socket, keeps its image store in a
-#                       claude-docker-<repo> volume, and uses CLAUDE_IMAGE_DOCKER
-#                       (default claude-code-box:docker; `make build-docker`), or
-#                       CLAUDE_IMAGE_DOCKER_BROWSER when combined with --browser.
 #     --marketplace <map>  add a git plugin marketplace to a repo at runtime.
 #                       Format REPO=NAME=URL (repeatable). The repo's service
 #                       gets CLAUDE_EXTRA_MARKETPLACES with this entry appended,
@@ -185,7 +177,7 @@ fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,87p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,109p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG=""
 OUT=""
@@ -198,7 +190,7 @@ NETWORK=""
 CACHE_VOL="$CACHE_VOLUME"
 BUILD_CONTEXT=""
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() DOCKER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=() ACCOUNTS_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=() ACCOUNTS_RAW=()
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
 # follow so they override scalars (--out/--org/--port-base) and append to
 # repeatables (--active/--expose/…). --scenario/--env-file were consumed in the
@@ -218,7 +210,12 @@ while [[ $# -gt 0 ]]; do
         --mem)             MEM_RAW+=("$2"); shift 2 ;;
         --model)           MODEL_RAW+=("$2"); shift 2 ;;
         --browser)         BROWSER_RAW+=("$2"); shift 2 ;;
-        --docker)          DOCKER_RAW+=("$2"); shift 2 ;;
+        # Removed flags refuse, naming the removal, rather than silently dropping a repo's
+        # request on the next regen of a .conf that still carries them.
+        --docker|--no-docker|--sysbox)
+            die "claude-compose-gen: $1 was removed along with the per-session Docker engine and the
+       Sysbox runtime it needed. Delete the line from the scenario .conf; build and run
+       containers on the host or in CI. (History: docs/legacy-sysbox-broker.md.)" ;;
         --broker|--worker-tarball)
             die "claude-compose-gen: $1 was removed (the legacy Sysbox worker-broker substrate is retired; see docs/legacy-sysbox-broker.md)" ;;
         --marketplace)     MKTS_RAW+=("$2"); shift 2 ;;
@@ -325,20 +322,6 @@ for tok in "${BROWSER_RAW[@]:-}"; do
         BROWSER["$(sanitize "$one")"]=1
     done
 done
-
-# Container workflows: services with their own Docker engine (CLAUDE_DOCKER=1), able to
-# build images and run containers/compose stacks. Image must be built with WITH_DOCKER=1
-# (`make build-docker`), and the service runs under the Sysbox runtime.
-declare -A DOCKER=()
-for tok in "${DOCKER_RAW[@]:-}"; do
-    [[ -n "$tok" ]] || continue
-    for one in $(echo "$tok" | tr ',' ' '); do
-        DOCKER["$(sanitize "$one")"]=1
-    done
-done
-# Fail here, not at `up`: without the runtime the inner daemon has no user namespace and
-# the container dies on a 60s entrypoint timeout, which reads as a mysterious boot failure.
-(( ${#DOCKER[@]} > 0 )) && preflight_sysbox
 
 # Runtime plugin marketplaces per service: svc -> comma-separated "name=url" list.
 # Each --marketplace value is REPO=NAME=URL: split on the FIRST = to peel off
@@ -452,10 +435,6 @@ GH_MAIL="$(git config --global user.email 2>/dev/null || true)"
 # in; non-browser services keep the lean CLAUDE_IMAGE. Default to the standard
 # `make build-browser` tag; override with CLAUDE_IMAGE_BROWSER.
 BROWSER_IMAGE="${CLAUDE_IMAGE_BROWSER:-claude-code-box:browser}"
-# --docker services need an engine baked in (`make build-docker`); a service that is BOTH
-# needs the image with both (`make build-docker-browser`), since these are baked, not mounted.
-DOCKER_IMAGE="${CLAUDE_IMAGE_DOCKER:-claude-code-box:docker}"
-DOCKER_BROWSER_IMAGE="${CLAUDE_IMAGE_DOCKER_BROWSER:-claude-code-box:docker-browser}"
 # Browser variants put /scratch (TMPDIR) on a bounded RAM tmpfs instead of the disk
 # volume the build-repos use, and cap pids harder. This box is all-HDD: chromium/
 # lighthouse/ffmpeg temp churn on the spinning rpool mirror starved I/O until hundreds
@@ -463,40 +442,12 @@ DOCKER_BROWSER_IMAGE="${CLAUDE_IMAGE_DOCKER_BROWSER:-claude-code-box:docker-brow
 # 2026-07-24). Non-browser build-repos keep disk /scratch so big pip/uv installs don't
 # ENOSPC (see the TMPDIR note below). Override sizes via the env vars.
 #
-# 3g, not the original 6g: a --docker+--browser service now ALSO carries
-# DOCKER_STORAGE_TMPFS (below) in the same CLAUDE_MEM_LIMIT cgroup (default 16g), and
-# chromium/lighthouse/ffmpeg temp churn needs far less headroom than an image/layer
-# cache does. Bumped down 2026-09-02 to make room; raise it back per-service via
+# 3g: chromium/lighthouse/ffmpeg temp churn needs little headroom, and the tmpfs is
+# charged to the service's CLAUDE_MEM_LIMIT cgroup (default 16g) alongside the 1g /tmp,
+# so 3g + 1g leaves 12g for the session, chromium and the dev server. Raise it via
 # CLAUDE_BROWSER_SCRATCH_TMPFS if a build genuinely needs more scratch space.
 BROWSER_SCRATCH_TMPFS="${CLAUDE_BROWSER_SCRATCH_TMPFS:-3g}"
 BROWSER_PIDS_LIMIT="${CLAUDE_BROWSER_PIDS_LIMIT:-1024}"
-# --docker services: same class of problem, a DIFFERENT disk-backed path the above fix
-# never covered. The inner Docker engine's own image/layer store (/var/lib/docker,
-# normally the claude-docker-<repo> volume below) sits on the SAME all-HDD rpool mirror,
-# and inner-dockerd's shutdown teardown (overlay2 unmount/flush) can stall there in
-# uninterruptible D-state exactly like the chromium temp churn did: reproduced live on
-# `super` again on 2026-09-02, this time via the docker-engine path rather than /scratch,
-# and unrecoverable short of a host reboot (a genuinely D-state process cannot be
-# SIGKILLed). Default ON, mirroring BROWSER_SCRATCH_TMPFS.
-#
-# 8g: observed real usage was ~2.7G on one service and ~10.4G on another (an
-# accumulated, prunable cache, not a hard floor). Combined with BROWSER_SCRATCH_TMPFS
-# (3g) and /tmp (1g), a --docker+--browser service's tmpfs floor is 12g, leaving 4g of
-# CLAUDE_MEM_LIMIT's default 16g for the actual session, chromium, and dockerd process
-# memory: chosen to fit inside 16g rather than raising the limit, per operator
-# preference on 2026-09-02. A service that consistently needs more than 8g of image
-# cache will hit ENOSPC on its own tmpfs (a build/pull failure, not a host-level wedge):
-# either raise CLAUDE_MEM_LIMIT + this size for that service (--mem, and
-# CLAUDE_DOCKER_STORAGE_TMPFS in its own scenario .conf), or run `docker system prune`
-# inside it periodically.
-#
-# TRADE-OFF, accepted: unlike the persistent volume this replaces, a RAM-backed store is
-# wiped on every container recreate, so every recreate re-pulls every base image and
-# rebuilds every layer cold (the exact cost the volume existed to avoid). Set to "" to
-# keep the old disk-backed claude-docker-<repo> volume instead (recreate-safe cache, but
-# exposed to this wedge class again).
-DOCKER_STORAGE_TMPFS="${CLAUDE_DOCKER_STORAGE_TMPFS-8g}"
-
 # --- Collect repos as "owner<TAB>name<TAB>branch" -----------------------------
 # Two independent sources, combined: (1) gh enumeration of --org (owner=ORG for
 # every repo), and (2) explicit repo args. An explicit arg may carry its own
@@ -655,21 +606,6 @@ for row in "${FINAL[@]}"; do
         svc_scratch_tmpfs=""
         svc_scratch_vol=$'\n      - claude-scratch-'"${svc}"':/scratch'
     fi
-    # --docker services: /var/lib/docker on a RAM tmpfs (svc_docker_tmpfs, appended to
-    # the tmpfs list) with NO disk volume, by default: see DOCKER_STORAGE_TMPFS above.
-    # DOCKER_STORAGE_TMPFS="" opts back into the old disk-backed claude-docker-<repo>
-    # volume (svc_docker_vol), which survives a recreate but is exposed to the same
-    # D-state wedge class the tmpfs exists to avoid.
-    if [[ -n "${DOCKER[$svc]:-}" && -n "$DOCKER_STORAGE_TMPFS" ]]; then
-        svc_docker_tmpfs=$'\n      - /var/lib/docker:rw,nosuid,nodev,exec,size='"${DOCKER_STORAGE_TMPFS}"
-        svc_docker_vol=""
-    elif [[ -n "${DOCKER[$svc]:-}" ]]; then
-        svc_docker_tmpfs=""
-        svc_docker_vol=$'\n      - claude-docker-'"${svc}"':/var/lib/docker'
-    else
-        svc_docker_tmpfs=""
-        svc_docker_vol=""
-    fi
     # Auth mount: either the single shared claude-auth volume (default), or one
     # read-write mount per named account (--accounts) at /auth-accounts/<name>:
     # mutually exclusive per service, mirroring claude-launch --accounts. Read-write:
@@ -688,13 +624,10 @@ for row in "${FINAL[@]}"; do
     # opus, the best available model, when nothing is set.
     if [[ -n "${MODEL[$svc]:-}" ]]; then svc_model="${MODEL[$svc]}"
     else svc_model='${CLAUDE_MODEL:-opus}'; fi
-    # Image selection. --browser and --docker are orthogonal capabilities but they are
-    # baked, not mounted, so a service needing both needs the image that has both.
+    # Image selection: Chromium is baked, not mounted, so a --browser service needs the
+    # browser image.
     svc_image="${CLAUDE_IMAGE}"
-    if   [[ -n "${BROWSER[$svc]:-}" && -n "${DOCKER[$svc]:-}" ]]; then svc_image="$DOCKER_BROWSER_IMAGE"
-    elif [[ -n "${BROWSER[$svc]:-}" ]];                          then svc_image="$BROWSER_IMAGE"
-    elif [[ -n "${DOCKER[$svc]:-}" ]];                           then svc_image="$DOCKER_IMAGE"
-    fi
+    [[ -n "${BROWSER[$svc]:-}" ]] && svc_image="$BROWSER_IMAGE"
     cat <<EOF
   ${svc}:
     image: ${svc_image}
@@ -708,15 +641,13 @@ for row in "${FINAL[@]}"; do
         CLAUDE_UID: "\${CLAUDE_UID:-1000}"
         CLAUDE_GID: "\${CLAUDE_GID:-1000}"
         CLAUDE_USER: "\${CLAUDE_USER:-claude}"
-        # The variant build args MUST ride along, because \`image:\` and \`build:\` are both
+        # The variant build arg MUST ride along, because \`image:\` and \`build:\` are both
         # set: compose builds from this context whenever the tagged image is MISSING (and on
-        # \`build\` / \`up --build\`), then tags the result with that name. Omitting these
-        # silently produced a LEAN image wearing the :browser/:docker tag, a --browser
-        # service would come up with no chrome-devtools MCP, and a --docker service would
-        # fail to boot outright ("dockerd is not in this image"), with the tag insisting
-        # otherwise. Emit them per service so the built image matches the tag it is given.
+        # \`build\` / \`up --build\`), then tags the result with that name. Omitting it
+        # silently produced a LEAN image wearing the :browser tag, and a --browser service
+        # came up with no chrome-devtools MCP while the tag insisted otherwise. Emit it per
+        # service so the built image matches the tag it is given.
         WITH_BROWSER: "${BROWSER[$svc]:-0}"
-        WITH_DOCKER: "${DOCKER[$svc]:-0}"
     container_name: claude-${svc}
     hostname: ${svc}
     restart: unless-stopped
@@ -733,7 +664,7 @@ for row in "${FINAL[@]}"; do
     pids_limit: ${svc_pids}
     stop_grace_period: ${CLAUDE_STOP_TIMEOUT}s
     tmpfs:
-      - /tmp:rw,nosuid,nodev,exec,size=1g${svc_scratch_tmpfs}${svc_docker_tmpfs}
+      - /tmp:rw,nosuid,nodev,exec,size=1g${svc_scratch_tmpfs}
     ports:
       - "${BIND_PREFIX}${port}:22"
 EOF
@@ -746,25 +677,13 @@ EOF
             [[ -n "$m" ]] && echo "      - \"${m}\""
         done <<<"${EXPOSE[$svc]}"
     fi
-    # --docker: run this service under Sysbox, which puts the inner dockerd in a user
-    # namespace (container-root → an unprivileged host uid). That is what makes nested
-    # Docker safe with no --privileged and no host-socket mount, both of which would give
-    # the agent the host. Compose's `runtime:` is the v2 spec field for exactly this.
-    [[ -n "${DOCKER[$svc]:-}" ]] && echo "    runtime: sysbox-runc"
     # Escape hardening (mirrors claude-launch via _common.sh): no-new-privileges
     # always; drop ALL caps + re-add the minimal set unless CLAUDE_HARDEN_CAPS=0;
     # add NET_ADMIN when the egress firewall is enabled.
-    #
-    # A --docker service SKIPS the cap-drop: an inner daemon cannot run under the minimal
-    # set (it needs NET_ADMIN for its bridge/iptables and SYS_ADMIN to mount layers, and
-    # neither is even in Docker's default set). Sysbox grants container-root the full set
-    # anyway: measured CapEff 000001ffffffffff with uid_map 0→165536, but those caps are
-    # powers over the container's own userns, not the host. Same trade as claude-launch's
-    # harden_run_args, kept per-service so a lean sibling in the same stack stays hardened.
     echo "    security_opt:"
     echo "      - no-new-privileges:true"
     _caps=""
-    if [[ -z "${DOCKER[$svc]:-}" ]] && [[ "$CLAUDE_HARDEN_CAPS" =~ ^(1|true|yes|on)$ ]]; then
+    if [[ "$CLAUDE_HARDEN_CAPS" =~ ^(1|true|yes|on)$ ]]; then
         echo "    cap_drop:"
         echo "      - ALL"
         _caps="$CLAUDE_MIN_CAPS"
@@ -819,13 +738,12 @@ EOF
         echo "      CLAUDE_DEV_CMD: \"${dc}\""
     fi
     [[ -n "${BROWSER[$svc]:-}" ]] && echo '      CLAUDE_BROWSER: "1"'
-    [[ -n "${DOCKER[$svc]:-}" ]]  && echo '      CLAUDE_DOCKER: "1"'
     # Account names come only from sanitize() (charset [a-z0-9._-]), so no
     # quoting hazard, unlike CLAUDE_DEV_CMD/MKTS/PLUGINS: no escaping needed.
     [[ -n "${ACCOUNTS[$svc]:-}" ]] && echo "      CLAUDE_ACCOUNTS: \"${ACCOUNTS[$svc]}\""
-    # Disk-backed TMPDIR. Without it everything temp (pip/uv wheel builds, docker
-    # save|load tarballs, the inner containerd's mount dirs) defaults to /tmp: a 1g
-    # tmpfs in RAM, and a big install dies with ENOSPC while the pool sits mostly empty.
+    # Disk-backed TMPDIR. Without it everything temp (pip/uv wheel builds, big archives,
+    # compiler temp files) defaults to /tmp: a 1g tmpfs in RAM, and a big install dies
+    # with ENOSPC while the pool sits mostly empty.
     echo '      TMPDIR: "/scratch"'
     # Marketplace/plugin lists: quote and escape \, ", and $ the same way as
     # CLAUDE_DEV_CMD so compose doesn't interpolate URL fragments like $foo.
@@ -863,21 +781,12 @@ EOF
       - ${AK}:/etc/claude/authorized_keys:ro
       - ${GK}:/etc/claude/git-key:ro
 EOF
-    # Inner Docker image store. Sysbox gives the container its own /var/lib/docker.
-    # DOCKER_STORAGE_TMPFS above puts it on RAM by default (svc_docker_tmpfs, already
-    # emitted into the tmpfs list); this volume line only fires when that is turned off
-    # (CLAUDE_DOCKER_STORAGE_TMPFS=""), the old disk-backed behavior: it dies WITH the
-    # container, so without EITHER the tmpfs or this volume every recreate re-pulls every
-    # base image and rebuilds every layer cold. Per-service, never shared: two daemons
-    # must not write one image store.
-    [[ -n "$svc_docker_vol" ]] && echo "      - claude-docker-${svc}:/var/lib/docker"
     cat <<EOF
     labels:
       claude.managed: "1"
       claude.project: "${svc}"
       claude.ssh_port: "${port}"
       claude.repo: "${url}"
-      claude.docker: "${DOCKER[$svc]:-0}"
 EOF
     # Non-active repos: defined but behind a profile, so `up -d` skips them.
     if [[ $HAVE_ACTIVE -eq 1 && -z "${ACTIVE[$svc]:-}" ]]; then
@@ -934,17 +843,6 @@ for row in "${FINAL[@]}"; do
         printf '  claude-scratch-%s:\n    name: claude-scratch-%s\n' "$svc" "$svc"
         OWNED_VOLS["claude-scratch-$svc"]=1
     fi
-    # Only --docker services with DOCKER_STORAGE_TMPFS turned OFF get a disk image-store
-    # volume; the default (RAM tmpfs, see DOCKER_STORAGE_TMPFS above) needs no volume at
-    # all. Declaring one for every --docker service would create empty/unused volumes.
-    # It is OWNED by this stack like the config/ws volumes, so register it too: otherwise
-    # a --mount naming it would slip past the guard below and get declared a SECOND time
-    # as external (a duplicate YAML key), and a `down -v` here would delete an image
-    # store another stack believed it had mounted read-only.
-    if [[ -n "${DOCKER[$svc]:-}" && -z "$DOCKER_STORAGE_TMPFS" ]]; then
-        printf '  claude-docker-%s:\n    name: claude-docker-%s\n' "$svc" "$svc"
-        OWNED_VOLS["claude-docker-$svc"]=1
-    fi
 done
 
 # --mount volumes belong to ANOTHER stack: declare them external so `up` fails
@@ -991,7 +889,6 @@ for r in "${FINAL[@]}"; do
     [[ -n "${DEVCMD[$s]:-}" ]] && extra="$extra +dev"
     [[ -n "${CPU[$s]:-}" || -n "${MEM[$s]:-}" ]] && extra="$extra +res(${CPU[$s]:-$CLAUDE_CPU_LIMIT}cpu/${MEM[$s]:-$CLAUDE_MEM_LIMIT})"
     [[ -n "${BROWSER[$s]:-}" ]] && extra="$extra +browser"
-    [[ -n "${DOCKER[$s]:-}" ]] && extra="$extra +docker(sysbox)"
     [[ -n "${MODEL[$s]:-}" ]] && extra="$extra +model(${MODEL[$s]})"
     if [[ -n "${MKTS[$s]:-}" ]]; then
         n_mkts="$(awk -F, '{print NF}' <<<"${MKTS[$s]}")"
@@ -1016,24 +913,6 @@ docker image inspect "$CLAUDE_IMAGE" >/dev/null 2>&1 || warn "image $CLAUDE_IMAG
 if (( ${#BROWSER[@]} > 0 )); then
     img_browser="$(docker image inspect -f '{{ index .Config.Labels "claude.browser" }}' "$BROWSER_IMAGE" 2>/dev/null || true)"
     [[ "$img_browser" == "1" ]] || warn "image $BROWSER_IMAGE was not built with WITH_BROWSER=1: run 'make build-browser' before 'up' (--browser services won't get the chrome-devtools MCP otherwise)"
-fi
-# Same for --docker. Check the image each docker service will actually use: a service that
-# is both --docker and --browser gets the combined image, and a missing engine there is a
-# boot failure (the entrypoint dies on 'dockerd not in this image'), not a silent downgrade.
-if (( ${#DOCKER[@]} > 0 )); then
-    _need_combined=0
-    for s in "${!DOCKER[@]}"; do [[ -n "${BROWSER[$s]:-}" ]] && _need_combined=1; done
-    for img in "$DOCKER_IMAGE" $( ((_need_combined)) && echo "$DOCKER_BROWSER_IMAGE" ); do
-        img_docker="$(docker image inspect -f '{{ index .Config.Labels "claude.docker" }}' "$img" 2>/dev/null || true)"
-        [[ "$img_docker" == "1" ]] && continue
-        if [[ "$img" == "$DOCKER_BROWSER_IMAGE" ]]; then
-            warn "image $img was not built with WITH_DOCKER=1: run 'make build-docker-browser' before 'up' (a service that is both --docker and --browser needs the combined image)"
-        else
-            warn "image $img was not built with WITH_DOCKER=1: run 'make build-docker' before 'up' (--docker services will fail to boot otherwise)"
-        fi
-    done
-    warn "--docker services can reach root INSIDE their own container (Sysbox keeps that off the host)."
-    warn "  CLAUDE_BROKER_GIT_KEY and CLAUDE_EGRESS_LOCKDOWN do not bind on them: see docs/architecture.md."
 fi
 
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing: run 'make login'"
