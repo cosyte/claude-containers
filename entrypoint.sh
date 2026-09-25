@@ -174,7 +174,12 @@ if [[ -n "$SCRATCH_DIR" && "$SCRATCH_DIR" != "/tmp" ]]; then
         # half-written tarball forever, and slowly fills the pool. Deleting only at boot means
         # nothing in flight is ever pulled out from under a running process.
         find "$SCRATCH_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
-        log "Scratch (TMPDIR)    : $SCRATCH_DIR (disk-backed; cleared on boot)"
+        # Say what it really is: --browser and --gpu services mount a RAM tmpfs here.
+        if [[ "$(stat -f -c %T "$SCRATCH_DIR" 2>/dev/null)" == tmpfs ]]; then
+            log "Scratch (TMPDIR)    : $SCRATCH_DIR (RAM tmpfs, $(df -h --output=size "$SCRATCH_DIR" 2>/dev/null | tail -1 | tr -d ' '); cleared on boot)"
+        else
+            log "Scratch (TMPDIR)    : $SCRATCH_DIR (disk-backed; cleared on boot)"
+        fi
     else
         log "WARNING: TMPDIR=$SCRATCH_DIR is not creatable, falling back to /tmp (a 1g tmpfs)."
         log "WARNING: Large installs/builds may fail with ENOSPC. Mount a scratch volume there."

@@ -84,7 +84,7 @@ trap 'rm -rf "$WORK"' EXIT
 got=""
 for url in $URLS; do
     say "downloading $url"
-    if curl -fL --retry 3 --connect-timeout 20 -A "claude-blender-install/${BLENDER_VERSION}" \
+    if curl -fsSL --retry 3 --connect-timeout 20 -A "claude-blender-install/${BLENDER_VERSION}" \
             -o "$WORK/$TARBALL" "$url"; then
         got="$url"; break
     fi

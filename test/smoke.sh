@@ -347,29 +347,32 @@ if "$REPO_ROOT/bin/claude-compose-gen" --out "$GENOUT" \
     # Extract exactly one service's block (its `^  name:` header to the next
     # service or top-level key) so assertions don't depend on line offsets: the
     # environment block grows over time and fixed -A windows silently rot.
+    # Assertions feed the block through a here-string, never `svc_block | grep -q`: under
+    # pipefail, grep -q exits on an early match, awk takes SIGPIPE writing the rest of the
+    # block, and the check fails BECAUSE it matched (seen on "cpus: 7").
     svc_block(){ awk -v s="^  $1:\$" '
         $0 ~ s {f=1; print; next}
         f && /^  [A-Za-z0-9_-]+:$/ {exit}
         f && /^[A-Za-z]/ {exit}
         f {print}' "$GENOUT"; }
     check "--cpu override applies cpus to the target repo" \
-        'svc_block alpha | grep -q "cpus: 7"'
+        'grep -q "cpus: 7" <<<"$(svc_block alpha)"'
     check "--mem override applies mem_limit to the target repo" \
-        'svc_block alpha | grep -q "mem_limit: 777m"'
+        'grep -q "mem_limit: 777m" <<<"$(svc_block alpha)"'
     check "non-overridden repo keeps the global default (no override leak)" \
-        '! svc_block beta | grep -qE "cpus: 7|mem_limit: 777m"'
+        '! grep -qE "cpus: 7|mem_limit: 777m" <<<"$(svc_block beta)"'
     check "--browser sets CLAUDE_BROWSER on the target repo" \
-        'svc_block beta | grep -q "CLAUDE_BROWSER"'
+        'grep -q "CLAUDE_BROWSER" <<<"$(svc_block beta)"'
     check "--browser repo uses the browser image" \
-        'svc_block beta | grep -qE "image: .*:browser"'
+        'grep -qE "image: .*:browser" <<<"$(svc_block beta)"'
     check "--browser does not leak to non-browser repos" \
-        '! svc_block alpha | grep -q "CLAUDE_BROWSER"'
+        '! grep -q "CLAUDE_BROWSER" <<<"$(svc_block alpha)"'
     check "--model override sets the literal model on the target repo" \
-        'svc_block alpha | grep -q "CLAUDE_MODEL.*sonnet"'
+        'grep -q "CLAUDE_MODEL.*sonnet" <<<"$(svc_block alpha)"'
     check "non-overridden repo defaults CLAUDE_MODEL to opus (best available)" \
-        'svc_block beta | grep "CLAUDE_MODEL" | grep -q opus'
+        'grep "CLAUDE_MODEL" <<<"$(svc_block beta)" | grep -q opus'
     check "--model does not leak the override to other repos" \
-        '! svc_block beta | grep -q sonnet'
+        '! grep -q sonnet <<<"$(svc_block beta)"'
 else
     bad "claude-compose-gen failed to generate with --cpu/--mem/--model/--browser"
 fi
@@ -1089,6 +1092,8 @@ else
     wait_tmux "$GPUCN" || true
     gpulog="$(docker logs "$GPUCN" 2>&1 || true)"
     check "the boot probe reports the GPU ok" 'grep -q "GPU                 : ok (" <<<"$gpulog"'
+    check "the boot log calls /scratch what it is here: a RAM tmpfs, not disk-backed" \
+        'grep -q "Scratch (TMPDIR)    : /scratch (RAM tmpfs, 4.0G; cleared on boot)" <<<"$gpulog"'
     check "claude-gpu status is ok inside the session (exit 0)" \
         'st="$(docker exec "$GPUCN" gosu claude claude-gpu status 2>&1)"; grep -qx "gpu: ok" <<<"$st"'
     check "the healthcheck says 'healthy; gpu: ok' (exit 0)" \
