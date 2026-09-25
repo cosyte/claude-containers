@@ -12,8 +12,8 @@ vulnerabilities go through private reporting rather than an issue.
 ## Filing an issue
 
 1. Search existing issues first.
-2. Include your host OS, `docker version`, `runc --version`, and whether Sysbox
-   is installed; a surprising number of failures here are host-runtime issues.
+2. Include your host OS, `docker version` and `runc --version`; a surprising
+   number of failures here are host-runtime issues.
 3. Include the exact `claude-launch` / `claude-compose-gen` command, the relevant
    env vars, and `docker logs <container>` around the failure.
 4. **Redact before pasting.** Logs from this stack can contain tokens, OAuth
@@ -61,8 +61,8 @@ task runner. Do not add a dependency without a strong reason.
 - **A removed flag must refuse, not silently no-op.** When something is deleted,
   the old flag stays as an error that names where it went. A silent no-op turns
   an operator's explicit request into nothing.
-- **Fail closed on safety, fail open on connectivity.** Sysbox preflight and the
-  credential guards refuse to boot rather than run degraded. Egress lockdown does
+- **Fail closed on safety, fail open on connectivity.** The credential guards
+  refuse to boot rather than run degraded. Egress lockdown does
   the opposite on purpose: it logs loudly and leaves egress unrestricted rather
   than bricking a session.
 - **Never add a log line carrying workspace or prompt content** to debug a

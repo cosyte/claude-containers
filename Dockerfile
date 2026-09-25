@@ -88,7 +88,7 @@ FROM node:${NODE_VERSION}-trixie-slim
 #   - 2.1.246: fixed the background retention sweep deleting git worktrees under
 #     `.claude/worktrees/` that a user created themselves, when a stale
 #     background-session record pointed at them: this repo's primary parallelism
-#     path (worktree-isolated subagents, post Sysbox-broker retirement) creates
+#     path (worktree-isolated subagents, since the worker broker was retired) creates
 #     exactly those worktrees.
 #   - 2.1.248: fixed backgrounded worktree sessions losing their checkout; the
 #     background session now holds the worktree's lock for as long as it runs.
@@ -116,7 +116,7 @@ FROM node:${NODE_VERSION}-trixie-slim
 # Landed between 2.1.220 and 2.1.241, still relevant:
 #   - 2.1.224: removed the 200-subagent spawn cap entirely (the concurrency-20 /
 #     nesting-depth-3 limits from 2.1.212-2.1.219 remain). Loosens a ceiling this
-#     repo's worktree-isolated-subagent parallelism path (post Sysbox-broker retirement)
+#     repo's worktree-isolated-subagent parallelism path (since the worker broker was retired)
 #     could otherwise hit on a large fan-out.
 #   - 2.1.232: fixed Remote Control sessions appearing as new claude.ai sessions on
 #     resume, and fixed RC sessions going unreachable to new clients while idle: both
@@ -145,15 +145,14 @@ FROM node:${NODE_VERSION}-trixie-slim
 #     around in entrypoint.sh's reconcile guard + watchdog (PR #36). Keep the guard:
 #     it covers the OAuth-credential expiry, which is a different trigger.
 #   - 2.1.216: worktree-isolated subagents no longer redirect git at the shared
-#     checkout. This repo replaced the retired Sysbox broker with subagents in git
+#     checkout. This repo replaced the retired worker broker with subagents in git
 #     worktrees, so that bug hit our primary parallelism path directly.
 #   - 2.1.212/2.1.217/2.1.219: subagent limits moved repeatedly, a per-session spawn
 #     cap (200), then a concurrency cap (20) with nesting OFF by default, then nesting
 #     re-enabled to depth 3. Anything that fans out subagents should not assume the
 #     2.1.207 behavior.
-#   - 2.1.214: `docker` daemon-redirect flags now prompt for permission. Harmless here
-#     (sessions run bypassPermissions) but it is the kind of change that would bite a
-#     --docker container running a stricter permission mode.
+#   - 2.1.214: `docker` daemon-redirect flags now prompt for permission. Harmless here:
+#     sessions run bypassPermissions and have no Docker daemon to redirect.
 #
 # Carried forward from the 2.1.145 -> 2.1.207 bump, still accounted for here:
 #   - 2.1.197: Sonnet 5 became Claude Code's OWN default model. Harmless for us only
@@ -299,9 +298,8 @@ ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
 #   mise use aqua:owner/tool | github:owner/tool         (arbitrary prebuilt CLIs)
 # `pipx:` CLIs reuse the baked `uv` automatically, mise's `pipx.uvx` defaults
 # true whenever `uv` is on PATH (it is, baked above). System `.so` libraries are
-# NOT in scope for mise (the curated worker-apt tier that used to close that gap,
-# the worker-tier apt provisioner, was retired along with the Sysbox substrate it was scoped to:
-# see docs/legacy-sysbox-broker.md).
+# NOT in scope for mise (the curated worker-apt tier that used to close that gap was
+# retired along with the worker broker it was scoped to).
 #
 # Pinned + checksummed IN-REPO: this repo's whole thesis is supply-chain
 # containment, so mise is NOT installed by piping a remotely-served `mise.run`
@@ -434,53 +432,6 @@ RUN set -eux; \
 # the variant by probing the baked binaries on PATH instead.)
 LABEL claude.browser="${WITH_BROWSER}"
 
-# --- Optional: Docker engine (the :docker image variant) -----------------------
-# Build with `--build-arg WITH_DOCKER=1` (or `make build-docker`) to bake the Docker
-# Engine into the image, so a session can BUILD IMAGES AND RUN CONTAINERS: Dockerfiles,
-# compose stacks, testcontainers: as part of its normal work. ~400 MB delta; default OFF.
-#
-# History, because this ARG existed twice before under a different name: it originally
-# hosted the Sysbox nested-worker-BROKER substrate (since retired), then a later prune deleted
-# it outright, correctly observing that nothing started dockerd and nothing *could*: the
-# launchers grant no --privileged and mount no docker socket, so the baked engine was
-# unreachable. This variant is NOT that comeback: there is no broker, no worker plane, no
-# spool. What changed is the missing piece that prune named. The container now runs under
-# `--runtime=sysbox-runc`, which puts the inner daemon in a USER NAMESPACE (container-root
-# → an unprivileged host uid), so nested Docker needs neither --privileged nor a host
-# socket mount: both remain FORBIDDEN, and both would hand a prompt-injectable agent the
-# host. entrypoint.sh §5a starts the daemon; bin/claude-launch --docker selects the runtime.
-#
-# The broker never needed to *compose* anything, so it installed neither plugin. A session
-# testing container workflows needs both, plus buildx for a modern `docker build`.
-ARG WITH_DOCKER=0
-RUN set -eux; \
-    if [ "$WITH_DOCKER" = "1" ]; then \
-        install -m 0755 -d /etc/apt/keyrings; \
-        curl -fsSL https://download.docker.com/linux/debian/gpg \
-            -o /etc/apt/keyrings/docker.asc; \
-        chmod a+r /etc/apt/keyrings/docker.asc; \
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-            > /etc/apt/sources.list.d/docker.list; \
-        apt-get update; \
-        apt-get install -y --no-install-recommends \
-            docker-ce docker-ce-cli containerd.io \
-            docker-buildx-plugin docker-compose-plugin; \
-        apt-get clean; \
-        rm -rf /var/lib/apt/lists/*; \
-        # Prove the whole surface a session actually uses is present; the entrypoint (§5a)
-        # starts dockerd. `docker compose`/`buildx` are plugins: a missing plugin is a
-        # silent "unknown command" at runtime, so assert them at BUILD time instead.
-        dockerd --version; docker --version; containerd --version; \
-        docker buildx version; docker compose version; \
-    else \
-        echo "WITH_DOCKER=0: skipping the Docker engine (lean session image)"; \
-    fi
-# Image-capability label: bin/claude-launch reads this to fail early (loud, actionable)
-# when --docker targets an image with no engine. Orthogonal to claude.browser: both ARGs
-# can be set in one build (make build-docker-browser) and each label is checked on its own.
-# (The in-container entrypoint can't read its own image labels, so §5a probes PATH instead.)
-LABEL claude.docker="${WITH_DOCKER}"
-
 # --- Non-root user ------------------------------------------------------------
 # The entrypoint starts as root (sshd, volume chown) then drops to this user
 # for the Claude Code process via gosu.
@@ -534,7 +485,7 @@ COPY bin/claude-disk-gc /usr/local/bin/claude-disk-gc
 COPY bin/claude-deps-check /usr/local/bin/claude-deps-check
 # claude-reaper and claude-controller were REMOVED: the reaper pruned a spool
 # only the retired broker ever wrote to, and the controller had collapsed to a
-# pass-through to claude-autopilot. See docs/legacy-sysbox-broker.md.
+# pass-through to claude-autopilot.
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude /usr/local/bin/claude-session \
         /usr/local/bin/claude-dev /usr/local/bin/claude-autopilot \

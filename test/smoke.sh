@@ -1044,57 +1044,12 @@ check "scratch is cleared on boot (a volume does not self-empty like a tmpfs)" \
 docker rm -f "$SCRCN" >/dev/null 2>&1 || true
 docker volume rm "$SCRVOL" >/dev/null 2>&1 || true
 
-# --- 17. Container workflows (--docker): the agent can actually build + run ----
-# The end-to-end proof, and the only one that matters: an UNPRIVILEGED agent inside the
-# session builds an image and runs a container, with no --privileged and no host socket.
-# Gated twice, because both halves are genuinely optional:
-#   - the image must have the engine baked (claude.docker LABEL / WITH_DOCKER=1)
-#   - the HOST must have the Sysbox runtime (CI runners do not)
-# A skip here is honest: it says the case was not exercised, rather than passing vacuously.
-IMG_IS_DOCKER="$(docker image inspect -f '{{ index .Config.Labels "claude.docker" }}' "$IMAGE" 2>/dev/null || echo 0)"
-HOST_HAS_SYSBOX=0
-docker info --format '{{range $r, $_ := .Runtimes}}{{$r}} {{end}}' 2>/dev/null | grep -qw sysbox-runc && HOST_HAS_SYSBOX=1
-
-if [ "$IMG_IS_DOCKER" != "1" ]; then
-    echo "  SKIP  17 container-workflow checks (\$IMAGE has no baked engine, build with WITH_DOCKER=1)"
-elif [ "$HOST_HAS_SYSBOX" != "1" ]; then
-    echo "  SKIP  17 container-workflow checks (host has no sysbox-runc runtime, nested Docker cannot be exercised)"
-else
-    DKCN="claude-smoke-docker-$$"
-    docker run -d --name "$DKCN" --runtime=sysbox-runc --security-opt no-new-privileges \
-        -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=dockersmoke -e CLAUDE_DOCKER=1 \
-        -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
-    wait_tmux "$DKCN" || true
-
-    check "the inner dockerd starts and reports ready" \
-        'docker logs "$DKCN" 2>&1 | grep -q "Inner dockerd.*ready"'
-    # The container must NOT be privileged and must NOT see the host socket. If either of
-    # these ever flips, the isolation story is gone regardless of what else passes.
-    check "the container is NOT privileged" \
-        '[ "$(docker inspect -f "{{.HostConfig.Privileged}}" "$DKCN")" = "false" ]'
-    check "no host docker socket is mounted into it" \
-        '! docker inspect -f "{{range .Mounts}}{{.Source}}{{end}}" "$DKCN" | grep -q "docker.sock"'
-    # Sysbox's userns is the whole mechanism: container-root must map to a NON-zero host uid.
-    check "container-root maps to an unprivileged host uid (Sysbox userns is active)" \
-        'docker exec "$DKCN" cat /proc/self/uid_map | awk "{exit !(\$2 != 0)}"'
-    # gosu, not `docker exec -u`: exec does not apply supplementary groups, so it would
-    # report a false failure here. gosu is how the entrypoint actually starts the agent.
-    check "the unprivileged agent is in the docker group (can reach the socket)" \
-        'docker exec "$DKCN" gosu claude id -nG | grep -qw docker'
-    check "the agent BUILDS an image" \
-        'docker exec "$DKCN" gosu claude sh -c "cd /tmp && printf \"FROM alpine\nRUN echo ok > /p\n\" > Dockerfile && docker build -q -t smoke:1 . >/dev/null"'
-    check "the agent RUNS a container from it" \
-        'docker exec "$DKCN" gosu claude docker run --rm smoke:1 cat /p | grep -q ok'
-    check "docker compose is available to the agent" \
-        'docker exec "$DKCN" gosu claude docker compose version >/dev/null 2>&1'
-    # Teardown regression: an inner container still running must not wedge removal. Before
-    # the entrypoint's TERM trap stopped the inner daemon, `docker rm -f` failed with
-    # "did not receive an exit event" and aborted claude-rm mid-purge, stranding volumes.
-    docker exec "$DKCN" gosu claude docker run -d --name linger alpine sleep 300 >/dev/null 2>&1 || true
-    check "the container stops cleanly even with a live inner container (no wedged teardown)" \
-        'docker stop -t 25 "$DKCN" >/dev/null 2>&1 && docker rm -f "$DKCN" >/dev/null 2>&1'
-    docker rm -f "$DKCN" >/dev/null 2>&1 || true
-fi
+# --- 17. The per-session Docker engine stays removed -----------------------------
+# The image must not carry a daemon: nothing can start one without extra privilege, and a
+# baked engine nobody can reach is dead weight that invites someone to "fix" it by adding a
+# privileged runtime back.
+check "the image ships no Docker daemon (the per-session engine was removed)" \
+    '! docker run --rm --entrypoint sh "$IMAGE" -c "command -v dockerd || command -v containerd"'
 
 echo
 echo "==============================================="

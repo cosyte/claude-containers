@@ -16,17 +16,16 @@ token.
 > and of your Claude subscription remains subject to Anthropic's own terms.
 > Report Claude Code bugs to Anthropic, not here.
 
-> **A retired feature you may find references to.** An earlier version ran a
+> **Retired features you may find references to.** An earlier version ran a
 > nested-Sysbox **worker broker**: a controller container that spawned autonomous
 > nested worker containers (`--broker`/`--sysbox`). It was retired on 2026-07-12 in
 > favour of Claude Code subagents in git worktrees, and is frozen on branch
 > `legacy/sysbox-broker-2026-07-12` (tag `legacy-sysbox-broker-2026-07-12`), which
-> is **not maintained**. Removed flags now *refuse* with an error naming their
-> replacement rather than silently doing nothing. Background:
-> [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md). Nothing described
-> below depends on it, and note that the **`--docker` per-session Docker engine
-> is a separate, current feature** ([below](#container-workflows-optional)) that
-> reuses only the Sysbox runtime.
+> is **not maintained**. The later per-session Docker engine (`--docker`), the last
+> thing that needed that runtime, was removed too: every session now runs on plain
+> `runc`. Removed flags *refuse* with an error naming the removal rather than
+> silently doing nothing. Background:
+> [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md).
 
 ## Quick start
 
@@ -82,7 +81,6 @@ the `./bin/` prefix.
    claude-sshkeys       (shared)  SSH host keys        → /etc/ssh/host-keys
    claude-config-<proj> (per ctr) sessions + state     → /home/claude/.claude
    claude-ws-<proj>     (per ctr) the git repo         → /workspace
-   claude-docker-<proj> (per ctr) inner image store    → /var/lib/docker  (--docker only)
    claude-scratch-<proj>(per ctr) disk-backed TMPDIR   → /scratch
 ```
 
@@ -229,9 +227,6 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_MCP_ENABLED` |: | CSV of baked MCP servers to load (empty = all) |
 | `WITH_BROWSER` | `0` | Build arg: 1 bakes Chromium + chrome-devtools-mcp (+~200 MB). `make build-browser` flips it. |
 | `CLAUDE_BROWSER` | auto | Tri-state for the chrome-devtools MCP: unset = auto (a browser image self-enables it), `1`/`--browser` = force on (fails loud on a lean image), `0`/`--no-browser` = opt out. |
-| `WITH_DOCKER` | `0` | Build arg: 1 bakes a Docker engine for per-session container workflows. `make build-docker` flips it (`make build-docker-browser` for both variants). See [Container workflows](#container-workflows-optional) |
-| `CLAUDE_DOCKER` | `0` | `1`/`--docker` gives the session its **own** Docker engine. Requires a `WITH_DOCKER=1` image **and** the Sysbox runtime on the host: the launcher refuses rather than falling back to something unsafe. Never `--privileged`, never a host docker-socket mount. Raise `CLAUDE_MEM_LIMIT` (8g+): inner containers share this container's cgroup |
-| `CLAUDE_DOCKERD_WAIT` | `60` | Seconds to wait for the inner daemon before failing the boot |
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` |: | Clone source (or use `--repo`/`--branch`/`--depth`) |
 | `GIT_AUTHOR_NAME`/`_EMAIL` (+`COMMITTER`) | host git config | Commit identity |
 | `GIT_SSH_KEY` | `~/.ssh/claude-git-key` | Host SSH key for git, mounted read-only |
@@ -263,7 +258,6 @@ vars override `.env`. Full reference: `.env.example`.
 | `/etc/ssh/host-keys` | `claude-sshkeys` volume | shared | SSH host keys (stable fingerprint) |
 | `/home/claude/.claude` | `claude-config-<proj>` volume | per container | Sessions, history, merged config, plugins |
 | `/workspace` | `claude-ws-<proj>` volume *or* `--workspace` bind | per container | The git repo |
-| `/var/lib/docker` | `claude-docker-<proj>` volume | per container, `--docker` only | Inner Docker image store: pulled base images + built layers. Can reach tens of GB; `claude-rm --purge` deletes it |
 | `/scratch` | `claude-scratch-<proj>` volume | per container | **`TMPDIR`**: disk-backed temp. Cleared on every boot; `claude-rm --purge` deletes it |
 | `/tmp` | tmpfs (**RAM**, 1 GB) | per container | Small temp only. Charged to the memory cgroup: big writes belong in `/scratch` |
 | `/etc/claude/authorized_keys` | host `SSH_AUTHORIZED_KEYS` | read-only | Who may SSH in |
@@ -303,10 +297,6 @@ claude-logs  <name> [-n LINES]    tail the entrypoint/sshd log
 claude-disk-gc [--loop]           GC docker image/build-cache layers + trim the shared cache
 claude-disk-verify                prove disk-hygiene logic (docker-free, safe anywhere)
 ```
-
-`claude-launch --broker` used to spawn autonomous nested workers via a root-owned broker.
-That substrate is retired: see [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md).
-The flag now errors rather than silently doing nothing.
 
 Inside an autopilot container (over SSH), `claude-enqueue "<prompt>"` adds a task
 to the durable queue (`CLAUDE_AUTOPILOT_QUEUE=1`); `--priority N` orders it
@@ -449,92 +439,19 @@ reads pages back via screenshots and DOM queries. Full design rationale:
 [docs/architecture.md](docs/architecture.md#decision-frontend-debugging-is-an-opt-in-image-variant);
 runbook: [docs/troubleshooting.md](docs/troubleshooting.md#frontend-debugging---browser--claude_browser).
 
-## Container workflows (optional)
-
-Off by default. When a session's job involves containers: writing a Dockerfile,
-bringing up a `compose` stack, running testcontainers: give it **its own Docker
-engine**:
-
-```bash
-make build-docker                             # tags claude-code-box:docker
-./bin/claude-launch api --docker --workspace ./api
-```
-
-Inside, the agent is a normal Docker user: `docker build`, `docker run`,
-`docker compose up`, `docker buildx` all work, as itself (the unprivileged
-`claude` user), with no `sudo`.
-
-**How this stays safe.** The daemon runs *inside* the session container, and the
-container runs under **Sysbox** (`--runtime=sysbox-runc`), which puts it in a user
-namespace: container-root maps to an unprivileged host uid. On this host, measured:
-
-| | capabilities | uid map |
-|---|---|---|
-| ordinary session (`runc`) | Docker's default 14 | `0 → 0` (container-root **is** host root) |
-| `--docker` session (`sysbox-runc`) | full set | `0 → 165536` (container-root is a host nobody) |
-
-The full capability set looks alarming and isn't: those are powers over the
-container's *own* namespace. This is why `--docker` needs **no `--privileged` and
-no host docker-socket mount**: both are forbidden here, and either would hand a
-prompt-injectable agent root on the host. `claude-launch --docker` refuses to run
-if the Sysbox runtime is missing rather than falling back to something unsafe.
-
-**What it does cost you, stated plainly.** A docker socket is a path to root
-*inside* the container (`docker run -v /:/rootfs …`). Sysbox keeps that root off
-the host, so the boundary that matters holds, but two in-container controls
-assume root is separate from the agent, and on a `--docker` session they no longer
-bind:
-
-- **`CLAUDE_BROKER_GIT_KEY=1`** hides the deploy key in a root-owned `ssh-agent`;
-  an agent with Docker can read the key file straight off the filesystem.
-- **`CLAUDE_EGRESS_LOCKDOWN=1` (and `=strict`)** filters the `OUTPUT` chain; inner
-  containers' traffic is `FORWARD`ed, and container-root can flush the rules
-  anyway. `strict` does not refuse a `--docker` session over this: its ruleset
-  still applies inside the session's own namespace, it just does not reach what
-  the inner daemon forwards. The launcher warns for either spelling.
-
-Egress lockdown is off by default; git-key brokering is **on** by default, so the
-first bullet applies to a plain `--docker` session unless you opted out. The
-caveat itself is unchanged: under `--docker`, treat the deploy key as readable by
-the agent. The launcher warns if you combine either with `--docker`.
-Also: `--cap-drop ALL` is skipped for these containers (an inner daemon cannot
-start under the minimal set), while `no-new-privileges` is kept: its one real
-cost is that setuid binaries *inside an inner container* (`sudo`, `ping`) can't
-elevate.
-
-**Sizing.** Inner containers live in the session's cgroup, so `CLAUDE_MEM_LIMIT` /
-`CLAUDE_CPU_LIMIT` / `CLAUDE_PIDS_LIMIT` have to cover the whole stack. The 4g
-default is tight for building images or running a compose stack; 8g+ is a saner
-floor, and the launcher warns below it.
-
-**Disk.** The inner image store persists in a per-project `claude-docker-<name>`
-volume, so a recreate doesn't re-pull every base image. It holds every layer the
-session builds or pulls and can reach tens of GB; `claude-rm --purge` deletes it
-(and prints its size first).
-
-Both variants compose: `make build-docker-browser` bakes the engine *and*
-Chromium, for a session that runs a containerized stack and debugs its frontend
-(`--docker --browser`). For a whole fleet, `claude-compose-gen --docker REPO`
-emits `runtime: sysbox-runc` on just those services, a lean sibling in the same
-stack keeps its full `cap_drop`.
-
-Not to be confused with the retired nested-Sysbox **worker broker**
-([docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md)): this reuses that
-era's runtime and nothing else: no broker, no worker plane, no spool.
-
 ## Temp space: `/scratch`, not `/tmp`
 
 `/tmp` is a **tmpfs**: it lives in RAM, is capped at 1 GB, and every page is charged to the
 container's memory cgroup. With `TMPDIR` unset, everything large defaults there: `pip`/`uv`
-building wheels, `docker save`/`load` tarballs, and (in a `--docker` session) the inner
-containerd's mount dirs. The result is an install that dies at 1 GiB with a confusing
+building wheels, big archives, compiler temp files. The result is an install that dies at
+1 GiB with a confusing
 `ENOSPC` while the host has terabytes free, or, worse, a session that OOM-kills itself
 because a build filled RAM it was accounted for.
 
 So every container gets a **disk-backed `claude-scratch-<name>` volume mounted at
 `/scratch`, and `TMPDIR` points at it**. Temp writes land on disk, where the space actually
-is; `/tmp` stays a small, fast tmpfs for what a tmpfs is good at. `dockerd` and `containerd`
-inherit `TMPDIR` from the entrypoint, and `bash_profile` re-exports it, so an SSH login gets
+is; `/tmp` stays a small, fast tmpfs for what a tmpfs is good at. Every process inherits
+`TMPDIR` from the entrypoint, and `bash_profile` re-exports it, so an SSH login gets
 the same behaviour as the agent (sshd builds a fresh environment and would otherwise fall
 back to `/tmp`).
 
@@ -584,11 +501,8 @@ idle-only and fail-safe. Full design + verification:
   need `CLAUDE_EGRESS_PACKAGES=1`; and the `node@`/`go@`/`rust` toolchains pull
   their runtime from vendor hosts (nodejs.org, go.dev, static.rust-lang.org) not
   yet on the allowlist, so they need those hosts via `CLAUDE_EGRESS_EXTRA_HOSTS`.
-- **System libraries (`apt`) are not available**: the agent is rootless, and the
-  worker-tier `apt` path that used to close that gap was retired along with the
-  Sysbox worker-broker substrate it depended on (see
-  [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md)). A system library
-  needs a base-image rebuild today.
+- **System libraries (`apt`) are not available**: the agent is rootless. A system
+  library needs a base-image rebuild.
 - The image sets `trusted_config_paths` to **`/workspace` only**: a deliberately
   scoped supply-chain trade so a repo's own `mise.toml` auto-applies while a config
   anywhere else stays untrusted (never a blanket `/`). Full design + verification:
@@ -679,10 +593,6 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   shared `/cache` volume's re-fetchable download caches when it exceeds
   `CLAUDE_CACHE_MAX_MIB`. Docker-free logic tests: `test/disk-unit.sh`,
   `test/sizing-unit.sh` (CI); one-command sanity pass: `bin/claude-disk-verify`.
-  (A nested-Sysbox worker-broker substrate used to run alongside this, a
-  root-owned broker spawning autonomous nested workers with a K-aware resource
-  envelope and a per-launch disk-pressure refusal. It is retired; see
-  [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md).)
 - **Secret brokering (git key + credentials).** By default the SSH deploy key is
   loaded into a **root-owned `ssh-agent`** and only a signing socket is exposed
   to the agent (via a root `socat` relay): git still pushes, but the
@@ -763,7 +673,7 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   the supply-chain exfil path the container refuses. Nothing broadens unless the
   flag is explicitly set, and the fail-open-as-a-whole semantics are unchanged.
   Debian/apt **system** libraries are deliberately not here: no self-service path
-  currently provisions those (see docs/legacy-sysbox-broker.md). The threat model (the
+  provisions those. The threat model (the
   Nx-class weaponized-agent exfil) and the containment rules are in
   [docs/package-provisioning-security.md](docs/package-provisioning-security.md).
   The baked `mise` toolchain provisioner (rootless language/CLI installs) rides on

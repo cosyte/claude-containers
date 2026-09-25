@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 # Unit tests that need NO docker: safe for CI and for `scripts/verify.sh`.
 #
-# Covers the pure-logic checks in bin/_common.sh that survive the substrate strip (the Sysbox
-# version-floor refusal, preflight_sysbox/sysbox_version_check, was removed along
-# with the nested-Sysbox worker-broker substrate it gated: see
-# docs/legacy-sysbox-broker.md):
+# Covers the pure-logic checks in bin/_common.sh, plus the prune gates:
 #   - version_ge: the generic dotted-numeric comparator (fail-closed on garbage)
 #   - preflight_runc: the warn-only posture is preserved (never exits non-zero)
 set -uo pipefail
@@ -215,6 +212,18 @@ if [[ -n "$GUARD" ]]; then
     [[ -z "$out" ]] \
         && ok  "no retired vars set → §0 is silent (no noise on a clean boot)" \
         || bad "§0 emitted output with no retired vars set: $out"
+
+    # A container created by an old launcher/compose can still carry CLAUDE_DOCKER=1. It must
+    # boot (a leftover, not an unsafe request) but say there is no engine; 0 stays silent,
+    # since .env files copied from the old .env.example carry CLAUDE_DOCKER=0.
+    rc="$(CLAUDE_DOCKER=1 guard_rc)"; out="$(CLAUDE_DOCKER=1 run_guard)"
+    [[ "$rc" == "0" && "$out" == *"CLAUDE_DOCKER=1 is IGNORED"* && "$out" == *"no Docker daemon"* ]] \
+        && ok  "CLAUDE_DOCKER=1 boots with a loud 'no Docker daemon' warning (rc=0)" \
+        || bad "CLAUDE_DOCKER=1 must warn and still boot (rc=$rc): $out"
+    out="$(CLAUDE_DOCKER=0 run_guard)"
+    [[ -z "$out" ]] \
+        && ok  "CLAUDE_DOCKER=0 is silent (an inert copied .env line is not noise)" \
+        || bad "CLAUDE_DOCKER=0 must be silent: $out"
 else
     bad "could not extract §0's retired-env guard from entrypoint.sh (the retired-env guard is missing)"
 fi
@@ -223,7 +232,7 @@ fi
 # The bin prune: the bins that lost their reason are gone, and their removal is LOUD
 # ==========================================================================================
 echo
-echo "== claude-controller / claude-reaper / the WITH_DOCKER variant are fully gone =="
+echo "== claude-controller / claude-reaper / the per-session Docker engine are fully gone =="
 
 # A deleted bin that some file still names is worse than the bin: a stale `COPY bin/claude-reaper`
 # fails the image build outright, and a stale CI step or npm-test entry fails every run. Pin the
@@ -244,40 +253,34 @@ if ! code_of "$REPO_ROOT/Dockerfile" | grep -qE 'claude-(controller|reaper)'; th
 else
     bad "Dockerfile still references a pruned bin: $(code_of "$REPO_ROOT/Dockerfile" | grep -E 'claude-(controller|reaper)')"
 fi
-# WITH_DOCKER is BACK, deliberately, but the property that prune was protecting still holds and
-# is what we assert now. It deleted the variant because the baked engine was UNREACHABLE: no
-# runtime, no --privileged, no socket mount, and nothing that started dockerd: 400 MB of dead
-# daemon. The engine only earns its place if it can actually run, so pin the wiring, not the
-# absence: the entrypoint must start it, and the launcher must give it the Sysbox runtime that
-# lets it start without privilege. Break either and the variant is dead weight again.
-# (See docs/architecture.md; the worker BROKER it originally served stays retired.)
+# The per-session Docker engine was REMOVED: an inner daemon needed a privileged host runtime
+# to start at all, which is exactly the kind of isolation exception this repo refuses. Pin
+# the absence at every LIVE site (comments that record the removal are stripped first), so a
+# partial revert cannot pass: no engine build arg, no daemon start, no runtime selection.
 # NOTE: materialize code_of's output into a variable instead of piping it into `grep -q`.
 # This file runs under `set -o pipefail`, and `producer | grep -q X` is a trap there: grep -q
 # exits the moment it matches, the producer takes SIGPIPE (141), and pipefail reports the
 # PIPELINE as failed even though the pattern was found. It is timing-dependent, so it shows
 # up as a test that passes locally and reds CI at random. Keep the here-string form.
 has() { grep -qE -- "$2" <<<"$1"; }   # has "<text>" "<ere>"
-dockerfile_code="$(code_of "$REPO_ROOT/Dockerfile")"
-entrypoint_code="$(code_of "$REPO_ROOT/entrypoint.sh")"
-launch_code="$(code_of "$REPO_ROOT/bin/claude-launch")"
-
-if has "$dockerfile_code" 'WITH_DOCKER'; then
-    ok  "the WITH_DOCKER image variant exists (bakes dockerd + CLI + compose/buildx)"
-else
-    bad "WITH_DOCKER is missing from the Dockerfile: --docker sessions cannot have an engine"
-fi
-if has "$entrypoint_code" 'CLAUDE_DOCKER' && has "$entrypoint_code" '(^|[[:space:]])dockerd[[:space:]]*>>'; then
-    ok  "the entrypoint actually STARTS the baked engine (CLAUDE_DOCKER=1 → dockerd)"
-else
-    bad "nothing starts dockerd: the baked engine is unreachable again (the exact defect it was once deleted for)"
-fi
-if has "$launch_code" 'runtime=sysbox-runc'; then
-    ok  "claude-launch gives the engine a runtime it can start under (--runtime=sysbox-runc)"
-else
-    bad "claude-launch selects no Sysbox runtime: an inner dockerd cannot start without the userns"
-fi
-# The two shortcuts that would make an inner engine trivial and catastrophic. Sysbox exists
-# precisely so neither is needed; if one appears, the isolation story is gone.
+engine_gone() {  # engine_gone <file> <ere> <what>
+    if has "$(code_of "$REPO_ROOT/$1")" "$2"; then
+        bad "$1 still has $3: the per-session Docker engine was removed"
+    else
+        ok  "$1 has no $3"
+    fi
+}
+engine_gone Dockerfile          'WITH_DOCKER|docker-ce|containerd\.io'   "Docker engine build step"
+engine_gone Makefile            'WITH_DOCKER|build-docker'                "Docker engine build target"
+engine_gone entrypoint.sh       '(^|[[:space:]])dockerd'                  "inner dockerd start"
+engine_gone bin/claude-launch   'runtime=|DOCKER_RUNTIME|docker_volume'   "runtime selection or image-store volume"
+engine_gone bin/claude-compose-gen 'runtime:|WITH_DOCKER|claude\.docker'  "runtime, engine build arg or docker label"
+engine_gone bin/_common.sh      'preflight_sysbox|docker_volume'          "runtime preflight or image-store volume helper"
+[[ ! -e "$REPO_ROOT/test/docker-unit.sh" ]] \
+    && ok  "test/docker-unit.sh is deleted (its surviving checks moved to test/launch-unit.sh)" \
+    || bad "test/docker-unit.sh still exists"
+# The two shortcuts that would hand a prompt-injectable agent the host. If one appears, the
+# isolation story is gone.
 for f in bin/claude-launch bin/claude-compose-gen entrypoint.sh docker-compose.yml; do
     [[ -e "$REPO_ROOT/$f" ]] || continue
     if has "$(code_of "$REPO_ROOT/$f")" '--privileged|privileged:[[:space:]]*true|/var/run/docker\.sock'; then
@@ -286,16 +289,16 @@ for f in bin/claude-launch bin/claude-compose-gen entrypoint.sh docker-compose.y
         ok  "$f grants no --privileged and mounts no host docker socket"
     fi
 done
-if ! grep -qE '(controller|reaper)-unit\.sh' "$REPO_ROOT/package.json" "$REPO_ROOT/.github/workflows/ci.yml"; then
-    ok  "npm test + CI no longer invoke the deleted controller/reaper suites"
+if ! grep -qE '(controller|reaper|docker)-unit\.sh' "$REPO_ROOT/package.json" "$REPO_ROOT/.github/workflows/ci.yml"; then
+    ok  "npm test + CI no longer invoke the deleted controller/reaper/docker suites"
 else
     bad "package.json or ci.yml still runs a deleted test suite"
 fi
-# CLAUDE_IMAGE_CONTROLLER only ever named the WITH_DOCKER build.
-if ! grep -q 'CLAUDE_IMAGE_CONTROLLER' "$REPO_ROOT/bin/_common.sh" "$REPO_ROOT/.env.example"; then
-    ok  "CLAUDE_IMAGE_CONTROLLER is gone (it named nothing buildable)"
+# The image-tag variables only ever named engine builds nothing can produce any more.
+if ! grep -qE 'CLAUDE_IMAGE_(CONTROLLER|DOCKER)' "$REPO_ROOT/bin/_common.sh" "$REPO_ROOT/bin/claude-compose-gen" "$REPO_ROOT/.env.example" "$REPO_ROOT/Makefile"; then
+    ok  "CLAUDE_IMAGE_CONTROLLER / CLAUDE_IMAGE_DOCKER* are gone (they named nothing buildable)"
 else
-    bad "CLAUDE_IMAGE_CONTROLLER survives, but nothing can build that image any more"
+    bad "an engine image-tag variable survives, but nothing can build that image any more"
 fi
 
 echo
@@ -1637,7 +1640,7 @@ ms_run() {
     ( # START FROM NOTHING. This suite is itself run inside one of these containers,
       # which exports CLAUDE_PERMISSION_MODE, so inheriting it would make the built-in
       # default untestable and make these cases pass or fail by ambient posture.
-      unset CLAUDE_PERMISSION_MODE CLAUDE_MANAGED_POLICY CLAUDE_DOCKER
+      unset CLAUDE_PERMISSION_MODE CLAUDE_MANAGED_POLICY
       export CLAUDE_UID="$MS_AGENT_UID" CLAUDE_GID="$(id -g)" CLAUDE_USER=claude
       if [[ $# -gt 0 ]]; then export "$@"; fi
       log() { echo "[entrypoint] $*"; }
