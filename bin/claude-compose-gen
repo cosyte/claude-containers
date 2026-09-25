@@ -66,6 +66,16 @@
 #                       these repos (repeatable; comma/space lists ok). Their
 #                       service uses CLAUDE_IMAGE_BROWSER (default
 #                       claude-code-box:browser; `make build-browser`).
+#     --group <map>     one service whose workspace holds SEVERAL repos. Format
+#                       NAME=REPO[:BRANCH],REPO[:BRANCH],... (repeatable, one per group;
+#                       REPO is owner/repo, or a bare name under --org). Each repo is
+#                       cloned into /workspace/<repo> and the session starts in
+#                       /workspace, so it works across all of them; a repo added to the
+#                       list later is cloned on the next restart. NAME is the service
+#                       (claude-NAME, its Remote Control session name) and takes every
+#                       per-repo flag (--active, --gpu, --cpu, --mem, ...). It must not
+#                       also be one of the stack's single-repo services, e.g.
+#                       --group maker=me/home,me/3d,me/keys --active maker
 #     --gpu <repos>     give these repos the host's NVIDIA GPU (repeatable; comma/space
 #                       lists ok; each must be a repo in this stack). The service gets
 #                       the CDI device nvidia.com/gpu=all on the default runc runtime,
@@ -185,7 +195,7 @@ fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,117p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,127p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG=""
 OUT=""
@@ -198,7 +208,7 @@ NETWORK=""
 CACHE_VOL="$CACHE_VOLUME"
 BUILD_CONTEXT=""
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() GPU_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=() ACCOUNTS_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() GPU_RAW=() GROUP_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=() ACCOUNTS_RAW=()
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
 # follow so they override scalars (--out/--org/--port-base) and append to
 # repeatables (--active/--expose/…). --scenario/--env-file were consumed in the
@@ -219,6 +229,7 @@ while [[ $# -gt 0 ]]; do
         --model)           MODEL_RAW+=("$2"); shift 2 ;;
         --browser)         BROWSER_RAW+=("$2"); shift 2 ;;
         --gpu)             GPU_RAW+=("$2"); shift 2 ;;
+        --group)           GROUP_RAW+=("$2"); shift 2 ;;
         # Removed flags refuse, naming the removal, rather than silently dropping a repo's
         # request on the next regen of a .conf that still carries them.
         --docker|--no-docker|--sysbox)
@@ -257,7 +268,7 @@ CACHE_NAME="$(cache_name "$CACHE_VOL")"
 # where to write and (for gh enumeration) which org.
 [[ -n "$OUT" ]] || die "--out <file> is required, and must be OUTSIDE this repo
        (a deploy location), e.g. --out /srv/claude/docker-compose.yml"
-if [[ ${#REPO_ARGS[@]} -eq 0 && -z "$ORG" ]]; then
+if [[ ${#REPO_ARGS[@]} -eq 0 && -z "$ORG" && ${#GROUP_RAW[@]} -eq 0 ]]; then
     die "give --org <name> to enumerate via gh, or pass repo names as args"
 fi
 
@@ -507,7 +518,7 @@ for r in "${REPO_ARGS[@]:-}"; do
     [[ -n "$name"  ]] || die "repo '$r' has no name"
     REPOS+=("$owner	$name	$branch")
 done
-[[ ${#REPOS[@]} -gt 0 ]] || die "no repos to emit (pass repo args or --org)"
+[[ ${#REPOS[@]} -gt 0 || ${#GROUP_RAW[@]} -gt 0 ]] || die "no repos to emit (pass repo args, --org or --group)"
 
 # --- Apply include/exclude, sanitize, sort, dedupe ---------------------------
 declare -A SEEN=()
@@ -522,7 +533,42 @@ while IFS=$'\t' read -r owner name branch; do
     [[ -n "${SEEN[$s]:-}" ]] && continue
     SEEN[$s]=1
     FINAL+=("$s	$owner	$name	$branch")
-done < <(printf '%s\n' "${REPOS[@]}" | sort -f)
+done < <(printf '%s\n' "${REPOS[@]:-}" | sort -f)
+
+# --- Multi-repo services (--group) -----------------------------------------------
+# GROUP_URLS[svc]: the whitespace-separated URL[#BRANCH] list the entrypoint clones into
+# /workspace/<repo> (GIT_REPOS). A group joins FINAL like any service (a port, volumes,
+# every per-repo flag), after the single-repo services so their order never shifts.
+declare -A GROUP_URLS=() GROUP_LABEL=()
+for tok in "${GROUP_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == *=* ]] || die "--group must be NAME=REPO[:BRANCH],REPO[:BRANCH],... (got '$tok')"
+    gname="$(sanitize "${tok%%=*}")"
+    [[ -z "${SEEN[$gname]:-}" ]] \
+        || die "--group '$gname' is already a service in this stack: give the group its own name"
+    declare -A gdirs=(); gurls="" glabel=""
+    for m in $(echo "${tok#*=}" | tr ',' ' '); do
+        mspec="${m%%:*}"; mbranch=""
+        [[ "$m" == *:* ]] && mbranch="${m#*:}"
+        if [[ "$mspec" == */* ]]; then mowner="${mspec%%/*}"; mname="${mspec##*/}"
+        else mowner="$ORG"; mname="$mspec"; fi
+        [[ -n "$mowner" ]] || die "--group $gname: repo '$m' has no owner: pass owner/repo or set --org"
+        [[ "$mowner/$mname" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] \
+            || die "--group $gname: '$m' is not owner/repo"
+        [[ -z "$mbranch" || "$mbranch" =~ ^[A-Za-z0-9._/-]+$ ]] \
+            || die "--group $gname: branch '$mbranch' has characters a branch name cannot"
+        [[ -z "${gdirs[$mname]:-}" ]] \
+            || die "--group $gname: two repos named '$mname' would both clone into /workspace/$mname"
+        gdirs[$mname]=1
+        gurls="${gurls:+$gurls }git@github.com:${mowner}/${mname}.git${mbranch:+#$mbranch}"
+        glabel="${glabel:+$glabel,}${mowner}/${mname}"
+    done
+    [[ -n "$gurls" ]] || die "--group $gname lists no repos"
+    unset gdirs
+    GROUP_URLS[$gname]="$gurls"; GROUP_LABEL[$gname]="$glabel"
+    SEEN[$gname]=1
+    FINAL+=("$gname	group	$gname	")
+done
 
 [[ ${#FINAL[@]} -gt 0 ]] || die "no repos selected (after filters)"
 
@@ -616,6 +662,15 @@ EOF
 for row in "${FINAL[@]}"; do
     IFS=$'\t' read -r svc owner name branch <<<"$row"
     url="git@github.com:${owner}/${name}.git"
+    # A --group service clones several repos into /workspace/<repo> (GIT_REPOS) instead of
+    # one repo into /workspace itself.
+    if [[ -n "${GROUP_URLS[$svc]:-}" ]]; then
+        svc_repo_env="GIT_REPOS: \"${GROUP_URLS[$svc]}\""
+        svc_repo_label="group:${GROUP_LABEL[$svc]}"
+    else
+        svc_repo_env="GIT_REPO_URL: \"${url}\""
+        svc_repo_label="${url}"
+    fi
     port="${SVCPORT[$svc]}"
     svc_cpu="${CPU[$svc]:-$CLAUDE_CPU_LIMIT}"
     svc_mem="${MEM[$svc]:-$CLAUDE_MEM_LIMIT}"
@@ -780,7 +835,7 @@ EOF
       BASH_DEFAULT_TIMEOUT_MS: "\${BASH_DEFAULT_TIMEOUT_MS:-}"
       BASH_MAX_TIMEOUT_MS: "\${BASH_MAX_TIMEOUT_MS:-}"
       API_TIMEOUT_MS: "\${API_TIMEOUT_MS:-}"
-      GIT_REPO_URL: "${url}"
+      ${svc_repo_env}
 EOF
     [[ -n "$branch" ]] && echo "      GIT_REPO_BRANCH: \"${branch}\""
     if [[ -n "${DEVCMD[$svc]:-}" ]]; then
@@ -846,7 +901,7 @@ EOF
       claude.managed: "1"
       claude.project: "${svc}"
       claude.ssh_port: "${port}"
-      claude.repo: "${url}"
+      claude.repo: "${svc_repo_label}"
 EOF
     # Non-active repos: defined but behind a profile, so `up -d` skips them.
     if [[ $HAVE_ACTIVE -eq 1 && -z "${ACTIVE[$svc]:-}" ]]; then
@@ -943,6 +998,7 @@ ok "Wrote $OUT  (${#FINAL[@]} services, ${n_active} start by default)"
 [[ -n "${CLAUDE_ENV_FILE:-}" ]] && info "env layered from: $CLAUDE_ENV_FILE (on top of the base .env)"
 for r in "${FINAL[@]}"; do
     IFS=$'\t' read -r s nm _ <<<"$r"
+    [[ -n "${GROUP_LABEL[$s]:-}" ]] && nm="group(${GROUP_LABEL[$s]})"
     if [[ $HAVE_ACTIVE -eq 1 && -z "${ACTIVE[$s]:-}" ]]; then mark="dormant (${DORMANT_PROFILE})"; else mark="ACTIVE"; fi
     extra=""
     [[ -n "${EXPOSE[$s]:-}" ]] && extra=" +ports $(echo "${EXPOSE[$s]}" | tr '\n' ',' | sed 's/,$//')"

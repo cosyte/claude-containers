@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # claude-launch <project-name> [options]
-#   --repo <url>               git URL to clone into a fresh workspace volume
-#   --branch <branch>          branch to check out
+#   --repo <url>               git URL to clone into a fresh workspace volume. Give it
+#                              more than once for a multi-repo workspace: each repo is
+#                              cloned into /workspace/<repo> and the session starts in
+#                              /workspace (pick a branch per repo with URL#BRANCH)
+#   --branch <branch>          branch to check out (single --repo only)
 #   --depth <n>                shallow-clone depth
 #   --workspace <path>         bind-mount a local checkout instead of cloning
 #   --image <ref>              container image to run (overrides CLAUDE_IMAGE/.env;
@@ -53,9 +56,9 @@ set -euo pipefail
 LAUNCH_BIN_DIR="$(dirname "${BASH_SOURCE[0]}")"
 source "$LAUNCH_BIN_DIR/_common.sh"
 
-usage() { sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
-PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
+PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT="" REPOS=()
 # EXTRA/MCP_LIST/DEVCMD/MKTS/PLUGINS default from .env (sourced by _common.sh);
 # flags below override. Without seeding them here, the explicit `-e` flags on
 # `docker run` would shadow any value set in .env with an empty string.
@@ -88,7 +91,7 @@ EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER="" BROWSER_EXPLICIT=0 IMAGE_EXPLICIT=0 CACHE_
 GPU=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --repo)        REPO="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --repo)        REPOS+=("$2"); OPTS_GIVEN=1; shift 2 ;;
         --branch)      BRANCH="$2"; OPTS_GIVEN=1; shift 2 ;;
         --depth)       DEPTH="$2"; OPTS_GIVEN=1; shift 2 ;;
         --workspace)   WS_PATH="$2"; OPTS_GIVEN=1; shift 2 ;;
@@ -146,7 +149,25 @@ if [[ -z "$GPU" ]]; then
     esac
 fi
 [[ -n "$PROJECT" ]] || usage 1
-[[ -n "$REPO" && -n "$WS_PATH" ]] && die "--repo and --workspace are mutually exclusive"
+[[ ${#REPOS[@]} -gt 0 && -n "$WS_PATH" ]] && die "--repo and --workspace are mutually exclusive"
+# One --repo clones into /workspace itself (GIT_REPO_URL, as always). Several make a
+# multi-repo workspace: the entrypoint clones each into /workspace/<repo> (GIT_REPOS).
+MULTI_REPOS=""
+if (( ${#REPOS[@]} == 1 )); then
+    REPO="${REPOS[0]}"
+elif (( ${#REPOS[@]} > 1 )); then
+    [[ -z "$BRANCH" ]] || die "--branch applies to a single --repo; with several, give each one as URL#BRANCH"
+    declare -A _dirs=()
+    for _r in "${REPOS[@]}"; do
+        [[ "$_r" =~ ^[^[:space:]]+$ ]] || die "--repo '$_r' contains whitespace"
+        _d="${_r%%#*}"; _d="${_d%/}"; _d="${_d##*/}"; _d="${_d##*:}"; _d="${_d%.git}"
+        [[ "$_d" =~ ^[A-Za-z0-9._-]+$ ]] || die "--repo '$_r': cannot derive a directory name from it"
+        [[ -z "${_dirs[$_d]:-}" ]] || die "--repo: two repos would both clone into /workspace/$_d"
+        _dirs[$_d]=1
+    done
+    unset _dirs _r _d
+    MULTI_REPOS="${REPOS[*]}"
+fi
 
 # Validate --expose maps (HOSTPORT:CONTAINERPORT) and build the docker -p args.
 EXPOSE_ARGS=()
@@ -259,7 +280,8 @@ if [[ -n "$WS_PATH" ]]; then
 else
     WS_MOUNT=(-v "$WS_VOL:/workspace")
     REPO_LABEL="${REPO:-$WS_VOL}"
-    if [[ -z "$REPO" ]] && ! docker volume inspect "$WS_VOL" >/dev/null 2>&1; then
+    [[ -n "$MULTI_REPOS" ]] && REPO_LABEL="group:${MULTI_REPOS// /,}"
+    if [[ -z "$REPO" && -z "$MULTI_REPOS" ]] && ! docker volume inspect "$WS_VOL" >/dev/null 2>&1; then
         die "no --repo, no --workspace, and no existing workspace volume '$WS_VOL'.
        First launch of a project needs --repo <url> or --workspace <path>."
     fi
@@ -369,6 +391,7 @@ docker run -d \
     -e CLAUDE_EGRESS_EXTRA_HOSTS="${CLAUDE_EGRESS_EXTRA_HOSTS:-}" \
     -e CLAUDE_EGRESS_REFRESH_INTERVAL="${CLAUDE_EGRESS_REFRESH_INTERVAL:-}" \
     -e GIT_REPO_URL="$REPO" \
+    -e GIT_REPOS="$MULTI_REPOS" \
     -e GIT_REPO_BRANCH="$BRANCH" \
     -e GIT_REPO_DEPTH="$DEPTH" \
     -e GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-$GH_NAME}" \

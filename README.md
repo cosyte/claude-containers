@@ -230,6 +230,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_GPU` | `0` | `1`/`--gpu` gives the session the host's NVIDIA GPU through CDI (see [GPU sessions](#gpu-sessions-optional)); `--no-gpu` opts out of an ambient `1`. Fixed at container creation. |
 | `CLAUDE_GPU_SCRATCH_TMPFS` | `4g` | Size of the RAM `/scratch` a GPU session gets instead of the disk volume. Charged to `CLAUDE_MEM_LIMIT`. |
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` |: | Clone source (or use `--repo`/`--branch`/`--depth`) |
+| `GIT_REPOS` |: | Several repos in one container: whitespace-separated `URL[#BRANCH]`, each cloned into `/workspace/<repo>` (set by `claude-compose-gen --group` or several `--repo`). Not together with `GIT_REPO_URL` |
 | `GIT_AUTHOR_NAME`/`_EMAIL` (+`COMMITTER`) | host git config | Commit identity |
 | `GIT_SSH_KEY` | `~/.ssh/claude-git-key` | Host SSH key for git, mounted read-only |
 | `SSH_AUTHORIZED_KEYS` | `~/.ssh/authorized_keys` | Host pubkeys allowed to SSH in (read-only) |
@@ -281,7 +282,7 @@ holds `CLAUDE.md`, `mcp/`, `plugins/`, `commands/`, `skills/`. MCP secrets are
 ## Launcher commands
 
 ```
-claude-launch <name> [--repo URL | --workspace PATH] [--branch B] [--depth N]
+claude-launch <name> [--repo URL [--repo URL[#BRANCH]]... | --workspace PATH] [--branch B] [--depth N]
                       [--port N] [--model NAME] [--mcp NAME ...] [--browser|--no-browser]
                       [--gpu|--no-gpu]
                       [--extra-args "…"] [--expose H:C ...] [--dev-cmd "…"]
@@ -325,6 +326,7 @@ claude-compose-gen --org ORG --out FILE [--active REPOS]... [--dormant-profile N
                    [--dev-cmd REPO=COMMAND]...
                    [--cpu REPO=N]... [--mem REPO=SIZE]... [--model REPO=MODEL]...
                    [--browser REPOS]... [--gpu REPOS]...
+                   [--group NAME=REPO[:BRANCH],REPO[:BRANCH],...]...
                    [--marketplace REPO=NAME=URL]... [--plugin REPO=PLUGIN[,...]]...
                    [--include GLOB] [--exclude GLOB] [--forks] [--archived]
 claude-compose-gen --out FILE repo-a repo-b:dev      # explicit list, no gh needed
@@ -442,6 +444,31 @@ lean default image is unchanged. Headless-only inside the container; the agent
 reads pages back via screenshots and DOM queries. Full design rationale:
 [docs/architecture.md](docs/architecture.md#decision-frontend-debugging-is-an-opt-in-image-variant);
 runbook: [docs/troubleshooting.md](docs/troubleshooting.md#frontend-debugging---browser--claude_browser).
+
+## Several repos in one container
+
+A session normally owns one repo, cloned into `/workspace`. When the work spans repos (a
+part, the board it mounts to, the notes about both), one container can hold several: each
+is cloned into `/workspace/<repo>` and the session starts in `/workspace`, so it reads,
+edits and commits across all of them. Every repo keeps its own git history and remote;
+each repo's own `CLAUDE.md` still applies inside it.
+
+```
+# a stack service (scenario .conf, or the generator's command line)
+--group maker=you/home,you/3d,you/keys:dev
+--active maker
+# a standalone container
+claude-launch maker --repo git@github.com:you/home.git --repo git@github.com:you/3d.git
+```
+
+The group's name is the service (`claude-maker`, its Remote Control session name) and
+takes every per-repo flag (`--active`, `--gpu`, `--cpu`, `--mem`, ...); it must not also be
+one of the stack's single-repo services. A branch is `repo:branch` in `--group` and
+`URL#BRANCH` with `--repo`. Each boot clones only the repos that are missing, so adding one
+to the list and restarting brings it in, and an existing checkout is never touched. The
+container passes the list as `GIT_REPOS`; it cannot be combined with a single-repo
+workspace (a repo at `/workspace` itself), so a multi-repo service starts from a fresh
+workspace volume.
 
 ## GPU sessions (optional)
 
