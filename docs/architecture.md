@@ -14,7 +14,8 @@
   fall back to a shell if Claude exits so SSH stays usable.
 - **bash_profile**: interactive SSH logins `exec tmux attach` to the live
   `claude` session; non-interactive SSH (scp/rsync) is untouched.
-- **bin/**: `claude-launch/list/stop/rm/logs` over a shared `_common.sh`.
+- **bin/**: `claude-launch/list/stop/rm/logs` over a shared `_common.sh`; inside the
+  image also `claude-gpu` (the GPU guard) and `claude-blender-install`.
 - **.claude/skills/claude-containers/**: project skill: when this repo is
   opened in Claude Code, it teaches the model the architecture, invariants,
   and operational playbook so it can drive build/login/launch/customize/debug.
@@ -121,6 +122,72 @@ variant by probing the baked binaries on `PATH`.
 Chrome is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
 (required in unprivileged Docker; Chrome's user-namespace sandbox conflicts
 with the default seccomp).
+
+## Decision: GPU sessions are CDI devices on plain runc
+
+`--gpu` (`claude-compose-gen --gpu REPO`, `claude-launch --gpu`, `CLAUDE_GPU=1`) gives a
+session the host's NVIDIA GPU. NVIDIA only; no `/dev/dri`, no device selection.
+
+**Mechanism: the CDI device `nvidia.com/gpu=all`, requested by name, on the default `runc`
+runtime.** The NVIDIA Container Toolkit's CDI spec lists everything the device needs (the
+`/dev/nvidia*` nodes, the driver's user libraries including CUDA, OptiX, the EGL/GLX
+vendor libraries and the Vulkan ICD, and `nvidia-smi`), and Docker injects it at creation,
+matched to the host driver. Nothing about the hardening changes: `cap_drop: ALL`, the
+minimal cap set and `no-new-privileges` stay, no capability is added, nothing is
+privileged, no host network, no socket. The alternatives were rejected:
+
+| approach | why not |
+|---|---|
+| `runtime: nvidia` | a second runtime to keep installed and in step, for what CDI does on runc |
+| `--gpus all` (the legacy device request) | mounts the compute libraries only (no EGL vendor file), so no headless graphics: EEVEE and VTK fall back to Mesa |
+| baking driver libraries into the image | they must match the host's kernel module exactly; a copy drifts and shadows the right one |
+
+**Compose syntax, verified on Docker 28.5 with Compose 2.39.** Both
+`devices: [nvidia.com/gpu=all]` and `deploy.resources.reservations.devices` with
+`driver: cdi` produce the same thing on the container (`HostConfig.DeviceRequests`:
+`Driver cdi`, `DeviceIDs [nvidia.com/gpu=all]`, `Runtime runc`), and `nvidia-smi` works
+in both. The generator emits `devices:` because it is the same shape as
+`docker run --device nvidia.com/gpu=all` and carries no `deploy:` semantics. Compose
+prints it back as `source/target: nvidia.com/gpu=all`. `NVIDIA_DRIVER_CAPABILITIES` does
+nothing in CDI mode: the spec is generated with every capability, and the mounted
+library set is identical with or without the variable.
+
+**The image carries the vendor-neutral half, in every variant:** glvnd's dispatch
+libraries (`libEGL`, `libGL`, `libOpenGL`, `libGLX`), Mesa llvmpipe (the CPU renderer,
+and the only one a session without a GPU has), OSMesa for VTK, and the X client
+libraries Blender's official build links even when it runs headless. That is about
+230 MB, mostly LLVM for llvmpipe, and it is also what lets a CPU-only session render a
+preview at all (OCP, behind build123d, hard-links `libGL.so.1`). glvnd reads
+`/usr/share/glvnd/egl_vendor.d`: CDI mounts `10_nvidia.json`, the image has
+`50_mesa.json`, so EGL picks NVIDIA when the device is attached and Mesa when it is not.
+
+**Degrade, do not fail.** With `CLAUDE_GPU=1` the entrypoint probes the card once, bounded
+(20 s at most), records `ok` or `degraded (<reason>)` in root-owned
+`/run/claude-gpu/state`, and on a failure prints a banner and puts it on the tmux status
+line; `claude-healthcheck` appends the GPU state to its healthy line and never fails on
+it. A session that loses its GPU is still a working session, and an unhealthy verdict
+would only get it restarted into the same state. The boundary: a missing CDI spec makes
+Docker refuse to create the container, before any code of ours runs, so that case is a
+loud creation error instead (the launcher and generator check for the device first).
+
+**Sharing the card: `claude-gpu`.** A GPU on a homelab host is rarely exclusive (a media
+server's NVENC transcodes, a metrics exporter). From inside a container `nvidia-smi` sees
+only device-wide numbers, not other containers' processes, and those are exactly what a
+polite preflight needs: free VRAM, SM utilization, NVENC session count. `claude-gpu run`
+waits for all three to be under their limits, falls back to CPU through an environment
+contract (`CLAUDE_GPU_DEVICE`, `CUDA_VISIBLE_DEVICES=`, glvnd pointed at Mesa), retries
+a GPU out-of-memory failure once on CPU, and always says which device ran. Per-process
+attribution needs the host PID namespace, so it lives on the host side, not in the guard.
+
+**`/scratch` on RAM.** Blender's render temp and kernel caches, and throwaway venvs,
+churn under `TMPDIR`; on a spinning pool that churn is the D-state wedge class the browser
+variant already moved to RAM. 4g plus the 1g `/tmp` leaves 11g of the 16g default limit.
+
+**Blender is installed, not baked.** A pinned, SHA-256-verified blender.org LTS tarball
+(`claude-blender-install`) goes rootless into the shared `/cache/blender`, under a lock
+and renamed into place when complete: one download serves every container, the image
+stays the same size for sessions that never render, and a Blender bump is a one-line pin
+change, not an image variant.
 
 ## Decision: one substantive build stage
 

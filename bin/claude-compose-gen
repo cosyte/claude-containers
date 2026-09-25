@@ -66,6 +66,14 @@
 #                       these repos (repeatable; comma/space lists ok). Their
 #                       service uses CLAUDE_IMAGE_BROWSER (default
 #                       claude-code-box:browser; `make build-browser`).
+#     --gpu <repos>     give these repos the host's NVIDIA GPU (repeatable; comma/space
+#                       lists ok; each must be a repo in this stack). The service gets
+#                       the CDI device nvidia.com/gpu=all on the default runc runtime,
+#                       keeps cap_drop ALL and no-new-privileges, puts /scratch on a
+#                       RAM tmpfs (CLAUDE_GPU_SCRATCH_TMPFS, default 4g) and sets
+#                       CLAUDE_GPU=1 for the in-container guard (claude-gpu). Needs the
+#                       NVIDIA Container Toolkit's CDI spec on the host (nvidia-ctk cdi
+#                       generate); without it Docker refuses to create the service.
 #     --marketplace <map>  add a git plugin marketplace to a repo at runtime.
 #                       Format REPO=NAME=URL (repeatable). The repo's service
 #                       gets CLAUDE_EXTRA_MARKETPLACES with this entry appended,
@@ -177,7 +185,7 @@ fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,109p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,117p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG=""
 OUT=""
@@ -190,7 +198,7 @@ NETWORK=""
 CACHE_VOL="$CACHE_VOLUME"
 BUILD_CONTEXT=""
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=() ACCOUNTS_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() GPU_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=() ACCOUNTS_RAW=()
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
 # follow so they override scalars (--out/--org/--port-base) and append to
 # repeatables (--active/--expose/…). --scenario/--env-file were consumed in the
@@ -210,6 +218,7 @@ while [[ $# -gt 0 ]]; do
         --mem)             MEM_RAW+=("$2"); shift 2 ;;
         --model)           MODEL_RAW+=("$2"); shift 2 ;;
         --browser)         BROWSER_RAW+=("$2"); shift 2 ;;
+        --gpu)             GPU_RAW+=("$2"); shift 2 ;;
         # Removed flags refuse, naming the removal, rather than silently dropping a repo's
         # request on the next regen of a .conf that still carries them.
         --docker|--no-docker|--sysbox)
@@ -320,6 +329,15 @@ for tok in "${BROWSER_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
     for one in $(echo "$tok" | tr ',' ' '); do
         BROWSER["$(sanitize "$one")"]=1
+    done
+done
+# GPU sessions: services that get the host's NVIDIA GPU through CDI (CLAUDE_GPU=1).
+# Checked against the final repo list below: a typo must not silently mean "no GPU".
+declare -A GPU=()
+for tok in "${GPU_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    for one in $(echo "$tok" | tr ',' ' '); do
+        GPU["$(sanitize "$one")"]=1
     done
 done
 
@@ -448,6 +466,15 @@ BROWSER_IMAGE="${CLAUDE_IMAGE_BROWSER:-claude-code-box:browser}"
 # CLAUDE_BROWSER_SCRATCH_TMPFS if a build genuinely needs more scratch space.
 BROWSER_SCRATCH_TMPFS="${CLAUDE_BROWSER_SCRATCH_TMPFS:-3g}"
 BROWSER_PIDS_LIMIT="${CLAUDE_BROWSER_PIDS_LIMIT:-1024}"
+# GPU services put /scratch (TMPDIR) on RAM for the same reason: Blender's render temp,
+# its shader/kernel caches and throwaway venvs churn there, and that churn must stay off a
+# spinning pool. Charged to the service's memory cgroup like every tmpfs, so size it
+# against CLAUDE_MEM_LIMIT (default 16g): 4g here + the 1g /tmp leaves 11g for the session
+# itself plus the render's own RAM (scene, BVH, textures), which a modest scene keeps to a
+# few GiB. 4g holds a render's temp files plus one throwaway CUDA or VTK venv (about 1 to
+# 1.5g each). A service that is also --browser gets the larger of the two sizes.
+GPU_SCRATCH_TMPFS="${CLAUDE_GPU_SCRATCH_TMPFS:-4g}"
+size_to_mib "$GPU_SCRATCH_TMPFS" >/dev/null || die "CLAUDE_GPU_SCRATCH_TMPFS '$GPU_SCRATCH_TMPFS' is not a size like 4g"
 # --- Collect repos as "owner<TAB>name<TAB>branch" -----------------------------
 # Two independent sources, combined: (1) gh enumeration of --org (owner=ORG for
 # every repo), and (2) explicit repo args. An explicit arg may carry its own
@@ -498,6 +525,11 @@ while IFS=$'\t' read -r owner name branch; do
 done < <(printf '%s\n' "${REPOS[@]}" | sort -f)
 
 [[ ${#FINAL[@]} -gt 0 ]] || die "no repos selected (after filters)"
+
+for g in "${!GPU[@]}"; do
+    [[ -n "${SEEN[$g]:-}" ]] \
+        || die "--gpu names '$g', which is not a repo in this stack (repos: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
+done
 
 # --- Stable SSH port assignment ----------------------------------------------
 # Reuse each repo's previously assigned port from an existing OUT file; only
@@ -598,9 +630,19 @@ for row in "${FINAL[@]}"; do
     # piling up) and put /scratch on a RAM tmpfs (svc_scratch_tmpfs, appended to the
     # tmpfs list) with NO disk volume mount/declaration (svc_scratch_vol left empty).
     # Non-browser build-repos keep the disk-backed scratch volume. See BROWSER_* above.
-    if [[ -n "${BROWSER[$svc]:-}" ]]; then
-        svc_pids="${BROWSER_PIDS_LIMIT}"
-        svc_scratch_tmpfs=$'\n      - /scratch:rw,nosuid,nodev,exec,size='"${BROWSER_SCRATCH_TMPFS}"
+    # GPU services take the same RAM /scratch (GPU_SCRATCH_TMPFS); one that is both gets
+    # the larger size.
+    if [[ -n "${BROWSER[$svc]:-}" || -n "${GPU[$svc]:-}" ]]; then
+        svc_scratch_size=""
+        if [[ -n "${BROWSER[$svc]:-}" ]]; then
+            svc_pids="${BROWSER_PIDS_LIMIT}"
+            svc_scratch_size="$BROWSER_SCRATCH_TMPFS"
+        fi
+        if [[ -n "${GPU[$svc]:-}" ]] && { [[ -z "$svc_scratch_size" ]] \
+                || (( $(size_to_mib "$GPU_SCRATCH_TMPFS") > $(size_to_mib "$svc_scratch_size") )); }; then
+            svc_scratch_size="$GPU_SCRATCH_TMPFS"
+        fi
+        svc_scratch_tmpfs=$'\n      - /scratch:rw,nosuid,nodev,exec,size='"${svc_scratch_size}"
         svc_scratch_vol=""
     else
         svc_scratch_tmpfs=""
@@ -677,6 +719,15 @@ EOF
             [[ -n "$m" ]] && echo "      - \"${m}\""
         done <<<"${EXPOSE[$svc]}"
     fi
+    # --gpu: the host's NVIDIA GPU through CDI, by device NAME, on the default runc runtime.
+    # The NVIDIA Container Toolkit's CDI spec injects the device nodes, the driver's user
+    # libraries (CUDA, OptiX, the EGL/GLX vendor libraries) and nvidia-smi; no runtime:
+    # line, no extra capability, no privilege. The image ships only the vendor-neutral
+    # glvnd side.
+    if [[ -n "${GPU[$svc]:-}" ]]; then
+        echo "    devices:"
+        echo "      - nvidia.com/gpu=all"
+    fi
     # Escape hardening (mirrors claude-launch via _common.sh): no-new-privileges
     # always; drop ALL caps + re-add the minimal set unless CLAUDE_HARDEN_CAPS=0;
     # add NET_ADMIN when the egress firewall is enabled.
@@ -738,6 +789,15 @@ EOF
         echo "      CLAUDE_DEV_CMD: \"${dc}\""
     fi
     [[ -n "${BROWSER[$svc]:-}" ]] && echo '      CLAUDE_BROWSER: "1"'
+    # The entrypoint's boot probe, the healthcheck and claude-gpu key off this.
+    if [[ -n "${GPU[$svc]:-}" ]]; then
+        echo '      CLAUDE_GPU: "1"'
+        # The guard's thresholds, from the stack's env at `up`; empty means claude-gpu's
+        # own default. Only GPU services carry them, so no other service changes.
+        for gv in CLAUDE_GPU_MIN_FREE_MIB CLAUDE_GPU_MAX_UTIL CLAUDE_GPU_MAX_NVENC CLAUDE_GPU_WAIT; do
+            echo "      ${gv}: \"\${${gv}:-}\""
+        done
+    fi
     # Account names come only from sanitize() (charset [a-z0-9._-]), so no
     # quoting hazard, unlike CLAUDE_DEV_CMD/MKTS/PLUGINS: no escaping needed.
     [[ -n "${ACCOUNTS[$svc]:-}" ]] && echo "      CLAUDE_ACCOUNTS: \"${ACCOUNTS[$svc]}\""
@@ -837,9 +897,9 @@ for row in "${FINAL[@]}"; do
     printf '  claude-ws-%s:\n    name: claude-ws-%s\n' "$svc" "$svc"
     OWNED_VOLS["claude-config-$svc"]=1
     OWNED_VOLS["claude-ws-$svc"]=1
-    # Browser variants use a RAM tmpfs for /scratch (see BROWSER_SCRATCH_TMPFS), so there
-    # is no disk scratch volume to declare/own. Non-browser build-repos keep the volume.
-    if [[ -z "${BROWSER[$svc]:-}" ]]; then
+    # Browser and GPU services use a RAM tmpfs for /scratch (BROWSER_/GPU_SCRATCH_TMPFS), so
+    # there is no disk scratch volume to declare/own. Other build-repos keep the volume.
+    if [[ -z "${BROWSER[$svc]:-}" && -z "${GPU[$svc]:-}" ]]; then
         printf '  claude-scratch-%s:\n    name: claude-scratch-%s\n' "$svc" "$svc"
         OWNED_VOLS["claude-scratch-$svc"]=1
     fi
@@ -889,6 +949,7 @@ for r in "${FINAL[@]}"; do
     [[ -n "${DEVCMD[$s]:-}" ]] && extra="$extra +dev"
     [[ -n "${CPU[$s]:-}" || -n "${MEM[$s]:-}" ]] && extra="$extra +res(${CPU[$s]:-$CLAUDE_CPU_LIMIT}cpu/${MEM[$s]:-$CLAUDE_MEM_LIMIT})"
     [[ -n "${BROWSER[$s]:-}" ]] && extra="$extra +browser"
+    [[ -n "${GPU[$s]:-}" ]] && extra="$extra +gpu"
     [[ -n "${MODEL[$s]:-}" ]] && extra="$extra +model(${MODEL[$s]})"
     if [[ -n "${MKTS[$s]:-}" ]]; then
         n_mkts="$(awk -F, '{print NF}' <<<"${MKTS[$s]}")"
@@ -913,6 +974,13 @@ docker image inspect "$CLAUDE_IMAGE" >/dev/null 2>&1 || warn "image $CLAUDE_IMAG
 if (( ${#BROWSER[@]} > 0 )); then
     img_browser="$(docker image inspect -f '{{ index .Config.Labels "claude.browser" }}' "$BROWSER_IMAGE" 2>/dev/null || true)"
     [[ "$img_browser" == "1" ]] || warn "image $BROWSER_IMAGE was not built with WITH_BROWSER=1: run 'make build-browser' before 'up' (--browser services won't get the chrome-devtools MCP otherwise)"
+fi
+# --gpu needs the host's CDI spec at `up` time: Docker refuses to create a container whose
+# CDI device it cannot resolve. Say so now rather than at `up`.
+if (( ${#GPU[@]} > 0 )); then
+    cdi="$(docker info --format '{{range .DiscoveredDevices}}{{.ID}} {{end}}' 2>/dev/null || true)"
+    [[ " $cdi " == *" nvidia.com/gpu=all "* ]] \
+        || warn "Docker lists no CDI device nvidia.com/gpu=all: --gpu services will fail to start until the NVIDIA Container Toolkit's CDI spec exists (nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml, or its refresh unit)"
 fi
 
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing: run 'make login'"

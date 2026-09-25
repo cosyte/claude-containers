@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# claude-blender-install: install the pinned Blender build into the shared tool cache.
+#
+#   claude-blender-install           install (idempotent: a no-op when already there)
+#   claude-blender-install --check   exit 0 if the pinned build is installed, else 1
+#   claude-blender-install --path    print the installed blender binary's path
+#
+# Rootless: runs as the session user and writes only under $CLAUDE_BLENDER_ROOT
+# (default /cache/blender, on the shared claude-cache volume, so one install serves
+# every container on the host). The download is the official Linux x64 tarball,
+# verified against the SHA-256 pinned below BEFORE anything is extracted: a mismatch
+# deletes the download and fails (fail closed), whichever URL it came from. The install
+# takes a lock, because /cache is shared stack-wide and two sessions may run this at
+# once; it lands in a temporary directory that is renamed into place, so a reader never
+# sees a half-extracted tree. /usr/local/bin/blender runs $CLAUDE_BLENDER_ROOT/current.
+#
+# Pin: the newest LTS whose Cycles renders on a Pascal card (compute capability 6.1)
+# via BOTH CUDA and OptiX. PIN_EVIDENCE below records how that was verified; re-verify
+# on any bump (README, "GPU sessions").
+set -euo pipefail
+
+BLENDER_VERSION="5.2.2"
+BLENDER_SERIES="5.2"
+BLENDER_SHA256="84098912789dc450e95697c4184fb8a90acbe5111c2ba4aede3fecb57806a168"
+# PIN_EVIDENCE: 5.2.2 is the newest LTS (5.2), "Blender 5.2.2 LTS (hash d13f752e3b9c)".
+# On a Pascal card (compute capability 6.1, driver branch 580, CDI-injected libraries):
+# Cycles' own device list names the card for CUDA and for OPTIX, and a test scene renders
+# on each ("Path tracing on: <card> (OptiX)" / "(CUDA)" at --log-level info). CUDA loads
+# the build's precompiled sm_60 kernel (no JIT); OptiX JIT-compiles its PTX once (~2 s),
+# then caches it. No step back to an older LTS was needed.
+TARBALL="blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+# blender.org first; then two of its official mirrors, because download.blender.org can
+# answer scripted clients with a bot challenge. The checksum, not the host, is the trust.
+DEFAULT_URLS="https://download.blender.org/release/Blender${BLENDER_SERIES}/${TARBALL} https://mirrors.ocf.berkeley.edu/blender/release/Blender${BLENDER_SERIES}/${TARBALL} https://mirror.clarkson.edu/blender/release/Blender${BLENDER_SERIES}/${TARBALL}"
+
+ROOT="${CLAUDE_BLENDER_ROOT:-/cache/blender}"
+URLS="${CLAUDE_BLENDER_URLS:-$DEFAULT_URLS}"
+WANT_SHA="$BLENDER_SHA256"
+# TEST SEAM (unit tests only, loudly warned): lets test/gpu-unit.sh prove the happy path
+# with a tiny local tarball. It can only ever change which checksum is REQUIRED, never
+# skip the check.
+if [[ -n "${CLAUDE_BLENDER_TEST_SHA256:-}" ]]; then
+    echo "claude-blender-install: TEST SEAM ACTIVE: CLAUDE_BLENDER_TEST_SHA256 replaces the pinned checksum" >&2
+    WANT_SHA="$CLAUDE_BLENDER_TEST_SHA256"
+fi
+DEST="$ROOT/$BLENDER_VERSION"
+MARK="$DEST/.claude-sha256"
+
+say() { echo "claude-blender-install: $*" >&2; }
+die() { say "$*"; exit 1; }
+
+installed() { [[ -x "$DEST/blender" && -f "$MARK" && "$(cat "$MARK" 2>/dev/null)" == "$WANT_SHA" ]]; }
+
+case "${1:-}" in
+    --check) installed; exit $? ;;
+    --path)  installed || die "Blender ${BLENDER_VERSION} is not installed (run claude-blender-install)"
+             echo "$DEST/blender"; exit 0 ;;
+    "")      ;;
+    -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)       die "unknown option '$1' (try --help)" ;;
+esac
+
+[[ "$(uname -m)" == x86_64 ]] || die "only the Linux x64 build is pinned; this is $(uname -m)"
+mkdir -p "$ROOT" || die "cannot create $ROOT (is the shared cache mounted and writable?)"
+
+# One installer at a time per cache. The lock file lives next to the installs; flock
+# releases it when this process exits, however it exits.
+exec 9>"$ROOT/.install.lock"
+flock -w 1800 9 || die "timed out waiting for another claude-blender-install to finish"
+
+point_current() {
+    ln -sfn "$BLENDER_VERSION" "$ROOT/.current.tmp.$$"
+    mv -T "$ROOT/.current.tmp.$$" "$ROOT/current"
+}
+
+if installed; then
+    point_current
+    say "Blender ${BLENDER_VERSION} already installed at $DEST"
+    exit 0
+fi
+
+WORK="$(mktemp -d "$ROOT/.work.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+got=""
+for url in $URLS; do
+    say "downloading $url"
+    if curl -fL --retry 3 --connect-timeout 20 -A "claude-blender-install/${BLENDER_VERSION}" \
+            -o "$WORK/$TARBALL" "$url"; then
+        got="$url"; break
+    fi
+    say "download failed from $url; trying the next source"
+done
+[[ -n "$got" ]] || die "could not download ${TARBALL} from any source"
+
+have="$(sha256sum "$WORK/$TARBALL" | awk '{print $1}')"
+if [[ "$have" != "$WANT_SHA" ]]; then
+    rm -f "$WORK/$TARBALL"
+    die "CHECKSUM MISMATCH for ${TARBALL} from ${got}
+    expected ${WANT_SHA}
+    got      ${have}
+  Refusing to install (the download was deleted)."
+fi
+say "sha256 verified: ${have}"
+
+mkdir "$WORK/x"
+tar -xJf "$WORK/$TARBALL" -C "$WORK/x" --no-same-owner
+top="$(find "$WORK/x" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+[[ -n "$top" && -x "$top/blender" ]] || die "the tarball has no blender binary at its top level"
+echo "$have" > "$top/.claude-sha256"
+rm -rf "$DEST"
+mv -T "$top" "$DEST"
+point_current
+say "installed Blender ${BLENDER_VERSION} at $DEST ($(du -sh "$DEST" | cut -f1))"
