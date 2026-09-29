@@ -1,0 +1,858 @@
+#!/usr/bin/env bash
+# claude-sessions: several Claude Code sessions in one container, started at boot.
+#
+# Every container runs its own session in tmux window claude:main (Remote Control name = the
+# project). claude-sessions adds more: each in its own tmux window, with its own Remote
+# Control link (<project>-<name>, so each shows up separately in the Claude app), working
+# directory, model, permission mode, and an optional first prompt or /goal. They are
+# declared two ways, and both come back after a restart:
+#
+#   CLAUDE_SESSIONS        creation-time (claude-launch --session, claude-compose-gen
+#                          --session SVC=SPEC). Reconciled on every boot: the container's
+#                          declaration is authoritative for these.
+#   claude-sessions new    at runtime, from inside the container (or -C from the host).
+#                          Kept on the config volume until `claude-sessions rm`.
+#
+# SPEC: entries separated by ';' or newlines. Each entry is NAME [key=value ...]:
+#   NAME            [a-z0-9][a-z0-9_-]*, at most 32 characters: the tmux window and the
+#                   Remote Control suffix. main, dev, scm and goal-chain are taken.
+#                   '*' means one session per git repo directly under /workspace (the repos
+#                   of a --group / several --repo container), named after the repo.
+#   dir=PATH        working directory, absolute or relative to /workspace. Default:
+#                   /workspace/NAME when that is a directory, else /workspace.
+#   model=M         model alias or id (default: the container's CLAUDE_MODEL)
+#   mode=M          permission mode (default: the container's CLAUDE_PERMISSION_MODE)
+#   goal=FILE       on its first start, begin with `/goal <contents of FILE>` (FILE is
+#                   relative to the session's dir)
+#   prompt-file=F   on its first start, begin with the contents of F as the first prompt
+#   rc=off          no Remote Control link (reachable over SSH/tmux only)
+#   resume=off      a fresh conversation on every boot (default: resume the last one)
+#   chain           run the session's /goal program back to back with claude-goal-chain
+#                   (one 'goal-chain' window watches every chained session;
+#                   CLAUDE_GOAL_CHAIN_REVIEW="<your words>" delegates checkpoint reviews)
+# e.g.  CLAUDE_SESSIONS="home goal=.claude/goals/home-g1.goal.txt chain; 3d; review model=sonnet mode=plan"
+#       CLAUDE_SESSIONS="* model=opus"
+#
+# Commands (inside the container, as the claude user):
+#   claude-sessions [ls] [--json]         every session: window, state, dir, Remote Control
+#   claude-sessions new NAME [--dir D] [--model M] [--mode M] [--goal F | --prompt-file F |
+#                   --prompt TEXT] [--no-rc] [--no-resume] [--chain]
+#   claude-sessions start NAME... | --all  start registered sessions that are not running
+#   claude-sessions stop NAME...           end them; they stay stopped across restarts
+#   claude-sessions restart NAME [--fresh] resume its conversation in a new process
+#   claude-sessions reset NAME             forget its conversation; the next start is a
+#                                          first start again (first prompt / goal re-sent)
+#   claude-sessions rm NAME                stop and unregister a `new` session
+#   claude-sessions attach NAME            open that window (tmux)
+#   claude-sessions send NAME TEXT...      type a prompt into the session and submit it
+#   claude-sessions check SPEC             validate a CLAUDE_SESSIONS value (works anywhere)
+#   claude-sessions -C PROJECT CMD ...     from the host: run CMD in container claude-PROJECT
+# Internal (the entrypoint, claude-session, the healthcheck): prepare, boot [--no-reconcile],
+#   supervise [--once], record, env NAME, mark NAME KEY=VALUE, names, health.
+#
+# State: $CLAUDE_CONFIG_DIR/session-registry/<name>.conf (declaration) and <name>.state
+# (the conversation to resume, whether it has started, whether it was stopped by hand).
+set -uo pipefail
+
+# --- host mode: forward to a container ------------------------------------------------------
+if [[ "${1:-}" == "-C" ]]; then
+    [[ -n "${2:-}" ]] || { echo "usage: claude-sessions -C PROJECT COMMAND ..." >&2; exit 2; }
+    _proj="$(printf '%s' "${2#claude-}" | tr '[:upper:]' '[:lower:]')"; shift 2
+    _tty=(-i); [[ -t 0 && -t 1 ]] && _tty=(-it)
+    exec docker exec "${_tty[@]}" -u "${CLAUDE_USER:-claude}" -e TERM="${TERM:-xterm-256color}" \
+        "claude-$_proj" claude-sessions "$@"
+fi
+
+TMUX_SESSION="${CLAUDE_TMUX_SESSION:-claude}"
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+REG="${CLAUDE_SESSIONS_REGISTRY:-$CONFIG_DIR/session-registry}"
+WORKSPACE="${CLAUDE_WORKSPACE:-/workspace}"
+SESSION_CMD="${CLAUDE_SESSION_CMD:-/usr/local/bin/claude-session}"
+WATCHDOG_BIN="${CLAUDE_RC_WATCHDOG_BIN:-/usr/local/bin/claude-rc-watchdog}"
+GOAL_CHAIN_BIN="${CLAUDE_GOAL_CHAIN_BIN:-claude-goal-chain}"
+RUN_DIR="${CLAUDE_SESSIONS_RUN_DIR:-/tmp/claude-sessions}"
+TICK="${CLAUDE_SESSIONS_TICK:-15}"
+CGROUP_DIR="${CLAUDE_SESSIONS_CGROUP:-/sys/fs/cgroup}"
+RESERVED=" main dev scm goal-chain "
+NAME_RE='^[a-z0-9][a-z0-9_-]{0,31}$'
+MODEL_RE='^[][A-Za-z0-9._:@/-]+$'      # an alias (opus), an id (claude-opus-4-8), or opus[1m]
+
+say() { echo "[sessions] $*"; }
+die() { echo "claude-sessions: $*" >&2; exit 1; }
+
+# A value the container was started with: prints it and returns 0, or returns 1 when it is
+# set nowhere. An SSH login gets a fresh environment from sshd, so fall back to the tmux
+# server's global environment, which the entrypoint's exports populate.
+cenv() {  # cenv <VAR>
+    if [[ -n "${!1+x}" ]]; then printf '%s' "${!1}"; return 0; fi
+    local line
+    line="$(tmux show-environment -g "$1" 2>/dev/null)" || return 1
+    [[ "$line" == "$1="* ]] || return 1
+    printf '%s' "${line#*=}"
+}
+project() { local p; p="$(cenv CLAUDE_PROJECT_NAME)"; printf '%s' "${p:-claude}"; }
+is_on() { [[ "${1:-}" =~ ^(1|on|true|yes)$ ]]; }
+
+# --- the spec ---------------------------------------------------------------------------------
+SPEC_ERR=""
+spec_err() { SPEC_ERR="$*"; }
+
+name_ok() {  # name_ok <name>: valid and not reserved (sets SPEC_ERR)
+    if [[ ! "$1" =~ $NAME_RE ]]; then
+        spec_err "session name '$1' must be lowercase letters, digits, '-' or '_' (at most 32, starting with a letter or digit)"
+        return 1
+    fi
+    if [[ "$RESERVED" == *" $1 "* ]]; then
+        spec_err "session name '$1' is taken (main, dev, scm and goal-chain are this container's own windows)"
+        return 1
+    fi
+}
+
+split_entries() {  # split_entries <spec>: one trimmed, non-empty entry per line
+    local e
+    while IFS= read -r e; do
+        e="${e#"${e%%[![:space:]]*}"}"; e="${e%"${e##*[![:space:]]}"}"
+        [[ -n "$e" ]] && printf '%s\n' "$e"
+    done <<<"${1//;/$'\n'}"
+    return 0
+}
+
+BOOL=""
+bool_val() {  # bool_val <key> <value>: sets BOOL to on|off (no subshell, so SPEC_ERR survives)
+    case "$2" in
+        1|on|true|yes)  BOOL=on ;;
+        0|off|false|no) BOOL=off ;;
+        *) spec_err "$1=$2: use on or off"; return 1 ;;
+    esac
+}
+
+# parse_entry <entry>: sets E_NAME E_DIR E_MODEL E_MODE E_GOAL E_PROMPT E_RC E_RESUME E_CHAIN,
+# or sets SPEC_ERR and returns 1.
+parse_entry() {
+    local -a tok
+    read -ra tok <<<"$1"
+    E_NAME="${tok[0]:-}" E_DIR="" E_MODEL="" E_MODE="" E_GOAL="" E_PROMPT=""
+    E_RC=on E_RESUME=on E_CHAIN=off
+    [[ -n "$E_NAME" ]] || { spec_err "empty entry"; return 1; }
+    [[ "$E_NAME" == "*" ]] || name_ok "$E_NAME" || return 1
+    local t k v
+    for t in "${tok[@]:1}"; do
+        if [[ "$t" == chain ]]; then E_CHAIN=on; continue; fi
+        [[ "$t" == *=* ]] || { spec_err "'$t' in the entry for $E_NAME is not key=value"; return 1; }
+        k="${t%%=*}" v="${t#*=}"
+        [[ -n "$v" ]] || { spec_err "$k= in the entry for $E_NAME has no value"; return 1; }
+        # These values travel through env files, compose YAML and tmux command lines.
+        if [[ "$v" == *[\"\'\`\$\\]* ]]; then
+            spec_err "$k=$v: quotes, backslashes, '\$' and '\`' are not allowed in a session spec"
+            return 1
+        fi
+        case "$k" in
+            dir)         E_DIR="$v" ;;
+            model)       [[ "$v" =~ $MODEL_RE ]] || { spec_err "model=$v is not a model alias or id"; return 1; }
+                         E_MODEL="$v" ;;
+            mode)        [[ "$v" =~ ^[A-Za-z]+$ ]] || { spec_err "mode=$v is not a permission mode"; return 1; }
+                         E_MODE="$v" ;;
+            goal)        E_GOAL="$v" ;;
+            prompt-file) E_PROMPT="$v" ;;
+            rc)          bool_val "$k" "$v" || return 1; E_RC="$BOOL" ;;
+            resume)      bool_val "$k" "$v" || return 1; E_RESUME="$BOOL" ;;
+            chain)       bool_val "$k" "$v" || return 1; E_CHAIN="$BOOL" ;;
+            *) spec_err "unknown key '$k' in the entry for $E_NAME (dir, model, mode, goal, prompt-file, rc, resume, chain)"; return 1 ;;
+        esac
+    done
+    if [[ -n "$E_GOAL" && -n "$E_PROMPT" ]]; then
+        spec_err "$E_NAME: goal= and prompt-file= are two kinds of first prompt, give one"; return 1
+    fi
+    if [[ "$E_NAME" == "*" && -n "$E_DIR" ]]; then
+        spec_err "'*' makes one session per repo, each in its own repo: it cannot take dir="; return 1
+    fi
+    return 0
+}
+
+# check_spec <spec>: every problem on stderr; 0 when the whole spec is valid.
+check_spec() {
+    local entry rc=0
+    declare -A seen=()
+    while IFS= read -r entry; do
+        if ! parse_entry "$entry"; then
+            echo "CLAUDE_SESSIONS: $SPEC_ERR" >&2; rc=1; continue
+        fi
+        if [[ -n "${seen[$E_NAME]:-}" ]]; then
+            echo "CLAUDE_SESSIONS: '$E_NAME' is declared twice" >&2; rc=1
+        fi
+        seen[$E_NAME]=1
+    done < <(split_entries "$1")
+    return $rc
+}
+
+# A directory name as a session name: lowercase, anything else becomes '-'.
+to_name() {  # to_name <dirname>
+    local n
+    n="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_-]/-/g' -e 's/^[^a-z0-9]*//')"
+    printf '%s' "${n:0:32}"
+}
+
+# --- the registry -----------------------------------------------------------------------------
+kv_get() {  # kv_get <file> <key>
+    [[ -f "$1" ]] || return 0
+    sed -n "s/^$2=//p" "$1" | tail -n1
+}
+# Read-modify-write under the registry's lock: the supervisor (recording a conversation id)
+# and claude-session (recording a first start) can write one state file at the same moment,
+# and a lost `started=1` would replay a session's first goal on the next boot.
+kv_set() {  # kv_set <file> <key> <value>
+    mkdir -p "${1%/*}"
+    (
+        flock -w 10 9 2>/dev/null || true
+        touch "$1"
+        { grep -v "^$2=" "$1"; printf '%s=%s\n' "$2" "$3"; } > "$1.tmp.$$" && mv -f "$1.tmp.$$" "$1"
+    ) 9>>"${1%/*}/.lock"
+}
+conf() { printf '%s/%s.conf' "$REG" "$1"; }
+state() { printf '%s/%s.state' "$REG" "$1"; }
+cget() { kv_get "$(conf "$1")" "$2"; }
+sget() { kv_get "$(state "$1")" "$2"; }
+sset() { kv_set "$(state "$1")" "$2" "$3"; }
+registered_p() { [[ -f "$(conf "$1")" ]]; }
+
+write_conf() {  # write_conf <name> <source> <order>: from the E_* values
+    local f; f="$(conf "$1")"
+    mkdir -p "$REG"
+    printf '%s\n' "source=$2" "order=$3" "dir=$E_DIR" "model=$E_MODEL" "mode=$E_MODE" \
+        "goal=$E_GOAL" "prompt_file=$E_PROMPT" "rc=$E_RC" "resume=$E_RESUME" "chain=$E_CHAIN" \
+        > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+}
+
+# Registered names, env-declared ones first in declaration order, then the rest by creation.
+registered() {
+    local f n
+    for f in "$REG"/*.conf; do
+        [[ -f "$f" ]] || continue
+        n="${f##*/}"; n="${n%.conf}"
+        printf '%s\t%s\n' "$(kv_get "$f" order)" "$n"
+    done | sort -n -k1,1 -k2,2 | cut -f2
+}
+
+session_dir() {  # session_dir <name>: its working directory, resolved now
+    [[ "$1" == main ]] && { printf '%s\n' "$WORKSPACE"; return 0; }
+    local d; d="$(cget "$1" dir)"
+    if [[ -z "$d" ]]; then
+        if [[ -d "$WORKSPACE/$1" ]]; then d="$WORKSPACE/$1"; else d="$WORKSPACE"; fi
+    elif [[ "$d" != /* ]]; then
+        d="$WORKSPACE/$d"
+    fi
+    # Lexically normalized (dir=. or home/../3d), so two spellings of one directory compare
+    # equal when deciding whether sessions share it. Symlinks are left alone.
+    realpath -ms "$d" 2>/dev/null || printf '%s\n' "${d%/}"
+}
+
+rc_name() {  # rc_name <name>: the Remote Control session name
+    if [[ "$1" == main ]]; then project; else printf '%s-%s' "$(project)" "$1"; fi
+}
+
+debug_log() {  # debug_log <name>: its Remote Control debug log ('' when disabled)
+    local base
+    base="$(cenv CLAUDE_RC_DEBUG_LOG)" || base=/tmp/claude-rc-debug.log
+    [[ -n "$base" ]] || return 0
+    if [[ "$1" == main ]]; then printf '%s' "$base"; else printf '%s-%s.log' "${base%.log}" "$1"; fi
+}
+
+# Another session (or main) works in the same directory, so `--continue` there is ambiguous.
+dir_shared() {  # dir_shared <name>
+    local me other n
+    me="$(session_dir "$1")"
+    for n in main $(registered); do
+        [[ "$n" == "$1" ]] && continue
+        other="$(session_dir "$n")"
+        [[ "$other" == "$me" ]] && return 0
+    done
+    return 1
+}
+
+# --- tmux -------------------------------------------------------------------------------------
+# tmux output is captured first, never piped into `grep -q` / an awk that exits early: under
+# pipefail the early reader leaves tmux writing into a closed pipe (SIGPIPE), and the pipeline
+# then reports failure for a window that IS there, whenever it is not the last one listed.
+# Fields are split on '|', not a tab: tmux prints a control character in a format as '_'.
+window_exists() {
+    local w; w="$(tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null)" || return 1
+    grep -qxF -- "$1" <<<"$w"
+}
+window_pane() {
+    local w; w="$(tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}|#{pane_id}' 2>/dev/null)" || return 0
+    awk -F'|' -v w="$1" '$1==w{print $2; exit}' <<<"$w"
+}
+
+# Every live Claude process's own session file ($CLAUDE_CONFIG_DIR/sessions/<pid>.json maps a
+# tmux pane to its conversation). One line each: <pane_id> <sessionId> <status> <pid>.
+live_sessions() {
+    local f pane sid st pid
+    for f in "$CONFIG_DIR"/sessions/*.json; do
+        [[ -f "$f" ]] || continue
+        IFS=$'\t' read -r pane sid st pid < <(jq -r --arg s "$TMUX_SESSION" '
+            select((.tmux // "") | startswith($s + ":"))
+            | [(.tmux | sub(".*\\."; "")), (.sessionId // ""), (.status // "unknown"), (.pid | tostring)] | @tsv' "$f" 2>/dev/null) || continue
+        [[ -n "$pane" && -n "$sid" && "$pid" =~ ^[0-9]+$ ]] || continue
+        kill -0 "$pid" 2>/dev/null || continue
+        [[ "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" == *claude* ]] || continue
+        printf '%s\t%s\t%s\t%s\n' "$pane" "$sid" "$st" "$pid"
+    done
+    return 0
+}
+
+# Is a claude process running in the window's pane? (the pane's process tree)
+pane_has_claude() {  # pane_has_claude <window>
+    local root
+    root="$(tmux display-message -p -t "$TMUX_SESSION:$1" '#{pane_pid}' 2>/dev/null)" || return 1
+    [[ "$root" =~ ^[0-9]+$ ]] || return 1
+    ps -eo pid=,ppid=,args= 2>/dev/null | awk -v r="$root" '
+        { p = $1; pp[p] = $2; $1 = ""; $2 = ""; args[p] = $0 }
+        END {
+            for (x in pp) {
+                y = x; n = 0
+                while ((y in pp) && y != r && n < 64) { y = pp[y]; n++ }
+                if (y == r && args[x] ~ /(^|[ \/])claude( |$)/) { found = 1 }
+            }
+            exit(found ? 0 : 1)
+        }'
+}
+
+# --- starting and stopping --------------------------------------------------------------------
+start_one() {  # start_one <name> <claude-session flag>
+    local n="$1" flag="${2:---boot}" d
+    registered_p "$n" || { say "$n: no such session (claude-sessions ls)"; return 1; }
+    if window_exists "$n"; then say "$n: already running (window $TMUX_SESSION:$n)"; return 0; fi
+    d="$(session_dir "$n")"
+    if [[ ! -d "$d" ]]; then
+        say "$n: NOT started, its directory $d does not exist"
+        return 1
+    fi
+    ensure_trust "$d" || true
+    if ! tmux new-window -d -t "$TMUX_SESSION:" -n "$n" -c "$d" "$SESSION_CMD --session $n $flag"; then
+        say "$n: NOT started, tmux could not open window $TMUX_SESSION:$n"
+        return 1
+    fi
+    local rc="Remote Control $(rc_name "$n")"
+    [[ "$(cget "$n" rc)" == off ]] && rc="no Remote Control"
+    local model; model="$(cget "$n" model)"; [[ -n "$model" ]] || model="$(cenv CLAUDE_MODEL)"
+    say "$n: started in window $TMUX_SESSION:$n ($d; $rc; model ${model:-opus})"
+    return 0
+}
+
+record_one() {  # record_one <name>: note the conversation its window is running now
+    local pane line
+    pane="$(window_pane "$1")"
+    [[ -n "$pane" ]] || return 0
+    line="$(live_sessions)"
+    line="$(awk -F'\t' -v p="$pane" '$1==p{print; exit}' <<<"$line")"
+    [[ -n "$line" ]] || return 0
+    local sid; sid="$(cut -f2 <<<"$line")"
+    [[ "$sid" != "$(sget "$1" sid)" ]] && sset "$1" sid "$sid"
+    return 0
+}
+
+stop_one() {  # stop_one <name>
+    local n="$1"
+    [[ "$n" == main ]] && { say "main is the container's own session: it is not stopped this way"; return 1; }
+    registered_p "$n" || { say "$n: no such session"; return 1; }
+    record_one "$n"
+    sset "$n" stopped 1
+    if window_exists "$n"; then
+        # The pane's claude first (TERM, so it writes its transcript), then the window.
+        CLAUDE_RC_TMUX_TARGET="$TMUX_SESSION:$n" "$WATCHDOG_BIN" --kill-pane >/dev/null 2>&1 || true
+        tmux kill-window -t "$TMUX_SESSION:$n" 2>/dev/null || true
+    fi
+    say "$n: stopped (it stays stopped across restarts: claude-sessions start $n)"
+}
+
+# Respawn a running session's pane through the RC watchdog's respawn (the same per-pane
+# lock, process-tree kill and resume-menu handling the watchdogs use).
+respawn_one() {  # respawn_one <name> <claude-session flag>
+    local n="$1" flag="$2"
+    local cmd="$SESSION_CMD --session $n $flag"
+    [[ "$n" == main ]] && cmd="$SESSION_CMD $flag"
+    CLAUDE_RC_TMUX_TARGET="$TMUX_SESSION:$n" CLAUDE_RC_RESPAWN_CMD="$cmd" \
+        CLAUDE_RC_DEBUG_LOG="$(debug_log "$n")" CLAUDE_RESPAWN_LOCK_DIR="$(lock_dir "$n")" \
+        CLAUDE_RC_LABEL="$n" "$WATCHDOG_BIN" --respawn
+}
+lock_dir() { if [[ "$1" == main ]]; then printf '/tmp/claude-respawn.lock'; else printf '/tmp/claude-respawn-%s.lock' "$1"; fi; }
+
+# --- per-session Remote Control watchdogs -----------------------------------------------------
+# Only the supervisor starts these (within one tick of a session starting): it runs for the
+# container's life with the entrypoint's stdout, so a watchdog's lines land in `docker logs`.
+# One started from `claude-sessions new` over SSH or docker exec would write into that
+# caller's terminal, and die on the first write after the caller left.
+watchdog_alive() {  # watchdog_alive <name>
+    local p; p="$(cat "$RUN_DIR/$1.watchdog.pid" 2>/dev/null)"
+    [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null \
+        && [[ "$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)" == *rc-watchdog* ]]
+}
+ensure_watchdog() {  # ensure_watchdog <name>: one per running session with a Remote Control link
+    local n="$1" log
+    [[ "$(cenv CLAUDE_RC_WATCHDOG)" == 0 ]] && return 0
+    [[ "$(cget "$n" rc)" == off ]] && return 0
+    log="$(debug_log "$n")"
+    [[ -n "$log" ]] || return 0
+    window_exists "$n" || return 0
+    watchdog_alive "$n" && return 0
+    mkdir -p "$RUN_DIR"
+    CLAUDE_RC_TMUX_TARGET="$TMUX_SESSION:$n" CLAUDE_RC_DEBUG_LOG="$log" \
+        CLAUDE_RC_RESPAWN_CMD="$SESSION_CMD --session $n --continue" \
+        CLAUDE_RESPAWN_LOCK_DIR="$(lock_dir "$n")" CLAUDE_RC_LABEL="$n" \
+        "$WATCHDOG_BIN" &
+    echo $! > "$RUN_DIR/$n.watchdog.pid"
+}
+
+# --- workspace trust --------------------------------------------------------------------------
+# Claude Code asks "Is this a project you trust?" for a directory with no trust entry of its
+# own: the entry the entrypoint seeds for /workspace does NOT cover /workspace/home, so a
+# session started there would sit on that dialog. Seed the same entry for every directory a
+# session runs in. `prepare` does it before any Claude process runs (nothing else writes
+# .claude.json then); a session added at runtime gets it best-effort, checked afterwards.
+trusted() {  # trusted <dir>
+    jq -e --arg d "$1" '.projects[$d].hasTrustDialogAccepted == true' "$CONFIG_DIR/.claude.json" >/dev/null 2>&1
+}
+seed_trust() {  # seed_trust <dir>...: only the ones not trusted yet
+    local cj="$CONFIG_DIR/.claude.json" d todo=()
+    declare -A seen=()
+    for d in "$@"; do
+        [[ -n "${seen[$d]:-}" ]] && continue
+        seen[$d]=1
+        trusted "$d" || todo+=("$d")
+    done
+    (( ${#todo[@]} )) || return 0
+    [[ -s "$cj" ]] || echo '{}' > "$cj"
+    jq --args '
+        .projects = (.projects // {})
+        | reduce $ARGS.positional[] as $d (.;
+            .projects[$d] = ((.projects[$d] // {}) + {
+                hasTrustDialogAccepted: true,
+                hasCompletedProjectOnboarding: true,
+                hasClaudeMdExternalIncludesApproved: true,
+                hasClaudeMdExternalIncludesWarningShown: true
+            }))' "${todo[@]}" < "$cj" > "$cj.tmp.$$" && mv -f "$cj.tmp.$$" "$cj" \
+        || { rm -f "$cj.tmp.$$"; say "WARNING: could not pre-accept workspace trust for ${todo[*]}"; return 1; }
+    say "Workspace trust     : pre-accepted for ${todo[*]}"
+}
+ensure_trust() {  # ensure_trust <dir>: at runtime, with Claude processes running
+    trusted "$1" && return 0
+    seed_trust "$1"
+    sleep 1
+    trusted "$1" || seed_trust "$1"   # a running Claude rewrote the file over ours: once more
+}
+
+# --- boot -------------------------------------------------------------------------------------
+# Bring the registry in line with CLAUDE_SESSIONS: every declared entry (re)written as
+# source=env, env entries that are gone unregistered, runtime (`new`) sessions untouched
+# unless a declared one takes the name.
+reconcile_env() {
+    local spec entry idx=0 d nm
+    spec="$(cenv CLAUDE_SESSIONS)"
+    declare -A want=()
+    local -a stars=()
+    # Pass 1: named entries. A bad entry is skipped, never fatal: the container still boots.
+    while IFS= read -r entry; do
+        if ! parse_entry "$entry"; then say "CLAUDE_SESSIONS: skipped '$entry': $SPEC_ERR"; continue; fi
+        if [[ "$E_NAME" == "*" ]]; then stars+=("$entry"); continue; fi
+        if [[ -n "${want[$E_NAME]:-}" ]]; then say "CLAUDE_SESSIONS: '$E_NAME' is declared twice, the first one is used"; continue; fi
+        if registered_p "$E_NAME" && [[ "$(cget "$E_NAME" source)" != env ]]; then
+            say "$E_NAME: CLAUDE_SESSIONS declares it, replacing the session of that name made with 'claude-sessions new'"
+        fi
+        want[$E_NAME]=1
+        write_conf "$E_NAME" env "$idx"; idx=$((idx + 1))
+    done < <(split_entries "$spec")
+    # Pass 2: '*' = one session per git repo under /workspace. A named entry wins its name.
+    for entry in "${stars[@]}"; do
+        parse_entry "$entry" || continue
+        local found=0
+        for d in "$WORKSPACE"/*/; do
+            d="${d%/}"
+            [[ -e "$d/.git" ]] || continue
+            found=1
+            nm="$(to_name "${d##*/}")"
+            if ! name_ok "$nm"; then say "CLAUDE_SESSIONS '*': no session for $d: $SPEC_ERR (declare it by hand: NAME dir=${d##*/})"; continue; fi
+            [[ -z "${want[$nm]:-}" ]] || continue
+            want[$nm]=1
+            E_DIR="$d"
+            write_conf "$nm" env "$idx"; idx=$((idx + 1))
+        done
+        (( found )) || say "CLAUDE_SESSIONS '*': no git repos directly under $WORKSPACE, so no sessions from it"
+    done
+    # Declared before, not any more: unregister (its conversations stay on disk).
+    local n
+    for n in $(registered); do
+        [[ "$(cget "$n" source)" == env && -z "${want[$n]:-}" ]] || continue
+        rm -f "$(conf "$n")" "$(state "$n")"
+        say "$n: no longer in CLAUDE_SESSIONS, unregistered"
+    done
+}
+
+start_goal_chain() {  # (re)start the goal-chain window over every chained session
+    local -a targets=()
+    local n
+    for n in $(registered); do
+        [[ "$(cget "$n" chain)" == on && "$(sget "$n" stopped)" != 1 ]] || continue
+        targets+=("$n=$(session_dir "$n")")
+    done
+    (( ${#targets[@]} )) || return 0
+    local review cmd t
+    review="$(cenv CLAUDE_GOAL_CHAIN_REVIEW)"
+    cmd="$GOAL_CHAIN_BIN"
+    [[ -n "$review" ]] && cmd+=" --review-checkpoints $(printf '%q' "$review")"
+    for t in "${targets[@]}"; do cmd+=" $(printf '%q' "$t")"; done
+    cmd+="; echo 'claude-goal-chain exited (rerun: claude-sessions start --all, or run it by hand)'; exec bash -l"
+    if window_exists goal-chain; then
+        [[ "${1:-}" == --restart ]] || { say "goal-chain: already running"; return 0; }
+        tmux kill-window -t "$TMUX_SESSION:goal-chain" 2>/dev/null || true
+        sleep 1
+    fi
+    if tmux new-window -d -t "$TMUX_SESSION:" -n goal-chain "$cmd"; then
+        say "goal-chain: watching ${targets[*]%%=*} in window $TMUX_SESSION:goal-chain$([[ -n "$review" ]] && echo ', checkpoint reviews delegated')"
+    else
+        say "goal-chain: WARNING, could not open its window"
+    fi
+}
+
+# Memory and pids are shared by every session in the container, so say what each gets.
+capacity_note() {  # capacity_note <number of Claude sessions, main included>
+    local count="$1" mem pids
+    mem="$(cat "$CGROUP_DIR/memory.max" 2>/dev/null)"
+    pids="$(cat "$CGROUP_DIR/pids.max" 2>/dev/null)"
+    if [[ "$mem" =~ ^[0-9]+$ ]]; then
+        local each=$(( mem / count / 1048576 ))
+        say "Capacity: $count Claude sessions share $(( mem / 1048576 )) MiB of memory (~$each MiB each)"
+        (( each < 1024 )) && say "WARNING: under 1 GiB per session. A Claude process alone uses 300-600 MiB, and an OOM kill takes down whichever session the kernel picks. Raise the limit (claude-launch: CLAUDE_MEM_LIMIT; compose-gen: --mem SVC=SIZE) or run fewer sessions."
+    fi
+    if [[ "$pids" =~ ^[0-9]+$ ]] && (( pids / count < 256 )); then
+        say "WARNING: pids limit $pids is under 256 per session; builds and browsers run out of threads first (CLAUDE_PIDS_LIMIT)."
+    fi
+    return 0
+}
+
+# Before any Claude process runs: the registry in line with CLAUDE_SESSIONS, and workspace
+# trust pre-accepted for every session's directory and every repo under /workspace (so a
+# session added later with `new --dir <repo>` is already trusted too).
+cmd_prepare() {
+    mkdir -p "$REG"
+    reconcile_env
+    local n d dirs=()
+    for n in $(registered); do dirs+=("$(session_dir "$n")"); done
+    for d in "$WORKSPACE"/*/; do [[ -e "${d%/}/.git" ]] && dirs+=("${d%/}"); done
+    (( ${#dirs[@]} )) && seed_trust "${dirs[@]}"
+    return 0
+}
+
+cmd_boot() {
+    mkdir -p "$REG"
+    [[ "${1:-}" == --no-reconcile ]] || reconcile_env
+    local n total=0 up=0
+    for n in $(registered); do
+        total=$((total + 1))
+        if [[ "$(sget "$n" stopped)" == 1 ]]; then
+            say "$n: stopped by hand, not started (claude-sessions start $n)"
+            continue
+        fi
+        start_one "$n" --boot && up=$((up + 1))
+    done
+    (( total )) || return 0
+    start_goal_chain
+    capacity_note $((up + 1))
+    say "$up of $total sessions started; attach with: claude-sessions attach NAME (or Ctrl-b w in tmux)"
+}
+
+# --- supervise --------------------------------------------------------------------------------
+# One pass: remember each window's current conversation (so a restart resumes it, and a
+# /clear is followed), and keep a Remote Control watchdog beside every running session.
+supervise_once() {
+    cmd_record
+    local n
+    for n in $(registered); do ensure_watchdog "$n"; done
+    return 0
+}
+# Record only (no watchdogs): the entrypoint runs this on shutdown, so a restart soon after a
+# session started, before the supervisor's first tick, still resumes the right conversation.
+cmd_record() {
+    local wins live n pane sid
+    wins="$(tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}|#{pane_id}' 2>/dev/null)" || return 0
+    live="$(live_sessions)"
+    for n in main $(registered); do
+        pane="$(awk -F'|' -v w="$n" '$1==w{print $2; exit}' <<<"$wins")"
+        [[ -n "$pane" ]] || continue
+        sid="$(awk -F'\t' -v p="$pane" '$1==p{print $2; exit}' <<<"$live")"
+        [[ -n "$sid" && "$sid" != "$(sget "$n" sid)" ]] && sset "$n" sid "$sid"
+    done
+    return 0
+}
+
+cmd_supervise() {
+    [[ "${1:-}" == --once ]] && { supervise_once; return 0; }
+    while :; do
+        tmux has-session -t "$TMUX_SESSION" 2>/dev/null || { say "tmux session gone: supervisor exiting"; return 0; }
+        supervise_once
+        sleep "$TICK"
+    done
+}
+
+# --- ls / health ------------------------------------------------------------------------------
+session_state() {  # session_state <name> <live-sessions>: stopped|down|shell|busy|idle|...
+    local n="$1" pane st
+    if [[ "$n" != main && "$(sget "$n" stopped)" == 1 ]]; then echo stopped; return; fi
+    pane="$(window_pane "$n")"
+    [[ -n "$pane" ]] || { echo down; return; }
+    st="$(awk -F'\t' -v p="$pane" '$1==p{print $3; exit}' <<<"$2")"
+    if [[ -n "$st" ]]; then echo "$st"; return; fi
+    if pane_has_claude "$n"; then echo starting; else echo shell; fi
+}
+
+rc_dead() {  # rc_dead <name>: its Remote Control bridge has given up
+    local log last
+    log="$(debug_log "$1")"
+    [[ -n "$log" && -s "$log" ]] || return 1
+    last="$(tail -n 800 "$log" 2>/dev/null | grep -aoE 'v2 transport connected|recovery exhausted after|notifyBridgeFailed' | tail -n1)"
+    [[ "$last" == 'recovery exhausted after' || "$last" == notifyBridgeFailed ]]
+}
+
+cmd_ls() {
+    local json=0 live n
+    [[ "${1:-}" == --json ]] && json=1
+    live="$(live_sessions)"
+    local rows="" st rc model sid
+    for n in main $(registered); do
+        st="$(session_state "$n" "$live")"
+        if [[ "$n" == main ]]; then rc="$(rc_name main)"; model="$(cenv CLAUDE_MODEL)"
+        else
+            rc="$(rc_name "$n")"; [[ "$(cget "$n" rc)" == off ]] && rc="-"
+            model="$(cget "$n" model)"; [[ -n "$model" ]] || model="$(cenv CLAUDE_MODEL)"
+        fi
+        [[ "$st" != down && "$st" != stopped && "$rc" != "-" ]] && rc_dead "$n" && rc="$rc (DEAD)"
+        sid="$(sget "$n" sid)"
+        rows+="$n	$st	$(session_dir "$n")	$rc	${model:-opus}	${sid:0:8}	$( [[ "$n" != main ]] && cget "$n" source || echo container)"$'\n'
+    done
+    if (( json )); then
+        printf '%s' "$rows" | jq -Rn '[inputs | select(length > 0) | split("\t")
+            | {name: .[0], state: .[1], dir: .[2], remote_control: .[3], model: .[4], conversation: .[5], source: .[6]}]'
+        return 0
+    fi
+    # Aligned with awk: the image has no column(1).
+    { printf 'NAME\tSTATE\tDIR\tREMOTE CONTROL\tMODEL\tCONVERSATION\tFROM\n'; printf '%s' "$rows"; } | awk -F'\t' '
+        { n[NR] = NF; for (i = 1; i <= NF; i++) { c[NR, i] = $i; if (length($i) > w[i]) w[i] = length($i) } }
+        END { for (r = 1; r <= NR; r++) { l = ""; for (i = 1; i <= n[r]; i++) l = l sprintf(i < n[r] ? "%-" w[i] + 2 "s" : "%s", c[r, i]); print l } }'
+}
+
+# One line for the healthcheck: how many named sessions are up, and what is wrong with the
+# rest. Never fails the healthcheck by itself (main decides that; a watchdog recovers the rest).
+cmd_health() {
+    local live n st total=0 up=0 problems=""
+    live="$(live_sessions)"
+    for n in $(registered); do
+        [[ "$(sget "$n" stopped)" == 1 ]] && continue
+        total=$((total + 1))
+        st="$(session_state "$n" "$live")"
+        case "$st" in
+            down)  problems+="${problems:+, }$n: no window" ;;
+            shell) problems+="${problems:+, }$n: claude exited" ;;
+            *)     if [[ "$(cget "$n" rc)" != off ]] && rc_dead "$n"; then
+                       problems+="${problems:+, }$n: Remote Control dead"
+                   else
+                       up=$((up + 1))
+                   fi ;;
+        esac
+    done
+    (( total )) || return 0
+    echo "sessions: $up/$total up${problems:+ ($problems)}"
+}
+
+# --- claude-session's view of a session -------------------------------------------------------
+cmd_env() {  # env <name>: shell assignments claude-session evals
+    local n="${1:-}" d
+    [[ -n "$n" ]] || die "env needs a session name"
+    if [[ "$n" != main ]]; then registered_p "$n" || die "no such session: $n"; fi
+    d="$(session_dir "$n")"
+    local kind="" path="" resume rcv model="" mode=""
+    if [[ "$n" == main ]]; then
+        resume=off; is_on "$(cenv CLAUDE_MAIN_RESUME)" && resume=on
+        rcv=on
+    else
+        resume="$(cget "$n" resume)"; rcv="$(cget "$n" rc)"
+        model="$(cget "$n" model)"; mode="$(cget "$n" mode)"
+        if [[ -n "$(cget "$n" goal)" ]]; then kind=goal; path="$(cget "$n" goal)"
+        elif [[ -n "$(cget "$n" prompt_file)" ]]; then kind=prompt; path="$(cget "$n" prompt_file)"; fi
+        [[ -n "$path" && "$path" != /* ]] && path="$d/$path"
+    fi
+    local shared=0; dir_shared "$n" && shared=1
+    printf 'S_DIR=%q\nS_RCNAME=%q\nS_MODEL=%q\nS_MODE=%q\nS_RC=%q\nS_RESUME=%q\n' \
+        "$d" "$(rc_name "$n")" "$model" "$mode" "${rcv:-on}" "${resume:-on}"
+    printf 'S_PROMPT_KIND=%q\nS_PROMPT_PATH=%q\nS_STARTED=%q\nS_SID=%q\nS_DEBUG_LOG=%q\nS_SHARED=%q\n' \
+        "$kind" "$path" "$(sget "$n" started)" "$(sget "$n" sid)" "$(debug_log "$n")" "$shared"
+}
+
+cmd_mark() {  # mark <name> KEY=VALUE
+    local n="${1:-}" kv="${2:-}"
+    [[ -n "$n" && "$kv" == *=* ]] || die "usage: mark NAME KEY=VALUE"
+    [[ "$n" == main ]] || registered_p "$n" || die "no such session: $n"
+    case "${kv%%=*}" in started|sid) ;; *) die "mark: unknown key ${kv%%=*}" ;; esac
+    sset "$n" "${kv%%=*}" "${kv#*=}"
+}
+
+# --- new / rm / reset / send / attach ---------------------------------------------------------
+cmd_new() {
+    local n="${1:-}"; shift || true
+    [[ -n "$n" ]] || die "usage: claude-sessions new NAME [--dir D] [--model M] [--mode M] [--goal F | --prompt-file F | --prompt TEXT] [--no-rc] [--no-resume] [--chain]"
+    name_ok "$n" || die "$SPEC_ERR"
+    registered_p "$n" && die "'$n' already exists (claude-sessions start|restart $n, or rm it first)"
+    local prompt_text="" have_prompt=0
+    E_NAME="$n" E_DIR="" E_MODEL="" E_MODE="" E_GOAL="" E_PROMPT="" E_RC=on E_RESUME=on E_CHAIN=off
+    while (( $# )); do
+        case "$1" in
+            --dir)         E_DIR="${2:?--dir needs a path}"; shift 2 ;;
+            --model)       E_MODEL="${2:?--model needs a model}"; shift 2 ;;
+            --mode)        E_MODE="${2:?--mode needs a permission mode}"; shift 2 ;;
+            --goal)        E_GOAL="${2:?--goal needs a file}"; shift 2 ;;
+            --prompt-file) E_PROMPT="${2:?--prompt-file needs a file}"; shift 2 ;;
+            --prompt)      prompt_text="${2:?--prompt needs text}"; have_prompt=1; shift 2 ;;
+            --no-rc)       E_RC=off; shift ;;
+            --no-resume)   E_RESUME=off; shift ;;
+            --chain)       E_CHAIN=on; shift ;;
+            *) die "new: unknown option $1" ;;
+        esac
+    done
+    (( have_prompt )) && [[ -n "$E_GOAL$E_PROMPT" ]] && die "give one first prompt: --goal, --prompt-file or --prompt"
+    [[ -n "$E_GOAL" && -n "$E_PROMPT" ]] && die "give one first prompt: --goal, --prompt-file or --prompt"
+    # Validate the flag values with the spec's own rules (prompt text is free-form: it goes
+    # to a file, never through the spec).
+    local probe="$n"
+    [[ -n "$E_DIR" ]] && probe+=" dir=$E_DIR"
+    [[ -n "$E_MODEL" ]] && probe+=" model=$E_MODEL"
+    [[ -n "$E_MODE" ]] && probe+=" mode=$E_MODE"
+    [[ -n "$E_GOAL" ]] && probe+=" goal=$E_GOAL"
+    [[ -n "$E_PROMPT" ]] && probe+=" prompt-file=$E_PROMPT"
+    local keep_rc="$E_RC" keep_resume="$E_RESUME" keep_chain="$E_CHAIN"
+    parse_entry "$probe" || die "$SPEC_ERR"
+    E_RC="$keep_rc" E_RESUME="$keep_resume" E_CHAIN="$keep_chain"
+    if (( have_prompt )); then
+        mkdir -p "$REG"
+        printf '%s\n' "$prompt_text" > "$REG/$n.prompt"
+        E_PROMPT="$REG/$n.prompt"
+    fi
+    write_conf "$n" cli "$(date +%s)"   # after every declared session (those are 0, 1, 2, ...)
+    rm -f "$(state "$n")"
+    local d f; d="$(session_dir "$n")"
+    [[ -d "$d" ]] || { rm -f "$(conf "$n")" "$REG/$n.prompt"; die "directory $d does not exist"; }
+    for f in "$E_GOAL" "$E_PROMPT"; do
+        [[ -n "$f" ]] || continue
+        [[ "$f" == /* ]] || f="$d/$f"
+        [[ -f "$f" ]] || { rm -f "$(conf "$n")" "$REG/$n.prompt"; die "first-prompt file $f does not exist"; }
+    done
+    start_one "$n" --boot || return 1
+    [[ "$E_CHAIN" == on ]] && start_goal_chain --restart
+    return 0
+}
+
+cmd_rm() {
+    local n="${1:-}"
+    [[ -n "$n" ]] || die "usage: claude-sessions rm NAME"
+    registered_p "$n" || die "no such session: $n"
+    if [[ "$(cget "$n" source)" == env ]]; then
+        die "'$n' is declared by the container's CLAUDE_SESSIONS and would come back on the next boot.
+       Stop it instead (claude-sessions stop $n), or drop it from --session / CLAUDE_SESSIONS and recreate the container."
+    fi
+    local chained; chained="$(cget "$n" chain)"
+    stop_one "$n" >/dev/null
+    rm -f "$(conf "$n")" "$(state "$n")" "$REG/$n.prompt"
+    [[ "$chained" == on ]] && start_goal_chain --restart
+    say "$n: removed (its conversations stay in $CONFIG_DIR/projects)"
+}
+
+cmd_reset() {
+    local n="${1:-}"
+    [[ -n "$n" ]] || die "usage: claude-sessions reset NAME"
+    [[ "$n" == main ]] || registered_p "$n" || die "no such session: $n"
+    rm -f "$(state "$n")"
+    say "$n: conversation forgotten; its next start is a first start$( [[ -n "$(cget "$n" goal)$(cget "$n" prompt_file)" ]] && echo ' (the first prompt is sent again)')"
+}
+
+cmd_send() {
+    local n="${1:-}"; shift || true
+    [[ -n "$n" && $# -gt 0 ]] || die "usage: claude-sessions send NAME TEXT..."
+    window_exists "$n" || die "no running session '$n'"
+    local text="$*" t="$TMUX_SESSION:$n"
+    if [[ "$text" == *$'\n'* ]]; then
+        local buf="claude-sessions-$$"
+        printf '%s' "$text" | tmux load-buffer -b "$buf" - && tmux paste-buffer -p -r -d -b "$buf" -t "$t" || die "could not paste into $t"
+    else
+        tmux send-keys -t "$t" -l "$text" || die "could not type into $t"
+    fi
+    sleep "${CLAUDE_SESSIONS_SEND_DELAY:-0.5}"
+    tmux send-keys -t "$t" Enter || die "could not submit in $t"
+    say "$n: sent"
+}
+
+cmd_attach() {
+    local n="${1:-main}"
+    window_exists "$n" || die "no running session '$n' (claude-sessions ls)"
+    if [[ -n "${TMUX:-}" ]]; then exec tmux select-window -t "$TMUX_SESSION:$n"; fi
+    exec tmux attach-session -t "$TMUX_SESSION:$n"
+}
+
+cmd_start() {
+    local -a names=()
+    if [[ "${1:-}" == --all ]]; then mapfile -t names < <(registered); else names=("$@"); fi
+    (( ${#names[@]} )) || die "usage: claude-sessions start NAME... | --all"
+    local n rc=0 chained=0
+    for n in "${names[@]}"; do
+        [[ "$n" == main ]] && { say "main always runs (claude-sessions restart main)"; continue; }
+        registered_p "$n" || { say "$n: no such session"; rc=1; continue; }
+        sset "$n" stopped 0
+        start_one "$n" --boot || rc=1
+        [[ "$(cget "$n" chain)" == on ]] && chained=1
+    done
+    (( chained )) && start_goal_chain
+    return $rc
+}
+
+cmd_restart() {
+    local n="${1:-}" flag=--continue
+    [[ -n "$n" ]] || die "usage: claude-sessions restart NAME [--fresh]"
+    [[ "${2:-}" == --fresh ]] && flag=--fresh
+    [[ "$n" == main ]] || registered_p "$n" || die "no such session: $n"
+    record_one "$n"
+    if window_exists "$n"; then
+        respawn_one "$n" "$flag" && say "$n: restarted ($([[ $flag == --fresh ]] && echo 'a fresh conversation' || echo 'resuming its conversation'))"
+    else
+        [[ "$n" == main ]] && die "window main is gone: restart the container"
+        sset "$n" stopped 0
+        start_one "$n" "$flag"
+    fi
+}
+
+cmd_names() { echo main; registered; }
+
+# --- dispatch ---------------------------------------------------------------------------------
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    cmd="${1:-ls}"; shift || true
+    case "$cmd" in
+        ls|list|status) cmd_ls "$@" ;;
+        new)        cmd_new "$@" ;;
+        start)      cmd_start "$@" ;;
+        stop)       (( $# )) || die "usage: claude-sessions stop NAME..."
+                    rc=0; for n in "$@"; do stop_one "$n" || rc=1; done; exit $rc ;;
+        restart)    cmd_restart "$@" ;;
+        reset)      cmd_reset "$@" ;;
+        rm|remove)  cmd_rm "$@" ;;
+        attach)     cmd_attach "$@" ;;
+        send)       cmd_send "$@" ;;
+        check)      [[ $# -ge 1 ]] || die "usage: claude-sessions check SPEC"
+                    check_spec "$1" || exit 1
+                    echo "ok: $(split_entries "$1" | wc -l) session entries" ;;
+        prepare)    cmd_prepare ;;
+        boot)       cmd_boot "$@" ;;
+        supervise)  cmd_supervise "$@" ;;
+        record)     cmd_record ;;
+        env)        cmd_env "$@" ;;
+        mark)       cmd_mark "$@" ;;
+        names)      cmd_names ;;
+        health)     cmd_health ;;
+        -h|--help|help) sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//' ;;
+        *) die "unknown command '$cmd' (claude-sessions --help)" ;;
+    esac
+fi

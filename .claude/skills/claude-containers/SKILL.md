@@ -13,8 +13,10 @@ description: >-
 # claude-containers
 
 A self-hostable Docker image plus bash launchers for running many isolated,
-long-lived Claude Code coding sessions on one host. One container = one session
-= one git repo (or several, as sibling checkouts under /workspace), reachable two ways at once: SSH into a persistent tmux session,
+long-lived Claude Code coding sessions on one host. One container = one workspace (one git
+repo, or several as sibling checkouts under /workspace) = a main session plus, optionally,
+more named sessions started at boot (`--session` / `CLAUDE_SESSIONS`, one tmux window and
+Remote Control link each). Reachable two ways at once: SSH into a persistent tmux session,
 and the Claude mobile app's Remote Control (Code tab). Auth is a Claude **Max**
 subscription via OAuth, **never API keys**.
 
@@ -91,11 +93,12 @@ small descriptive commits as you change things.
 |---|---|
 | `Dockerfile` | `node:24-trixie-slim`; uv via a named throwaway stage (BuildKit forbids var-expansion in `COPY --from`); apt toolchain + `gh`; npm-pinned Claude Code; reuses base 1000:1000 user as `claude`; hardened sshd. |
 | `entrypoint.sh` | Root → refuse API key → (login mode) → fix volume perms → host keys → authorized_keys → git key/identity → credential reconcile loop → seed `.claude.json` trust → merge bake-ins (CLAUDE.md, settings, plugins, commands, skills) → workspace (use/clone/fail) → register MCP via CLI → `sshd` → `gosu claude tmux` running `claude-session` → stay PID 1 with signal traps. |
-| `bin/claude-session` | tmux pane cmd: `cd /workspace`, `exec claude --dangerously-skip-permissions --remote-control "<project>" $EXTRA`; falls back to a shell so SSH stays usable. |
+| `bin/claude-session` | tmux pane cmd: `cd /workspace`, `exec claude --dangerously-skip-permissions --remote-control "<project>" $EXTRA`; falls back to a shell so SSH stays usable. `--session NAME` runs a named session (dir, RC name `<project>-NAME`, model, mode, first prompt/goal once, resume by recorded id); `--boot` / `--continue` / `--resume ID` / `--fresh`. |
+| `bin/claude-sessions` | Baked: several sessions per container. `prepare` (entrypoint, before main: reconcile `CLAUDE_SESSIONS` into `~/.claude/session-registry/`, pre-accept workspace trust per session dir + every repo), `boot --no-reconcile` (one tmux window each, the `goal-chain` window for `chain` sessions, a capacity line), `supervise` (records each window's conversation id from `sessions/<pid>.json`; one RC watchdog per linked session). Operator: `ls [--json]`, `new`, `start`, `stop` (remembered), `restart [--fresh]`, `reset`, `rm` (runtime ones only), `attach`, `send`, `check SPEC`; `-C PROJECT` forwards from the host via docker exec. |
 | `bin/claude-dev` | tmux `dev`-window cmd: runs `$CLAUDE_DEV_CMD` (a dev server) in `/workspace` on boot, shell fallback. Started by the entrypoint only when `CLAUDE_DEV_CMD` is set. |
 | `bin/_common.sh` | Shared lib: `.env` load, defaults, `sanitize`, volume names, `alloc_port` (2200-2299, skips used), state checks, `print_connect`. |
 | `bin/claude-launch` | Create/start a container; auto port; labels carry metadata; surfaces a fast-failing entrypoint. `--expose H:C` / `--dev-cmd` publish + auto-start a dev server; `--browser` enables the chrome-devtools MCP for frontend debugging (needs a WITH_BROWSER=1 image). |
-| `bin/claude-list/attach/stop/rm/logs` | Manage containers. `claude-attach` opens the live tmux session via `docker exec` (local, no SSH key). `claude-rm --purge` also deletes the per-project volumes. |
+| `bin/claude-list/attach/stop/rm/logs` | Manage containers. `claude-attach <name> [session]` opens the live tmux session via `docker exec` (local, no SSH key), on a named session's window if given. `claude-rm --purge` also deletes the per-project volumes. |
 | `bin/claude-tui` | `whiptail` menu over the whole fleet, grouped by compose stack (discovered live from `com.docker.compose.project*` labels, no hardcoded paths; pre-seed a stack with zero containers via `CLAUDE_TUI_STACKS`). Per-session: attach/start/stop/restart/logs/remove/connect-info. Per-stack: bring up a dormant (never-created) repo, switch which auth account it uses (edits its `.env`'s `AUTH_VOLUME`, regenerates via its sibling `*.conf`, recreates only the containers actually running, by service name, so an already-running dormant-profile container is never silently skipped by a bare `up -d`), regenerate its compose. Accounts screen wraps `claude-account-list`/`claude-account-login`. Disk screen wraps `claude-disk-gc`/`-verify`. Pure navigation: shells out to the scripts here, no duplicated logic. Needs `whiptail` (the `newt` package). |
 | `bin/claude-compose-gen` | Generate a multi-service `docker-compose.yml` (one session per repo in a GitHub org via `gh`, or explicit `repo[:branch]` args). Stable ports (reserves ports used by any `claude.managed` container host-wide), shared+per-repo volumes, `claude.managed` labels so `claude-list` sees them. `--scenario <file>` reads a persisted `.conf` of flags; `--env-file <file>` layers a per-stack env for multi-stack hosts. |
 | `scenarios/example.conf.example` | Documented template for a `--scenario` `.conf` (persisted generator flags). Real scenario files live with the compose, outside this repo. |
@@ -111,6 +114,7 @@ small descriptive commits as you change things.
 | `bin/claude-goal-chain` | Baked: runs a `/plan-program` program's goals back to back in their tmux sessions. A met goal advances only when the session is idle, its ledger on origin has `COMPLETE (goal n)`, the report isn't BLOCKED, and every `CHECKPOINT-*.approved` the next goal names is on origin; then `/clear` + `/goal <next file>` (same RC link). Nudges a usage-limit pause after the parsed reset time. `--review-checkpoints "<owner's words>"` runs a delegated checkpoint review `/goal` that may commit the approval on the owner's behalf (never for physical/account/taste steps); the watcher itself never writes one. Stops with a note typed into the session. `status`, `start WINDOW N`. |
 | `bin/claude-blender-install` | Baked: installs the pinned, SHA-256-verified Blender LTS rootless into the shared `/cache/blender/<ver>` under a lock (fail closed on a checksum mismatch; blender.org then two official mirrors). `blender` on PATH runs it. |
 | `test/goal-chain-unit.sh` | Docker-free `claude-goal-chain` tests against a fake tmux that behaves like a Claude session and a local git origin: parsers (goal/review conditions, reset hints, last goal event), waiting on a checkpoint then starting the next goal verbatim, BLOCKED / incomplete-ledger / busy / too-recent never advance, the delegated review (under 4,000 chars, quotes the owner, not-approved stops, approved advances, never writes a checkpoint), usage-limit nudge timing, `start`, `status`, the lock: CI. |
+| `test/sessions-unit.sh` | Docker-free multi-session tests against a fake tmux (prints control chars as `_` like the real one) and a fake claude: spec validation, boot/reconcile/`*`/stop/drop, trust seeding, claude-session argv (RC name, dir, model, mode, goal once, resume by id, `--continue` only when unambiguous, main unchanged), supervise, ls/health, new/rm/reset/send, claude-session-id by window, RC watchdog pane-scoped kill, usage watchdog per-session respawn, launch/compose-gen `--session`/`--env`, entrypoint wiring: CI. |
 | `test/gpu-unit.sh` | Docker-free `--gpu` tests: generator emission (CDI device, RAM `/scratch`, `CLAUDE_GPU=1`, runc, cap_drop kept, non-GPU services byte-identical, unknown repo refused), `claude-launch --gpu` args against a stubbed docker, the guard against a fake `nvidia-smi` (idle / busy co-tenant / short VRAM / OOM then CPU / NVML failure / hang), the installer failing closed, §2b degrading without failing the boot, the healthcheck GPU line: CI. |
 | `test/launch-unit.sh` | Docker-free tests for the container boundary: `harden_run_args` (cap-drop ALL + no-new-privileges), no `--privileged` / host socket anywhere, the removed `--docker`/`--no-docker`/`--sysbox` flags refusing, every compose service on plain runc, and the disk-backed `/scratch`: CI. |
 | `test/sizing-unit.sh` | Docker-free sizing tests (size/reservation math, K resolution from config, compose reservation/pids emission): CI. |
@@ -138,6 +142,9 @@ make login                    # one-time OAuth; opens a URL, paste the code
 ./bin/claude-launch <name> [--expose 4321:4321] [--dev-cmd "npm run dev …"]
 ./bin/claude-launch <name> --gpu               # the host's NVIDIA GPU via CDI (needs the toolkit's CDI spec)
 ./bin/claude-launch <name> --repo URL --repo URL#BRANCH   # several repos: /workspace/<repo> each
+./bin/claude-launch <name> ... --session '*' --session 'review model=sonnet mode=plan'   # more sessions
+./bin/claude-attach <name> [session]    # a named session's window
+./bin/claude-sessions -C <name> ls      # sessions inside (new/start/stop/restart/send/rm too)
 ./bin/claude-list                       # name, state, ssh port, repo, uptime
 ./bin/claude-attach <name>              # attach to its live tmux session (local)
 ./bin/claude-stop <name>                # graceful; state preserved
@@ -246,6 +253,24 @@ clones each into `/workspace/<repo>` from `GIT_REPOS` and the session starts in
 `/workspace`. Each boot clones only what is missing; existing checkouts are never touched.
 Never combine with a single-repo workspace (refused: no nested repos), so a new group needs
 a fresh `claude-ws-NAME` volume. `test/workspace-unit.sh` covers it.
+
+**Several sessions in one container:** `claude-launch NAME --session "SPEC" ...` or
+`compose-gen --session SVC=SPEC` (repeatable, accumulates; `;` separates entries; both
+validate with the container's own parser) set `CLAUDE_SESSIONS`. SPEC entry =
+`NAME [dir=] [model=] [mode=] [goal=FILE | prompt-file=FILE] [rc=off] [resume=off] [chain]`;
+NAME `*` = one per git repo under /workspace (named entries win). RC name `<project>-NAME`.
+`--env KEY=VALUE` (launch) / `--env SVC=KEY=VALUE` (compose-gen; refuses keys it already
+emits) passes e.g. `CLAUDE_GOAL_CHAIN_REVIEW` (the `--review-checkpoints` quote for `chain`
+sessions) or `CLAUDE_MAIN_RESUME=1`. Values with spaces or `;` cannot go in `.env` (it is
+bash-sourced). Inside: `claude-sessions ls|new|start|stop|restart|reset|rm|attach|send`;
+host: `claude-sessions -C <project> ...`, `claude-attach <project> <session>`, and the TUI's
+per-container Sessions menu. Named sessions resume their recorded conversation on boot
+(main stays fresh unless `CLAUDE_MAIN_RESUME=1`); a goal is sent once. Health line:
+`healthy; sessions: N/M up (...)`, never unhealthy for a named session. Pitfalls this
+design already handles (do not regress): trust is per directory (seed before main
+starts); never `pkill -f remote-control` (kill the pane's tree); never `--continue` in a
+shared dir; tmux `-F` prints a TAB as `_` (split on `|`); never pipe tmux into `grep -q`
+under pipefail (capture first). Size memory for 300-600 MiB per Claude process.
 
 **GPU sessions (`--gpu`, NVIDIA only):** `compose-gen --gpu REPO` (repeatable; the repo
 must be in the stack) or `claude-launch --gpu` / `CLAUDE_GPU=1` gives the service the CDI

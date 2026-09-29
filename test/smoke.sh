@@ -1094,6 +1094,57 @@ check "the Claude pane starts in /workspace, the parent of both" \
     '[ "$(docker exec "$MRCN" gosu claude tmux display-message -p -t claude:main "#{pane_current_path}")" = "/workspace" ]'
 docker rm -f "$MRCN" >/dev/null 2>&1 || true
 
+echo "== 17c. several sessions in one container (CLAUDE_SESSIONS) =="
+# The multi-repo bare repos from 17b, one of them carrying a goal file: one session per
+# repo ('*'), alpha starting on that goal, plus a read-only reviewer with no Remote Control.
+git clone -q "$TMP/mr-bare/alpha.git" "$TMP/mr-goal"
+mkdir -p "$TMP/mr-goal/.claude/goals"
+echo "alpha program, GOAL 1 of 2: foundations" > "$TMP/mr-goal/.claude/goals/g1.goal.txt"
+git -C "$TMP/mr-goal" add -A
+GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git -C "$TMP/mr-goal" commit -qm goal
+git -C "$TMP/mr-goal" push -q origin HEAD:main
+SESSCN="claude-smoke-sessions-$$"
+SESSCFG="claude-smoke-sessions-cfg-$$"
+docker run -d --name "$SESSCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=multi \
+    -e GIT_REPOS="file:///repos/alpha.git file:///repos/beta.git" \
+    -e "CLAUDE_SESSIONS=alpha goal=.claude/goals/g1.goal.txt; *; review dir=alpha model=sonnet mode=plan rc=off" \
+    -v "$SESSCFG:/home/claude/.claude" -v "$TMP/mr-bare:/repos:ro" "$IMAGE" >/dev/null 2>&1 || true
+wait_tmux "$SESSCN" || true
+for _ in $(seq 1 30); do docker logs "$SESSCN" 2>&1 | grep -q "Named sessions" && break; sleep 1; done
+sesslog="$(docker logs "$SESSCN" 2>&1 || true)"
+sx() { docker exec "$SESSCN" gosu claude "$@"; }
+check "every declared session is started, '*' after the named ones" \
+    '[ "$(sx tmux list-windows -t claude -F "#{window_name}" | tr "\n" " ")" = "main alpha review beta " ]'
+check "each session runs in its own directory" \
+    '[ "$(for w in alpha review beta; do sx tmux display-message -p -t claude:$w "#{pane_current_path}"; done | tr "\n" " ")" = "/workspace/alpha /workspace/alpha /workspace/beta " ]'
+check "workspace trust was pre-accepted for each session directory, before Claude started" \
+    'sx jq -e ".projects[\"/workspace/alpha\"].hasTrustDialogAccepted and .projects[\"/workspace/beta\"].hasTrustDialogAccepted" /home/claude/.claude/.claude.json >/dev/null'
+for _ in $(seq 1 30); do sx tmux capture-pane -p -t claude:beta 2>/dev/null | grep -q "Claude Code v" && break; sleep 1; done
+check "no session is parked on the trust dialog" \
+    '! sx sh -c "for w in alpha beta review; do tmux capture-pane -p -t claude:\$w; done" | grep -q "Quick safety check"'
+check "alpha: its own Remote Control name, and its goal as the first prompt" \
+    'docker exec "$SESSCN" ps -eo args | grep -F -- "--remote-control multi-alpha" | grep -qF "/goal alpha program, GOAL 1 of 2"'
+check "review: plan mode, sonnet, and no Remote Control" \
+    'docker exec "$SESSCN" ps -eo args | grep -E "bin/claude .*--permission-mode plan --model sonnet" | grep -vq -- "--remote-control"'
+for _ in $(seq 1 40); do [ "$(docker exec "$SESSCN" pgrep -fc claude-rc-watchdog)" = 3 ] && break; sleep 1; done
+check "one RC watchdog per session with a link (main, alpha, beta), none for review" \
+    '[ "$(docker exec "$SESSCN" pgrep -fc claude-rc-watchdog)" = 3 ]'
+check "claude-sessions ls lists every session" \
+    '[ "$(sx claude-sessions ls --json | jq -r "[.[].name] | join(\",\")")" = "main,alpha,review,beta" ]'
+check "the healthcheck reports the named sessions" \
+    'docker exec "$SESSCN" sh -c "d=\$(mktemp -d); printf \"#!/bin/sh\nexit 0\n\" > \$d/pgrep; chmod +x \$d/pgrep; PATH=\$d:\$PATH /usr/local/bin/claude-healthcheck" | grep -q "; sessions: 3/3 up"'
+sx claude-sessions stop beta >/dev/null 2>&1
+docker restart "$SESSCN" >/dev/null 2>&1
+for _ in $(seq 1 60); do [ "$(docker logs --since 90s "$SESSCN" 2>&1 | grep -c "Named sessions")" -ge 1 ] && break; sleep 1; done
+sleep 8
+check "after a restart alpha resumes its conversation instead of re-sending goal 1" \
+    'p="$(sx tmux capture-pane -p -t claude:alpha -S -50)"; grep -q "Resuming conversation" <<<"$p" && ! grep -q "First start" <<<"$p"'
+check "a session stopped by hand stays stopped across the restart" \
+    '! sx tmux list-windows -t claude -F "#{window_name}" | grep -qx beta'
+docker rm -f "$SESSCN" >/dev/null 2>&1 || true
+docker volume rm "$SESSCFG" >/dev/null 2>&1 || true
+
 # --- 18. GPU sessions (--gpu) ----------------------------------------------------
 # 18a needs the NVIDIA Container Toolkit's CDI device on this host (a skip says so).
 # 18b needs no GPU at all: it is the "GPU unusable at boot" case, simulated the way it

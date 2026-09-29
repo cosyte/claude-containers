@@ -110,6 +110,20 @@
 #                       count >= 1. The claude-auth-<name> volumes are external and
 #                       shared like claude-auth itself: several repos or stacks can
 #                       name the same account.
+#     --session <map>   another Claude session in a service's container, started at
+#                       boot in its own tmux window with its own Remote Control link
+#                       (<service>-<name>). Format SVC=SPEC (repeatable, accumulates per
+#                       service; a SPEC may hold several entries separated by ';'). SPEC
+#                       entries are NAME [key=value ...]: dir= model= mode= goal=FILE
+#                       prompt-file=FILE rc=off resume=off chain, and NAME '*' is one
+#                       session per repo of a --group. See `claude-sessions --help`. e.g.
+#                       --session maker=*
+#                       --session maker=home goal=.claude/goals/2026-09-home-g1.goal.txt chain
+#                       --session site=review model=sonnet mode=plan
+#     --env <map>       one more environment variable for a service. Format
+#                       SVC=KEY=VALUE (repeatable), e.g.
+#                       --env maker=CLAUDE_GOAL_CHAIN_REVIEW=it reviews and approves for me
+#                       A key the generator already sets (it has its own flag) is refused.
 #     --build-context <dir>  build.context for every service (default: the checkout
 #                       this script runs from). Pin it in the scenario when the
 #                       deployment builds from a DIFFERENT clone than the one you
@@ -195,7 +209,7 @@ fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-usage() { sed -n '2,127p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n "2,$(( $(grep -n '^set -euo pipefail' "$0" | head -1 | cut -d: -f1) - 1 ))p" "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 ORG=""
 OUT=""
@@ -208,7 +222,7 @@ NETWORK=""
 CACHE_VOL="$CACHE_VOLUME"
 BUILD_CONTEXT=""
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() GPU_RAW=() GROUP_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=() ACCOUNTS_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() GPU_RAW=() GROUP_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=() ACCOUNTS_RAW=() SESSION_RAW=() ENV_RAW=()
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
 # follow so they override scalars (--out/--org/--port-base) and append to
 # repeatables (--active/--expose/…). --scenario/--env-file were consumed in the
@@ -242,6 +256,8 @@ while [[ $# -gt 0 ]]; do
         --plugin)          PLUGINS_RAW+=("$2"); shift 2 ;;
         --mount)           MOUNTS_RAW+=("$2"); shift 2 ;;
         --accounts)        ACCOUNTS_RAW+=("$2"); shift 2 ;;
+        --session)         SESSION_RAW+=("$2"); shift 2 ;;
+        --env)             ENV_RAW+=("$2"); shift 2 ;;
         --build-context)   BUILD_CONTEXT="$2"; shift 2 ;;
         --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
         --forks)           WANT_FORKS=1; shift ;;
@@ -404,6 +420,40 @@ for tok in "${MOUNTS_RAW[@]:-}"; do
     esac
     MOUNTS[$us]="${MOUNTS[$us]:-}${MOUNTS[$us]:+$'\n'}${mvol}:${mpath}${mopt:+:$mopt}"
     MOUNT_VOLS[$mvol]=1
+done
+
+# Named sessions per service: svc -> CLAUDE_SESSIONS (entries joined by '; '). Validated
+# with the container's own parser, so a typo fails here, not as a skipped session at boot.
+declare -A SESSIONS=()
+for tok in "${SESSION_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == *=* ]] || die "--session must be SVC=SPEC (got '$tok')"
+    ss="$(sanitize "${tok%%=*}")"
+    sv="${tok#*=}"
+    [[ -n "${sv//[[:space:];]/}" ]] || die "--session '$tok' has no session after '='"
+    SESSIONS[$ss]="${SESSIONS[$ss]:-}${SESSIONS[$ss]:+; }${sv}"
+done
+for ss in "${!SESSIONS[@]}"; do
+    spec_errs="$("$(dirname "${BASH_SOURCE[0]}")/claude-sessions" check "${SESSIONS[$ss]}" 2>&1 >/dev/null)" \
+        || die "--session for $ss is not valid:
+$(sed 's/^/       /' <<<"$spec_errs")"
+done
+
+# Extra environment per service: svc -> newline-separated KEY=VALUE. A key this generator
+# already writes has its own flag, and a second copy would be a duplicate YAML key.
+GENERATED_ENV_RE='^(CLAUDE_PROJECT_NAME|CLAUDE_MODEL|CLAUDE_PERMISSION_MODE|CLAUDE_MANAGED_POLICY|CLAUDE_SECRET_GUARD|CLAUDE_BROKER_GIT_KEY|CLAUDE_EGRESS_[A-Z_]+|CLAUDE_OTEL_[A-Z_]+|OTEL_[A-Z_]+|CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION|BASH_DEFAULT_TIMEOUT_MS|BASH_MAX_TIMEOUT_MS|API_TIMEOUT_MS|GIT_REPO_URL|GIT_REPOS|GIT_REPO_BRANCH|CLAUDE_DEV_CMD|CLAUDE_BROWSER|CLAUDE_GPU[A-Z_]*|CLAUDE_ACCOUNTS|TMPDIR|CLAUDE_EXTRA_MARKETPLACES|CLAUDE_EXTRA_PLUGINS|GIT_AUTHOR_[A-Z]+|GIT_COMMITTER_[A-Z]+|GH_TOKEN|CLAUDE_SESSIONS)$'
+declare -A ENVS=()
+for tok in "${ENV_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == *=*=* ]] || die "--env must be SVC=KEY=VALUE (got '$tok')"
+    es="$(sanitize "${tok%%=*}")"
+    ekv="${tok#*=}"
+    ek="${ekv%%=*}"
+    [[ "$ek" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "--env key '$ek' is not a variable name (in '$tok')"
+    [[ "$ek" != ANTHROPIC_API_KEY ]] || die "--env ANTHROPIC_API_KEY: this stack is OAuth-subscription only"
+    [[ ! "$ek" =~ $GENERATED_ENV_RE ]] || die "--env $ek: the generator already sets it; use its own flag (--model, --session, --dev-cmd, ...) or the stack's .env"
+    [[ "$ekv" != *$'\n'* ]] || die "--env $ek: the value must be one line"
+    ENVS[$es]="${ENVS[$es]:-}${ENVS[$es]:+$'\n'}${ekv}"
 done
 
 # Named-account rotation per service: svc -> comma-separated account names.
@@ -575,6 +625,10 @@ done
 for g in "${!GPU[@]}"; do
     [[ -n "${SEEN[$g]:-}" ]] \
         || die "--gpu names '$g', which is not a repo in this stack (repos: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
+done
+for g in "${!SESSIONS[@]}" "${!ENVS[@]}"; do
+    [[ -n "${SEEN[$g]:-}" ]] \
+        || die "--session/--env names '$g', which is not a service in this stack (services: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
 done
 
 # --- Stable SSH port assignment ----------------------------------------------
@@ -872,6 +926,21 @@ EOF
         pv="${pv//\\/\\\\}"; pv="${pv//\"/\\\"}"; pv="${pv//\$/\$\$}"
         echo "      CLAUDE_EXTRA_PLUGINS: \"${pv}\""
     fi
+    # Named sessions and --env values: quoted and escaped like CLAUDE_DEV_CMD, so compose
+    # never interpolates a '$' in them.
+    if [[ -n "${SESSIONS[$svc]:-}" ]]; then
+        sv="${SESSIONS[$svc]}"
+        sv="${sv//\\/\\\\}"; sv="${sv//\"/\\\"}"; sv="${sv//\$/\$\$}"
+        echo "      CLAUDE_SESSIONS: \"${sv}\""
+    fi
+    if [[ -n "${ENVS[$svc]:-}" ]]; then
+        while IFS= read -r ekv; do
+            [[ -n "$ekv" ]] || continue
+            ev="${ekv#*=}"
+            ev="${ev//\\/\\\\}"; ev="${ev//\"/\\\"}"; ev="${ev//\$/\$\$}"
+            echo "      ${ekv%%=*}: \"${ev}\""
+        done <<< "${ENVS[$svc]}"
+    fi
     cat <<EOF
       GIT_AUTHOR_NAME: "${GH_NAME}"
       GIT_AUTHOR_EMAIL: "${GH_MAIL}"
@@ -1019,6 +1088,10 @@ for r in "${FINAL[@]}"; do
         n_accts="$(awk -F, '{print NF}' <<<"${ACCOUNTS[$s]}")"
         extra="$extra +accounts($n_accts)"
     fi
+    if [[ -n "${SESSIONS[$s]:-}" ]]; then
+        extra="$extra +sessions($(tr ';' '\n' <<<"${SESSIONS[$s]}" | awk 'NF{print $1}' | paste -sd, -))"
+    fi
+    [[ -n "${ENVS[$s]:-}" ]] && extra="$extra +env($(grep -c . <<<"${ENVS[$s]}"))"
     printf '   %-22s -> claude-%-20s ssh :%-5s %s%s\n' "$nm" "$s" "${SVCPORT[$s]}" "$mark" "$extra"
 done
 

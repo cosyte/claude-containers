@@ -31,8 +31,17 @@
 # a choice is made. dismiss_resume_menu takes the recommended option after a
 # restart so recovery stays unattended.
 #
-# Runs as the `claude` user, started by the entrypoint. Disable the whole
-# watchdog by launching the container with CLAUDE_RC_WATCHDOG=0.
+# One watchdog per session: the entrypoint starts main's, and `claude-sessions supervise`
+# starts one beside every named session, pointed at its own window, debug log, respawn
+# command and lock (CLAUDE_RC_TMUX_TARGET, CLAUDE_RC_DEBUG_LOG, CLAUDE_RC_RESPAWN_CMD,
+# CLAUDE_RESPAWN_LOCK_DIR). A restart only ever touches its own pane's processes, never a
+# sibling session's.
+#
+# Runs as the `claude` user. Disable the whole watchdog by launching the container with
+# CLAUDE_RC_WATCHDOG=0. One-shot modes (claude-sessions uses them):
+#   --respawn              restart the target pane once, with the lock, then dismiss a resume menu
+#   --kill-pane            end the claude processes in the target pane (no respawn)
+#   --dismiss-resume-menu  take the recommended option if the resume selector shows up
 set -uo pipefail
 
 LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
@@ -47,7 +56,17 @@ RESPAWN_CMD="${CLAUDE_RC_RESPAWN_CMD:-/usr/local/bin/claude-session --continue}"
 # still holds a real token. Mirrors entrypoint.sh's creds_have_token check.
 CREDS_FILE="${CLAUDE_CREDS_FILE:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json}"
 
-say() { echo "[rc-watchdog] $*"; }
+LABEL="${CLAUDE_RC_LABEL:-}"
+say() { echo "[rc-watchdog${LABEL:+:$LABEL}] $*"; }
+
+# True while this watchdog's own window exists. A named session that was stopped takes its
+# window with it, and its watchdog then has nothing left to watch.
+window_alive() {
+    [[ "$WINDOW" == *:* ]] || { tmux has-session -t "$SESSION" >/dev/null 2>&1; return; }
+    local w   # captured, not piped into grep -q: see claude-sessions window_exists
+    w="$(tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null)" || return 1
+    grep -qxF -- "${WINDOW#*:}" <<<"$w"
+}
 
 # Most recent decisive RC bridge event in the log. Prints: dead | auth | alive | unknown
 rc_state() {
@@ -135,27 +154,57 @@ with_respawn_lock() {  # with_respawn_lock <command...> -> command's exit status
     return $rc
 }
 
+# Every process below the pane's own process (the claude-session script, claude, and
+# whatever claude runs), deepest first. Scoped to ONE pane: several sessions share this
+# container, and a restart must never take a sibling session down with it.
+pane_tree_pids() {  # pane_tree_pids <tmux-target>
+    local root
+    root="$(tmux display-message -p -t "$1" '#{pane_pid}' 2>/dev/null)" || return 0
+    [[ "$root" =~ ^[0-9]+$ ]] || return 0
+    ps -eo pid=,ppid= 2>/dev/null | awk -v r="$root" '
+        { pp[$1] = $2 }
+        END {
+            for (x in pp) {
+                y = x; d = 0
+                while ((y in pp) && y != r && d < 64) { y = pp[y]; d++ }
+                if (y == r && x != r) print d, x
+            }
+        }' | sort -rn | cut -d' ' -f2
+}
+
+# End the claude processes in the target pane: TERM first (so it writes its transcript),
+# KILL whatever is left after ~5s.
+kill_pane_claude() {
+    local pids i
+    pids="$(pane_tree_pids "$WINDOW")"
+    [[ -n "$pids" ]] || return 0
+    # shellcheck disable=SC2086
+    kill -TERM $pids 2>/dev/null || true
+    for ((i = 0; i < 10; i++)); do
+        pids="$(for p in $pids; do kill -0 "$p" 2>/dev/null && echo "$p"; done)"
+        [[ -n "$pids" ]] || return 0
+        sleep 0.5
+    done
+    # shellcheck disable=SC2086
+    kill -KILL $pids 2>/dev/null || true
+}
+
 _kill_and_respawn_pane() {
     # The old `claude` process is alive but its RC bridge is dead: kill it
     # explicitly so the respawn doesn't leave a second --remote-control process.
-    pkill -f 'remote-control' 2>/dev/null || true
-    local i
-    for ((i = 0; i < 10; i++)); do
-        pgrep -f 'remote-control' >/dev/null 2>&1 || break
-        sleep 0.5
-    done
-    pkill -9 -f 'remote-control' 2>/dev/null || true
+    kill_pane_claude
     tmux respawn-pane -k -t "$WINDOW" "$RESPAWN_CMD"
 }
 
 # Kill the stale RC process, then respawn the pane fresh with --continue.
 restart_session() {
-    say "Restarting Claude session with --continue to restore Remote Control."
+    say "Restarting the Claude session in ${WINDOW} (${RESPAWN_CMD})."
     if with_respawn_lock _kill_and_respawn_pane; then
         say "Session respawned; Remote Control should re-register within ~30s."
         dismiss_resume_menu
     else
         say "WARNING: could not restart the session (respawn lock busy, or 'tmux respawn-pane' failed)."
+        return 1
     fi
 }
 
@@ -170,8 +219,9 @@ watch_loop() {
     say "started: watching ${LOG} (tmux target ${WINDOW}, check every ${CHECK_INTERVAL}s)"
 
     while sleep "$CHECK_INTERVAL"; do
-        # Container shutting down: the entrypoint killed tmux.
+        # Container shutting down (the entrypoint killed tmux), or this session was stopped.
         tmux has-session -t "$SESSION" >/dev/null 2>&1 || { say "tmux session gone: exiting."; break; }
+        window_alive || { say "window ${WINDOW} gone: exiting."; break; }
 
         now="$(date +%s)"
         state="$(rc_state)"
@@ -232,8 +282,13 @@ watch_loop() {
     done
 }
 
-# Executed directly -> run the watcher. Sourced (unit tests) -> just define the
-# helpers above without starting the loop.
+# Executed directly -> run the watcher (or a one-shot mode). Sourced (unit tests,
+# claude-usage-watchdog) -> just define the helpers above without starting the loop.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    watch_loop
+    case "${1:-}" in
+        --respawn)             restart_session ;;
+        --kill-pane)           kill_pane_claude ;;
+        --dismiss-resume-menu) dismiss_resume_menu ;;
+        *)                     watch_loop ;;
+    esac
 fi

@@ -39,6 +39,15 @@
 #                              (default: claude-cache). Reused across restarts
 #                              for mise/cargo/go/npm/uv installs.
 #   --no-cache                 disable the shared cache (per-container installs)
+#   --session <spec>           another Claude session in this container, started at boot
+#                              in its own tmux window with its own Remote Control link
+#                              (<name>-<session>). Repeatable. SPEC is NAME [key=value ...]
+#                              with dir= model= mode= goal=FILE prompt-file=FILE rc=off
+#                              resume=off chain; NAME '*' = one per repo of a multi-repo
+#                              workspace. e.g. --session "home goal=.claude/goals/g1.goal.txt"
+#                              Sets CLAUDE_SESSIONS (see `claude-sessions --help`).
+#   --env <KEY=VALUE>          pass one more environment variable into the container
+#                              (repeatable), e.g. --env CLAUDE_MAIN_RESUME=1
 #   --accounts <name[,...]>    named OAuth accounts (from claude-account-login) this
 #                              container can rotate between on a usage-limit hit
 #                              (bin/claude-usage-watchdog). Repeatable/comma-list, works
@@ -56,7 +65,8 @@ set -euo pipefail
 LAUNCH_BIN_DIR="$(dirname "${BASH_SOURCE[0]}")"
 source "$LAUNCH_BIN_DIR/_common.sh"
 
-usage() { sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+# The help is the header up to (not including) its "REMOVED flags" note.
+usage() { sed -n '2,/^# REMOVED flags/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT="" REPOS=()
 # EXTRA/MCP_LIST/DEVCMD/MKTS/PLUGINS default from .env (sourced by _common.sh);
@@ -65,6 +75,7 @@ PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT="" REPOS=()
 EXTRA="${CLAUDE_EXTRA_ARGS:-}" MCP_LIST="${CLAUDE_MCP_ENABLED:-}" DEVCMD="${CLAUDE_DEV_CMD:-}"
 MKTS="${CLAUDE_EXTRA_MARKETPLACES:-}" PLUGINS="${CLAUDE_EXTRA_PLUGINS:-}"
 ACCOUNTS="${CLAUDE_ACCOUNTS:-}"
+SESSIONS="${CLAUDE_SESSIONS:-}" EXTRA_ENV=()
 # Empty here means "unset": the container's entrypoint then defaults it to opus
 # (best available). A value from .env/env seeds the default; --model overrides.
 MODEL="${CLAUDE_MODEL:-}"
@@ -111,6 +122,8 @@ while [[ $# -gt 0 ]]; do
         --cache)       CACHE_ARG="$2"; OPTS_GIVEN=1; shift 2 ;;
         --no-cache)    CACHE_ARG="off"; OPTS_GIVEN=1; shift ;;
         --accounts)    ACCOUNTS="${ACCOUNTS:+$ACCOUNTS,}$2"; OPTS_GIVEN=1; shift 2 ;;
+        --session)     SESSIONS="${SESSIONS:+$SESSIONS; }$2"; OPTS_GIVEN=1; shift 2 ;;
+        --env)         EXTRA_ENV+=("$2"); OPTS_GIVEN=1; shift 2 ;;
         --docker|--no-docker|--sysbox)
             die "claude-launch: $1 was removed along with the per-session Docker engine and the
        Sysbox runtime it needed. A session can no longer build images or run containers
@@ -168,6 +181,21 @@ elif (( ${#REPOS[@]} > 1 )); then
     unset _dirs _r _d
     MULTI_REPOS="${REPOS[*]}"
 fi
+
+# Named sessions: validate the whole spec HERE, with the same parser the container uses,
+# so a typo fails the launch instead of becoming a skipped session in a boot log.
+if [[ -n "${SESSIONS//[[:space:];]/}" ]]; then
+    spec_errs="$("$LAUNCH_BIN_DIR/claude-sessions" check "$SESSIONS" 2>&1 >/dev/null)" \
+        || die "--session / CLAUDE_SESSIONS is not valid:
+$(sed 's/^/       /' <<<"$spec_errs")"
+fi
+ENV_ARGS=()
+for kv in "${EXTRA_ENV[@]:-}"; do
+    [[ -n "$kv" ]] || continue
+    [[ "$kv" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "--env must be KEY=VALUE (got '$kv')"
+    [[ "${kv%%=*}" != ANTHROPIC_API_KEY ]] || die "--env ANTHROPIC_API_KEY: this stack is OAuth-subscription only"
+    ENV_ARGS+=(-e "$kv")
+done
 
 # Validate --expose maps (HOSTPORT:CONTAINERPORT) and build the docker -p args.
 EXPOSE_ARGS=()
@@ -398,6 +426,8 @@ docker run -d \
     -e GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-$GH_MAIL}" \
     -e GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-$GH_NAME}" \
     -e GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$GH_MAIL}" \
+    -e CLAUDE_SESSIONS="$SESSIONS" \
+    "${ENV_ARGS[@]}" \
     "${AUTH_MOUNT_ARGS[@]}" \
     -v "$SSHKEYS_VOLUME:/etc/ssh/host-keys" \
     -v "$CFG_VOL:/home/claude/.claude" \
@@ -429,6 +459,10 @@ if (( ${#EXPOSE_RAW[@]} )); then
     echo
 fi
 info "Model: ${MODEL:-opus (best available, container default)}"
+if [[ -n "${SESSIONS//[[:space:];]/}" ]]; then
+    info "Sessions: main + $(tr ';\n' '\n\n' <<<"$SESSIONS" | awk 'NF{print $1}' | paste -sd' ' -) (each its own tmux window and Remote Control link $PROJECT-<name>)"
+    info "  claude-attach $PROJECT <name>   |   claude-sessions -C $PROJECT ls"
+fi
 [[ -n "$DEVCMD" ]] && \
     info "Dev server auto-starts on boot in tmux window 'dev' (claude-attach, then: tmux select-window -t claude:dev)"
 # Only announce an explicit choice; in auto mode the entrypoint decides by image

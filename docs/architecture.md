@@ -11,7 +11,14 @@
   Claude Code inside a detached tmux session. Stays PID 1 for clean signals.
 - **claude-session**: the tmux pane command: `cd /workspace`, exec
   `claude --dangerously-skip-permissions --remote-control "<project>"`, and
-  fall back to a shell if Claude exits so SSH stays usable.
+  fall back to a shell if Claude exits so SSH stays usable. With `--session NAME`
+  it runs a named session instead (its directory, Remote Control name, model,
+  first prompt and resume come from `claude-sessions`).
+- **claude-sessions**: several sessions in one container: reconciles
+  `CLAUDE_SESSIONS` into a registry on the config volume, pre-accepts workspace
+  trust for each session's directory, opens one tmux window per session, and runs a
+  supervisor that records each window's conversation and keeps an RC watchdog beside
+  every linked session. Also the operator's `ls/new/start/stop/restart/send/rm`.
 - **bash_profile**: interactive SSH logins `exec tmux attach` to the live
   `claude` session; non-interactive SSH (scp/rsync) is untouched.
 - **bin/**: `claude-launch/list/stop/rm/logs` over a shared `_common.sh`; inside the
@@ -134,8 +141,55 @@ changes. Each boot clones only what is missing and never touches an existing che
 growing the list is a restart, and a session's uncommitted work survives it. The single
 repo layout (`/workspace` is the repo) is unchanged and the two never mix: `GIT_REPOS`
 with `GIT_REPO_URL`, or on a workspace that already has a repo at its root, refuses to
-boot rather than nest one repo inside another. Workspace trust and mise's trusted paths
-already cover `/workspace` and everything below it.
+boot rather than nest one repo inside another. mise's trusted paths cover `/workspace`
+and everything below it. Claude Code's workspace trust does not: main is fine because it
+starts in `/workspace`, and a named session started in `/workspace/<repo>` gets its own
+trust entry (next decision).
+
+## Decision: several sessions share one container as tmux windows
+
+`CLAUDE_SESSIONS` (from `claude-launch --session` / `claude-compose-gen --session`) and
+`claude-sessions new` run more Claude sessions beside `main`: one tmux window each, each
+its own `claude` process with its own Remote Control name (`<project>-<name>`), directory,
+model, permission mode and optional first prompt. The alternative, one container per
+session, is still the right call for unrelated repos, but it is wrong for several lanes
+over one workspace: a second container cannot share the first one's checkout without a
+foreign volume mount, and it doubles the image, the sshd, the watchdogs and the port.
+
+What had to change for a container to hold more than one session, and why:
+
+- **Workspace trust is per directory.** The trust seeded for `/workspace` does not cover
+  `/workspace/<repo>`: a session started there sat on "Is this a project you trust?"
+  (observed on 2.1.280). `claude-sessions prepare` seeds the same entry for every session
+  directory and every repo under `/workspace`, as the claude user, *before* main starts,
+  so no running Claude rewrites `.claude.json` under it. A session added at runtime gets
+  its directory seeded best-effort and checked afterwards.
+- **Resume is by conversation id, not by directory.** `--continue` picks the most recent
+  conversation in the current directory, which is a sibling's whenever two sessions share
+  one. A supervisor records each window's conversation from Claude Code's own
+  `sessions/<pid>.json` (it maps a tmux pane to a session id and follows a `/clear`), and
+  every resume path (boot, RC recovery, usage rotation, `claude-sessions restart`) passes
+  `--resume <id>`. `--continue` remains only as a fallback where it cannot be ambiguous.
+  `claude-session-id` resolves by window for the same reason.
+- **A first prompt is sent exactly once.** The start is recorded before Claude runs, so a
+  restart resumes a session that is on goal 4 instead of replaying goal 1.
+- **Recovery is scoped to one pane.** The RC watchdog used `pkill -f remote-control`,
+  which with several sessions kills all of them. It now kills only the process tree under
+  its own pane, uses a per-window lock, exits when its window is gone, and one runs per
+  linked session (started by the supervisor, so its output reaches `docker logs`).
+- **Health is still about the container.** Named sessions are reported on the healthy line
+  and never make the container unhealthy: an unhealthy status only ever leads to a restart
+  of every session in it, which is the wrong response to one session's trouble.
+- **Declared vs added.** `CLAUDE_SESSIONS` is creation-time, so it is authoritative for its
+  entries on every boot (a dropped entry is unregistered); `new` sessions live on the
+  config volume until `rm`. A stop is remembered either way.
+- **tmux formats.** tmux prints a control character in a `-F` format as `_`, so fields are
+  split on `|`, and tmux output is captured before it is matched: under `pipefail` a
+  `grep -q` that exits early leaves tmux writing into a closed pipe and fails the match
+  for any window that is not the last one listed.
+
+Main is unchanged unless asked: same window, same Remote Control name, a fresh
+conversation on boot unless `CLAUDE_MAIN_RESUME=1`.
 
 ## Decision: GPU sessions are CDI devices on plain runc
 
@@ -320,4 +374,5 @@ note describes either.
 | 5 | Appears in app, named, green | `--remote-control "<project>"`, outbound HTTPS; name = project name |
 | 6 | stop→launch resumes | Per-container `claude-config`/`claude-ws` volumes survive `docker stop`; `claude-launch` does `docker start` |
 | 7 | Two parallel, independent | Distinct container names, ports (`alloc_port`), per-container volumes, separate app sessions |
+| 7b | Several sessions in one container | `--session` / `CLAUDE_SESSIONS`: one window + Remote Control link each, trusted, resumed by id; `test/sessions-unit.sh`, smoke §17c |
 | 8 | Baked MCP/plugins/commands/skills usable | In a session: `/mcp`, `/plugin`, `/container-info`, the `example-skill`; see customizing-bakeins.md |
