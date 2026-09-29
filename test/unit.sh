@@ -5,6 +5,10 @@
 #   - version_ge: the generic dotted-numeric comparator (fail-closed on garbage)
 #   - preflight_runc: the warn-only posture is preserved (never exits non-zero)
 set -uo pipefail
+# The entrypoint runs as root with umask 022, and the managed-policy checks (§7a) judge the
+# modes of directories these tests create. Under a developer's umask 002 those come out
+# group-writable, and eight §7a checks failed for a reason that is not in the code.
+umask 022
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PASS=0 FAIL=0
