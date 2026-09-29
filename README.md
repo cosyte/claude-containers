@@ -470,6 +470,37 @@ container passes the list as `GIT_REPOS`; it cannot be combined with a single-re
 workspace (a repo at `/workspace` itself), so a multi-repo service starts from a fresh
 workspace volume.
 
+## Goal programs (`/plan-program`, `claude-goal-chain`)
+
+A **program** is a brief plus numbered `/goal` files (`.claude/goals/<prefix>-g<n>.goal.txt`)
+that sessions run one after another. The baked `/plan-program` command interviews you and
+writes one (see [customizing-bakeins.md](docs/customizing-bakeins.md)). `claude-goal-chain`,
+also baked, runs its goals back to back in the same session, so the phone app keeps one
+Remote Control link per program:
+
+```
+tmux new-window -d -n goal-chain 'claude-goal-chain home 3d devices'   # windows claude:home … in /workspace/<name>
+claude-goal-chain status                                               # phase and last goal per window
+claude-goal-chain start devices 5                                      # /clear + goal 5 now, by hand
+```
+
+When a goal is met, it waits for the session to be idle and checks origin before doing
+anything. The ledger must carry `COMPLETE (goal n)` and the report must not be BLOCKED (a
+BLOCKED report satisfies the evaluator too). If a checkpoint file the next goal needs is
+missing, it waits for it. Otherwise it sends `/clear`, then `/goal` with the next file. After a
+usage-limit pause it sends one "continue" once the reset time in the CLI's own message has
+passed. Whenever it stops the chain (BLOCKED, an incomplete ledger, a failed goal, the end of
+the program), it types a short note into the session so you see it in the app.
+
+`--review-checkpoints "<your words>"` delegates checkpoint approval. When a goal that ends at
+Checkpoint X is complete, the same session runs a review `/goal`: re-run the gate, have a fresh
+adversarial subagent check the packet and the ledger, and decide the open proposals. If it
+approves, it commits `CHECKPOINT-X.approved` saying it was approved on your behalf and quoting
+your words, and the next goal starts. It never approves what only you can do or judge
+(buying, printing, measuring, accounts or tokens, a fit or look that needs the object in
+hand). The watcher itself never writes a checkpoint file. State and a log live in
+`~/.claude/goal-chain/`.
+
 ## GPU sessions (optional)
 
 Off by default. A session that renders (Blender Cycles, EEVEE, Workbench), previews CAD
