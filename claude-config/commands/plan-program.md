@@ -316,7 +316,7 @@ tell it the hard 4,000-character limit on goal files. Reconcile the briefs yours
 ### The brief's skeleton
 
 ```
-# <program> — <what it becomes, in Noah's framing> (brief v<k>, <YYYY-MM-DD>)
+# <program>: <what it becomes, in Noah's framing> (brief v<k>, <YYYY-MM-DD>)
 ```
 
 **Introduction:**
@@ -415,7 +415,7 @@ tell it the hard 4,000-character limit on goal files. Reconcile the briefs yours
 - invariants at every merge
 - security
 
-**Goal sections, one per goal:** "## <k>. Goal <n> — <title> (ends at Checkpoint <X>)", then:
+**Goal sections, one per goal:** "## <k>. Goal <n>: <title> (ends at Checkpoint <X>)", then:
 - **Precondition**, pin and research files
 - numbered items
 - **Done when**: "the lettered lines of `<file>.goal.txt`, verbatim (§<R>):" followed by the lines
@@ -491,7 +491,7 @@ else.
 **Paragraph 2** is the condition:
 
 ```
-The goal is met only when the final turn prints GOAL REPORT (goal <n>) per §<R>, pasting real command-output tails, and every line shows — or, if the precondition fails, the final turn prints only the BLOCKED report of §<R>:
+The goal is met only when the final turn prints GOAL REPORT (goal <n>) per §<R>, pasting real command-output tails, and every line shows; if the precondition fails, the final turn instead prints only the BLOCKED report of §<R>:
 A. <done-when line>
 B. …
 ```
@@ -528,13 +528,13 @@ without a checkpoint drops that sentence.
 
 ```
 GOAL REPORT (goal <n>): <title>
-A. <line text> — DONE | NEEDS-NOAH (why; Needs Noah entry) | NEEDS-OWNER (row; workaround) | PROPOSED (where)
+A. <line text>: DONE | NEEDS-NOAH (why; Needs Noah entry) | NEEDS-OWNER (row; workaround) | PROPOSED (where)
    evidence: <command> → <5–20 line output tail>; PR <url>; <repo>@<sha>
 B. …
 Needs Noah (this goal): <list, safety first, then what unblocks the most>
 Proposals awaiting Noah: <list with paths>
 Requests: filed <rows>; served <rows>; open against this goal <rows>
-Ledger: <path>@<sha> — <n> DONE, <n> NEEDS-NOAH, <n> NEEDS-OWNER, <n> DROPPED (reasons listed); COMPLETE line <sha>
+Ledger: <path>@<sha>: <n> DONE, <n> NEEDS-NOAH, <n> NEEDS-OWNER, <n> DROPPED (reasons listed); COMPLETE line <sha>
 Adversarial review of this report: <verdict and what it checked>
 ```
 
@@ -612,7 +612,7 @@ The reviewer's checklist, drawn from what the earlier programs' reviews caught:
 
 For each repo:
 
-1. Commit as `goals: the <program> program — brief v2 and <N> goal files (<YYYY-MM-DD> interview)`
+1. Commit as `goals: the <program> program, brief v2 and <N> goal files (<YYYY-MM-DD> interview)`
    and push.
 2. Open a PR. Its body covers:
    - what the program is
