@@ -550,7 +550,14 @@ sessions honest:
 - **Capacity is shared.** The boot log says what each session gets (`Capacity: 4 Claude
   sessions share 16384 MiB (~4096 MiB each)`) and warns under 1 GiB each: a Claude process
   alone uses 300-600 MiB, and an OOM kill lands on whichever session the kernel picks.
-  Raise `--mem` / `CLAUDE_MEM_LIMIT` with the session count.
+  Raise `--mem` / `CLAUDE_MEM_LIMIT` with the session count. Pids too: threads count as pids,
+  so give a multi-session container thousands per session (`CLAUDE_PIDS_LIMIT`). Library thread
+  pools are capped per process (`CLAUDE_THREADS_PER_PROCESS`, default 4) because they size
+  themselves to the host, and the supervisor warns in `claude-logs` near either limit.
+- **A crashed session comes back.** If Claude exits abnormally (an abort, a segfault, an OOM
+  kill, a failed thread create), its window relaunches it after a backoff, resuming the same
+  conversation, up to 5 times in 15 minutes. `/exit`, Ctrl-C and `claude-sessions stop` still
+  mean stop.
 
 Sessions share one checkout per directory. Two sessions writing the same git tree race on
 its index, so give concurrent writers their own directories (one per repo, or a `git
