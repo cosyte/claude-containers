@@ -105,10 +105,15 @@ echo "${1:-loop} target=$CLAUDE_RC_TMUX_TARGET log=${CLAUDE_RC_DEBUG_LOG:-} cmd=
 [[ $# -eq 0 ]] && { sleep 300 & wait; }
 exit 0
 EOF
-# A fake claude: records its argv (one per line) and working directory.
+# A fake claude: records its argv (one per line) and working directory; appends one line per
+# call to claude.calls; exits with the next code in $FAKE/codes (0 when there is none).
 cat > "$FAKE/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$FAKE/claude.args"; pwd > "$FAKE/claude.pwd"
+echo "$*" >> "$FAKE/claude.calls"
+code=0
+if [[ -s "$FAKE/codes" ]]; then code="$(head -n1 "$FAKE/codes")"; sed -i 1d "$FAKE/codes"; fi
+exit "$code"
 EOF
 chmod +x "$FAKE/bin/"*
 export PATH="$FAKE/bin:$PATH"
@@ -281,6 +286,28 @@ check "a session alone in its dir falls back to --continue when nothing is recor
 run_session --session nosuch --boot
 check "an unknown session never runs claude (drops to a shell)" test ! -e "$FAKE/claude.args"
 
+echo "== claude-session: a crash relaunches, resuming; a deliberate exit does not =="
+crash_run() {  # crash_run <codes...> -- <claude-session args...>: number of claude calls
+    local codes=()
+    while [[ "$1" != -- ]]; do codes+=("$1"); shift; done; shift
+    printf '%s\n' "${codes[@]}" > "$FAKE/codes"; rm -f "$FAKE/claude.calls"
+    HOME="$TMPD/home" CLAUDE_SESSIONS_BIN="$CS" CLAUDE_SESSION_CRASH_BACKOFF=0 CLAUDE_SESSION_CRASH_RESTARTS=3 \
+        "$SESSION" "$@" </dev/null >"$TMPD/crash.out" 2>&1
+    wc -l < "$FAKE/claude.calls"
+}
+"$CS" mark solo sid=older
+check "a crash (139) relaunches once, then a clean exit (0) drops to the shell" test "$(crash_run 139 0 -- --session solo --boot)" -eq 2
+check "the relaunch resumes the conversation" bash -c "tail -n1 '$FAKE/claude.calls' | grep -q -- '--resume older'"
+grep -q "Claude Code crashed (status 139). Restarting in 0s, resuming this conversation (restart 1 of 3" "$TMPD/crash.out" \
+    && ok "the pane says it crashed and is restarting" || bad "crash message: $(cat "$TMPD/crash.out")"
+check "a deliberate SIGTERM (143, stop or a watchdog respawn) is not relaunched" test "$(crash_run 143 -- --session solo --boot)" -eq 1
+check "Ctrl-C (130) is not relaunched" test "$(crash_run 130 -- --session solo --boot)" -eq 1
+check "crashes stop being relaunched after CLAUDE_SESSION_CRASH_RESTARTS in the window" test "$(crash_run 134 134 134 134 134 134 -- --session solo --boot)" -eq 4
+grep -q "crashed 3 times in 900s: not restarting it automatically again" "$TMPD/crash.out" \
+    && ok "and the pane says why it stopped" || bad "give-up message: $(tail -3 "$TMPD/crash.out")"
+check "main is relaunched too" test "$(crash_run 1 0 -- --boot)" -eq 2
+rm -f "$FAKE/codes"
+
 echo "== claude-session: main =="
 mkdir -p "$CLAUDE_CONFIG_DIR/projects/x"; touch "$CLAUDE_CONFIG_DIR/projects/x/sid-main.jsonl"
 "$CS" mark main sid=sid-main
@@ -302,7 +329,7 @@ echo "== supervise: conversations recorded, one watchdog per linked session =="
 export CLAUDE_SESSIONS='home; review dir=home rc=off'
 tm_reset; tm_main; rm -rf "$REG" "$TMPD/run" "$FAKE/watchdog.calls"; "$CS" boot >/dev/null 2>&1
 mksess() {  # mksess <pane> <sid>: a live "claude" whose session file maps it to a pane
-    bash -c 'exec -a claude-fake sleep 300' & KILL+=($!)
+    bash -c 'exec -a claude-fake sleep 1800' & KILL+=($!)
     jq -n --argjson p "$!" --arg s "$2" --arg t "claude:@1.$1" '{pid:$p,sessionId:$s,status:"idle",tmux:$t,cwd:"/x"}' \
         > "$CLAUDE_CONFIG_DIR/sessions/$!.json"
 }
@@ -330,7 +357,7 @@ json="$("$CS" ls --json)"
 check "ls --json lists main and every session" test "$(jq -r '[.[].name] | join(",")' <<<"$json")" = "main,home,review"
 check "ls shows a live session's status and conversation" test "$(jq -r '.[] | select(.name=="home") | "\(.state) \(.conversation)"' <<<"$json")" = "idle conv-hom"
 check "ls marks a session without Remote Control" test "$(jq -r '.[] | select(.name=="review") | .remote_control' <<<"$json")" = "-"
-bash -c 'sleep 300' & KILL+=($!); echo $! > "$FAKE/tm/w/review/pid"
+bash -c 'sleep 1800' & KILL+=($!); echo $! > "$FAKE/tm/w/review/pid"
 out="$("$CS" health)"
 check "health: a pane whose claude exited is reported" test "$out" = "sessions: 1/2 up (review: claude exited)"
 check "ls says 'exited' for it" test "$("$CS" ls --json | jq -r '.[] | select(.name=="review") | .state')" = exited
@@ -343,6 +370,18 @@ printf 'recovery exhausted after 6 attempts\n' > "$TMPD/rc/claude-rc-debug-home.
 out="$("$CS" health)"
 [[ "$out" == *"home: Remote Control dead"* ]] && ok "health: a dead Remote Control link is reported" || bad "health: $out"
 : > "$TMPD/rc/claude-rc-debug-home.log"
+
+echo "== capacity: pids and memory near the limits are named =="
+echo 8192 > "$TMPD/cg/pids.max"; echo 7000 > "$TMPD/cg/pids.current"
+echo 1000 > "$TMPD/cg/memory.current"; echo 8589934592 > "$TMPD/cg/memory.max"
+out="$("$CS" health)"
+[[ "$out" == *"pids 85% (7000/8192)"* && "$out" != *memory* ]] && ok "health adds 'pids 85%' at 80% and above" || bad "health: $out"
+out="$("$CS" supervise --once 2>&1)"
+[[ "$out" == *"WARNING: capacity: pids 7000/8192 (85%)"* && "$out" == *"Heaviest: "*" threads, "* ]] \
+    && ok "the supervisor warns and names the heaviest processes by threads" || bad "capacity warning: $out"
+echo 100 > "$TMPD/cg/pids.current"
+check "below the threshold, nothing is added" bash -c "! '$CS' health | grep -q pids"
+rm -f "$TMPD/cg/pids.current" "$TMPD/cg/memory.current"; echo 2048 > "$TMPD/cg/pids.max"
 
 echo "== stop / start / restart / reset / rm / send =="
 out="$("$CS" stop home 2>&1)"
@@ -399,7 +438,7 @@ check "a window with no live session is exit 1 (never a sibling's id)" bash -c "
 # ======================================================================================
 echo "== RC watchdog: only its own pane, and only while its window exists =="
 WD="$REPO_ROOT/bin/claude-rc-watchdog"
-bash -c 'bash -c "exec -a claude-fake sleep 300" & bash -c "sleep 300" & wait' & root=$!; KILL+=($root)
+bash -c 'bash -c "exec -a claude-fake sleep 1800" & bash -c "sleep 300" & wait' & root=$!; KILL+=($root)
 sleep 300 & other=$!; KILL+=($other)
 sleep 0.5
 echo "$root" > "$FAKE/tm/w/home/pid"
@@ -502,6 +541,22 @@ gen --out "$TMPD/d.yml" acme/site --env 'site=ANTHROPIC_API_KEY=x'; rc=$?
 check "--env ANTHROPIC_API_KEY is refused" test "$rc" -ne 0
 
 # ======================================================================================
+echo "== the entrypoint caps library thread pools =="
+TB="$(awk '/^# --- 12-threads\. Library thread pools/{f=1} f{print} f&&/^unset _tpp$/{exit}' "$REPO_ROOT/entrypoint.sh")"
+tp() {  # tp <env...>: run the extracted block, print the resulting values and the profile file
+    env -i PATH="$PATH" "$@" bash -c "log() { echo \"[entrypoint] \$*\"; }
+        $(printf '%s\n' "$TB" | sed "s#^THREADS_PROFILE_D=.*#THREADS_PROFILE_D=$TMPD/threads.sh#")
+        echo \"vals=\${OMP_NUM_THREADS:-unset},\${OPENBLAS_NUM_THREADS:-unset},\${MKL_NUM_THREADS:-unset},\${NUMEXPR_NUM_THREADS:-unset}\"
+        cat $TMPD/threads.sh 2>/dev/null"
+}
+out="$(tp)"
+[[ -n "$TB" && "$out" == *"vals=4,4,4,4"* && "$out" == *'export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"'* ]] \
+    && ok "unset: every pool is capped at 4, and SSH login shells get the same" || bad "thread caps: $out"
+out="$(tp OPENBLAS_NUM_THREADS=16 CLAUDE_THREADS_PER_PROCESS=2)"
+[[ "$out" == *"vals=2,16,2,2"* ]] && ok "an operator's own value is kept; CLAUDE_THREADS_PER_PROCESS sets the rest" || bad "preset: $out"
+out="$(tp CLAUDE_THREADS_PER_PROCESS=0)"
+[[ "$out" == *"vals=unset,unset,unset,unset"* && "$out" == *"NOT capped"* ]] && ok "CLAUDE_THREADS_PER_PROCESS=0 leaves them alone, and says so" || bad "disabled: $out"
+
 echo "== the entrypoint and the image wire it in =="
 EP="$REPO_ROOT/entrypoint.sh"
 main_line="$(grep -n 'tmux new-session -d -s claude' "$EP" | head -1 | cut -d: -f1)"

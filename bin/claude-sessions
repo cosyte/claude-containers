@@ -524,8 +524,8 @@ capacity_note() {  # capacity_note <number of Claude sessions, main included>
         say "Capacity: $count Claude sessions share $(( mem / 1048576 )) MiB of memory (~$each MiB each)"
         (( each < 1024 )) && say "WARNING: under 1 GiB per session. A Claude process alone uses 300-600 MiB, and an OOM kill takes down whichever session the kernel picks. Raise the limit (claude-launch: CLAUDE_MEM_LIMIT; compose-gen: --mem SVC=SIZE) or run fewer sessions."
     fi
-    if [[ "$pids" =~ ^[0-9]+$ ]] && (( pids / count < 256 )); then
-        say "WARNING: pids limit $pids is under 256 per session; builds and browsers run out of threads first (CLAUDE_PIDS_LIMIT)."
+    if [[ "$pids" =~ ^[0-9]+$ ]] && (( pids / count < 1024 )); then
+        say "WARNING: pids limit $pids is under 1024 per session. Threads count as pids, and one test run of parallel workers can use thousands (CLAUDE_PIDS_LIMIT)."
     fi
     return 0
 }
@@ -585,11 +585,42 @@ cmd_record() {
     return 0
 }
 
+# --- capacity: pids and memory near the container's limits --------------------------------------
+PIDS_WARN="${CLAUDE_SESSIONS_PIDS_WARN:-80}"     # percent of pids.max
+MEM_WARN="${CLAUDE_SESSIONS_MEM_WARN:-90}"       # percent of memory.max
+capacity() {  # prints "<pids%> <pids> <pids.max> <mem%> <mem MiB> <mem.max MiB>"; nothing without limits
+    local pc pm mc mm pp=0 mp=0
+    pc="$(cat "$CGROUP_DIR/pids.current" 2>/dev/null)"; pm="$(cat "$CGROUP_DIR/pids.max" 2>/dev/null)"
+    mc="$(cat "$CGROUP_DIR/memory.current" 2>/dev/null)"; mm="$(cat "$CGROUP_DIR/memory.max" 2>/dev/null)"
+    [[ "$pc" =~ ^[0-9]+$ && "$pm" =~ ^[0-9]+$ ]] && (( pm > 0 )) && pp=$(( pc * 100 / pm ))
+    [[ "$mc" =~ ^[0-9]+$ && "$mm" =~ ^[0-9]+$ ]] && (( mm > 0 )) && mp=$(( mc * 100 / mm ))
+    [[ "$pm" =~ ^[0-9]+$ || "$mm" =~ ^[0-9]+$ ]] || return 0
+    echo "$pp ${pc:-0} ${pm:-max} $mp $(( ${mc:-0} / 1048576 )) $(( ${mm:-0} / 1048576 ))"
+}
+# The heaviest command lines by thread count (threads are what exhaust pids), summed per command.
+heaviest() {
+    ps -eo nlwp=,rss=,args= 2>/dev/null | awk '{ t = $1; r = $2; $1 = ""; $2 = ""; c = substr($0, 3, 70)
+        n[c]++; th[c] += t; m[c] += r }
+        END { for (c in n) printf "%d\t%d\t%d\t%s\n", th[c], n[c], m[c] / 1024, c }' \
+        | sort -rn | head -n "${1:-3}" | awk -F'\t' '{ printf "%s%d x %s (%d threads, %d MiB)", (NR > 1 ? "; " : ""), $2, $4, $1, $3 }'
+}
+LAST_CAP_WARN=0
+capacity_watch() {  # log, at most every 10 minutes, while pids or memory is near its limit
+    local c pp pc pm mp mc mm now
+    c="$(capacity)"; [[ -n "$c" ]] || return 0
+    read -r pp pc pm mp mc mm <<<"$c"
+    (( pp >= PIDS_WARN || mp >= MEM_WARN )) || return 0
+    now="$(date +%s)"; (( now - LAST_CAP_WARN >= 600 )) || return 0
+    LAST_CAP_WARN="$now"
+    say "WARNING: capacity: pids $pc/$pm (${pp}%), memory ${mc}/${mm} MiB (${mp}%). At the pid limit no process can start a thread and Claude sessions crash. Heaviest: $(heaviest 3)"
+}
+
 cmd_supervise() {
-    [[ "${1:-}" == --once ]] && { supervise_once; return 0; }
+    [[ "${1:-}" == --once ]] && { supervise_once; capacity_watch; return 0; }
     while :; do
         tmux has-session -t "$TMUX_SESSION" 2>/dev/null || { say "tmux session gone: supervisor exiting"; return 0; }
         supervise_once
+        capacity_watch
         sleep "$TICK"
     done
 }
@@ -661,8 +692,16 @@ cmd_health() {
                    fi ;;
         esac
     done
-    (( total )) || return 0
-    echo "sessions: $up/$total up${problems:+ ($problems)}"
+    local out="" c pp pc pm mp mc mm
+    (( total )) && out="sessions: $up/$total up${problems:+ ($problems)}"
+    c="$(capacity)"
+    if [[ -n "$c" ]]; then
+        read -r pp pc pm mp mc mm <<<"$c"
+        (( pp >= PIDS_WARN )) && out+="${out:+; }pids ${pp}% ($pc/$pm)"
+        (( mp >= MEM_WARN )) && out+="${out:+; }memory ${mp}%"
+    fi
+    [[ -n "$out" ]] && echo "$out"
+    return 0
 }
 
 # --- claude-session's view of a session -------------------------------------------------------

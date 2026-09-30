@@ -253,6 +253,19 @@ shell in that window), `down` (no window) or `stopped` (stopped by hand).
 - **Its goal was not sent.** A first prompt / goal is sent on the session's first start
   only. `claude-sessions reset NAME` makes the next start a first start again. A missing
   goal file is a warning in the pane, and the session starts without it.
+- **Sessions keep dropping, and pids are near the limit** (`docker stats` PIDS near
+  `pids_limit`; the healthcheck line ends `pids 9x% (...)`; `[sessions] WARNING: capacity:` in
+  `claude-logs`, naming the heaviest processes). Threads count as pids. Numeric and CAD
+  libraries (OpenMP, OpenBLAS, MKL) size their thread pools to the HOST's CPUs, not the
+  container's quota, so on a 56-thread host each Python test worker carried ~100 threads, and
+  two `pytest -n 28` runs held ~8,000 of 8,192 pids. At the limit a Claude process cannot start
+  a thread and crashes. The image caps those pools per process (`CLAUDE_THREADS_PER_PROCESS`,
+  default 4), crashed sessions relaunch and resume (`CLAUDE_SESSION_CRASH_RESTARTS`), and the
+  supervisor warns before the limit. Also: cap test parallelism for suites that size it from
+  the quota (`SHOPKIT_WORKERS`, `-n`), run one heavy suite at a time, and size `pids_limit`
+  for the session count (the boot log warns under 1024 per session). To recover by hand: find
+  the heavy processes (`ps -eo pid,nlwp,rss,args --sort=-nlwp | head`), end the runaway run,
+  then `claude-sessions restart` each session that shows `exited`.
 - **Two sessions fight over git.** Sessions in the same directory share one working tree
   and index. Give concurrent writers their own directory (a repo each, or `git worktree
   add`) and keep a shared-directory session to reading (`mode=plan`).

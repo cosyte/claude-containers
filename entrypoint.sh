@@ -1255,6 +1255,31 @@ if [[ "${CLAUDE_OTEL_ENABLED:-0}" =~ ^(1|true|yes|on)$ || -n "${OTEL_EXPORTER_OT
         log "OpenTelemetry        : WARNING, enabled but OTEL_EXPORTER_OTLP_ENDPOINT is empty; nothing will be exported"
 fi
 
+# --- 12-threads. Library thread pools --------------------------------------------------
+# OpenMP, OpenBLAS, MKL, numexpr and Accelerate size their pools to the HOST's CPU count:
+# nproc ignores the cgroup quota. On a 56-thread host `import numpy, build123d` alone starts
+# 111 threads, and threads count against pids.max. Parallel test workers multiplied that:
+# two pytest-xdist runs of 28 workers held ~8,000 threads, hit a pids.max of 8192, and every
+# Claude session that then needed a thread crashed. Cap each process's pools unless the
+# operator (or the image) already set a variable; CLAUDE_THREADS_PER_PROCESS=0 leaves them
+# alone. A repo's own .claude/settings.json env still overrides these for its session.
+# Written to /etc/profile.d as well, since an SSH login gets a fresh environment.
+THREADS_PROFILE_D="/etc/profile.d/claude-threads.sh"
+_tpp="${CLAUDE_THREADS_PER_PROCESS:-4}"
+if [[ "$_tpp" =~ ^[1-9][0-9]*$ ]]; then
+    : > "$THREADS_PROFILE_D.tmp" 2>/dev/null || true
+    for _v in OMP_NUM_THREADS OPENBLAS_NUM_THREADS MKL_NUM_THREADS NUMEXPR_NUM_THREADS VECLIB_MAXIMUM_THREADS; do
+        [[ -n "${!_v:-}" ]] || export "$_v=$_tpp"
+        printf 'export %s="${%s:-%s}"\n' "$_v" "$_v" "${!_v}" >> "$THREADS_PROFILE_D.tmp" 2>/dev/null || true
+    done
+    mv -f "$THREADS_PROFILE_D.tmp" "$THREADS_PROFILE_D" 2>/dev/null && chmod 644 "$THREADS_PROFILE_D" 2>/dev/null || true
+    log "Thread pools        : OMP/OpenBLAS/MKL/numexpr/vecLib ${OMP_NUM_THREADS} per process (CLAUDE_THREADS_PER_PROCESS; 0 = leave them alone)"
+else
+    rm -f "$THREADS_PROFILE_D" 2>/dev/null || true
+    log "Thread pools        : NOT capped (CLAUDE_THREADS_PER_PROCESS=${_tpp}); libraries size them to the host's $(nproc) CPUs"
+fi
+unset _tpp
+
 # Native Claude Code CLI tuning knobs (real upstream env vars the `claude`
 # binary reads directly, see .env.example). Nothing to translate here, just
 # surface non-default values in the boot log for operator visibility; a

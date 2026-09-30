@@ -23,6 +23,8 @@
 #                  claude-session-id). bin/claude-usage-watchdog passes this on
 #                  an account-rotation respawn.
 #   --fresh        a new conversation, no first prompt.
+# If Claude crashes (any exit but 0, 130 or 143) it is relaunched, resuming the conversation,
+# up to CLAUDE_SESSION_CRASH_RESTARTS (5) times in CLAUDE_SESSION_CRASH_WINDOW (900) seconds.
 set -uo pipefail
 
 SESSION="" MODE="" RESUME_ID=""
@@ -168,6 +170,31 @@ echo
 claude "${ARGS[@]}" $EXTRA "${PROMPT[@]}"
 
 code=$?
+
+# Crash recovery. A deliberate end (/exit is 0, Ctrl-C 130, a SIGTERM from `claude-sessions
+# stop` or a watchdog respawn 143) drops to a shell as it always has. Anything else is a crash
+# (an abort, a segfault, an OOM kill, a failed thread create when the container is out of
+# pids): relaunch after a backoff, resuming this conversation, at most
+# CLAUDE_SESSION_CRASH_RESTARTS times in CLAUDE_SESSION_CRASH_WINDOW seconds (0 = never).
+# Before this, a crashed session sat in a shell until someone noticed.
+case "$code" in
+    0|130|143) ;;
+    *)
+        now="$(date +%s)"; window="${CLAUDE_SESSION_CRASH_WINDOW:-900}"; max="${CLAUDE_SESSION_CRASH_RESTARTS:-5}"
+        recent=""; for t in ${CLAUDE_SESSION_CRASH_TIMES:-}; do (( now - t < window )) && recent+="$t "; done
+        n="$(wc -w <<<"$recent")"
+        if (( max > 0 && n < max )); then
+            delay=$(( ${CLAUDE_SESSION_CRASH_BACKOFF:-5} * (1 << n) )); (( delay > 120 )) && delay=120
+            echo
+            echo "Claude Code crashed (status ${code}). Restarting in ${delay}s, resuming this conversation (restart $((n + 1)) of ${max} in ${window}s)."
+            sleep "$delay"
+            export CLAUDE_SESSION_CRASH_TIMES="${recent}${now}"
+            if [[ -n "$SESSION" ]]; then exec "${BASH_SOURCE[0]}" --session "$SESSION" --continue; fi
+            exec "${BASH_SOURCE[0]}" --continue
+        fi
+        echo
+        echo "Claude Code crashed ${n} times in ${window}s: not restarting it automatically again." ;;
+esac
 echo
 echo "Claude Code exited (status ${code}). Dropping to a shell."
 if [[ -n "$SESSION" ]]; then
