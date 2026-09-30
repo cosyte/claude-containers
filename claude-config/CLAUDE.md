@@ -71,6 +71,15 @@ them from an agent session is either impossible or a supply-chain foot-gun. If a
 tool insists it needs one of those, the answer is `mise use` (rootless, per-user)
 or a manifest change, never an escalation.
 
+## Other sessions in this container
+
+You may not be the only Claude session here: `claude-sessions ls` lists them (each is a
+tmux window with its own Remote Control link and directory). Sessions in the same
+directory share one git working tree, so before committing there, check that no sibling
+is mid-change (`git status`, `claude-sessions ls` for a busy one), and never force-push or
+reset a branch another session may be on. `claude-sessions new NAME --dir D --prompt TEXT`
+starts a sibling for independent work when the operator asks for one.
+
 ## Working style
 
 - Prefer small, reviewable commits with clear messages.

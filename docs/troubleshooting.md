@@ -210,6 +210,47 @@ the dialog, the per-container config volume didn't mount (check
 isn't the path Claude opened. As a one-off, accept it once: it persists in the
 config volume.
 
+Trust is per directory: `/workspace`'s entry does not cover `/workspace/<repo>`. Named
+sessions get an entry for their own directory (and every repo under `/workspace`) from
+`claude-sessions prepare` at boot, so a session started by hand with plain `claude` in a
+repo directory can still ask once. The boot log's `Workspace trust :` line names what
+was pre-accepted.
+
+## Several sessions in one container (`--session`, `claude-sessions`)
+
+Start with `claude-sessions ls` inside (or `claude-sessions -C <project> ls` from the
+host). STATE is `busy`/`idle` (Claude is running), `starting`, `shell` (Claude exited to a
+shell in that window), `down` (no window) or `stopped` (stopped by hand).
+
+- **A session is missing at boot.** `claude-logs <project>` has a `[sessions]` line for
+  each one: `skipped '<entry>': <why>` (a bad `CLAUDE_SESSIONS` entry; the launchers
+  validate, so this is usually a hand-edited env), `NOT started, its directory ... does
+  not exist` (a `dir=` typo, or a repo that did not clone), or `stopped by hand` (run
+  `claude-sessions start NAME`). A session dropped from `--session` is unregistered on
+  the next recreate, by design.
+- **`shell`.** Claude exited in that window; its last lines are in the pane
+  (`claude-sessions attach NAME`). `claude-sessions restart NAME` resumes the same
+  conversation; `--fresh` starts over.
+- **It started a fresh conversation after a restart.** A session resumes the conversation
+  the supervisor recorded for its window. None is recorded until Claude has written a
+  transcript (a session that never received a prompt has nothing to resume), and a
+  `--continue` fallback is only used when no other session shares the directory. `resume=off`
+  in the spec and main without `CLAUDE_MAIN_RESUME=1` start fresh on purpose.
+- **Its goal was not sent.** A first prompt / goal is sent on the session's first start
+  only. `claude-sessions reset NAME` makes the next start a first start again. A missing
+  goal file is a warning in the pane, and the session starts without it.
+- **Two sessions fight over git.** Sessions in the same directory share one working tree
+  and index. Give concurrent writers their own directory (a repo each, or `git worktree
+  add`) and keep a shared-directory session to reading (`mode=plan`).
+- **The container is OOM-killed.** Every session is a Claude process of 300-600 MiB plus
+  whatever it runs. The boot log's `Capacity:` line says what each gets; raise
+  `CLAUDE_MEM_LIMIT` / `--mem SVC=SIZE`, or stop a session (`claude-sessions stop NAME`,
+  remembered across restarts).
+- **One session's Remote Control is gone.** Each linked session has its own watchdog
+  (`[rc-watchdog:NAME]` in `claude-logs`) and its own debug log
+  (`/tmp/claude-rc-debug-NAME.log`); the healthcheck line names a dead link
+  (`sessions: 2/3 up (home: Remote Control dead)`) without marking the container unhealthy.
+
 ## Frontend debugging (`--browser` / `CLAUDE_BROWSER`)
 
 Launching on the **browser image is enough**: the entrypoint auto-detects the
@@ -385,4 +426,5 @@ deliberately avoid them.
 This image installs Claude Code via npm (not the native installer), avoiding
 the historical startup filesystem scan that OOM'd containers. If a container is
 still memory-starved, raise `CLAUDE_MEM_LIMIT`. Builds in `/workspace` honor
-`CLAUDE_CPU_LIMIT`/`CLAUDE_MEM_LIMIT`.
+`CLAUDE_CPU_LIMIT`/`CLAUDE_MEM_LIMIT`. A container running several sessions shares that
+limit between them: see the boot log's `Capacity:` line.

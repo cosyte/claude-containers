@@ -1,18 +1,35 @@
 #!/usr/bin/env bash
-# claude-session-id: print the current session's transcript UUID, or exit 1
-# if none is found.
+# claude-session-id [TMUX-TARGET]: print the conversation id of the Claude session running
+# in a tmux window (default claude:main), or exit 1 if none is found.
 #
-# Every container in this repo uses a fixed WORKSPACE=/workspace
-# (entrypoint.sh), so there's exactly one project transcript directory per
-# container: this sidesteps needing to know Claude Code's own path-
-# sanitization scheme by just globbing every project dir and taking the
-# newest *.jsonl file by mtime. Used by bin/claude-usage-watchdog to pass
-# `claude-session --resume <id>` across an account-rotation respawn.
+# A container can run several sessions (bin/claude-sessions), so "the newest transcript
+# anywhere" is not an answer: it can be a sibling session's. Each live Claude process keeps
+# $CLAUDE_CONFIG_DIR/sessions/<pid>.json, which maps its tmux pane to its conversation, so
+# look the window's pane up there. Only if that finds nothing (an older CLI without the
+# file) fall back to the newest transcript, and only for the main window. Used by
+# bin/claude-usage-watchdog to pass `claude-session --resume <id>` across an
+# account-rotation respawn.
 set -uo pipefail
 
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+TARGET="${1:-claude:main}"
+[[ "$TARGET" == *:* ]] || TARGET="claude:$TARGET"
 
+wins="$(tmux list-windows -t "${TARGET%%:*}" -F '#{window_name}|#{pane_id}' 2>/dev/null)"
+pane="$(awk -F'|' -v w="${TARGET#*:}" '$1==w{print $2; exit}' <<<"$wins")"
+if [[ -n "$pane" ]]; then
+    for f in "$CONFIG_DIR"/sessions/*.json; do
+        [[ -f "$f" ]] || continue
+        read -r pid sid < <(jq -r --arg p "$pane" --arg s "${TARGET%%:*}:" \
+            'select((.tmux // "") | startswith($s) and endswith("." + $p)) | "\(.pid) \(.sessionId // "")"' \
+            "$f" 2>/dev/null) || continue
+        [[ -n "$sid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || continue
+        echo "$sid"
+        exit 0
+    done
+fi
+
+[[ "${TARGET#*:}" == main ]] || exit 1
 newest="$(ls -t "$CONFIG_DIR"/projects/*/*.jsonl 2>/dev/null | head -n1)"
 [[ -n "$newest" ]] || exit 1
-
 basename "$newest" .jsonl

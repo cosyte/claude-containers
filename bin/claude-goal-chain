@@ -1,0 +1,499 @@
+#!/usr/bin/env bash
+# claude-goal-chain: run a /goal program's goals back to back in their tmux sessions.
+#
+# A program (see the baked /plan-program command) is a brief plus numbered goal files,
+# `.claude/goals/<prefix>-g<n>.goal.txt`, each started with `/goal <file contents>` in a
+# session running in that repo. This watcher follows one tmux window per program and,
+# when a goal finishes, starts the next one in the same session, so the Remote Control
+# link (the phone app) stays the same.
+#
+# Per window, every INTERVAL seconds, it reads the session's own transcript (found through
+# $CLAUDE_CONFIG_DIR/sessions/<pid>.json, which maps a tmux pane to its conversation) for
+# the last goal event:
+#   met (goal n)     the evaluator accepted goal n. Once the session has been idle for
+#                    IDLE_SECONDS, the watcher checks, on up-to-date origin, that the goal's
+#                    ledger carries its `COMPLETE (goal n)` line and that the final report is
+#                    not BLOCKED (a BLOCKED report also satisfies the evaluator). Then:
+#                    - goal n "ends at Checkpoint X" and CHECKPOINT-X.approved is missing:
+#                      with --review-checkpoints it runs a delegated checkpoint review as a
+#                      /goal in the same session (below); without it, it waits for the file
+#                    - every CHECKPOINT-*.approved goal n+1 names is on origin: it sends
+#                      /clear, then /goal with goal n+1's file (typed, then bracketed-pasted)
+#                    - no goal n+1: the program is complete
+#   met (review)     the checkpoint review finished: the next goal starts if the approval
+#                    file is now on origin; otherwise the chain stops
+#   failed/cleared   the evaluator judged the goal impossible, or it was cleared: stop
+#   paused           a usage limit (or other pause) stopped the goal: after the reset time
+#                    in the CLI's own message ("resets Oct 1, 1pm (UTC)"), or NUDGE_FALLBACK
+#                    seconds when there is none, it sends a message so the goal continues
+# When the chain stops, it types a short status note into the idle session so it shows in
+# the Claude app (that starts one short turn there). A new goal set by hand in a stopped
+# session resumes the chain.
+#
+# The delegated checkpoint review (--review-checkpoints "<the owner's words>") approves a
+# checkpoint on the owner's behalf: it re-runs the gate, has a fresh adversarial subagent
+# check the packet and ledger, decides the open proposals, and commits
+# CHECKPOINT-X.approved stating it was approved on the owner's behalf, quoting the
+# delegation. It never approves what only the owner can do or judge (buying, printing,
+# measuring, flashing, accounts or tokens, a fit or look that needs the object in hand);
+# then it stops and says what the owner must do. The watcher itself never writes a
+# checkpoint file.
+#
+# Usage (run as the claude user, in a tmux window of its own so it outlives your shell):
+#   claude-goal-chain [--review-checkpoints "<quote>"] [--interval S] [--once] WINDOW[=REPO] ...
+#   claude-goal-chain status
+#   claude-goal-chain start WINDOW N [REPO]     # /clear + goal N now (e.g. after fixing a BLOCKED cause)
+# WINDOW is a window of tmux session "claude" (CLAUDE_GOAL_CHAIN_TMUX_SESSION); REPO
+# defaults to /workspace/WINDOW. State and a log live in $CLAUDE_CONFIG_DIR/goal-chain.
+set -uo pipefail
+
+SESSION="${CLAUDE_GOAL_CHAIN_TMUX_SESSION:-claude}"
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+STATE_DIR="${CLAUDE_GOAL_CHAIN_STATE:-$CONFIG_DIR/goal-chain}"
+INTERVAL="${CLAUDE_GOAL_CHAIN_INTERVAL:-60}"
+IDLE_SECONDS="${CLAUDE_GOAL_CHAIN_IDLE:-120}"            # session idle this long after a goal is met
+NUDGE_FALLBACK="${CLAUDE_GOAL_CHAIN_NUDGE_FALLBACK:-1800}" # a pause with no reset time: nudge this often
+MAX_NUDGES="${CLAUDE_GOAL_CHAIN_MAX_NUDGES:-12}"         # nudges per goal before the chain stops
+SET_TIMEOUT="${CLAUDE_GOAL_CHAIN_SET_TIMEOUT:-120}"      # seconds for "Goal set" to appear after sending
+STEP_SLEEP="${CLAUDE_GOAL_CHAIN_STEP_SLEEP:-1}"          # pause between keystroke steps
+NOTE_TAG="[goal-chain]"
+OWNER="${CLAUDE_GOAL_CHAIN_OWNER:-Noah}"                  # whose checkpoints and whose words the review quotes
+
+# The machine's SSH agent reaches tmux windows through the tmux environment; a shell
+# started some other way may not have it, and `git fetch` needs it.
+if [[ -z "${SSH_AUTH_SOCK:-}" && -S /run/claude/agent.sock ]]; then
+    export SSH_AUTH_SOCK=/run/claude/agent.sock
+fi
+
+now() { echo "${CLAUDE_GOAL_CHAIN_NOW:-$(date +%s)}"; }
+log() {
+    local line
+    line="$(date -u +%FT%TZ) $NOTE_TAG $*"
+    echo "$line"
+    mkdir -p "$STATE_DIR" 2>/dev/null && echo "$line" >> "$STATE_DIR/log" 2>/dev/null
+    return 0
+}
+
+# --- per-window state: key=value lines in $STATE_DIR/<window>.state ------------------------
+state_get() {  # state_get <window> <key>
+    [[ -f "$STATE_DIR/$1.state" ]] || return 0
+    sed -n "s/^$2=//p" "$STATE_DIR/$1.state" | tail -n1
+}
+state_set() {  # state_set <window> <key> <value>
+    local f="$STATE_DIR/$1.state"
+    mkdir -p "$STATE_DIR"
+    touch "$f"
+    { command grep -v "^$2=" "$f"; printf '%s=%s\n' "$2" "$3"; } > "$f.tmp" && mv -f "$f.tmp" "$f"
+}
+
+# --- the session behind a window --------------------------------------------------------------
+# Prints "<pid> <sessionId> <status> <cwd>" for the live claude process in the window's pane.
+session_info() {  # session_info <window>
+    local pane f pid
+    pane="$(tmux list-panes -t "$SESSION:$1" -F '#{pane_id}' 2>/dev/null | head -n1)" || return 1
+    [[ -n "$pane" ]] || return 1
+    for f in "$CONFIG_DIR"/sessions/*.json; do
+        [[ -f "$f" ]] || continue
+        jq -e --arg p "$pane" '(.tmux // "") | endswith("." + $p)' "$f" >/dev/null 2>&1 || continue
+        pid="$(jq -r '.pid' "$f")"
+        kill -0 "$pid" 2>/dev/null || continue
+        [[ "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" == *claude* ]] || continue
+        jq -r '"\(.pid) \(.sessionId) \(.status // "unknown") \(.cwd)"' "$f"
+        return 0
+    done
+    return 1
+}
+transcript_path() {  # transcript_path <cwd> <sessionId>
+    printf '%s/projects/%s/%s.jsonl' "$CONFIG_DIR" "$(printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g')" "$2"
+}
+
+# The last goal event in a transcript, as TSV: <timestamp> <kind> <detail>
+#   kind: set | active | met | failed | paused | cleared; detail: the condition's start, or
+#   the notice text. Only main-thread lines count (subagents keep their own transcripts).
+last_goal_event() {  # last_goal_event <transcript>
+    [[ -f "$1" ]] || return 0
+    command grep -a -E '"goal_status"|Goal (set|paused|cleared)' "$1" 2>/dev/null | jq -r '
+        select((.isSidechain // false) | not)
+        | if .type == "attachment" and (.attachment.type // "") == "goal_status" then
+              [ .timestamp,
+                (if .attachment.met then "met"
+                 elif (.attachment.sentinel // false) then "active"
+                 else "failed" end),
+                ((.attachment.condition // "") | .[0:200] | gsub("[\t\n]"; " ")) ]
+          elif .type == "system" and ((.content // "") | type) == "string" then
+              (.content | sub("^<local-command-stdout>"; "")) as $c
+              | if ($c | startswith("Goal set:")) then [ .timestamp, "set", ((.commandRun.args // $c[10:]) | .[0:200] | gsub("[\t\n]"; " ")) ]
+                elif ($c | startswith("Goal paused")) then [ .timestamp, "paused", ($c | .[0:200] | gsub("[\t\n]"; " ")) ]
+                elif ($c | test("^Goal cleared")) then [ .timestamp, "cleared", ($c | .[0:200] | gsub("[\t\n]"; " ")) ]
+                else empty end
+          else empty end
+        | @tsv' 2>/dev/null | tail -n1
+}
+
+# The last usage-limit message ("You've hit your weekly limit · resets Oct 1, 1pm (UTC)").
+last_limit_text() {  # last_limit_text <transcript>
+    [[ -f "$1" ]] || return 0
+    command grep -a '"isApiErrorMessage":true' "$1" 2>/dev/null \
+        | jq -r '[.message.content[]? | select(.type == "text") | .text] | join(" ")' 2>/dev/null \
+        | command grep -iE 'limit|resets' | tail -n1
+}
+
+# Seconds since the epoch at which a "resets …" hint falls, or nothing, judged against now()
+# (so it is testable and never depends on the wall clock). Handles "resets 3:45pm",
+# "resets 3pm (UTC)", "resets Mon 12:00am", "resets Oct 1, 1pm (UTC)" and the older
+# "will reset at 3pm (America/Santiago)". A time of day already past means the next one.
+reset_epoch() {  # reset_epoch <text>
+    local hint tz="UTC" when base t d mon day time n
+    hint="$(printf '%s' "$1" | sed -nE 's/.*reset(s| at)[[:space:]]+([^·.]*).*/\2/p' | head -n1)"
+    [[ -n "$hint" ]] || return 0
+    if [[ "$hint" =~ \(([A-Za-z_/+-]+)\) ]]; then tz="${BASH_REMATCH[1]}"; fi
+    when="$(printf '%s' "$hint" | sed -E 's/\([^)]*\)//g; s/,//g; s/ at / /; s/[[:space:]]+/ /g; s/^ //; s/ $//')"
+    n="$(now)"
+    base="$(TZ="$tz" date -d "@$n" +%F)"
+    if [[ "$when" =~ ^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\ ([0-9]{1,2})\ (.+)$ ]]; then
+        mon="${BASH_REMATCH[1]}"; day="${BASH_REMATCH[2]}"; time="${BASH_REMATCH[3]}"
+        t="$(TZ="$tz" date -d "$mon $day ${base%%-*} $time" +%s 2>/dev/null)" || return 0
+        (( t < n - 86400 )) && t="$(TZ="$tz" date -d "$mon $day $(( ${base%%-*} + 1 )) $time" +%s 2>/dev/null)"
+    elif [[ "$when" =~ ^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\ (.+)$ ]]; then
+        day="${BASH_REMATCH[1]}"; time="${BASH_REMATCH[2]}"
+        for d in 0 1 2 3 4 5 6 7; do
+            [[ "$(TZ="$tz" date -d "$base + $d day" +%a)" == "$day" ]] || continue
+            t="$(TZ="$tz" date -d "$(TZ="$tz" date -d "$base + $d day" +%F) $time" +%s 2>/dev/null)" || return 0
+            (( t >= n - 60 )) && break
+        done
+    else
+        t="$(TZ="$tz" date -d "$base $when" +%s 2>/dev/null)" || return 0
+        (( t < n - 60 )) && t="$(TZ="$tz" date -d "$base $when + 1 day" +%s 2>/dev/null)"
+    fi
+    [[ -n "${t:-}" ]] && echo "$t"
+}
+
+# The text of the main thread's last assistant messages (the final report lives there).
+last_assistant_text() {  # last_assistant_text <transcript> [count]
+    [[ -f "$1" ]] || return 0
+    command grep -a '"type":"assistant"' "$1" 2>/dev/null | jq -r '
+        select((.isSidechain // false) | not)
+        | [.message.content[]? | select(.type == "text") | .text] | join("\n")
+        | select(length > 0) | @json' 2>/dev/null | tail -n "${2:-4}" | jq -r '.' 2>/dev/null
+}
+
+# --- the program's files ----------------------------------------------------------------------
+# A goal condition starts "<program> program, GOAL <n> of <N>: …"; a review "CHECKPOINT REVIEW <X> …".
+parse_goal() {  # parse_goal <condition> -> "<program> <n> <N>"
+    [[ "$1" =~ ^([A-Za-z0-9_.-]+)\ program,\ GOAL\ ([0-9]+)\ of\ ([0-9]+) ]] || return 1
+    echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}"
+}
+parse_review() {  # parse_review <condition> -> "<X> <program> <n>"
+    [[ "$1" =~ ^CHECKPOINT\ REVIEW\ ([A-Za-z0-9]+)\ for\ the\ ([A-Za-z0-9_.-]+)\ program,\ after\ GOAL\ ([0-9]+) ]] || return 1
+    echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}"
+}
+goal_file() {  # goal_file <repo> <program> <n>: the single *-<program>-g<n>.goal.txt, or nothing
+    local m=("$1"/.claude/goals/*-"$2"-g"$3".goal.txt)
+    [[ -f "${m[0]}" && ${#m[@]} -eq 1 ]] && echo "${m[0]}"
+}
+default_ref() {  # default_ref <repo>: origin/<default branch>
+    git -C "$1" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main
+}
+on_origin() {  # on_origin <repo> <path>: the file exists on the fetched default branch
+    git -C "$1" cat-file -e "$(default_ref "$1"):$2" 2>/dev/null
+}
+fetch_origin() { timeout 120 git -C "$1" fetch -q origin 2>/dev/null; }
+ledger_complete() {  # ledger_complete <repo> <prefix> <n>
+    git -C "$1" show "$(default_ref "$1"):.claude/goals/$2-g$3.status.md" 2>/dev/null \
+        | command grep -qE "COMPLETE \(goal $3\)"
+}
+ends_at_checkpoint() {  # ends_at_checkpoint <goal-file>: the letter, or nothing
+    command grep -oE 'ends at Checkpoint [A-Za-z0-9]+' "$1" 2>/dev/null | head -n1 | awk '{print $4}'
+}
+# Checkpoint files a goal needs before it may start: every CHECKPOINT-*.approved it names,
+# except the one it ends at itself (which it only mentions to say it never writes it).
+needed_checkpoints() {  # needed_checkpoints <goal-file>
+    local own
+    own="$(ends_at_checkpoint "$1")"
+    command grep -oE 'CHECKPOINT-[A-Za-z0-9]+\.approved' "$1" 2>/dev/null | sort -u \
+        | { if [[ -n "$own" ]]; then command grep -vx "CHECKPOINT-$own.approved"; else cat; fi; }
+}
+
+# --- acting on the session ----------------------------------------------------------------------
+send_line() {  # send_line <window> <text>: type it literally, then Enter
+    tmux send-keys -t "$SESSION:$1" -l "$2" && sleep "$STEP_SLEEP" && tmux send-keys -t "$SESSION:$1" Enter
+}
+note() {  # note <window> <text>: a status note in the session, shown in the Claude app
+    send_line "$1" "$NOTE_TAG $2 (A status note from the goal-chain watcher: acknowledge it in one line and take no other action.)"
+    log "$1: note: $2"
+}
+clear_session() {  # clear_session <window>: /clear, then wait for the new conversation
+    local before after i
+    before="$(session_info "$1" | awk '{print $2}')"
+    send_line "$1" "/clear" || return 1
+    for ((i = 0; i < 60; i++)); do
+        sleep "$STEP_SLEEP"
+        after="$(session_info "$1" | awk '{print $2}')"
+        [[ -n "$after" && "$after" != "$before" ]] && return 0
+    done
+    log "$1: /clear did not start a new conversation"
+    return 1
+}
+# Type "/goal ", bracketed-paste the condition (newlines stay inside the paste), submit, and
+# wait for the transcript to say "Goal set".
+send_goal() {  # send_goal <window> <condition-file>
+    local buf="goal-chain-$1" info i ev
+    tmux send-keys -t "$SESSION:$1" -l "/goal " || return 1
+    sleep "$STEP_SLEEP"
+    tmux load-buffer -b "$buf" "$2" && tmux paste-buffer -p -r -d -b "$buf" -t "$SESSION:$1" || return 1
+    sleep $((STEP_SLEEP * 2))
+    tmux send-keys -t "$SESSION:$1" Enter || return 1
+    for ((i = 0; i < SET_TIMEOUT; i++)); do
+        sleep "$STEP_SLEEP"
+        info="$(session_info "$1")" || continue
+        ev="$(last_goal_event "$(transcript_path "$(awk '{print $4}' <<<"$info")" "$(awk '{print $2}' <<<"$info")")")"
+        [[ "$(cut -f2 <<<"$ev")" == set || "$(cut -f2 <<<"$ev")" == active ]] && return 0
+    done
+    log "$1: no 'Goal set' within ${SET_TIMEOUT}s of sending $(basename "$2")"
+    return 1
+}
+start_goal_file() {  # start_goal_file <window> <file> <label>
+    local repo
+    repo="$(state_get "$1" repo)"
+    [[ -n "$repo" ]] && git -C "$repo" pull -q --rebase --autostash >/dev/null 2>&1
+    if clear_session "$1" && send_goal "$1" "$2"; then
+        log "$1: started $3"
+        state_set "$1" phase watching
+        state_set "$1" stopped_note ""
+        return 0
+    fi
+    stop "$1" "could not start $3 ($(basename "$2")); start it by hand: /goal + that file" "start:$3"
+    return 1
+}
+stop() {  # stop <window> <why> <event-key>: note once per event, then hold
+    if [[ "$(state_get "$1" stopped_note)" != "$3" ]]; then
+        note "$1" "Chain stopped: $2."
+        state_set "$1" stopped_note "$3"
+    fi
+    state_set "$1" phase stopped
+}
+
+# --- the delegated checkpoint review --------------------------------------------------------------
+review_condition() {  # review_condition <X> <program> <n> <N> <repo> <prefix> <packet> -> file path
+    local x="$1" program="$2" n="$3" total="$4" repo="$5" prefix="$6" packet="$7"
+    local quote date out="$STATE_DIR/review-$2-$1.txt"
+    quote="$(cat "$STATE_DIR/delegation.quote" 2>/dev/null)"
+    date="$(cat "$STATE_DIR/delegation.date" 2>/dev/null)"
+    cat > "$out" <<EOF
+CHECKPOINT REVIEW $x for the $program program, after GOAL $n of $total, on $OWNER's behalf. $OWNER delegated checkpoint approval on $date, in these words: "$quote". Work from $repo. First git pull --rebase, then read \`.claude/goals/$prefix.md\` §0-§4 and its Checkpoint $x section, goal $n's section and ledger (\`.claude/goals/$prefix-g$n.status.md\`), and the packet goal $n printed, saved at $packet. If \`.claude/goals/CHECKPOINT-$x.approved\` is already on origin, change nothing and report it. Review as $OWNER would, against the brief's §1 decisions (never re-open a Not chosen option) and its safety, security, identity and outward-facing rules: re-run the repo's gate on a fresh clone; have a fresh adversarial subagent check the packet's claims and the ledger's DONE rows against the repos; for each proposal awaiting $OWNER, take the recommendation or a safer option that fits the decisions, with the reason. Never approve on $OWNER's behalf anything only $OWNER can do or judge: buying, printing, measuring, photographing, flashing, creating accounts or tokens, merging PRs the brief reserves to $OWNER, or a choice of fit, feel or look that needs the object in hand. Those stay Needs $OWNER items; if the next goal cannot run without one, or the gate fails, or a claim is false, do not approve. Edit nothing else, start no other work, and never start the next goal (the watcher does). To approve: one commit on the default branch adding only \`.claude/goals/CHECKPOINT-$x.approved\`, whose first line is "Approved on $OWNER's behalf by the delegated checkpoint review, <date> (delegation: $OWNER, $date: '$quote')." followed by one line per decision taken, each with its reason; then push.
+
+The goal is met only when the final turn prints either \`CHECKPOINT REVIEW ($x): APPROVED\` with the output of \`git log -1 --stat\` for that file on the default branch and the decisions taken, or \`CHECKPOINT REVIEW ($x): NOT APPROVED\` with each blocking reason, its evidence, and exactly what $OWNER must do.
+EOF
+    echo "$out"
+}
+
+# --- one pass over one window --------------------------------------------------------------------
+tick() {  # tick <window> <repo>
+    local w="$1" repo="$2" info pid sid status cwd tr ev ts kind detail key g program n total
+    local file prefix x need missing next nextfile phase age
+
+    info="$(session_info "$w")" || { log "$w: no live claude session in window $SESSION:$w"; return 0; }
+    read -r pid sid status cwd <<<"$info"
+    tr="$(transcript_path "$cwd" "$sid")"
+    ev="$(last_goal_event "$tr")"
+    [[ -n "$ev" ]] || return 0
+    IFS=$'\t' read -r ts kind detail <<<"$ev"
+    key="$sid:$ts"
+    phase="$(state_get "$w" phase)"
+
+    # A goal set or running: if the chain had stopped, someone restarted it by hand.
+    if [[ "$kind" == set || "$kind" == active ]]; then
+        [[ "$phase" == stopped ]] && { log "$w: a new goal is running; the chain resumes"; state_set "$w" phase watching; }
+        return 0
+    fi
+    [[ "$(state_get "$w" handled)" == "$key" ]] && return 0
+
+    case "$kind" in
+    failed|cleared)
+        state_set "$w" handled "$key"
+        stop "$w" "the goal ended without being met ($detail)" "$key"
+        return 0 ;;
+    paused)
+        local limit reset last nudges
+        [[ "$status" == idle ]] || return 0
+        limit="$(last_limit_text "$tr")"
+        reset="$(reset_epoch "$limit")"
+        last="$(state_get "$w" nudged_at)"; nudges="$(state_get "$w" nudges_for)"
+        [[ "$nudges" == "$sid:"* ]] && nudges="${nudges##*:}" || nudges=0
+        if [[ -n "$reset" ]]; then
+            (( $(now) >= reset + 120 )) || return 0
+            [[ -n "$last" ]] && (( last >= reset )) && (( $(now) - last < NUDGE_FALLBACK )) && return 0
+        else
+            [[ -n "$last" ]] && (( $(now) - last < NUDGE_FALLBACK )) && return 0
+        fi
+        if (( nudges >= MAX_NUDGES )); then
+            state_set "$w" handled "$key"
+            stop "$w" "the goal stayed paused after $MAX_NUDGES nudges ($detail)" "$key"
+            return 0
+        fi
+        send_line "$w" "$NOTE_TAG The pause should be over (${limit:-$detail}). Continue toward the goal."
+        state_set "$w" nudged_at "$(now)"
+        state_set "$w" nudges_for "$sid:$((nudges + 1))"
+        log "$w: nudged a paused goal ($((nudges + 1))/$MAX_NUDGES)"
+        return 0 ;;
+    met) ;;
+    *) return 0 ;;
+    esac
+
+    # --- met: wait until the session has been idle a while -------------------------------------
+    [[ "$status" == idle ]] || return 0
+    age=$(( $(now) - $(date -d "$ts" +%s 2>/dev/null || now) ))
+    (( age >= IDLE_SECONDS )) || return 0
+    fetch_origin "$repo" || log "$w: git fetch failed in $repo; using what is fetched"
+
+    # A finished checkpoint review.
+    if g="$(parse_review "$detail")"; then
+        read -r x program n <<<"$g"
+        if on_origin "$repo" ".claude/goals/CHECKPOINT-$x.approved"; then
+            advance "$w" "$repo" "$program" "$n" "$key"
+        else
+            state_set "$w" handled "$key"
+            stop "$w" "the Checkpoint $x review did not approve; see its report above" "$key"
+        fi
+        return 0
+    fi
+
+    g="$(parse_goal "$detail")" || { state_set "$w" handled "$key"; log "$w: a met goal that is not a program goal; left alone"; return 0; }
+    read -r program n total <<<"$g"
+    file="$(goal_file "$repo" "$program" "$n")"
+    if [[ -z "$file" ]]; then
+        state_set "$w" handled "$key"
+        stop "$w" "goal $n's file (*-$program-g$n.goal.txt) is not in $repo" "$key"
+        return 0
+    fi
+    prefix="$(basename "$file" "-g$n.goal.txt")"
+    local final
+    final="$(last_assistant_text "$tr" 6)"
+    if command grep -qE "BLOCKED \(goal $n\)" <<<"$final" && ! command grep -qE "GOAL REPORT \(goal $n\)" <<<"$final"; then
+        state_set "$w" handled "$key"
+        stop "$w" "$program goal $n ended BLOCKED: its precondition is not met" "$key"
+        return 0
+    fi
+    if ! ledger_complete "$repo" "$prefix" "$n"; then
+        state_set "$w" handled "$key"
+        stop "$w" "$program goal $n was judged met, but its ledger on origin has no 'COMPLETE (goal $n)' line" "$key"
+        return 0
+    fi
+    state_set "$w" last_goal "$program $n"
+
+    # Goal n ends at a checkpoint that is not approved yet.
+    x="$(ends_at_checkpoint "$file")"
+    if [[ -n "$x" ]] && ! on_origin "$repo" ".claude/goals/CHECKPOINT-$x.approved"; then
+        if [[ -f "$STATE_DIR/delegation.quote" ]]; then
+            local packet="$STATE_DIR/packet-$program-$x.md"
+            last_assistant_text "$tr" 6 > "$packet"
+            state_set "$w" handled "$key"
+            log "$w: $program goal $n is COMPLETE; running the delegated Checkpoint $x review"
+            start_goal_file "$w" "$(review_condition "$x" "$program" "$n" "$total" "$repo" "$prefix" "$packet")" \
+                "the Checkpoint $x review" && state_set "$w" phase reviewing
+        else
+            # Wait for the owner's approval file; note it once.
+            if [[ "$(state_get "$w" stopped_note)" != "wait:$key" ]]; then
+                note "$w" "$program goal $n is COMPLETE. Goal $((n + 1)) starts once .claude/goals/CHECKPOINT-$x.approved is on origin."
+                state_set "$w" stopped_note "wait:$key"
+            fi
+            state_set "$w" phase waiting
+        fi
+        return 0
+    fi
+    advance "$w" "$repo" "$program" "$n" "$key"
+}
+
+# Start goal n+1 when its checkpoint files are all on origin; otherwise wait or finish.
+advance() {  # advance <window> <repo> <program> <n> <event-key>
+    local w="$1" repo="$2" program="$3" n="$4" key="$5" nextfile missing="" c
+    nextfile="$(goal_file "$repo" "$program" "$((n + 1))")"
+    if [[ -z "$nextfile" ]]; then
+        state_set "$w" handled "$key"
+        state_set "$w" phase done
+        note "$w" "The $program program is complete: goal $n was its last goal file."
+        return 0
+    fi
+    while read -r c; do
+        [[ -n "$c" ]] || continue
+        on_origin "$repo" ".claude/goals/$c" || missing+="${missing:+, }$c"
+    done < <(needed_checkpoints "$nextfile")
+    if [[ -n "$missing" ]]; then
+        if [[ "$(state_get "$w" stopped_note)" != "wait:$key" ]]; then
+            note "$w" "$program goal $n is COMPLETE. Goal $((n + 1)) waits for $missing on origin."
+            state_set "$w" stopped_note "wait:$key"
+        fi
+        state_set "$w" phase waiting
+        return 0   # not handled: checked again next pass
+    fi
+    state_set "$w" handled "$key"
+    start_goal_file "$w" "$nextfile" "$program goal $((n + 1))"
+}
+
+# --- commands ------------------------------------------------------------------------------------
+cmd_status() {
+    local f w
+    for f in "$STATE_DIR"/*.state; do
+        [[ -f "$f" ]] || { echo "no windows watched yet ($STATE_DIR)"; return 0; }
+        w="$(basename "$f" .state)"
+        printf '%-12s phase=%-9s last goal: %-14s repo=%s\n' "$w" "$(state_get "$w" phase)" \
+            "$(state_get "$w" last_goal)" "$(state_get "$w" repo)"
+    done
+    [[ -f "$STATE_DIR/delegation.quote" ]] && echo "checkpoint reviews: delegated ($(cat "$STATE_DIR/delegation.date")): \"$(cat "$STATE_DIR/delegation.quote")\""
+    return 0
+}
+cmd_start() {  # cmd_start <window> <n> [repo]
+    local w="$1" n="$2" repo="${3:-$(state_get "$1" repo)}" m
+    repo="${repo:-/workspace/$w}"
+    m=("$repo"/.claude/goals/*-g"$n".goal.txt)
+    [[ -f "${m[0]}" && ${#m[@]} -eq 1 ]] || { echo "claude-goal-chain: no single *-g$n.goal.txt in $repo/.claude/goals" >&2; return 1; }
+    state_set "$w" repo "$repo"
+    start_goal_file "$w" "${m[0]}" "goal $n"
+}
+
+main() {
+    local once=0 arg w repo
+    local -a windows=()
+    case "${1:-}" in
+        status) cmd_status; return ;;
+        start)  shift; [[ $# -ge 2 ]] || { echo "usage: claude-goal-chain start WINDOW N [REPO]" >&2; return 2; }
+                cmd_start "$@"; return ;;
+        ""|-h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//'; return 0 ;;
+    esac
+    while [[ $# -gt 0 ]]; do
+        arg="$1"; shift
+        case "$arg" in
+            --review-checkpoints)
+                [[ -n "${1:-}" ]] || { echo "claude-goal-chain: --review-checkpoints needs the owner's words" >&2; return 2; }
+                mkdir -p "$STATE_DIR"
+                printf '%s' "$1" > "$STATE_DIR/delegation.quote"
+                date -u +%F > "$STATE_DIR/delegation.date"
+                shift ;;
+            --no-review-checkpoints) rm -f "$STATE_DIR/delegation.quote" "$STATE_DIR/delegation.date" ;;
+            --interval) INTERVAL="$1"; shift ;;
+            --once) once=1 ;;
+            -*) echo "claude-goal-chain: unknown option $arg" >&2; return 2 ;;
+            *) windows+=("$arg") ;;
+        esac
+    done
+    (( ${#windows[@]} )) || { echo "claude-goal-chain: name at least one WINDOW[=REPO]" >&2; return 2; }
+    for arg in "${windows[@]}"; do
+        w="${arg%%=*}"; repo="${arg#*=}"; [[ "$arg" == *=* ]] || repo="/workspace/$w"
+        state_set "$w" repo "$repo"
+    done
+
+    mkdir -p "$STATE_DIR"
+    exec 9>"$STATE_DIR/.lock"
+    flock -n 9 || { echo "claude-goal-chain: another watcher already runs (lock $STATE_DIR/.lock)" >&2; return 1; }
+    log "watching ${windows[*]} every ${INTERVAL}s$([[ -f "$STATE_DIR/delegation.quote" ]] && echo '; checkpoint reviews delegated')"
+    while :; do
+        for arg in "${windows[@]}"; do
+            w="${arg%%=*}"
+            tick "$w" "$(state_get "$w" repo)"
+        done
+        (( once )) && return 0
+        sleep "$INTERVAL"
+    done
+}
+
+[[ "${BASH_SOURCE[0]}" == "$0" ]] && main "$@"

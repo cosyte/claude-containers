@@ -311,6 +311,11 @@ launch_new() {
             local m; m="$(whiptail --title "Launch new session" --inputbox "Model value:" 10 60 3>&1 1>&2 2>&3)" || m=""
             [[ -n "$m" ]] && cmd_args+=(--model "$m") ;;
     esac
+    local sessions
+    sessions="$(whiptail --title "Launch new session" --inputbox \
+        "More Claude sessions in this container, started at boot (optional).\nEntries separated by ';', each NAME [dir= model= goal=FILE ...]\n'*' = one per repo of a multi-repo workspace. e.g.  api; web model=sonnet" \
+        12 78 3>&1 1>&2 2>&3)" || sessions=""
+    [[ -n "${sessions//[[:space:];]/}" ]] && cmd_args+=(--session "$sessions")
     extra="$(whiptail --title "Launch new session" --inputbox \
         "Extra claude-launch flags (optional, e.g. --mcp foo --browser --expose 4321:4321):" 10 78 3>&1 1>&2 2>&3)" || extra=""
     clear
@@ -326,6 +331,71 @@ launch_new() {
     pause
 }
 
+# --- Sessions inside one container (bin/claude-sessions, run through docker exec) ------------
+session_menu() {  # session_menu <project> <session> <source>
+    local project="$1" name="$2" src="$3" action items=()
+    items+=(attach  "Attach to this session's window")
+    items+=(restart "Restart, resuming its conversation")
+    items+=(fresh   "Restart with a fresh conversation")
+    items+=(send    "Send it a prompt")
+    if [[ "$name" != main ]]; then
+        items+=(stop  "Stop (stays stopped across restarts)")
+        items+=(start "Start")
+        [[ "$src" == cli ]] && items+=(remove "Remove this session")
+    fi
+    items+=(back "◀ Back")
+    action="$(whiptail --title "$project: session $name" --menu "" 18 72 9 "${items[@]}" 3>&1 1>&2 2>&3)" || return 0
+    case "$action" in
+        attach)  clear; "$BIN/claude-attach" "$project" "$name" || pause ;;
+        restart) run_interactive "restart $name" "$BIN/claude-sessions" -C "$project" restart "$name" ;;
+        fresh)   run_interactive "restart $name --fresh" "$BIN/claude-sessions" -C "$project" restart "$name" --fresh ;;
+        stop)    run_interactive "stop $name" "$BIN/claude-sessions" -C "$project" stop "$name" ;;
+        start)   run_interactive "start $name" "$BIN/claude-sessions" -C "$project" start "$name" ;;
+        remove)  whiptail --yesno "Remove session '$name'? Its conversations stay on disk." 9 60 \
+                     && run_interactive "rm $name" "$BIN/claude-sessions" -C "$project" rm "$name" ;;
+        send)
+            local text
+            text="$(whiptail --title "Send to $name" --inputbox "Prompt:" 10 78 3>&1 1>&2 2>&3)" || return 0
+            [[ -n "$text" ]] && run_interactive "send to $name" "$BIN/claude-sessions" -C "$project" send "$name" "$text" ;;
+    esac
+}
+
+new_session_flow() {  # new_session_flow <project>
+    local project="$1" name dir model prompt args=()
+    name="$(whiptail --title "New session in $project" --inputbox "Name (lowercase, e.g. review):" 10 60 3>&1 1>&2 2>&3)" || return 0
+    [[ -n "$name" ]] || return 0
+    dir="$(whiptail --title "New session: $name" --inputbox "Directory (blank = /workspace/$name if it exists, else /workspace):" 10 78 3>&1 1>&2 2>&3)" || dir=""
+    [[ -n "$dir" ]] && args+=(--dir "$dir")
+    model="$(whiptail --title "New session: $name" --inputbox "Model (blank = the container's):" 10 60 3>&1 1>&2 2>&3)" || model=""
+    [[ -n "$model" ]] && args+=(--model "$model")
+    prompt="$(whiptail --title "New session: $name" --inputbox "First prompt (optional):" 10 78 3>&1 1>&2 2>&3)" || prompt=""
+    [[ -n "$prompt" ]] && args+=(--prompt "$prompt")
+    run_interactive "new session $name" "$BIN/claude-sessions" -C "$project" new "$name" "${args[@]}"
+}
+
+sessions_menu() {  # sessions_menu <project>
+    local project="$1" json items choice
+    while true; do
+        json="$("$BIN/claude-sessions" -C "$project" ls --json 2>/dev/null)" || json='[]'
+        items=()
+        while IFS=$'\t' read -r n st d rc src; do
+            [[ -n "$n" ]] || continue
+            items+=("$n" "$(printf '%-9s %-28s %s' "$st" "$d" "$rc")")
+            SESSION_SRC[$n]="$src"
+        done < <(jq -r '.[] | [.name, .state, .dir, .remote_control, .source] | @tsv' <<<"$json" 2>/dev/null)
+        items+=(__new__ "+ New session")
+        items+=(back "◀ Back")
+        choice="$(whiptail --title "$project: sessions" --menu "Each is its own tmux window and Remote Control link" \
+            22 100 12 "${items[@]}" 3>&1 1>&2 2>&3)" || return 0
+        case "$choice" in
+            back|"") return 0 ;;
+            __new__) new_session_flow "$project" ;;
+            *)       session_menu "$project" "$choice" "${SESSION_SRC[$choice]:-}" ;;
+        esac
+    done
+}
+declare -A SESSION_SRC=()
+
 container_menu() {  # container_menu <project>
     local project="$1" cn state
     while true; do
@@ -334,6 +404,7 @@ container_menu() {  # container_menu <project>
         local items=()
         if [[ "$state" == running ]]; then
             items+=(attach  "Attach to live tmux session")
+            items+=(sessions "Sessions in this container (list / attach / new / restart)")
             items+=(logs    "View recent entrypoint/sshd logs")
             items+=(restart "Restart (stop + launch)")
             items+=(stop    "Stop (graceful; state preserved)")
@@ -346,10 +417,11 @@ container_menu() {  # container_menu <project>
         items+=(back    "◀ Back")
 
         local action
-        action="$(whiptail --title "$TITLE: $project" --menu "state: $state" 18 72 8 "${items[@]}" \
+        action="$(whiptail --title "$TITLE: $project" --menu "state: $state" 19 78 9 "${items[@]}" \
             3>&1 1>&2 2>&3)" || return 0
         case "$action" in
             attach)  clear; "$BIN/claude-attach" "$project" || true ;;
+            sessions) sessions_menu "$project" ;;
             start)   clear; "$BIN/claude-launch" "$project" || true; pause ;;
             stop)    clear; "$BIN/claude-stop" "$project" || true; pause ;;
             restart) clear; ( "$BIN/claude-stop" "$project" && "$BIN/claude-launch" "$project" ) || true; pause ;;

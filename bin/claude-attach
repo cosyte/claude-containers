@@ -1,24 +1,36 @@
 #!/usr/bin/env bash
-# claude-attach <name>: attach to the live tmux session inside a container.
+# claude-attach <name> [session]: attach to the live tmux session inside a container,
+# on window 'main' or on a named session's window (claude-sessions ls lists them).
 # Local convenience: runs `docker exec` (no SSH key needed). For remote access
 # use the `ssh -p <port>` line that claude-launch / claude-list print.
-# Detach with Ctrl-b d: the container and Claude session keep running.
+# Detach with Ctrl-b d: the container and Claude session keep running. Switch between
+# sessions inside with Ctrl-b w (a list) or Ctrl-b n / p.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 need_docker
 
-[[ $# -ge 1 ]] || die "usage: claude-attach <name>"
+[[ $# -ge 1 ]] || die "usage: claude-attach <name> [session]"
 PROJECT="$(sanitize "$1")"
 CN="$(cname "$PROJECT")"
+WIN="${2:-}"
 
 case "$(container_state "$CN")" in
     absent)  die "no such container: $CN" ;;
     stopped) die "'$CN' is stopped: start it first: claude-launch $PROJECT" ;;
 esac
 
+TARGET=claude
+if [[ -n "$WIN" ]]; then
+    wins="$(docker exec -u "${CLAUDE_USER:-claude}" "$CN" tmux list-windows -t claude -F '#{window_name}' 2>/dev/null || true)"
+    grep -qxF -- "$WIN" <<<"$wins" \
+        || die "'$CN' has no session window '$WIN'. Its sessions:
+$(docker exec -u "${CLAUDE_USER:-claude}" "$CN" claude-sessions ls 2>/dev/null | sed 's/^/       /')"
+    TARGET="claude:$WIN"
+fi
+
 # The entrypoint runs tmux as the claude user; attach as that user so the
 # socket is reachable. TERM is forwarded so the TUI renders correctly.
 docker exec -it -u "${CLAUDE_USER:-claude}" -e TERM="${TERM:-xterm-256color}" \
-    "$CN" tmux attach-session -t claude \
+    "$CN" tmux attach-session -t "$TARGET" \
     || die "could not attach: the tmux session 'claude' may have died.
        Check: claude-logs $PROJECT"

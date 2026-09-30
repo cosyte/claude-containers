@@ -1197,7 +1197,9 @@ log "Model               : $CLAUDE_MODEL (override with CLAUDE_MODEL; 'default' 
 # removed and is refused up in §0b: long before we get here.
 case "${CLAUDE_AUTOPILOT:-0}" in
     1|true|yes|on) CLAUDE_MODE=autopilot;   MAIN_PANE_CMD=/usr/local/bin/claude-autopilot ;;
-    *)             CLAUDE_MODE=interactive; MAIN_PANE_CMD=/usr/local/bin/claude-session ;;
+    # --boot: resume main's last conversation when CLAUDE_MAIN_RESUME=1; otherwise (the
+    # default) a fresh one, exactly as before named sessions existed.
+    *)             CLAUDE_MODE=interactive; MAIN_PANE_CMD="/usr/local/bin/claude-session --boot" ;;
 esac
 export CLAUDE_MODE \
        CLAUDE_AUTOPILOT_CMD="${CLAUDE_AUTOPILOT_CMD:-}" \
@@ -1216,6 +1218,12 @@ export CLAUDE_MODE \
        CLAUDE_SCM_PR_LIMIT="${CLAUDE_SCM_PR_LIMIT:-}" \
        CLAUDE_SCM_PRIORITY="${CLAUDE_SCM_PRIORITY:-}" \
        CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
+# Named sessions (bin/claude-sessions, §12d). Exported so the tmux server carries them:
+# claude-sessions run from an SSH login reads them back from tmux's global environment.
+export CLAUDE_SESSIONS="${CLAUDE_SESSIONS:-}" \
+       CLAUDE_MAIN_RESUME="${CLAUDE_MAIN_RESUME:-0}" \
+       CLAUDE_GOAL_CHAIN_REVIEW="${CLAUDE_GOAL_CHAIN_REVIEW:-}" \
+       CLAUDE_RC_WATCHDOG="${CLAUDE_RC_WATCHDOG:-1}"
 
 # OpenTelemetry: opt-in fleet observability. Claude Code reads OTEL_* + the
 # enable flag straight from the process environment (env > settings.json), and
@@ -1343,6 +1351,14 @@ elif [[ -n "${CLAUDE_EGRESS_LOCKDOWN:-}" ]] && [[ ! "${CLAUDE_EGRESS_LOCKDOWN}" 
     log "Egress lockdown      : IPv4 UNRESTRICTED, IPv6 UNRESTRICTED (CLAUDE_EGRESS_LOCKDOWN='${CLAUDE_EGRESS_LOCKDOWN}' is not a recognised value, so NO firewall was applied; recognised: 0/false/no/off = off, 1/true/yes/on = lockdown that fails OPEN, strict = lockdown that refuses to start the agent when it cannot be applied)"
 fi
 
+# Named sessions, step 1 of 2 (§12d is step 2): bring the registry in line with
+# CLAUDE_SESSIONS and pre-accept workspace trust for every session directory NOW, while no
+# Claude process is running to rewrite .claude.json under us. The trust seeded for
+# /workspace in §7 does not cover /workspace/<repo>: without this a named session would sit
+# on the trust dialog. Never fatal.
+asclaude /usr/local/bin/claude-sessions prepare \
+    || log "WARNING: claude-sessions prepare failed; named sessions may be missing (claude-sessions ls)"
+
 # tmux server runs as the claude user; the main pane command falls back to an
 # interactive shell if it exits, so SSH stays usable. The pane lives in window
 # 'main' (the RC watchdog respawns it by name in interactive mode).
@@ -1408,6 +1424,23 @@ else
     log "Usage-limit watchdog disabled (CLAUDE_USAGE_WATCHDOG=0)"
 fi
 
+# --- 12d. Named sessions ------------------------------------------------------
+# CLAUDE_SESSIONS (claude-launch --session, claude-compose-gen --session) declares more
+# Claude sessions beside main, each in its own tmux window with its own Remote Control
+# link, directory, model and optional first prompt / goal; `claude-sessions new` adds more
+# at runtime and those persist on the config volume. `prepare` (above, before main started)
+# reconciled the declaration; `boot` starts every registered session that was not stopped
+# by hand, resuming its last conversation. It never fails the boot: a bad entry is skipped
+# with a log line.
+#
+# The supervisor always runs (it is cheap): it records which conversation each window is
+# running, so a restart or an RC recovery resumes exactly that one, and keeps a Remote
+# Control watchdog beside every named session.
+asclaude /usr/local/bin/claude-sessions boot --no-reconcile \
+    || log "WARNING: claude-sessions boot failed; named sessions may be missing (claude-sessions ls)"
+asclaude /usr/local/bin/claude-sessions supervise &
+SESSIONS_PID=$!
+
 echo
 if [[ "$CLAUDE_MODE" == "autopilot" ]]; then
     if [[ -n "${CLAUDE_AUTOPILOT_CMD:-}" ]]; then
@@ -1419,6 +1452,10 @@ else
     log "Remote Control name : $CLAUDE_PROJECT_NAME  (look for it in the Claude app Code tab)"
 fi
 log "SSH                 : connect, you'll attach to the live tmux session"
+_named="$(asclaude /usr/local/bin/claude-sessions names 2>/dev/null | grep -vx main | tr '\n' ' ' || true)"
+[[ -n "${_named// }" ]] && \
+    log "Named sessions      : ${_named% }  (claude-sessions ls; Remote Control ${CLAUDE_PROJECT_NAME}-<name>)"
+unset _named
 [[ -n "${CLAUDE_DEV_CMD:-}" ]] && \
     log "Dev window          : tmux select-window -t claude:dev  (after SSH attach)"
 echo
@@ -1426,12 +1463,17 @@ echo
 # --- 13. Stay alive + graceful shutdown --------------------------------------
 shutdown() {
     log "Shutting down"
+    # Note every window's current conversation first, so the next boot resumes exactly it
+    # (the supervisor only records every 15s). Bounded: a stop must never hang on this.
+    timeout 5 gosu "$CLAUDE_USER" env CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" \
+        /usr/local/bin/claude-sessions record >/dev/null 2>&1 || true
     asclaude tmux kill-server >/dev/null 2>&1 || true
     pkill -x sshd >/dev/null 2>&1 || true
     kill "$RECONCILE_PID" >/dev/null 2>&1 || true
     [[ -n "${ACCT_SWITCH_PID:-}" ]] && kill "$ACCT_SWITCH_PID" >/dev/null 2>&1 || true
     [[ -n "${RC_WATCHDOG_PID:-}" ]] && kill "$RC_WATCHDOG_PID" >/dev/null 2>&1 || true
     [[ -n "${USAGE_WATCHDOG_PID:-}" ]] && kill "$USAGE_WATCHDOG_PID" >/dev/null 2>&1 || true
+    [[ -n "${SESSIONS_PID:-}" ]] && kill "$SESSIONS_PID" >/dev/null 2>&1 || true
     exit 0
 }
 trap shutdown TERM INT

@@ -15,7 +15,23 @@ if [[ -z "$rows" ]]; then
     exit 0
 fi
 
-table="$(printf 'NAME\tSTATE\tSSH PORT\tREPO\tSTATUS\n%s\n' "$rows")"
+# SESSIONS: the named sessions each container runs besides main, from its last healthcheck
+# ("healthy; sessions: 2/3 up (3d: claude exited)"), so this needs no exec into anything.
+# "-" = main only, or no healthcheck has run yet. One inspect for the whole fleet.
+declare -A SESS=()
+if command -v jq >/dev/null 2>&1; then
+    while IFS=$'\t' read -r n s; do
+        [[ -n "$n" ]] && SESS[$n]="$s"
+    done < <(docker inspect $(cut -f1 <<<"$rows") 2>/dev/null | jq -r '.[]
+        | [ (.Name | ltrimstr("/")),
+            (((.State.Health.Log // []) | last // {} | .Output // "")
+             | capture("sessions: (?<s>[0-9]+/[0-9]+ up)(?<p> \\([^)]*\\))?").s // "-") ] | @tsv' 2>/dev/null || true)
+fi
+rows="$(while IFS=$'\t' read -r n st port repo status; do
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$st" "$port" "${SESS[$n]:--}" "$repo" "$status"
+done <<<"$rows")"
+
+table="$(printf 'NAME\tSTATE\tSSH PORT\tSESSIONS\tREPO\tSTATUS\n%s\n' "$rows")"
 # `column` is in util-linux/bsdmainutils and not always present; fall back to
 # an awk pass that measures each column so it always renders aligned (kept
 # mawk-compatible: single-dim arrays + split, no gawk-only features).

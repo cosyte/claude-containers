@@ -147,7 +147,7 @@ the home, 3d and devices interview ran 19 rounds and 78 questions, and its brief
 it. Expect 10 to 25 rounds.
 
 1. **Direction.** Where Noah wants the project in the coming months and year; what it is for and
-   who uses it; the emphasis, in his words; what success looks like; explicit non-goals.
+   who uses it; the emphasis, in Noah's own words; what success looks like; explicit non-goals.
 2. **Current state.** Each rough edge and open item the survey found: fix, leave, drop, or research.
    Existing roadmaps and plans: keep, supersede or reverse. A reversal is recorded in the file whose
    rule it changes.
@@ -174,7 +174,7 @@ it. Expect 10 to 25 rounds.
      never merge, only read it, or never touch it?
 8. **Architecture.**
    - where new code lives: this repo, a shared library, or a new repo (creating a GitHub repo is
-     Noah's step unless he authorises it)
+     Noah's step unless Noah authorises it)
    - languages
    - dependencies and pins
    - licences that matter
@@ -206,7 +206,7 @@ it. Expect 10 to 25 rounds.
     - where Needs Noah items go
     - the tools and equipment Noah has (ask; don't infer from records)
     - how measurements, data, photos and approvals reach the repo
-    - how quickly Noah can act. Goals chain in hours and his steps take days, which shapes where
+    - how quickly Noah can act. Goals chain in hours and Noah's steps take days, which shapes where
       checkpoints go.
 15. **Interfaces.** How Noah uses the result day to day: CLI, Claude Code skills, a web UI, MCP, the
     phone app, printed sheets, an API.
@@ -265,7 +265,7 @@ Present this at item 6. It becomes §0 unless Noah changes it.
   - `C<n>` for decisions common to several programs
   - `<L><n>` for one program, where `<L>` is a letter no existing program uses
 
-  Each row states the chosen option in bold, quotes Noah's words where he typed any, and ends with
+  Each row states the chosen option in bold, quotes Noah's words wherever Noah typed any, and ends with
   "Not chosen: …" listing the declined options, so no goal re-opens them.
 - **`interview.md`** holds every round verbatim: the time, each question with its options, and the
   answer.
@@ -425,7 +425,7 @@ tell it the hard 4,000-character limit on goal files. Reconcile the briefs yours
   the ledger, the Needs Noah list
 - approval is a commit on `main` adding `.claude/goals/CHECKPOINT-<X>.approved` with Noah's own
   words ("Approved by Noah, <date>" plus any amendments)
-- only Noah writes it, or a session he tells to in its own chat
+- only Noah writes it, or a session Noah tells to in its own chat
 - the goals after it chain without further review unless the decisions say otherwise
 - `<X>` is a letter no existing program's checkpoint uses
 
@@ -458,9 +458,9 @@ each finding fixed, or declined with the reason.
   also carries the start-up and the checkpoint packet.
 - **Loops are bounded.** Every "repeat until it passes" has a maximum number of rounds and says
   what happens at the limit.
-- **Noah's steps never stall the chain.** Work that needs his physical result either waits behind
+- **Noah's steps never stall the chain.** Work that needs Noah's physical result either waits behind
   a checkpoint, or proceeds on fixtures with the real run marked NEEDS-NOAH. The goal that uses
-  his result re-checks for it and re-runs when it has arrived.
+  that result re-checks for it and re-runs when it has arrived.
 - **Standard closing lines.** Every goal ends with, in this order:
   - (if other programs run) "Requests: every row addressed to <program> is DONE, ACCEPTED (goal
     named), DEFERRED (follow-up listed) or DECLINED (why); rows it filed are listed with their
@@ -585,7 +585,7 @@ The reviewer's checklist, drawn from what the earlier programs' reviews caught:
   use.
 - **Safety and security:** safety, tokens, identity and outward-facing actions are guarded in code
   where they can be, not only in prose.
-- **Coverage:** no area Noah chose goes unbuilt, and no area he declined gets built.
+- **Coverage:** no area Noah chose goes unbuilt, and no declined area gets built.
 - **Structure:** no loop is unbounded, and no work is duplicated between goals.
 - **Reversals:** each is recorded, and none is broader or narrower than its decision.
 
@@ -654,5 +654,8 @@ Print the following:
   - `/clear` removes the goal. `claude --resume <id>` restores it.
   - Each later goal starts the same way, after the previous one's report (and after Noah approves
     the checkpoint, where there is one).
+  - To run the goals back to back without starting each by hand, run `claude-goal-chain <window>`
+    in its own tmux window (`claude-goal-chain --help`). It starts each next goal in the same
+    session once the previous one is COMPLETE on origin and its checkpoint is approved.
 
 Then stop. Do not start goal 1.

@@ -67,11 +67,14 @@ the `./bin/` prefix.
  │                        │             │   ├─ merge baked-in config       │
  │                        │             │   ├─ clone / use /workspace      │
  │                        │             │   └─ gosu claude ▶ tmux "claude" │
- │                        │             │            └─ claude \           │
- │                        │             │                 --dangerously-   │
- │                        │             │                 skip-permissions │
- │                        │             │                 --remote-control │
- │                        │             │                 "<project>"      │
+ │                        │             │            ├─ main: claude \     │
+ │                        │             │            │   --dangerously-    │
+ │                        │             │            │   skip-permissions  │
+ │                        │             │            │   --remote-control  │
+ │                        │             │            │   "<project>"       │
+ │                        │             │            └─ <name>: claude …   │
+ │                        │             │                --remote-control  │
+ │                        │             │                "<project>-<name>"│
  └────────────────────────┘             └───────┬──────────────────────────┘
                                                  │ outbound HTTPS only
  Claude mobile app  ◀───── Remote Control ───────┘  (no inbound port)
@@ -286,6 +289,7 @@ claude-launch <name> [--repo URL [--repo URL[#BRANCH]]... | --workspace PATH] [-
                       [--port N] [--model NAME] [--mcp NAME ...] [--browser|--no-browser]
                       [--gpu|--no-gpu]
                       [--extra-args "…"] [--expose H:C ...] [--dev-cmd "…"]
+                      [--session "NAME [key=value ...]" ...] [--env KEY=VALUE ...]
 claude-tui                        interactive whiptail menu over the whole fleet: per-session
                                    (attach/start/stop/restart/logs/remove/launch), grouped by
                                    compose stack (bring up a dormant repo, switch a stack's auth
@@ -294,8 +298,11 @@ claude-tui                        interactive whiptail menu over the whole fleet
                                    Discovers stacks live from `com.docker.compose.project`
                                    labels; set CLAUDE_TUI_STACKS to pre-seed one with no
                                    containers created yet. Wraps the commands below; no new logic.
-claude-list                       table of all sessions
-claude-attach <name>              attach to its live tmux session (local host)
+claude-list                       table of all containers (SESSIONS = named sessions up, from the healthcheck)
+claude-attach <name> [session]    attach to its live tmux session (local host), on a named
+                                   session's window if given
+claude-sessions -C <name> CMD     manage the sessions inside a container from the host
+                                   (ls, new, start, stop, restart, send, ...; see below)
 claude-stop  <name>               graceful stop (state preserved)
 claude-rm    <name> [--yes] [--purge]   remove (+volumes with --purge)
 claude-logs  <name> [-n LINES]    tail the entrypoint/sshd log
@@ -469,6 +476,122 @@ to the list and restarting brings it in, and an existing checkout is never touch
 container passes the list as `GIT_REPOS`; it cannot be combined with a single-repo
 workspace (a repo at `/workspace` itself), so a multi-repo service starts from a fresh
 workspace volume.
+
+## Several sessions in one container
+
+Every container runs its own session in tmux window `main` (Remote Control name = the
+project). It can run more, started at boot: each in its own tmux window, with its own
+Remote Control link (`<project>-<name>`, so each shows up separately in the Claude app),
+working directory, model, permission mode, and an optional first prompt or `/goal`. They
+share the container's workspace, tools, credentials and resources, which makes this the
+natural shape for several lanes of work over one checkout, or one session per repo of a
+multi-repo container.
+
+```
+# a standalone container: main + one session per repo, plus a read-only reviewer
+claude-launch maker --repo git@github.com:you/home.git --repo git@github.com:you/3d.git \
+    --session '*' --session 'review dir=home model=sonnet mode=plan'
+
+# a stack service (scenario .conf lines, or the generator's command line)
+--group maker=you/home,you/3d,you/devices
+--session maker=home goal=.claude/goals/2026-09-home-g1.goal.txt chain
+--session maker=3d goal=.claude/goals/2026-09-3d-g1.goal.txt chain
+--session maker=devices goal=.claude/goals/2026-09-devices-g1.goal.txt chain
+--env maker=CLAUDE_GOAL_CHAIN_REVIEW=it reviews and approves for me then starts the next goal
+```
+
+A session spec is `NAME [key=value ...]`, several separated by `;` (the flag repeats too):
+
+| Key | Meaning |
+|---|---|
+| `NAME` | lowercase letters, digits, `-`, `_`: the tmux window and the Remote Control suffix. `main`, `dev`, `scm`, `goal-chain` are taken. `*` is one session per git repo directly under `/workspace`, named after the repo (a named entry wins its name). |
+| `dir=` | working directory, absolute or relative to `/workspace`. Default: `/workspace/NAME` when it is a directory, else `/workspace`. |
+| `model=` / `mode=` | model alias or id / permission mode for this session (default: the container's). |
+| `goal=FILE` | on its **first** start, begin with `/goal <contents of FILE>` (FILE relative to `dir`). |
+| `prompt-file=FILE` | on its first start, begin with the contents of FILE. |
+| `rc=off` | no Remote Control link (SSH / tmux only). |
+| `resume=off` | a fresh conversation on every boot. By default a named session **resumes its last conversation** when the container restarts; main does not unless `CLAUDE_MAIN_RESUME=1`. |
+| `chain` | run the session's `/goal` program back to back: one `goal-chain` window runs `claude-goal-chain` over every chained session (see the next section). `CLAUDE_GOAL_CHAIN_REVIEW="<your words>"` delegates its checkpoint reviews. |
+
+`claude-launch` and `claude-compose-gen` validate the spec with the container's own
+parser, so a typo fails the launch or the generation, not the boot. Inside, and from the
+host with `claude-sessions -C <project> …`:
+
+```
+claude-sessions                        # ls: every session, its state (busy/idle/shell/stopped), dir, Remote Control, conversation
+claude-sessions new review --dir home --model sonnet --prompt "Review the last 5 commits"
+claude-sessions attach home            # or Ctrl-b w in tmux, or from the host: claude-attach maker home
+claude-sessions send home "Run the tests and fix what fails"
+claude-sessions restart home [--fresh] # resume its conversation in a new process (or start over)
+claude-sessions stop home              # stays stopped across restarts, until: claude-sessions start home
+claude-sessions reset home             # forget its conversation; the next start re-sends its first prompt
+claude-sessions rm review              # a `new` session only; a declared one is stopped instead
+```
+
+Sessions from `--session` (`CLAUDE_SESSIONS`) are the container's declaration: reconciled
+on every boot, so an entry dropped from it is unregistered on the next recreate. Sessions
+from `claude-sessions new` persist on the config volume and come back after a restart. A
+first prompt or goal is sent exactly once (the start is recorded before Claude runs), so
+a restart never replays goal 1 over a session that is on goal 4. What keeps several
+sessions honest:
+
+- **Resume is exact.** A supervisor records which conversation each window runs (from
+  Claude Code's own `sessions/<pid>.json`, so it follows a `/clear`), and a restart resumes
+  that one with `--resume <id>`. `--continue` is only a fallback, and only when no other
+  session works in the same directory, where it could pick up a sibling's conversation.
+- **Recovery is per session.** Every session with a Remote Control link gets its own RC
+  watchdog, debug log (`/tmp/claude-rc-debug-<name>.log`) and respawn lock, and a restart
+  kills only its own pane's processes. The usage-limit watchdog resumes every session that
+  hit the limit, each with its own conversation.
+- **Health stays about the container.** `docker ps` / `claude-list` read
+  `healthy; sessions: 2/3 up (3d: claude exited)`: a named session never makes the
+  container unhealthy (that would restart every session in it); main still does.
+- **Capacity is shared.** The boot log says what each session gets (`Capacity: 4 Claude
+  sessions share 16384 MiB (~4096 MiB each)`) and warns under 1 GiB each: a Claude process
+  alone uses 300-600 MiB, and an OOM kill lands on whichever session the kernel picks.
+  Raise `--mem` / `CLAUDE_MEM_LIMIT` with the session count.
+
+Sessions share one checkout per directory. Two sessions writing the same git tree race on
+its index, so give concurrent writers their own directories (one per repo, or a `git
+worktree` each) and keep extra sessions in a shared directory to reading and reviewing
+(`mode=plan`).
+
+## Goal programs (`/plan-program`, `claude-goal-chain`)
+
+A **program** is a brief plus numbered `/goal` files (`.claude/goals/<prefix>-g<n>.goal.txt`)
+that sessions run one after another. The baked `/plan-program` command interviews you and
+writes one (see [customizing-bakeins.md](docs/customizing-bakeins.md)). `claude-goal-chain`,
+also baked, runs its goals back to back in the same session, so the phone app keeps one
+Remote Control link per program:
+
+```
+tmux new-window -d -n goal-chain 'claude-goal-chain home 3d devices'   # windows claude:home … in /workspace/<name>
+claude-goal-chain status                                               # phase and last goal per window
+claude-goal-chain start devices 5                                      # /clear + goal 5 now, by hand
+```
+
+Natively at start: declare each program's session with `goal=<its g1 file>` and `chain`
+(see [Several sessions in one container](#several-sessions-in-one-container)). The
+container then starts every session on goal 1 and a `goal-chain` window over all of them,
+and a restart resumes each session's conversation and the chain instead of replaying goal
+1. `CLAUDE_GOAL_CHAIN_REVIEW` (via `--env`) is the `--review-checkpoints` quote.
+
+When a goal is met, it waits for the session to be idle and checks origin before doing
+anything. The ledger must carry `COMPLETE (goal n)` and the report must not be BLOCKED (a
+BLOCKED report satisfies the evaluator too). If a checkpoint file the next goal needs is
+missing, it waits for it. Otherwise it sends `/clear`, then `/goal` with the next file. After a
+usage-limit pause it sends one "continue" once the reset time in the CLI's own message has
+passed. Whenever it stops the chain (BLOCKED, an incomplete ledger, a failed goal, the end of
+the program), it types a short note into the session so you see it in the app.
+
+`--review-checkpoints "<your words>"` delegates checkpoint approval. When a goal that ends at
+Checkpoint X is complete, the same session runs a review `/goal`: re-run the gate, have a fresh
+adversarial subagent check the packet and the ledger, and decide the open proposals. If it
+approves, it commits `CHECKPOINT-X.approved` saying it was approved on your behalf and quoting
+your words, and the next goal starts. It never approves what only you can do or judge
+(buying, printing, measuring, accounts or tokens, a fit or look that needs the object in
+hand). The watcher itself never writes a checkpoint file. State and a log live in
+`~/.claude/goal-chain/`.
 
 ## GPU sessions (optional)
 
