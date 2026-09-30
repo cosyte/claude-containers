@@ -258,7 +258,9 @@ a fresh `claude-ws-NAME` volume. `test/workspace-unit.sh` covers it.
 `compose-gen --session SVC=SPEC` (repeatable, accumulates; `;` separates entries; both
 validate with the container's own parser) set `CLAUDE_SESSIONS`. SPEC entry =
 `NAME [dir=] [model=] [mode=] [goal=FILE | prompt-file=FILE] [rc=off] [resume=off] [chain]`;
-NAME `*` = one per git repo under /workspace (named entries win). RC name `<project>-NAME`.
+NAME `*` = one per git repo under /workspace (named entries win). Every session is named
+`<project>-<window>` (RC name and `--name`, each start; a resumed conversation otherwise keeps its
+old RC session's name); main is `<project>-main` when named sessions exist (`CLAUDE_MAIN_NAME`).
 `--env KEY=VALUE` (launch) / `--env SVC=KEY=VALUE` (compose-gen; refuses keys it already
 emits) passes e.g. `CLAUDE_GOAL_CHAIN_REVIEW` (the `--review-checkpoints` quote for `chain`
 sessions) or `CLAUDE_MAIN_RESUME=1`. Values with spaces or `;` cannot go in `.env` (it is
