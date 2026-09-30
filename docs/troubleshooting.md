@@ -244,6 +244,12 @@ shell in that window), `down` (no window) or `stopped` (stopped by hand).
   `claude-sessions restart <repo> --resume <id>`. The conversation's paths still say
   `/workspace`; tell the session its repo is now `/workspace/<repo>`. A `/goal` program's
   goal files name the launch directory too, so amend them before its next goal starts.
+  "Nothing unpushed" includes linked worktrees: a goal's worktrees usually live on the shared
+  `/cache` (`git -C /workspace worktree list`), and each one's `.git` file points into the OLD
+  container's `/workspace/.git`, so inside the new container it is broken. Once its branch is
+  pushed and clean, delete the directory and `git worktree add` it again from the new checkout.
+  Settings in a repo's committed `.claude/settings.json` sized for the old container (build
+  jobs, agent counts) reach a running session on its next command once the file changes.
 - **Its goal was not sent.** A first prompt / goal is sent on the session's first start
   only. `claude-sessions reset NAME` makes the next start a first start again. A missing
   goal file is a warning in the pane, and the session starts without it.
