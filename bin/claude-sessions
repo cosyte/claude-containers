@@ -39,7 +39,8 @@
 #                   --prompt TEXT] [--no-rc] [--no-resume] [--chain]
 #   claude-sessions start NAME... | --all  start registered sessions that are not running
 #   claude-sessions stop NAME...           end them; they stay stopped across restarts
-#   claude-sessions restart NAME [--fresh] resume its conversation in a new process
+#   claude-sessions restart NAME [--fresh | --resume ID]  resume its conversation in a new
+#                                          process (or start over, or take over conversation ID)
 #   claude-sessions reset NAME             forget its conversation; the next start is a
 #                                          first start again (first prompt / goal re-sent)
 #   claude-sessions rm NAME                stop and unregister a `new` session
@@ -594,14 +595,16 @@ cmd_supervise() {
 }
 
 # --- ls / health ------------------------------------------------------------------------------
-session_state() {  # session_state <name> <live-sessions>: stopped|down|shell|busy|idle|...
+session_state() {  # session_state <name> <live-sessions>: stopped|down|exited|starting|busy|idle|shell|...
     local n="$1" pane st
     if [[ "$n" != main && "$(sget "$n" stopped)" == 1 ]]; then echo stopped; return; fi
     pane="$(window_pane "$n")"
     [[ -n "$pane" ]] || { echo down; return; }
     st="$(awk -F'\t' -v p="$pane" '$1==p{print $3; exit}' <<<"$2")"
     if [[ -n "$st" ]]; then echo "$st"; return; fi
-    if pane_has_claude "$n"; then echo starting; else echo shell; fi
+    # "exited", never "shell": Claude Code reports its own status "shell" while a background
+    # shell runs, and a busy session must not read as a dead one.
+    if pane_has_claude "$n"; then echo starting; else echo exited; fi
 }
 
 rc_dead() {  # rc_dead <name>: its Remote Control bridge has given up
@@ -650,7 +653,7 @@ cmd_health() {
         st="$(session_state "$n" "$live")"
         case "$st" in
             down)  problems+="${problems:+, }$n: no window" ;;
-            shell) problems+="${problems:+, }$n: claude exited" ;;
+            exited) problems+="${problems:+, }$n: claude exited" ;;
             *)     if [[ "$(cget "$n" rc)" != off ]] && rc_dead "$n"; then
                        problems+="${problems:+, }$n: Remote Control dead"
                    else
@@ -811,13 +814,25 @@ cmd_start() {
 }
 
 cmd_restart() {
-    local n="${1:-}" flag=--continue
-    [[ -n "$n" ]] || die "usage: claude-sessions restart NAME [--fresh]"
-    [[ "${2:-}" == --fresh ]] && flag=--fresh
+    local n="${1:-}" flag=--continue what="resuming its conversation"
+    [[ -n "$n" ]] || die "usage: claude-sessions restart NAME [--fresh | --resume ID]"
     [[ "$n" == main ]] || registered_p "$n" || die "no such session: $n"
-    record_one "$n"
+    case "${2:-}" in
+        "")       record_one "$n" ;;   # resume what the window runs right now
+        --fresh)  flag=--fresh; what="a fresh conversation" ;;
+        --resume)
+            # A specific conversation, e.g. one copied in from another container. Recorded as the
+            # session's own, and NOT preceded by record_one, which would overwrite it with the
+            # conversation the window is running now.
+            [[ "${3:-}" =~ ^[A-Za-z0-9-]+$ ]] || die "--resume needs a conversation id"
+            compgen -G "$CONFIG_DIR/projects/*/$3.jsonl" >/dev/null \
+                || die "no transcript for conversation $3 under $CONFIG_DIR/projects (copy it into projects/<the session dir's project>/ first)"
+            sset "$n" sid "$3"; sset "$n" started 1
+            flag="--resume $3"; what="resuming conversation $3" ;;
+        *) die "usage: claude-sessions restart NAME [--fresh | --resume ID]" ;;
+    esac
     if window_exists "$n"; then
-        respawn_one "$n" "$flag" && say "$n: restarted ($([[ $flag == --fresh ]] && echo 'a fresh conversation' || echo 'resuming its conversation'))"
+        respawn_one "$n" "$flag" && say "$n: restarted ($what)"
     else
         [[ "$n" == main ]] && die "window main is gone: restart the container"
         sset "$n" stopped 0

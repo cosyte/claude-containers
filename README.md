@@ -518,11 +518,12 @@ parser, so a typo fails the launch or the generation, not the boot. Inside, and 
 host with `claude-sessions -C <project> …`:
 
 ```
-claude-sessions                        # ls: every session, its state (busy/idle/shell/stopped), dir, Remote Control, conversation
+claude-sessions                        # ls: every session, its state (busy/idle/exited/stopped), dir, Remote Control, conversation
 claude-sessions new review --dir home --model sonnet --prompt "Review the last 5 commits"
 claude-sessions attach home            # or Ctrl-b w in tmux, or from the host: claude-attach maker home
 claude-sessions send home "Run the tests and fix what fails"
 claude-sessions restart home [--fresh] # resume its conversation in a new process (or start over)
+claude-sessions restart home --resume ID   # take over conversation ID (e.g. one copied in from another container)
 claude-sessions stop home              # stays stopped across restarts, until: claude-sessions start home
 claude-sessions reset home             # forget its conversation; the next start re-sends its first prompt
 claude-sessions rm review              # a `new` session only; a declared one is stopped instead

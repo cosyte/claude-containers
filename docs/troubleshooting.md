@@ -219,7 +219,8 @@ was pre-accepted.
 ## Several sessions in one container (`--session`, `claude-sessions`)
 
 Start with `claude-sessions ls` inside (or `claude-sessions -C <project> ls` from the
-host). STATE is `busy`/`idle` (Claude is running), `starting`, `shell` (Claude exited to a
+host). STATE is Claude Code's own status while Claude runs (`busy`, `idle`, `waiting`, or `shell` while
+a background shell runs), `starting`, `exited` (Claude exited to a
 shell in that window), `down` (no window) or `stopped` (stopped by hand).
 
 - **A session is missing at boot.** `claude-logs <project>` has a `[sessions]` line for
@@ -228,7 +229,7 @@ shell in that window), `down` (no window) or `stopped` (stopped by hand).
   not exist` (a `dir=` typo, or a repo that did not clone), or `stopped by hand` (run
   `claude-sessions start NAME`). A session dropped from `--session` is unregistered on
   the next recreate, by design.
-- **`shell`.** Claude exited in that window; its last lines are in the pane
+- **`exited`.** Claude exited in that window; its last lines are in the pane
   (`claude-sessions attach NAME`). `claude-sessions restart NAME` resumes the same
   conversation; `--fresh` starts over.
 - **It started a fresh conversation after a restart.** A session resumes the conversation
@@ -236,6 +237,19 @@ shell in that window), `down` (no window) or `stopped` (stopped by hand).
   transcript (a session that never received a prompt has nothing to resume), and a
   `--continue` fallback is only used when no other session shares the directory. `resume=off`
   in the spec and main without `CLAUDE_MAIN_RESUME=1` start fresh on purpose.
+- **Moving a conversation in from another container** (a standalone container folded into a
+  multi-session one). Once that session is idle and its workspace has nothing unpushed, stop
+  the old container, copy `projects/-workspace/<id>.jsonl` (and the `<id>/` directory beside it)
+  from its config volume into this one's `projects/-workspace-<repo>/`, then
+  `claude-sessions restart <repo> --resume <id>`. The conversation's paths still say
+  `/workspace`; tell the session its repo is now `/workspace/<repo>`. A `/goal` program's
+  goal files name the launch directory too, so amend them before its next goal starts.
+  "Nothing unpushed" includes linked worktrees: a goal's worktrees usually live on the shared
+  `/cache` (`git -C /workspace worktree list`), and each one's `.git` file points into the OLD
+  container's `/workspace/.git`, so inside the new container it is broken. Once its branch is
+  pushed and clean, delete the directory and `git worktree add` it again from the new checkout.
+  Settings in a repo's committed `.claude/settings.json` sized for the old container (build
+  jobs, agent counts) reach a running session on its next command once the file changes.
 - **Its goal was not sent.** A first prompt / goal is sent on the session's first start
   only. `claude-sessions reset NAME` makes the next start a first start again. A missing
   goal file is a warning in the pane, and the session starts without it.

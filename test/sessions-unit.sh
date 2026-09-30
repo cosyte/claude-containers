@@ -333,6 +333,12 @@ check "ls marks a session without Remote Control" test "$(jq -r '.[] | select(.n
 bash -c 'sleep 300' & KILL+=($!); echo $! > "$FAKE/tm/w/review/pid"
 out="$("$CS" health)"
 check "health: a pane whose claude exited is reported" test "$out" = "sessions: 1/2 up (review: claude exited)"
+check "ls says 'exited' for it" test "$("$CS" ls --json | jq -r '.[] | select(.name=="review") | .state')" = exited
+sj="$(grep -l '"conv-home"' "$CLAUDE_CONFIG_DIR"/sessions/*.json | head -1)"
+jq '.status = "shell"' "$sj" > "$sj.t" && mv "$sj.t" "$sj"
+check "a session running a background shell (Claude Code's status 'shell') is up, not exited" \
+    test "$("$CS" health)" = "sessions: 1/2 up (review: claude exited)"
+jq '.status = "idle"' "$sj" > "$sj.t" && mv "$sj.t" "$sj"
 printf 'recovery exhausted after 6 attempts\n' > "$TMPD/rc/claude-rc-debug-home.log"
 out="$("$CS" health)"
 [[ "$out" == *"home: Remote Control dead"* ]] && ok "health: a dead Remote Control link is reported" || bad "health: $out"
@@ -348,6 +354,13 @@ check "start brings it back and clears the stop" bash -c "[[ -e '$FAKE/tm/w/home
 "$CS" restart home --fresh >/dev/null 2>&1
 check "restart --fresh respawns through the watchdog with --fresh" \
     grep -q "^--respawn target=claude:home .*cmd=/usr/local/bin/claude-session --session home --fresh" "$FAKE/watchdog.calls"
+mkdir -p "$CLAUDE_CONFIG_DIR/projects/-moved"; touch "$CLAUDE_CONFIG_DIR/projects/-moved/imported-1.jsonl"
+"$CS" restart home --resume imported-1 >/dev/null 2>&1
+check "restart --resume ID respawns with --resume ID" \
+    grep -q "^--respawn target=claude:home .*cmd=/usr/local/bin/claude-session --session home --resume imported-1 " "$FAKE/watchdog.calls"
+check "restart --resume keeps that id as the session's conversation (no record over it)" grep -qx 'sid=imported-1' "$REG/home.state"
+out="$("$CS" restart home --resume nosuch 2>&1)"; rc=$?
+check "restart --resume refuses an id with no transcript" bash -c "(( $rc != 0 )) && [[ \"\$1\" == *'no transcript'* ]]" _ "$out"
 "$CS" restart main >/dev/null 2>&1
 check "restart main respawns main with --continue under main's lock" \
     grep -q "^--respawn target=claude:main .*cmd=/usr/local/bin/claude-session --continue lock=/tmp/claude-respawn.lock" "$FAKE/watchdog.calls"
