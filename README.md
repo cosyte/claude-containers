@@ -518,7 +518,7 @@ parser, so a typo fails the launch or the generation, not the boot. Inside, and 
 host with `claude-sessions -C <project> …`:
 
 ```
-claude-sessions                        # ls: every session, its state (busy/idle/shell/stopped), dir, Remote Control, conversation
+claude-sessions                        # ls: every session, its state (busy/idle/exited/stopped), dir, Remote Control, conversation
 claude-sessions new review --dir home --model sonnet --prompt "Review the last 5 commits"
 claude-sessions attach home            # or Ctrl-b w in tmux, or from the host: claude-attach maker home
 claude-sessions send home "Run the tests and fix what fails"

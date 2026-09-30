@@ -595,14 +595,16 @@ cmd_supervise() {
 }
 
 # --- ls / health ------------------------------------------------------------------------------
-session_state() {  # session_state <name> <live-sessions>: stopped|down|shell|busy|idle|...
+session_state() {  # session_state <name> <live-sessions>: stopped|down|exited|starting|busy|idle|shell|...
     local n="$1" pane st
     if [[ "$n" != main && "$(sget "$n" stopped)" == 1 ]]; then echo stopped; return; fi
     pane="$(window_pane "$n")"
     [[ -n "$pane" ]] || { echo down; return; }
     st="$(awk -F'\t' -v p="$pane" '$1==p{print $3; exit}' <<<"$2")"
     if [[ -n "$st" ]]; then echo "$st"; return; fi
-    if pane_has_claude "$n"; then echo starting; else echo shell; fi
+    # "exited", never "shell": Claude Code reports its own status "shell" while a background
+    # shell runs, and a busy session must not read as a dead one.
+    if pane_has_claude "$n"; then echo starting; else echo exited; fi
 }
 
 rc_dead() {  # rc_dead <name>: its Remote Control bridge has given up
@@ -651,7 +653,7 @@ cmd_health() {
         st="$(session_state "$n" "$live")"
         case "$st" in
             down)  problems+="${problems:+, }$n: no window" ;;
-            shell) problems+="${problems:+, }$n: claude exited" ;;
+            exited) problems+="${problems:+, }$n: claude exited" ;;
             *)     if [[ "$(cget "$n" rc)" != off ]] && rc_dead "$n"; then
                        problems+="${problems:+, }$n: Remote Control dead"
                    else

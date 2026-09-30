@@ -219,7 +219,8 @@ was pre-accepted.
 ## Several sessions in one container (`--session`, `claude-sessions`)
 
 Start with `claude-sessions ls` inside (or `claude-sessions -C <project> ls` from the
-host). STATE is `busy`/`idle` (Claude is running), `starting`, `shell` (Claude exited to a
+host). STATE is Claude Code's own status while Claude runs (`busy`, `idle`, `waiting`, or `shell` while
+a background shell runs), `starting`, `exited` (Claude exited to a
 shell in that window), `down` (no window) or `stopped` (stopped by hand).
 
 - **A session is missing at boot.** `claude-logs <project>` has a `[sessions]` line for
@@ -228,7 +229,7 @@ shell in that window), `down` (no window) or `stopped` (stopped by hand).
   not exist` (a `dir=` typo, or a repo that did not clone), or `stopped by hand` (run
   `claude-sessions start NAME`). A session dropped from `--session` is unregistered on
   the next recreate, by design.
-- **`shell`.** Claude exited in that window; its last lines are in the pane
+- **`exited`.** Claude exited in that window; its last lines are in the pane
   (`claude-sessions attach NAME`). `claude-sessions restart NAME` resumes the same
   conversation; `--fresh` starts over.
 - **It started a fresh conversation after a restart.** A session resumes the conversation

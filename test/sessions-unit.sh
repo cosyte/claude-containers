@@ -333,6 +333,12 @@ check "ls marks a session without Remote Control" test "$(jq -r '.[] | select(.n
 bash -c 'sleep 300' & KILL+=($!); echo $! > "$FAKE/tm/w/review/pid"
 out="$("$CS" health)"
 check "health: a pane whose claude exited is reported" test "$out" = "sessions: 1/2 up (review: claude exited)"
+check "ls says 'exited' for it" test "$("$CS" ls --json | jq -r '.[] | select(.name=="review") | .state')" = exited
+sj="$(grep -l '"conv-home"' "$CLAUDE_CONFIG_DIR"/sessions/*.json | head -1)"
+jq '.status = "shell"' "$sj" > "$sj.t" && mv "$sj.t" "$sj"
+check "a session running a background shell (Claude Code's status 'shell') is up, not exited" \
+    test "$("$CS" health)" = "sessions: 1/2 up (review: claude exited)"
+jq '.status = "idle"' "$sj" > "$sj.t" && mv "$sj.t" "$sj"
 printf 'recovery exhausted after 6 attempts\n' > "$TMPD/rc/claude-rc-debug-home.log"
 out="$("$CS" health)"
 [[ "$out" == *"home: Remote Control dead"* ]] && ok "health: a dead Remote Control link is reported" || bad "health: $out"
