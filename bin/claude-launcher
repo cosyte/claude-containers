@@ -12,8 +12,19 @@
 # size is a reliable test (install.cjs itself uses the same 4096 cutoff).
 set -u
 
-PREFIX=/opt/claude-code
+PREFIX="${CLAUDE_CODE_PREFIX:-/opt/claude-code}"
 PKG="$PREFIX/lib/node_modules/@anthropic-ai/claude-code"
+
+# An auto-update in progress replaces the package under $PREFIX, and for a few seconds up to a
+# couple of minutes bin/claude does not exist. A session started (or relaunched after a crash)
+# in that window used to die with "No such file or directory" (127). Wait for it instead.
+if [ ! -e "$PREFIX/bin/claude" ]; then
+    echo "claude: Claude Code is being updated; waiting for it to finish..." >&2
+    waited=0
+    while [ ! -e "$PREFIX/bin/claude" ] && [ "$waited" -lt "${CLAUDE_UPDATE_WAIT:-180}" ]; do
+        sleep 2; waited=$((waited + 2))
+    done
+fi
 
 is_stub() {
     local size

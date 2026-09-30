@@ -308,6 +308,16 @@ grep -q "crashed 3 times in 900s: not restarting it automatically again" "$TMPD/
 check "main is relaunched too" test "$(crash_run 1 0 -- --boot)" -eq 2
 rm -f "$FAKE/codes"
 
+echo "== the claude launcher waits out an update in progress =="
+LP="$TMPD/prefix"; mkdir -p "$LP/lib/node_modules/@anthropic-ai/claude-code/bin"
+( sleep 3; mkdir -p "$LP/bin"; printf '#!/bin/sh\necho launched "$@"\n' > "$LP/bin/claude"; chmod +x "$LP/bin/claude" ) &
+out="$(CLAUDE_CODE_PREFIX="$LP" "$REPO_ROOT/bin/claude-launcher" --version 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$out" == *"being updated; waiting"* && "$out" == *"launched --version"* ]] \
+    && ok "a missing binary (an update in progress) is waited for, then run" || bad "launcher wait (rc=$rc): $out"
+rm -rf "$LP/bin"
+out="$(CLAUDE_CODE_PREFIX="$LP" CLAUDE_UPDATE_WAIT=2 "$REPO_ROOT/bin/claude-launcher" 2>&1)"; rc=$?
+check "the wait is bounded (CLAUDE_UPDATE_WAIT), then it fails as before" test "$rc" -ne 0
+
 echo "== claude-session: main =="
 mkdir -p "$CLAUDE_CONFIG_DIR/projects/x"; touch "$CLAUDE_CONFIG_DIR/projects/x/sid-main.jsonl"
 "$CS" mark main sid=sid-main
