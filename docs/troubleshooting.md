@@ -236,6 +236,13 @@ shell in that window), `down` (no window) or `stopped` (stopped by hand).
   transcript (a session that never received a prompt has nothing to resume), and a
   `--continue` fallback is only used when no other session shares the directory. `resume=off`
   in the spec and main without `CLAUDE_MAIN_RESUME=1` start fresh on purpose.
+- **Moving a conversation in from another container** (a standalone container folded into a
+  multi-session one). Once that session is idle and its workspace has nothing unpushed, stop
+  the old container, copy `projects/-workspace/<id>.jsonl` (and the `<id>/` directory beside it)
+  from its config volume into this one's `projects/-workspace-<repo>/`, then
+  `claude-sessions restart <repo> --resume <id>`. The conversation's paths still say
+  `/workspace`; tell the session its repo is now `/workspace/<repo>`. A `/goal` program's
+  goal files name the launch directory too, so amend them before its next goal starts.
 - **Its goal was not sent.** A first prompt / goal is sent on the session's first start
   only. `claude-sessions reset NAME` makes the next start a first start again. A missing
   goal file is a warning in the pane, and the session starts without it.

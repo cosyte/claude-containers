@@ -348,6 +348,13 @@ check "start brings it back and clears the stop" bash -c "[[ -e '$FAKE/tm/w/home
 "$CS" restart home --fresh >/dev/null 2>&1
 check "restart --fresh respawns through the watchdog with --fresh" \
     grep -q "^--respawn target=claude:home .*cmd=/usr/local/bin/claude-session --session home --fresh" "$FAKE/watchdog.calls"
+mkdir -p "$CLAUDE_CONFIG_DIR/projects/-moved"; touch "$CLAUDE_CONFIG_DIR/projects/-moved/imported-1.jsonl"
+"$CS" restart home --resume imported-1 >/dev/null 2>&1
+check "restart --resume ID respawns with --resume ID" \
+    grep -q "^--respawn target=claude:home .*cmd=/usr/local/bin/claude-session --session home --resume imported-1 " "$FAKE/watchdog.calls"
+check "restart --resume keeps that id as the session's conversation (no record over it)" grep -qx 'sid=imported-1' "$REG/home.state"
+out="$("$CS" restart home --resume nosuch 2>&1)"; rc=$?
+check "restart --resume refuses an id with no transcript" bash -c "(( $rc != 0 )) && [[ \"\$1\" == *'no transcript'* ]]" _ "$out"
 "$CS" restart main >/dev/null 2>&1
 check "restart main respawns main with --continue under main's lock" \
     grep -q "^--respawn target=claude:main .*cmd=/usr/local/bin/claude-session --continue lock=/tmp/claude-respawn.lock" "$FAKE/watchdog.calls"
