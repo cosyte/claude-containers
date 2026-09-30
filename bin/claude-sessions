@@ -247,8 +247,16 @@ session_dir() {  # session_dir <name>: its working directory, resolved now
     realpath -ms "$d" 2>/dev/null || printf '%s\n' "${d%/}"
 }
 
-rc_name() {  # rc_name <name>: the Remote Control session name
-    if [[ "$1" == main ]]; then project; else printf '%s-%s' "$(project)" "$1"; fi
+# rc_name <name>: the session's Remote Control and display name, <project>-<window> for every
+# session. main is <project>-main once the container has named sessions (so the root session over
+# every repo is as easy to find in the Claude app as the rest), plain <project> when it runs alone,
+# as it always has; CLAUDE_MAIN_NAME overrides it.
+rc_name() {
+    if [[ "$1" != main ]]; then printf '%s-%s' "$(project)" "$1"; return 0; fi
+    local mn; mn="$(cenv CLAUDE_MAIN_NAME)"
+    if [[ -n "$mn" ]]; then printf '%s' "$mn"
+    elif [[ -n "$(registered)" ]]; then printf '%s-main' "$(project)"
+    else project; fi
 }
 
 debug_log() {  # debug_log <name>: its Remote Control debug log ('' when disabled)

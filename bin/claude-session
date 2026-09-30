@@ -89,6 +89,8 @@ else
     if envs="$("$SESSIONS_BIN" env main 2>/dev/null)"; then
         eval "$envs"
         S_RC=on; RC_DEBUG_LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
+        # <project>-main in a container with named sessions, <project> alone (claude-sessions).
+        [[ -n "$S_RCNAME" ]] && NAME="$S_RCNAME"
     fi
 fi
 [[ "$S_RC" == off ]] && RC_DEBUG_LOG=""
@@ -102,6 +104,9 @@ case "$PERM_MODE" in
     *)                           ARGS=(--permission-mode "$PERM_MODE") ;;
 esac
 [[ "$S_RC" != off ]] && ARGS+=(--remote-control "$NAME")
+# The display name too, every start: a resumed conversation reuses the Remote Control session it
+# was created with, and keeps that session's old name in the Claude app unless it is renamed.
+ARGS+=(--name "$NAME")
 [[ -n "$MODEL" ]] && ARGS+=(--model "$MODEL")
 
 # Resume this session's own conversation: the one claude-sessions recorded for its window

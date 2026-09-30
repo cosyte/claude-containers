@@ -231,7 +231,10 @@ check "home: goal path resolved against its dir" test "$(envof home S_PROMPT_KIN
 check "home: its own debug log beside main's" test "$(envof home S_DEBUG_LOG)" = "$TMPD/rc/claude-rc-debug-home.log"
 check "home and review share a directory, so both know it" test "$(envof home S_SHARED)$(envof review S_SHARED)" = 11
 check "review: rc=off, resume=off, model and mode carried" test "$(envof review S_RC)/$(envof review S_RESUME)/$(envof review S_MODEL)/$(envof review S_MODE)" = "off/off/sonnet/plan"
-check "main: Remote Control name is the project, resume off by default" test "$(envof main S_RCNAME)/$(envof main S_RESUME)" = "maker/off"
+check "main: named <project>-main once the container has named sessions, resume off by default" test "$(envof main S_RCNAME)/$(envof main S_RESUME)" = "maker-main/off"
+check "main: CLAUDE_MAIN_NAME overrides that name" test "$(CLAUDE_MAIN_NAME=maker-root envof main S_RCNAME)" = maker-root
+check "main: plain <project> in a container without named sessions" \
+    test "$(CLAUDE_SESSIONS_REGISTRY="$TMPD/empty-reg" envof main S_RCNAME)" = maker
 check "main: CLAUDE_MAIN_RESUME=1 turns resume on" test "$(CLAUDE_MAIN_RESUME=1 envof main S_RESUME)" = on
 check "env of an unknown session fails" bash -c "! '$CS' env nosuch 2>/dev/null"
 unset CLAUDE_RC_DEBUG_LOG
@@ -251,6 +254,7 @@ arg_pair() { grep -A1 -xF -- "$1" "$FAKE/claude.args" | sed -n 2p; }
 run_session --session home --boot
 check "home: runs in its directory" test "$(cat "$FAKE/claude.pwd")" = "$WS/home"
 check "home: --remote-control maker-home" test "$(arg_pair --remote-control)" = maker-home
+check "home: the display name is the same (--name maker-home), so a resumed conversation is renamed" test "$(arg_pair --name)" = maker-home
 check "home: the container's model" test "$(arg_pair --model)" = opus
 check "home: its own debug log" test "$(arg_pair --debug-file)" = "$TMPD/rc/claude-rc-debug-home.log"
 check "home: first start sends /goal with the file's contents, as the last argument" \
@@ -271,6 +275,7 @@ run_session --session home --continue
 check "home: a recorded id with no transcript and a shared dir: fresh, never a blind --continue" \
     bash -c "! grep -qxE -- '--(continue|resume)' '$FAKE/claude.args'"
 run_session --session review --boot
+check "review: rc=off still gets its display name" test "$(arg_pair --name)" = maker-review
 check "review: rc=off means no --remote-control and no debug log" \
     bash -c "! grep -qxE -- '--(remote-control|debug-file)' '$FAKE/claude.args'"
 check "review: mode=plan is --permission-mode plan, model sonnet" \
@@ -322,8 +327,8 @@ echo "== claude-session: main =="
 mkdir -p "$CLAUDE_CONFIG_DIR/projects/x"; touch "$CLAUDE_CONFIG_DIR/projects/x/sid-main.jsonl"
 "$CS" mark main sid=sid-main
 run_session --boot
-check "main: --remote-control <project>, default debug log" \
-    test "$(arg_pair --remote-control)|$(arg_pair --debug-file)" = "maker|$TMPD/rc/claude-rc-debug.log"
+check "main: --remote-control and --name <project>-main (named sessions exist), default debug log" \
+    test "$(arg_pair --remote-control)|$(arg_pair --name)|$(arg_pair --debug-file)" = "maker-main|maker-main|$TMPD/rc/claude-rc-debug.log"
 check "main: a boot is fresh by default (as before named sessions)" bash -c "! grep -qxE -- '--(continue|resume)' '$FAKE/claude.args'"
 CLAUDE_MAIN_RESUME=1 run_session --boot
 check "main: CLAUDE_MAIN_RESUME=1 resumes its recorded conversation on boot" test "$(arg_pair --resume)" = sid-main

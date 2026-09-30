@@ -481,7 +481,8 @@ workspace volume.
 
 Every container runs its own session in tmux window `main` (Remote Control name = the
 project). It can run more, started at boot: each in its own tmux window, with its own
-Remote Control link (`<project>-<name>`, so each shows up separately in the Claude app),
+Remote Control link (`<project>-<name>`, so each shows up separately in the Claude app;
+`main` becomes `<project>-main` alongside them, or `CLAUDE_MAIN_NAME`),
 working directory, model, permission mode, and an optional first prompt or `/goal`. They
 share the container's workspace, tools, credentials and resources, which makes this the
 natural shape for several lanes of work over one checkout, or one session per repo of a
@@ -510,6 +511,7 @@ A session spec is `NAME [key=value ...]`, several separated by `;` (the flag rep
 | `goal=FILE` | on its **first** start, begin with `/goal <contents of FILE>` (FILE relative to `dir`). |
 | `prompt-file=FILE` | on its first start, begin with the contents of FILE. |
 | `rc=off` | no Remote Control link (SSH / tmux only). |
+| (names) | every session is named `<project>-<window>`, as its Remote Control name and its display name (`--name`), on every start: a resumed conversation reuses its old Remote Control session and would otherwise keep that session's old name in the app. |
 | `resume=off` | a fresh conversation on every boot. By default a named session **resumes its last conversation** when the container restarts; main does not unless `CLAUDE_MAIN_RESUME=1`. |
 | `chain` | run the session's `/goal` program back to back: one `goal-chain` window runs `claude-goal-chain` over every chained session (see the next section). `CLAUDE_GOAL_CHAIN_REVIEW="<your words>"` delegates its checkpoint reviews. |
 
