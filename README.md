@@ -605,7 +605,10 @@ A BLOCKED goal no longer stops the chain: it is held until origin moves and
 ready it says once what each open goal waits on, and re-checks every
 `CLAUDE_GOAL_CHAIN_PARK_POLL` (10 min). The program **has finished** when every goal without
 `parked_until` is COMPLETE (parked goals never hold it open), and is **complete** when every goal
-is. `claude-goal-chain lanes REPO` prints the table and exits 0 once it has finished. Without a
+is. `claude-goal-chain lanes REPO` prints the table and exits 0 once it has finished; with
+several manifests in the repo it prints each, and the repo has finished when every one has.
+Two programs of the same name in one repo (`2026-09-devices`, `2026-10-devices`) are told apart
+by the goal that ran; `start WINDOW 2026-10-devices-g1` names one by hand. Without a
 manifest, goals run strictly in order as above.
 A manifest's `[checkpoints]` table gives a checkpoint to the owner alone (`D = "owner"`): even
 with `--review-checkpoints`, the chain then runs no delegated review for it, notes it once, and

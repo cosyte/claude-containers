@@ -74,7 +74,8 @@
 # Usage (run as the claude user, in a tmux window of its own so it outlives your shell):
 #   claude-goal-chain [--review-checkpoints "<quote>"] [--interval S] [--once] WINDOW[=REPO] ...
 #   claude-goal-chain status
-#   claude-goal-chain start WINDOW N [REPO]     # /clear + goal N now (e.g. after fixing a BLOCKED cause)
+#   claude-goal-chain start WINDOW N|PREFIX-gN [REPO]   # /clear + that goal now (PREFIX-gN when two
+#                                                     # programs in REPO share a name)
 #   claude-goal-chain lanes REPO [PREFIX]       # every goal's lane and state; exit 0 when finished
 # WINDOW is a window of tmux session "claude" (CLAUDE_GOAL_CHAIN_TMUX_SESSION); REPO
 # defaults to /workspace/WINDOW. State and a log live in $CLAUDE_CONFIG_DIR/goal-chain.
@@ -222,9 +223,25 @@ parse_review() {  # parse_review <condition> -> "<X> <program> <n>"
     [[ "$1" =~ ^CHECKPOINT\ REVIEW\ ([A-Za-z0-9]+)\ for\ the\ ([A-Za-z0-9_.-]+)\ program,\ after\ GOAL\ ([0-9]+) ]] || return 1
     echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}"
 }
-goal_file() {  # goal_file <repo> <program> <n>: the single *-<program>-g<n>.goal.txt, or nothing
-    local m=("$1"/.claude/goals/*-"$2"-g"$3".goal.txt)
-    [[ -f "${m[0]}" && ${#m[@]} -eq 1 ]] && echo "${m[0]}"
+# Two programs of the same name can live in one repo (2026-09-devices and 2026-10-devices both
+# have a goal 1). The hint picks between them: a prefix (`2026-10-devices`), or the start of the
+# goal's condition as the transcript holds it (tabs and newlines as spaces), matched against
+# each candidate file's text.
+goal_file() {  # goal_file <repo> <program> <n> [hint]: the one *-<program>-g<n>.goal.txt, or nothing
+    local m=("$1"/.claude/goals/*-"$2"-g"$3".goal.txt) hint="${4:-}" f found=""
+    [[ -f "${m[0]}" ]] || return 0
+    if [[ -n "$hint" && "$hint" =~ ^[A-Za-z0-9_.-]+$ && -f "$1/.claude/goals/$hint-g$3.goal.txt" ]]; then
+        echo "$1/.claude/goals/$hint-g$3.goal.txt"; return 0
+    fi
+    (( ${#m[@]} == 1 )) && { echo "${m[0]}"; return 0; }
+    [[ -n "$hint" ]] || return 0
+    for f in "${m[@]}"; do
+        [[ "$(tr '\t\n' '  ' < "$f")" == "$hint"* ]] || continue
+        [[ -n "$found" ]] && return 0   # still ambiguous
+        found="$f"
+    done
+    [[ -n "$found" ]] && echo "$found"
+    return 0
 }
 default_ref() {  # default_ref <repo>: origin/<default branch>
     git -C "$1" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main
@@ -533,10 +550,10 @@ tick() {  # tick <window> <repo>
     if g="$(parse_review "$detail")"; then
         read -r x program n <<<"$g"
         if on_origin "$repo" ".claude/goals/CHECKPOINT-$x.approved"; then
-            advance "$w" "$repo" "$program" "$n" "$key"
+            advance "$w" "$repo" "$program" "$n" "$key" "$(state_get "$w" cur_prefix)"
             return 0
         fi
-        file="$(goal_file "$repo" "$program" "$n")"
+        file="$(goal_file "$repo" "$program" "$n" "$(state_get "$w" cur_prefix)")"
         prefix="$(basename "${file:-x}" "-g$n.goal.txt")"
         if [[ -n "$file" ]] && has_lanes "$repo" "$prefix"; then
             # Lanes: only the goals that name the checkpoint wait for it.
@@ -554,13 +571,14 @@ tick() {  # tick <window> <repo>
 
     g="$(parse_goal "$detail")" || { state_set "$w" handled "$key"; log "$w: a met goal that is not a program goal; left alone"; return 0; }
     read -r program n total <<<"$g"
-    file="$(goal_file "$repo" "$program" "$n")"
+    file="$(goal_file "$repo" "$program" "$n" "$detail")"
     if [[ -z "$file" ]]; then
         state_set "$w" handled "$key"
-        stop "$w" "goal $n's file (*-$program-g$n.goal.txt) is not in $repo" "$key"
+        stop "$w" "goal $n's file (*-$program-g$n.goal.txt) is not in $repo, or more than one matches the goal that ran" "$key"
         return 0
     fi
     prefix="$(basename "$file" "-g$n.goal.txt")"
+    state_set "$w" cur_prefix "$prefix"
     local final lanes=0
     has_lanes "$repo" "$prefix" && lanes=1
     final="$(last_assistant_text "$tr" 6)"
@@ -611,20 +629,20 @@ tick() {  # tick <window> <repo>
         fi
         return 0
     fi
-    advance "$w" "$repo" "$program" "$n" "$key"
+    advance "$w" "$repo" "$program" "$n" "$key" "$prefix"
 }
 
 # Start goal n+1 when its checkpoint files are all on origin; otherwise wait or finish.
 # A program with a lanes manifest is scheduled instead.
-advance() {  # advance <window> <repo> <program> <n> <event-key>
+advance() {  # advance <window> <repo> <program> <n> <event-key> [prefix]
     local w="$1" repo="$2" program="$3" n="$4" key="$5" nextfile missing="" c file prefix
-    file="$(goal_file "$repo" "$program" "$n")"
+    file="$(goal_file "$repo" "$program" "$n" "${6:-}")"
     prefix="$(basename "${file:-x}" "-g$n.goal.txt")"
     if [[ -n "$file" ]] && has_lanes "$repo" "$prefix"; then
         schedule "$w" "$repo" "$program" "$prefix" "$key"
         return 0
     fi
-    nextfile="$(goal_file "$repo" "$program" "$((n + 1))")"
+    nextfile="$(goal_file "$repo" "$program" "$((n + 1))" "${file:+$prefix}")"
     if [[ -z "$nextfile" ]]; then
         state_set "$w" handled "$key"
         state_set "$w" phase done
@@ -708,37 +726,49 @@ cmd_status() {
     [[ -f "$STATE_DIR/delegation.quote" ]] && echo "checkpoint reviews: delegated ($(cat "$STATE_DIR/delegation.date")): \"$(cat "$STATE_DIR/delegation.quote")\""
     return 0
 }
-cmd_start() {  # cmd_start <window> <n> [repo]
+cmd_start() {  # cmd_start <window> <n | prefix-g<n>> [repo]
     local w="$1" n="$2" repo="${3:-$(state_get "$1" repo)}" m
     repo="${repo:-/workspace/$w}"
-    m=("$repo"/.claude/goals/*-g"$n".goal.txt)
-    [[ -f "${m[0]}" && ${#m[@]} -eq 1 ]] || { echo "claude-goal-chain: no single *-g$n.goal.txt in $repo/.claude/goals" >&2; return 1; }
+    if [[ "$n" =~ ^[A-Za-z0-9_.-]+-g[0-9]+$ ]]; then m=("$repo/.claude/goals/$n.goal.txt")
+    else m=("$repo"/.claude/goals/*-g"$n".goal.txt); fi
+    if [[ ! -f "${m[0]}" || ${#m[@]} -ne 1 ]]; then
+        echo "claude-goal-chain: no single goal file for '$n' in $repo/.claude/goals" >&2
+        if (( ${#m[@]} > 1 )); then
+            local f
+            for f in "${m[@]}"; do f="${f##*/}"; echo "  name one: claude-goal-chain start $w ${f%.goal.txt}" >&2; done
+        fi
+        return 1
+    fi
     state_set "$w" repo "$repo"
-    start_goal_file "$w" "${m[0]}" "goal $n"
+    start_goal_file "$w" "${m[0]}" "goal ${n##*-g}"
 }
 
 cmd_lanes() {  # cmd_lanes <repo> [prefix]: every goal's lane and state; 0 finished, 1 not, 2 error
-    local repo="$1" prefix="${2:-}" states n lane parked st why finished=1 complete=1
+    # With no PREFIX, every program in the repo that has a manifest: the repo has finished when
+    # each of them has (a newer program with an open agent goal means not finished).
+    local repo="$1" prefix="${2:-}" states n lane parked st why finished=1 complete=1 p rc=0
     local -a found=()
     git -C "$repo" rev-parse -q --git-dir >/dev/null 2>&1 || { echo "claude-goal-chain: $repo is not a git repo" >&2; return 2; }
     fetch_origin "$repo" || echo "claude-goal-chain: git fetch failed in $repo; using what is fetched" >&2
-    if [[ -z "$prefix" ]]; then
+    if [[ -n "$prefix" ]]; then found=("$prefix")
+    else
         mapfile -t found < <(git -C "$repo" ls-tree --name-only "$(default_ref "$repo")" .claude/goals/ 2>/dev/null \
             | sed -n 's|^\.claude/goals/\(.*\)\.lanes\.toml$|\1|p')
-        if (( ${#found[@]} != 1 )); then
-            echo "claude-goal-chain: ${#found[@]} lanes manifests (.claude/goals/*.lanes.toml) on $(default_ref "$repo") in $repo; name the PREFIX" >&2
-            (( ${#found[@]} )) && printf '  %s\n' "${found[@]}" >&2
+        if (( ${#found[@]} == 0 )); then
+            echo "claude-goal-chain: no lanes manifest (.claude/goals/*.lanes.toml) on $(default_ref "$repo") in $repo" >&2
             return 2
         fi
-        prefix="${found[0]}"
     fi
-    states="$(lanes_states "$repo" "$prefix")" || return 2
-    printf '%-5s %-12s %-6s %-8s %s\n' goal lane needs state why
-    while IFS=$'\t' read -r n lane parked st why; do
-        [[ -n "$n" ]] || continue
-        if [[ "$st" != done ]]; then complete=0; (( parked )) || finished=0; fi
-        printf '%-5s %-12s %-6s %-8s %s\n' "$n" "$lane" "$( (( parked )) && echo owner || echo agent)" "$st" "${why#-}"
-    done <<<"$states"
+    for p in "${found[@]}"; do
+        states="$(lanes_states "$repo" "$p")" || return 2
+        (( ${#found[@]} > 1 )) && echo "== $p"
+        printf '%-5s %-12s %-6s %-8s %s\n' goal lane needs state why
+        while IFS=$'\t' read -r n lane parked st why; do
+            [[ -n "$n" ]] || continue
+            if [[ "$st" != done ]]; then complete=0; (( parked )) || finished=0; fi
+            printf '%-5s %-12s %-6s %-8s %s\n' "$n" "$lane" "$( (( parked )) && echo owner || echo agent)" "$st" "${why#-}"
+        done <<<"$states"
+    done
     echo "finished: $( (( finished )) && echo yes || echo no) (finished means every goal an agent can do is COMPLETE)"
     echo "complete: $( (( complete )) && echo yes || echo no) (complete means every goal is COMPLETE)"
     (( finished )) && return 0
@@ -750,7 +780,7 @@ main() {
     local -a windows=()
     case "${1:-}" in
         status) cmd_status; return ;;
-        start)  shift; [[ $# -ge 2 ]] || { echo "usage: claude-goal-chain start WINDOW N [REPO]" >&2; return 2; }
+        start)  shift; [[ $# -ge 2 ]] || { echo "usage: claude-goal-chain start WINDOW N|PREFIX-gN [REPO]" >&2; return 2; }
                 cmd_start "$@"; return ;;
         lanes)  shift; [[ $# -ge 1 ]] || { echo "usage: claude-goal-chain lanes REPO [PREFIX]" >&2; return 2; }
                 cmd_lanes "$@"; return ;;

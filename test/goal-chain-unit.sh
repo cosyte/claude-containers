@@ -383,7 +383,7 @@ at 2026-09-30T10:05:00Z bad="$WS5"
 check "  ...and the chain stops with a note instead of guessing" \
     bash -c "tail -n1 '$FAKE/sent/bad' | jq -r . | grep -q 'lanes manifest cannot be used' && grep -q '^phase=stopped' '$CLAUDE_GOAL_CHAIN_STATE/bad.state'"
 out="$("$GC" lanes "$TMPD/ws/home" 2>&1)"; rc=$?
-check "a program without a manifest: 'lanes' exits 2 (the strict n, n+1 chain above is unchanged)" bash -c "[ $rc = 2 ] && grep -q '0 lanes manifests' <<<\"\$1\"" _ "$out"
+check "a program without a manifest: 'lanes' exits 2 (the strict n, n+1 chain above is unchanged)" bash -c "[ $rc = 2 ] && grep -q 'no lanes manifest' <<<\"\$1\"" _ "$out"
 
 echo "== a checkpoint only the owner approves =="
 src="$TMPD/src/own"; g="$src/.claude/goals"
@@ -417,6 +417,38 @@ push_file own .claude/goals/2026-10-own.lanes.toml "$(cat "$TMPD/bad.toml")"
 git -C "$WS6" fetch -q origin
 check "a [checkpoints] value other than \"owner\" makes the manifest unusable" \
     bash -c "! lanes_read '$WS6' 2026-10-own >/dev/null 2>&1"
+
+echo "== two programs of the same name in one repo =="
+src="$TMPD/src/dup"; g="$src/.claude/goals"
+mkdir -p "$g"; git init -q -b main "$src"
+for pre in 2026-09-dup 2026-10-dup; do
+    for n in 1 2; do echo "dup program, GOAL $n of 2: $pre step $n. Read \`.claude/goals/$pre.md\`." > "$g/$pre-g$n.goal.txt"; done
+done
+git -C "$src" add -A && git -C "$src" commit -qm init
+git clone -q --bare "$src" "$TMPD/bare/dup.git"; git clone -q "file://$TMPD/bare/dup.git" "$TMPD/ws/dup"
+WS7="$TMPD/ws/dup"
+check "goal_file with no hint refuses to guess between two programs" [ -z "$(goal_file "$WS7" dup 1)" ]
+check "  ...a prefix hint picks that program" [ "$(goal_file "$WS7" dup 1 2026-10-dup)" = "$WS7/.claude/goals/2026-10-dup-g1.goal.txt" ]
+check "  ...so does the start of the condition that ran" \
+    [ "$(goal_file "$WS7" dup 1 "$(tr '\t\n' '  ' < "$WS7/.claude/goals/2026-09-dup-g1.goal.txt" | cut -c1-60)")" = "$WS7/.claude/goals/2026-09-dup-g1.goal.txt" ]
+mksession dup %7 "$WS7" idle
+ev_say dup "GOAL REPORT (goal 1): step 1"
+ev_met dup "$(cat "$WS7/.claude/goals/2026-10-dup-g1.goal.txt")" 2026-10-01T10:00:00Z
+push_file dup .claude/goals/2026-10-dup-g1.status.md "COMPLETE (goal 1): 2026-10-01"
+at 2026-10-01T10:05:00Z dup="$WS7"
+check "2026-10-dup goal 1 met: the chain starts 2026-10-dup goal 2, not 2026-09-dup's" \
+    [ "$(sent_last dup)" = "/goal $(cat "$WS7/.claude/goals/2026-10-dup-g2.goal.txt")" ]
+out="$("$GC" start dup 1 "$WS7" 2>&1)"; rc=$?
+check "'start WINDOW 1' with two programs: refused, naming both" \
+    bash -c "[ $rc = 1 ] && grep -q 'start dup 2026-09-dup-g1' <<<\"\$1\" && grep -q 'start dup 2026-10-dup-g1' <<<\"\$1\"" _ "$out"
+push_file dup .claude/goals/2026-09-dup.lanes.toml "$(printf '%s\n' '[[goal]]' 'n = 1' '' '[[goal]]' 'n = 2' 'parked_until = [ { note = "a step only the owner can do" } ]')"
+push_file dup .claude/goals/2026-09-dup-g1.status.md "COMPLETE (goal 1): 2026-09-30"
+push_file dup .claude/goals/2026-10-dup.lanes.toml "$(printf '%s\n' '[[goal]]' 'n = 1' '' '[[goal]]' 'n = 2')"
+out="$("$GC" lanes "$WS7" 2>&1)"; rc=$?
+check "'lanes' with two manifests: both tables; not finished while 2026-10-dup's agent goal 2 is open" \
+    bash -c "[ $rc = 1 ] && grep -q '^== 2026-09-dup' <<<\"\$1\" && grep -q '^== 2026-10-dup' <<<\"\$1\" && grep -q '^finished: no' <<<\"\$1\"" _ "$out"
+"$GC" lanes "$WS7" 2026-09-dup >/dev/null 2>&1; rc=$?
+check "  ...and 'lanes REPO 2026-09-dup' alone has finished (exit 0)" [ "$rc" = 0 ]
 
 echo "== start, status, and the lock =="
 CLAUDE_GOAL_CHAIN_NOW="$(date +%s)" "$GC" start lab 2 "$WS3" >/dev/null 2>&1
