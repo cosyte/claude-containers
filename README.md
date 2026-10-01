@@ -578,6 +578,7 @@ Remote Control link per program:
 tmux new-window -d -n goal-chain 'claude-goal-chain home 3d devices'   # windows claude:home … in /workspace/<name>
 claude-goal-chain status                                               # phase and last goal per window
 claude-goal-chain start devices 5                                      # /clear + goal 5 now, by hand
+claude-goal-chain lanes /workspace/devices                             # each goal's lane and state; exit 0 = finished
 ```
 
 Natively at start: declare each program's session with `goal=<its g1 file>` and `chain`
@@ -593,6 +594,19 @@ missing, it waits for it. Otherwise it sends `/clear`, then `/goal` with the nex
 usage-limit pause it sends one "continue" once the reset time in the CLI's own message has
 passed. Whenever it stops the chain (BLOCKED, an incomplete ledger, a failed goal, the end of
 the program), it types a short note into the session so you see it in the app.
+
+**Lanes.** A program may commit `.claude/goals/<prefix>.lanes.toml`, which gives each goal a
+lane, the goals it waits for (`after`) and, for a goal that needs your physical result (a print,
+a pick, a purchase), `parked_until` checks on origin: a file exists, or a line in it matches.
+Then the chain starts the lowest-numbered goal that is ready from any lane instead of strictly
+n+1, skips parked goals instead of stopping, and starts a parked goal once its check turns true.
+A BLOCKED goal no longer stops the chain: it is held until origin moves and
+`CLAUDE_GOAL_CHAIN_BLOCKED_RETRY` (6 h) passes, and the other lanes go on. When nothing is
+ready it says once what each open goal waits on, and re-checks every
+`CLAUDE_GOAL_CHAIN_PARK_POLL` (10 min). The program **has finished** when every goal without
+`parked_until` is COMPLETE (parked goals never hold it open), and is **complete** when every goal
+is. `claude-goal-chain lanes REPO` prints the table and exits 0 once it has finished. Without a
+manifest, goals run strictly in order as above.
 
 `--review-checkpoints "<your words>"` delegates checkpoint approval. When a goal that ends at
 Checkpoint X is complete, the same session runs a review `/goal`: re-run the gate, have a fresh
