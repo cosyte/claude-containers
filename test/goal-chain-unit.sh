@@ -385,6 +385,39 @@ check "  ...and the chain stops with a note instead of guessing" \
 out="$("$GC" lanes "$TMPD/ws/home" 2>&1)"; rc=$?
 check "a program without a manifest: 'lanes' exits 2 (the strict n, n+1 chain above is unchanged)" bash -c "[ $rc = 2 ] && grep -q '0 lanes manifests' <<<\"\$1\"" _ "$out"
 
+echo "== a checkpoint only the owner approves =="
+src="$TMPD/src/own"; g="$src/.claude/goals"
+mkdir -p "$g"; git init -q -b main "$src"
+echo "own program, GOAL 1 of 2: Start. It ends at Checkpoint W (§9) and never writes CHECKPOINT-W.approved." > "$g/2026-10-own-g1.goal.txt"
+echo "own program, GOAL 2 of 2: Build. Precondition: \`.claude/goals/CHECKPOINT-W.approved\` exists." > "$g/2026-10-own-g2.goal.txt"
+printf '%s\n' '[checkpoints]' 'W = "owner"' '' '[[goal]]' 'n = 1' '' '[[goal]]' 'n = 2' > "$g/2026-10-own.lanes.toml"
+git -C "$src" add -A && git -C "$src" commit -qm init
+git clone -q --bare "$src" "$TMPD/bare/own.git"; git clone -q "file://$TMPD/bare/own.git" "$TMPD/ws/own"
+WS6="$TMPD/ws/own"
+check "the manifest's [checkpoints] comes out as a ckpt line" \
+    [ "$(lanes_read "$WS6" 2026-10-own | awk -F'\t' '$1 == "ckpt" {print $2 ":" $3}')" = "W:owner" ]
+mksession own %6 "$WS6" idle
+ev_say own "GOAL REPORT (goal 1): Start. Checkpoint W packet."
+ev_met own "$(cat "$WS6/.claude/goals/2026-10-own-g1.goal.txt")" 2026-10-01T10:00:00Z
+push_file own .claude/goals/2026-10-own-g1.status.md "COMPLETE (goal 1): 2026-10-01"
+at 2026-10-01T10:05:00Z --review-checkpoints "it reviews and approves for me then starts the next goal" own="$WS6"
+check "delegated, but Checkpoint W is the owner's: no review goal, no /clear" \
+    bash -c "! jq -r . '$FAKE/sent/own' | grep -q 'CHECKPOINT REVIEW' && [ \"\$(cat '$FAKE/clears/own' 2>/dev/null || echo 0)\" = 0 ]"
+check "  ...one note saying the checkpoint is the owner's alone" \
+    bash -c "[ \"\$(jq -r . '$FAKE/sent/own' | grep -c \"Checkpoint W is the owner's alone\")\" = 1 ]"
+at 2026-10-01T10:30:00Z own="$WS6"
+check "  ...not repeated on the next pass, and goal 2 does not start" \
+    bash -c "[ \"\$(jq -r . '$FAKE/sent/own' | grep -c \"Checkpoint W is the owner's alone\")\" = 1 ] && ! jq -r . '$FAKE/sent/own' | grep -q 'GOAL 2 of 2'"
+push_file own .claude/goals/CHECKPOINT-W.approved "Approved by Noah, 2026-10-01"
+at 2026-10-01T11:00:00Z own="$WS6"
+check "  ...the owner's approval on origin starts goal 2" \
+    [ "$(sent_last own)" = "/goal $(cat "$WS6/.claude/goals/2026-10-own-g2.goal.txt")" ]
+printf '%s\n' '[checkpoints]' 'W = "me"' > "$TMPD/bad.toml"
+push_file own .claude/goals/2026-10-own.lanes.toml "$(cat "$TMPD/bad.toml")"
+git -C "$WS6" fetch -q origin
+check "a [checkpoints] value other than \"owner\" makes the manifest unusable" \
+    bash -c "! lanes_read '$WS6' 2026-10-own >/dev/null 2>&1"
+
 echo "== start, status, and the lock =="
 CLAUDE_GOAL_CHAIN_NOW="$(date +%s)" "$GC" start lab 2 "$WS3" >/dev/null 2>&1
 check "'start WINDOW N' clears and sets goal N" \

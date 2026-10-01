@@ -607,6 +607,9 @@ ready it says once what each open goal waits on, and re-checks every
 `parked_until` is COMPLETE (parked goals never hold it open), and is **complete** when every goal
 is. `claude-goal-chain lanes REPO` prints the table and exits 0 once it has finished. Without a
 manifest, goals run strictly in order as above.
+A manifest's `[checkpoints]` table gives a checkpoint to the owner alone (`D = "owner"`): even
+with `--review-checkpoints`, the chain then runs no delegated review for it, notes it once, and
+waits for `CHECKPOINT-D.approved`. `/plan-program` always gives goal 1's checkpoint to the owner.
 
 `--review-checkpoints "<your words>"` delegates checkpoint approval. When a goal that ends at
 Checkpoint X is complete, the same session runs a review `/goal`: re-run the gate, have a fresh

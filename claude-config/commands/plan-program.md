@@ -162,8 +162,11 @@ it. Expect 10 to 25 rounds.
      another's work
    - how those goals group into **lanes** (by domain, by device, or one lane), and which goals
      inside a lane depend on which (`after`)
-5. **Autonomy and checkpoints.** The options:
-   - fully autonomous, with one checkpoint after goal 1 (the default in earlier programs)
+5. **Autonomy and checkpoints.** Goal 1 always ends at a checkpoint that only Noah approves
+   (decided 2026-10-01 by Noah: "I want there to always be a checkpoint for me after the first
+   goal always"). It is never offered as optional, and a delegated review never approves it: the
+   lanes manifest gives it to Noah (`[checkpoints] <X> = "owner"`). Ask only about more review:
+   - none beyond goal 1's checkpoint
    - a review after every goal
    - a pause at physical steps
 
@@ -255,8 +258,9 @@ Present this at item 6. It becomes §0 unless Noah changes it.
     agent budget.
   - Agents that write files work in worktrees under `/cache/wt/<repo>/<branch>`.
   - Every agent prompt states a time budget; long commands run under `timeout`.
-- **Ledgers and checkpoints.** One ledger per goal, ending in a `COMPLETE` line. A checkpoint after
-  goal 1 that only Noah approves.
+- **Ledgers and checkpoints.** One ledger per goal, ending in a `COMPLETE` line. Always a
+  checkpoint after goal 1 that only Noah approves, given to him in the lanes manifest's
+  `[checkpoints]` so the chain's delegated review never approves it.
 - **Human steps.** Physical and account steps go on a Needs Noah list and never block the run. Ask
   Noah once: search the list before adding. A goal that cannot start without Noah's physical result
   is parked in its own lane; the other lanes run on.
@@ -452,7 +456,8 @@ then:
   the ledger, the Needs Noah list
 - approval is a commit on `main` adding `.claude/goals/CHECKPOINT-<X>.approved` with Noah's own
   words ("Approved by Noah, <date>" plus any amendments)
-- only Noah writes it, or a session Noah tells to in its own chat
+- only Noah writes it, or a session Noah tells to in its own chat; goal 1's checkpoint is listed
+  in the manifest's `[checkpoints]` as `"owner"`, so the chain's delegated review never approves it
 - the goals after it chain without further review unless the decisions say otherwise
 - `<X>` is a letter no existing program's checkpoint uses
 
@@ -508,6 +513,8 @@ each finding fixed, or declined with the reason.
     { file = ".claude/goals/CHECKPOINT-A.approved" },                         # the file exists
     { note = "the PLA campaign is complete" },                                # the goal checks it
   ]
+  [checkpoints]                 # always: goal 1's checkpoint is Noah's alone
+  D = "owner"                   # claude-goal-chain never runs a delegated review for it
   ```
 
   Prefer `file`/`match` checks, which the chain can test on origin without starting the goal; a
@@ -629,7 +636,8 @@ The reviewer's checklist, drawn from what the earlier programs' reviews caught:
   - every done-when line can be judged from the transcript alone
   - no count is frozen at planning time
 - **Preconditions and checkpoints:** every goal has a precondition and a BLOCKED exit, and only
-  Noah can create a checkpoint file.
+  Noah can create a checkpoint file. Goal 1 ends at a checkpoint, and the manifest's
+  `[checkpoints]` gives it to Noah (`"owner"`).
 - **Lanes and parking:**
   - every goal file is in the manifest, and each goal's precondition matches its `after` and
     `parked_until`
@@ -670,7 +678,8 @@ The reviewer's checklist, drawn from what the earlier programs' reviews caught:
    - `settings.json` parses, and its merge kept the existing keys
    - the lanes manifest parses and lists every goal file (`python3 -c 'import tomllib,sys;
      tomllib.load(open(sys.argv[1],"rb"))' <file>`), with each goal's `after` and
-     `parked_until` matching its precondition
+     `parked_until` matching its precondition, and `[checkpoints]` naming goal 1's checkpoint
+     as `"owner"`
    - the repo's identity or secret scan, if it has one, passes over the new files and the PR body
 
 ## Phase 7: Land
@@ -720,7 +729,8 @@ Print the following:
     shows the goal's status.
   - `/clear` removes the goal. `claude --resume <id>` restores it.
   - Each later goal starts the same way, after the previous one's report (and after Noah approves
-    the checkpoint, where there is one).
+    the checkpoint, where there is one). Goal 1's checkpoint is always Noah's own: the chain notes
+    it and waits for `CHECKPOINT-<X>.approved` even when checkpoint reviews are delegated.
   - To run the goals back to back without starting each by hand, run `claude-goal-chain <window>`
     in its own tmux window (`claude-goal-chain --help`). With the lanes manifest it starts, in the
     same session, the lowest-numbered goal that is ready (its `after` goals COMPLETE on origin,

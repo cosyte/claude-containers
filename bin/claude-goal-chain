@@ -42,6 +42,8 @@
 #     { file = "CHECKPOINT-A.ok" },                          # the file exists on origin
 #     { note = "the PLA campaign is done" },                 # the goal checks it itself
 #   ]
+#   [checkpoints]                # optional: a checkpoint only the owner approves
+#   D = "owner"                  # the delegated review never runs for CHECKPOINT-D
 # `after` defaults to the previous [[goal]] of the same lane (none for a lane's first), and
 # for a goal with no lane, or a goal file the manifest does not list, to n-1. Per goal, on
 # origin: done (its ledger has `COMPLETE (goal n)`), waiting (an `after` goal is not done, or a
@@ -52,7 +54,8 @@
 #   - a BLOCKED report does not stop the chain: that goal is held until origin's default
 #     branch has moved past the commit it blocked at and BLOCKED_RETRY seconds have passed
 #   - a checkpoint without an approval file only holds the goals that name it (the delegated
-#     review still runs first when delegated; one that does not approve holds them too)
+#     review still runs first when delegated, except for a checkpoint `[checkpoints]` gives
+#     to the owner; one that does not approve holds them too)
 #   - the lowest-numbered ready goal starts; if none is ready, it notes once what the rest
 #     wait on (and that the program has finished, when it has), re-checks every PARK_POLL
 #     seconds, and starts a goal as soon as one turns ready
@@ -253,6 +256,7 @@ has_lanes() { on_origin "$1" "$(lanes_file "$2")"; }   # has_lanes <repo> <prefi
 # The manifest resolved against origin's goal files, as TSV (never an empty field):
 #   goal <n> <lane|-> <after: n,n|-> <parked 0|1>     one per goal file or [[goal]]
 #   cond <n> exists <path> | cond <n> match <path> <ERE> | cond <n> note <text>
+#   ckpt <X> owner                                    a checkpoint only the owner approves
 # Exit 2 with the reason on stderr when there is no manifest or it cannot be used.
 lanes_read() {  # lanes_read <repo> <prefix>
     python3 - "$1" "$(default_ref "$1")" "$2" <<'PY'
@@ -294,6 +298,10 @@ for g in goals:
                 or (isinstance(c.get("note"), str) and c["note"].strip() and "file" not in c and "match" not in c))
             if not ok: die(f"goal {n}: each parked_until entry is {{ file, match }}, {{ file }} or {{ note }}: {c}")
     listed[n] = g
+cps = man.get("checkpoints", {})
+if not isinstance(cps, dict) or not all(re.fullmatch(r"[A-Za-z0-9]+", k) and v == "owner" for k, v in cps.items()):
+    die('checkpoints must be a table of checkpoint letters, each = "owner"')
+for k in sorted(cps): print("ckpt", k, "owner", sep="\t")
 prev_in_lane = {}
 for n in sorted(set(files) | set(listed)):
     g = listed.get(n, {})
@@ -309,6 +317,10 @@ for n in sorted(set(files) | set(listed)):
         elif "match" in c: print("cond", n, "match", flat(c["file"]), flat(c["match"]), sep="\t")
         else: print("cond", n, "exists", flat(c["file"]), sep="\t")
 PY
+}
+
+owner_checkpoint() {  # owner_checkpoint <repo> <prefix> <X>: the manifest gives Checkpoint X to the owner
+    lanes_read "$1" "$2" 2>/dev/null | awk -F'\t' -v x="$3" '$1 == "ckpt" && $2 == x {f = 1} END {exit !f}'
 }
 
 # Every goal's state on origin, by n, as TSV: <n> <lane|-> <parked 0|1> <state> <why|->
@@ -573,7 +585,13 @@ tick() {  # tick <window> <repo>
     # Goal n ends at a checkpoint that is not approved yet.
     x="$(ends_at_checkpoint "$file")"
     if [[ -n "$x" ]] && ! on_origin "$repo" ".claude/goals/CHECKPOINT-$x.approved"; then
-        if [[ -f "$STATE_DIR/delegation.quote" ]]; then
+        local owner_only=0
+        (( lanes )) && owner_checkpoint "$repo" "$prefix" "$x" && owner_only=1
+        if (( owner_only )) && [[ "$(state_get "$w" owner_noted)" != "$key" ]]; then
+            note "$w" "$program goal $n is COMPLETE. Checkpoint $x is the owner's alone: the goals that need it wait for .claude/goals/CHECKPOINT-$x.approved on origin."
+            state_set "$w" owner_noted "$key"
+        fi
+        if [[ -f "$STATE_DIR/delegation.quote" ]] && (( ! owner_only )); then
             local packet="$STATE_DIR/packet-$program-$x.md"
             last_assistant_text "$tr" 6 > "$packet"
             state_set "$w" handled "$key"
