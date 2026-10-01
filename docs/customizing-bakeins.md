@@ -86,7 +86,8 @@ only after its copy there is removed (or the config volume is recreated).
 
 One directory per skill under `claude-config/skills/`, each with a `SKILL.md`
 (frontmatter `name:` + `description:`). `example-skill/` ships as a sanity
-check. Add directories and rebuild. A baked skill directory is copied only if
+check. `record-step/` lets any session record a device step Noah reports into
+the devices program's steps files (it defers to devices' own skill). Add directories and rebuild. A baked skill directory is copied only if
 that skill doesn't already exist in the container, so in-container edits
 survive restarts.
 
