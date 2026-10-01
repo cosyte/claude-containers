@@ -72,8 +72,9 @@ Markdown files in `claude-config/commands/`, optional YAML frontmatter
 `plan-program.md` ships as `/plan-program [repo ...] [-- notes]`. It surveys the
 repo(s), interviews you with rounds of multiple-choice questions until every
 topic is settled, then writes a multi-goal `/goal` program: a brief, goal files
-under the 4,000-character `/goal` limit, research notes, an adversarial review
-and a v2 that answers it. It lands the program through a self-merged PR and
+under the 4,000-character `/goal` limit, a lanes manifest (goals grouped into
+lanes; a goal that waits on your physical step is parked in its own lane so the
+rest run on), research notes, an adversarial review and a v2 that answers it. It lands the program through a self-merged PR and
 prints the command that starts goal 1. The same text also works pasted into a
 session.
 

@@ -5,8 +5,10 @@ argument-hint: "[repo ...] [-- notes]"
 
 # /plan-program: plan a multi-goal `/goal` program by interviewing Noah
 
-You are planning a **program**: a brief plus a numbered series of `/goal` prompts that later
-sessions run one goal at a time, fully autonomously, to take a repository where Noah wants it to go.
+You are planning a **program**: a brief plus a numbered series of `/goal` prompts, grouped into
+**lanes**, that later sessions run one goal at a time, fully autonomously, to take a repository
+where Noah wants it to go. A goal that needs Noah's physical result is **parked** in its own lane,
+so it never holds up the rest (see "Rules for goals").
 The work runs in eight phases, in this order:
 
 1. **Orient**: survey the repo(s) and the environment. No questions yet.
@@ -153,15 +155,21 @@ it. Expect 10 to 25 rounds.
    rule it changes.
 3. **Capabilities and scope.** What to build, area by area, as multiSelect sets. For each area
    chosen, a second-level question on what exactly it should produce or do. What is explicitly out.
-4. **Priorities and order.** What is most urgent; what matters most; the ordering principle
+4. **Priorities, order and lanes.** What is most urgent; what matters most; the ordering principle
    (foundations first, value first, risk first, or research and propose); the program's size (as
-   big as needed, or a number of goals).
+   big as needed, or a number of goals). Then the shape:
+   - how goals are cut: one per device, subproject or area, so one item's wait never holds
+     another's work
+   - how those goals group into **lanes** (by domain, by device, or one lane), and which goals
+     inside a lane depend on which (`after`)
 5. **Autonomy and checkpoints.** The options:
    - fully autonomous, with one checkpoint after goal 1 (the default in earlier programs)
    - a review after every goal
    - a pause at physical steps
 
-   Also: what each checkpoint reviews.
+   Also: what each checkpoint reviews, and **which goals need Noah's physical result** (a print, a
+   pick, a measurement, a purchase, a fit or look in hand). Each of those gets its own lane and a
+   `parked_until` check, and is never a goal that agent-doable work or the program's end waits on.
 6. **The contract.** Show the standing contract (below) and ask: inherit it unchanged, inherit it
    with changes (in the notes), or walk through it part by part.
 7. **Git and gates.**
@@ -190,6 +198,9 @@ it. Expect 10 to 25 rounds.
     - requests between programs
     - a shared Needs Noah list
     - the release protocol for a shared library
+    - when another program may serve its own rows in this repo: after this program **has finished**
+      (every goal without `parked_until` COMPLETE; parked goals never hold it open), merging under
+      `flock /cache/locks/<repo>-merge.lock` and this repo's gate
 11. **Hardware, external systems, outward-facing actions.** For each device, printer, vehicle,
     deployed service, production system, cloud account, home-automation system, payment, email,
     or publication it touches: read-only, act only when Noah says so in the session, or allowed
@@ -207,7 +218,10 @@ it. Expect 10 to 25 rounds.
     - the tools and equipment Noah has (ask; don't infer from records)
     - how measurements, data, photos and approvals reach the repo
     - how quickly Noah can act. Goals chain in hours and Noah's steps take days, which shapes where
-      checkpoints go.
+      checkpoints go, and which goals are parked.
+    - for each parked goal, the file on origin that shows Noah's step is done (a pick file, a
+      spec's checkpoint entry, an approval file), so the chain can check it without starting the
+      goal
 15. **Interfaces.** How Noah uses the result day to day: CLI, Claude Code skills, a web UI, MCP, the
     phone app, printed sheets, an API.
 16. **Quality.**
@@ -244,7 +258,8 @@ Present this at item 6. It becomes §0 unless Noah changes it.
 - **Ledgers and checkpoints.** One ledger per goal, ending in a `COMPLETE` line. A checkpoint after
   goal 1 that only Noah approves.
 - **Human steps.** Physical and account steps go on a Needs Noah list and never block the run. Ask
-  Noah once: search the list before adding.
+  Noah once: search the list before adding. A goal that cannot start without Noah's physical result
+  is parked in its own lane; the other lanes run on.
 - **Outward-facing limits.**
   - Never flash, order, spend, or create accounts, tokens or API keys.
   - Nothing is created, deleted or made public on GitHub beyond branches and PRs in the repos the
@@ -298,6 +313,8 @@ git worktree add -b goals/<YYYY-MM>-<program> /cache/wt/<repo>/goals-<YYYY-MM> o
 ```
 .claude/goals/<YYYY-MM>-<program>.md                the brief
 .claude/goals/<YYYY-MM>-<program>-g<n>.goal.txt     one per goal
+.claude/goals/<YYYY-MM>-<program>.lanes.toml        every goal's lane, after and parked_until
+                                                    (read by claude-goal-chain; format below)
 .claude/goals/<YYYY-MM>-<program>-research/         review-<repo>.md, research-*.md,
                                                     interview-<YYYY-MM-DD>.md, review-brief-v1.md
                                                     (+ review-cross-program-v1.md)
@@ -320,9 +337,10 @@ tell it the hard 4,000-character limit on goal files. Reconcile the briefs yours
 ```
 
 **Introduction:**
-- how many `/goal` runs, their order, and which programs they run beside
-- this paragraph: "Every goal reads §0–§4 in full plus its own section. §0–§4 are the contract; a
-  goal section says *what* to build and *when it is done*. Where they disagree, §0–§4 win, except
+- how many `/goal` runs, their lanes and order (a table: goal, lane, after, parked until), and
+  which programs they run beside
+- this paragraph: "Every goal reads §0-§4 in full plus its own section. §0-§4 are the contract; a
+  goal section says *what* to build and *when it is done*. Where they disagree, §0-§4 win, except
   where `CHECKPOINT-<X>.approved` amends them: Noah's amendments beat this file."
 - where the program comes from (the interview: its date and number of rounds), its emphasis in
   Noah's words, and the program's shape
@@ -334,7 +352,7 @@ tell it the hard 4,000-character limit on goal files. Reconcile the briefs yours
   - the first actions of every goal: `git pull --rebase` everywhere; check the precondition;
     read the earlier ledgers and the requests addressed to this program; create the ledger;
     re-baseline the gates the goal will change, with timings
-  - after a compaction: re-read §0–§4, the goal's own section and its ledger
+  - after a compaction: re-read §0-§4, the goal's own section and its ledger
 - **0.2 Autonomy and fallbacks:** the standing rules, the research-and-propose rule, rootless
   installs. NEEDS-NOAH is only for steps physically impossible for an agent.
 - **0.3 Repos, branches, PRs**
@@ -342,7 +360,8 @@ tell it the hard 4,000-character limit on goal files. Reconcile the briefs yours
   - the local gate is the merge gate, its tail in the PR
   - CI as it really behaves
   - shared repos merge under `flock /cache/locks/<repo>-merge.lock`, held from the final pull
-    through `gh pr merge`
+    through `gh pr merge`; so does this repo once it has finished and another program serves its
+    rows here, while a parked goal of this program may still run
   - ledger-only commits
   - commit-subject prefixes
   - attribution per the session's system prompt
@@ -370,7 +389,8 @@ tell it the hard 4,000-character limit on goal files. Reconcile the briefs yours
   - nothing measured or unknown is invented: a missing input is refused by name, never replaced
     with a typical value
 - **0.9 Research, citations and pins**
-- **0.10 Preconditions, BLOCKED, and evidence for the evaluator** (see "Rules for goals")
+- **0.10 Preconditions, BLOCKED, and evidence for the evaluator** (see "Rules for goals"),
+  including the lanes manifest and what "has finished" means
 - **0.11 Environment facts (verified <date>):** a Fact | Consequence table from phase 1
 - **0.12 Long-run hygiene**
   - the worker variable in the committed `.claude/settings.json`, and who removes it when the
@@ -385,6 +405,11 @@ tell it the hard 4,000-character limit on goal files. Reconcile the briefs yours
   - the requests protocol: rows appended to the owner's section; only the owner changes a row's
     state; every goal serves the rows addressed to its program; a requester waits as
     `NEEDS-OWNER (row; workaround)`
+  - **when a program has finished**: every goal in its lanes manifest without `parked_until` has
+    its `COMPLETE` line on origin (`claude-goal-chain lanes <repo>` exits 0); a parked goal never
+    holds a program open. A program without a manifest has finished at its last goal's `COMPLETE`
+    line. After that, a requester may serve its own open rows in the owner's repo, under the
+    owner's rules and gate and `/cache/locks/<repo>-merge.lock`, citing the row
   - the release protocol for a shared library
 
 **§1 Noah's decisions, <date>:**
@@ -415,8 +440,10 @@ tell it the hard 4,000-character limit on goal files. Reconcile the briefs yours
 - invariants at every merge
 - security
 
-**Goal sections, one per goal:** "## <k>. Goal <n>: <title> (ends at Checkpoint <X>)", then:
-- **Precondition**, pin and research files
+**Goal sections, one per goal:** "## <k>. Goal <n>: <title> (<lane> lane; ends at Checkpoint <X>)",
+then:
+- **Precondition** (the goals in its `after`, plus Noah's step for a parked goal), pin and research
+  files
 - numbered items
 - **Done when**: "the lettered lines of `<file>.goal.txt`, verbatim (§<R>):" followed by the lines
 
@@ -445,8 +472,10 @@ each finding fixed, or declined with the reason.
     environment checks, e.g. the worker variable printing its value in a fresh shell. If either
     fails, the goal does no other work and prints BLOCKED. It never commits the brief or the
     settings itself.
-  - Later goals need the previous ledger's `COMPLETE (goal <n-1>)` line. The goal after a
-    checkpoint also needs `CHECKPOINT-<X>.approved`.
+  - Later goals need the `COMPLETE (goal <m>)` line of each goal in their `after` (the lane's
+    previous goal, or what the manifest names), never blindly goal n-1. The goal after a
+    checkpoint also needs `CHECKPOINT-<X>.approved`. A parked goal also needs Noah's step,
+    checked the same way its `parked_until` says.
   - No goal ever writes a checkpoint file.
 - **Done-when states.** A line reads DONE, or one of:
   - NEEDS-NOAH, only when the step is physically impossible for an agent (why, and where the
@@ -458,9 +487,33 @@ each finding fixed, or declined with the reason.
   also carries the start-up and the checkpoint packet.
 - **Loops are bounded.** Every "repeat until it passes" has a maximum number of rounds and says
   what happens at the limit.
-- **Noah's steps never stall the chain.** Work that needs Noah's physical result either waits behind
-  a checkpoint, or proceeds on fixtures with the real run marked NEEDS-NOAH. The goal that uses
-  that result re-checks for it and re-runs when it has arrived.
+- **Noah's steps never stall the chain.** Work that needs Noah's physical result either proceeds on
+  fixtures with the real run marked NEEDS-NOAH, or is a **parked goal**: its own goal, in its own
+  lane, with `parked_until` in the manifest. A parked goal is never in another goal's `after`
+  unless that goal needs the same result, never the program's finale, and never what "has
+  finished" waits on. While it waits, claude-goal-chain runs the other lanes; when its check
+  turns true on origin, the chain starts it.
+- **Lanes.** `.claude/goals/<YYYY-MM>-<program>.lanes.toml` lists every goal:
+
+  ```toml
+  [lanes]                       # lane name = what it covers
+  input = "keyboards and mice"
+  [[goal]]
+  n = 5
+  lane = "input"                # omitted = a program-wide goal
+  after = [4]                   # default: the lane's previous goal (none for its first);
+                                # a goal with no lane: n-1
+  parked_until = [              # only for a goal that waits on Noah's physical step
+    { file = "hardware/mouse/glide6/pick.toml", match = '^round2 *= *"g6r' },  # a line matches (ERE)
+    { file = ".claude/goals/CHECKPOINT-A.approved" },                         # the file exists
+    { note = "the PLA campaign is complete" },                                # the goal checks it
+  ]
+  ```
+
+  Prefer `file`/`match` checks, which the chain can test on origin without starting the goal; a
+  `note` makes the chain start the goal, which prints BLOCKED until Noah's step is done (it is
+  retried only after origin moves). The program **has finished** when every goal without
+  `parked_until` is COMPLETE, and is **complete** when every goal is.
 - **Standard closing lines.** Every goal ends with, in this order:
   - (if other programs run) "Requests: every row addressed to <program> is DONE, ACCEPTED (goal
     named), DEFERRED (follow-up listed) or DECLINED (why); rows it filed are listed with their
@@ -469,7 +522,8 @@ each finding fixed, or declined with the reason.
     ledger is complete with its COMPLETE line"
   - "A fresh adversarial subagent checked every line above against the repos and found none false
     (its verdict pasted)"
-- **The last goal is a finale:**
+- **The last agent-doable goal is a finale** (a parked goal never is; one that runs later updates
+  the program report itself):
   - final docs and pins
   - the gate on a fresh clone
   - `docs/program-report-<YYYY-MM>-<program>.md`: what was built and where, test counts and
@@ -485,7 +539,7 @@ else.
 **Paragraph 1** carries the standing rules, compressed, with § references:
 
 ```
-<program> program, GOAL <n> of <N>: <title>. FIRST work from <path> (clone <owner/repo> there if missing) and read `.claude/goals/<YYYY-MM>-<program>.md` §0-§4 and §<k> in full plus earlier goals' ledgers; re-read them and this goal's ledger (`.claude/goals/<YYYY-MM>-<program>-g<n>.status.md`) after any compaction. Precondition: <checks>; otherwise do no other work and print the BLOCKED report (§<R>). It ends at Checkpoint <X> (§<C>) and never writes CHECKPOINT-<X>.approved. Work fully autonomously: never stop to ask; record assumptions in the ledger. Git per §0.3: a branch + PR per track, self-merged only after the local gate passes with its tail in the PR; pull --rebase first; never force-push or rewrite history. I explicitly opt in to Workflows and subagents for parallel tracks, research and adversarial review, at most ~<k> agents at once; <worker variable>=<v> for the whole program. <Scope sentence.> <Hardware and outward-facing limits.> Web-search and cite (URL, date read) anything a number, price, version or licence rests on. Physical steps go on Needs Noah (§0.6); carry on.
+<program> program, GOAL <n> of <N> (<lane> lane): <title>. FIRST work from <path> (clone <owner/repo> there if missing) and read `.claude/goals/<YYYY-MM>-<program>.md` §0-§4 and §<k> in full plus earlier goals' ledgers; re-read them and this goal's ledger (`.claude/goals/<YYYY-MM>-<program>-g<n>.status.md`) after any compaction. Precondition: <checks>; otherwise do no other work and print the BLOCKED report (§<R>). It ends at Checkpoint <X> (§<C>) and never writes CHECKPOINT-<X>.approved. Work fully autonomously: never stop to ask; record assumptions in the ledger. Git per §0.3: a branch + PR per track, self-merged only after the local gate passes with its tail in the PR; pull --rebase first; never force-push or rewrite history. I explicitly opt in to Workflows and subagents for parallel tracks, research and adversarial review, at most ~<k> agents at once; <worker variable>=<v> for the whole program. <Scope sentence.> <Hardware and outward-facing limits.> Web-search and cite (URL, date read) anything a number, price, version or licence rests on. Physical steps go on Needs Noah (§0.6); carry on.
 ```
 
 **Paragraph 2** is the condition:
@@ -503,7 +557,8 @@ A line may read NEEDS-NOAH only when the step is physically impossible for an ag
 ```
 
 The lettered lines must be **byte-identical** to the brief's done-when lines for that goal. A goal
-without a checkpoint drops that sentence.
+without a checkpoint drops that sentence. The precondition names the ledgers of the goals in its
+`after`, and for a parked goal Noah's step, in the same terms as its `parked_until`.
 
 ### The ledger (§0.5)
 
@@ -529,7 +584,7 @@ without a checkpoint drops that sentence.
 ```
 GOAL REPORT (goal <n>): <title>
 A. <line text>: DONE | NEEDS-NOAH (why; Needs Noah entry) | NEEDS-OWNER (row; workaround) | PROPOSED (where)
-   evidence: <command> → <5–20 line output tail>; PR <url>; <repo>@<sha>
+   evidence: <command> → <5-20 line output tail>; PR <url>; <repo>@<sha>
 B. …
 Needs Noah (this goal): <list, safety first, then what unblocks the most>
 Proposals awaiting Noah: <list with paths>
@@ -575,6 +630,13 @@ The reviewer's checklist, drawn from what the earlier programs' reviews caught:
   - no count is frozen at planning time
 - **Preconditions and checkpoints:** every goal has a precondition and a BLOCKED exit, and only
   Noah can create a checkpoint file.
+- **Lanes and parking:**
+  - every goal file is in the manifest, and each goal's precondition matches its `after` and
+    `parked_until`
+  - every goal that needs Noah's physical result is parked, in its own lane, with a check the
+    chain can test on origin where one exists (a `note` only when none can)
+  - no agent-doable goal, finale or "has finished" test waits on a parked goal
+  - `claude-goal-chain lanes` on the branch shows the order Noah expects
 - **Resources and timing:**
   - the resource plan reaches commands: the worker variable is in the committed settings, not
     only in prose
@@ -606,6 +668,9 @@ The reviewer's checklist, drawn from what the earlier programs' reviews caught:
    - no unfilled `<placeholder>`, TODO or TBD
    - every referenced file exists
    - `settings.json` parses, and its merge kept the existing keys
+   - the lanes manifest parses and lists every goal file (`python3 -c 'import tomllib,sys;
+     tomllib.load(open(sys.argv[1],"rb"))' <file>`), with each goal's `after` and
+     `parked_until` matching its precondition
    - the repo's identity or secret scan, if it has one, passes over the new files and the PR body
 
 ## Phase 7: Land
@@ -613,7 +678,7 @@ The reviewer's checklist, drawn from what the earlier programs' reviews caught:
 For each repo:
 
 1. Commit as `goals: the <program> program, brief v2 and <N> goal files (<YYYY-MM-DD> interview)`
-   and push.
+   (the lanes manifest included) and push.
 2. Open a PR. Its body covers:
    - what the program is
    - the goal list
@@ -627,7 +692,8 @@ For each repo:
    red without this change, show both runs, merge, and make the fix goal 1's first item (the brief
    must say so).
 4. Confirm the merge:
-   - `git ls-tree origin/<default> .claude/goals/` lists the files
+   - `git ls-tree origin/<default> .claude/goals/` lists the files, the lanes manifest among them
+   - `claude-goal-chain lanes <repo>` prints every goal with the lane and state you expect
    - the goal-1 precondition check (e.g. the worker variable in a fresh shell in the repo) passes
      now
 5. Remove the worktree.
@@ -639,7 +705,8 @@ Shared files (`NEEDS-NOAH.md`, `PROGRAM-REQUESTS.md`) are committed under their 
 Print the following:
 
 - **Per program:**
-  - one line per goal: its number, title, and the checkpoint it ends at, if any
+  - one line per goal: its number, lane, title, the checkpoint it ends at, if any, and what it is
+    parked until, if it is parked
   - the checkpoint, and what Noah approves there
   - counts: decisions, interview rounds and questions, review findings (HIGH)
   - the PR URL and the merge SHA
@@ -655,7 +722,10 @@ Print the following:
   - Each later goal starts the same way, after the previous one's report (and after Noah approves
     the checkpoint, where there is one).
   - To run the goals back to back without starting each by hand, run `claude-goal-chain <window>`
-    in its own tmux window (`claude-goal-chain --help`). It starts each next goal in the same
-    session once the previous one is COMPLETE on origin and its checkpoint is approved.
+    in its own tmux window (`claude-goal-chain --help`). With the lanes manifest it starts, in the
+    same session, the lowest-numbered goal that is ready (its `after` goals COMPLETE on origin,
+    its checkpoints approved, its `parked_until` true), skips parked goals instead of stopping,
+    holds a BLOCKED goal until origin moves, and notes when the program has finished.
+    `claude-goal-chain lanes <repo>` shows every goal's lane and state at any time.
 
 Then stop. Do not start goal 1.
