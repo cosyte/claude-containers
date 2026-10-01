@@ -14,6 +14,11 @@
 #     the next goal; the watcher itself never writes a checkpoint file
 #   - a usage-limit pause is nudged once, after the reset time; a stopped chain resumes when
 #     a goal is set by hand; `start` and the single-instance lock
+#   - lanes (a .lanes.toml on origin): the default `after` rules; a parked goal is skipped
+#     and another lane's goal starts; a note-only parked goal counts as ready; a BLOCKED goal
+#     does not stop the chain and is retried only once origin moved AND BLOCKED_RETRY passed;
+#     a parked goal starts when its match turns true on origin; "finished" vs "complete";
+#     `lanes` output and exit codes; an unusable manifest stops the chain
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -264,6 +269,121 @@ at 2026-10-01T13:05:00Z lab="$WS3"
 check "after the reset: one nudge to continue, naming the limit" bash -c "[ $(sent_count lab) = 1 ] && tail -n1 '$FAKE/sent/lab' | jq -r . | grep -q 'Continue toward the goal' && tail -n1 '$FAKE/sent/lab' | jq -r . | grep -q 'resets Oct 1'"
 at 2026-10-01T13:10:00Z lab="$WS3"
 check "  ...and not again a few minutes later" [ "$(sent_count lab)" = 1 ]
+
+echo "== lanes =="
+export CLAUDE_GOAL_CHAIN_PARK_POLL=600 CLAUDE_GOAL_CHAIN_BLOCKED_RETRY=21600
+mklanes() {  # mklanes <name> <manifest>: goals 1-5 with a lanes manifest; goal 4 needs CHECKPOINT-Z
+    local src="$TMPD/src/$1" g="$TMPD/src/$1/.claude/goals" n
+    mkdir -p "$g"; git init -q -b main "$src"
+    for n in 1 2 3 5; do echo "$1 program, GOAL $n of 5: step $n." > "$g/2026-10-$1-g$n.goal.txt"; done
+    echo "$1 program, GOAL 4 of 5: step 4. Precondition: \`.claude/goals/CHECKPOINT-Z.approved\` exists." > "$g/2026-10-$1-g4.goal.txt"
+    printf '%s\n' "$2" > "$g/2026-10-$1.lanes.toml"
+    git -C "$src" add -A && git -C "$src" commit -qm init
+    git clone -q --bare "$src" "$TMPD/bare/$1.git"
+    git clone -q "file://$TMPD/bare/$1.git" "$TMPD/ws/$1"
+}
+mklanes dev '[lanes]
+input = "mice"
+house = "sensors"
+audio = "speakers"
+
+[[goal]]
+n = 1
+lane = "input"
+
+[[goal]]
+n = 2
+lane = "input"
+parked_until = [ { file = "hw/pick.toml", match = '"'"'^round2 = "g6r'"'"' } ]
+
+[[goal]]
+n = 3
+lane = "house"
+
+[[goal]]
+n = 5
+lane = "audio"
+parked_until = [ { note = "the speakers are bought" } ]'
+WS4="$TMPD/ws/dev"
+L="$WS4/.claude/goals/2026-10-dev"
+check "default 'after': the lane's previous goal, none for a lane's first, n-1 for a goal with no lane (4 is unlisted)" \
+    [ "$(lanes_read "$WS4" 2026-10-dev | awk -F'\t' '$1 == "goal" {printf "%s:%s:%s:%s ", $2, $3, $4, $5}')" = "1:input:-:0 2:input:1:1 3:house:-:0 4:-:3:0 5:audio:-:1 " ]
+check "  ...and the conditions come out one per line" \
+    [ "$(lanes_read "$WS4" 2026-10-dev | awk -F'\t' '$1 == "cond" {printf "%s|%s|%s|%s ", $2, $3, $4, $5}')" = '2|match|hw/pick.toml|^round2 = "g6r 5|note|the speakers are bought| ' ]
+out="$("$GC" lanes "$WS4" 2>&1)"; rc=$?
+check "'lanes' before any work: exit 1, not finished; goal 1 ready, goal 2 (owner) waits on goal 1, goal 4 on goal 3 and CHECKPOINT-Z" \
+    bash -c "[ $rc = 1 ] && grep -q '^finished: no' <<<\"\$1\" && grep -qE '^1 +input +agent +ready' <<<\"\$1\" && grep -qE '^2 +input +owner +waiting +after goal 1$' <<<\"\$1\" && grep -qE '^4 +- +agent +waiting +after goal 3; CHECKPOINT-Z.approved' <<<\"\$1\"" _ "$out"
+push_file dev .claude/goals/CHECKPOINT-Z.approved "Approved by Noah, 2026-09-30"
+mksession dev %4 "$WS4" idle
+ev_say dev "GOAL REPORT (goal 1): step 1"
+ev_met dev "$(cat "$L-g1.goal.txt")" 2026-09-30T10:00:00Z
+push_file dev .claude/goals/2026-10-dev-g1.status.md "COMPLETE (goal 1): 2026-09-30"
+at 2026-09-30T10:05:00Z dev="$WS4"
+check "goal 1 done, goal 2 parked: the house lane's goal 3 starts (/clear, then its file)" \
+    bash -c "[ \"\$(cat '$FAKE/clears/dev')\" = 1 ] && [ \"\$(tail -n1 '$FAKE/sent/dev' | jq -r .)\" = \"/goal \$(cat '$L-g3.goal.txt')\" ]"
+ev_say dev "GOAL REPORT (goal 3): step 3"
+ev_met dev "$(cat "$L-g3.goal.txt")" 2026-09-30T11:00:00Z
+push_file dev .claude/goals/2026-10-dev-g3.status.md "COMPLETE (goal 3): 2026-09-30"
+at 2026-09-30T11:05:00Z dev="$WS4"
+check "goal 3 done: goal 4 (after 3, its checkpoint on origin) starts" [ "$(sent_last dev)" = "/goal $(cat "$L-g4.goal.txt")" ]
+ev_say dev "GOAL REPORT (goal 4): step 4"
+ev_met dev "$(cat "$L-g4.goal.txt")" 2026-09-30T12:00:00Z
+push_file dev .claude/goals/2026-10-dev-g4.status.md "COMPLETE (goal 4): 2026-09-30"
+at 2026-09-30T12:05:00Z dev="$WS4"
+check "a note-only parked goal counts as ready: goal 5 starts (goal 2 is still parked)" [ "$(sent_last dev)" = "/goal $(cat "$L-g5.goal.txt")" ]
+out="$("$GC" lanes "$WS4" 2026-10-dev 2>&1)"; rc=$?
+check "'lanes' now: exit 0, finished (only parked goals open) but not complete" \
+    bash -c "[ $rc = 0 ] && grep -q '^finished: yes' <<<\"\$1\" && grep -q '^complete: no' <<<\"\$1\" && grep -qE '^4 +- +agent +done' <<<\"\$1\"" _ "$out"
+clears_before="$(cat "$FAKE/clears/dev")"
+ev_say dev "BLOCKED (goal 5): precondition not met"
+ev_met dev "$(cat "$L-g5.goal.txt")" 2026-09-30T13:00:00Z
+at 2026-09-30T13:05:00Z dev="$WS4"
+check "a BLOCKED goal does not stop the chain: one 'has finished' note naming what is open" \
+    bash -c "sent_last() { tail -n1 '$FAKE/sent/dev' | jq -r .; }; sent_last | grep -q 'The dev program has finished' && sent_last | grep -q 'goal 2 (input) parked: no line of hw/pick.toml' && sent_last | grep -q 'goal 5 (audio) blocked'"
+check "  ...phase 'parked', nothing cleared, the hold recorded" \
+    bash -c "grep -q '^phase=parked' '$CLAUDE_GOAL_CHAIN_STATE/dev.state' && grep -q '^blocked_5=' '$CLAUDE_GOAL_CHAIN_STATE/dev.state' && [ \"\$(cat '$FAKE/clears/dev')\" = $clears_before ]"
+n_before="$(sent_count dev)"
+at 2026-09-30T13:10:00Z dev="$WS4"
+check "  ...not re-checked before PARK_POLL, and no repeated note" [ "$(sent_count dev)" = "$n_before" ]
+push_file dev hw/pick.toml 'round2 = "g6r1a"'
+at 2026-09-30T14:20:00Z dev="$WS4"
+check "the parked goal's condition turns true on origin: goal 2 starts" [ "$(sent_last dev)" = "/goal $(cat "$L-g2.goal.txt")" ]
+ev_say dev "GOAL REPORT (goal 2): step 2"
+ev_met dev "$(cat "$L-g2.goal.txt")" 2026-09-30T15:00:00Z
+push_file dev .claude/goals/2026-10-dev-g2.status.md "COMPLETE (goal 2): 2026-09-30"
+at 2026-09-30T15:05:00Z dev="$WS4"
+check "origin moved, but BLOCKED_RETRY has not passed: goal 5 is still held (a note, nothing started)" \
+    bash -c "tail -n1 '$FAKE/sent/dev' | jq -r . | grep -q 'goal 5 (audio) blocked' && ! tail -n1 '$FAKE/sent/dev' | jq -r . | grep -q 'goal 2'"
+at 2026-09-30T19:30:00Z dev="$WS4"
+check "origin moved and BLOCKED_RETRY passed: goal 5 is retried" [ "$(sent_last dev)" = "/goal $(cat "$L-g5.goal.txt")" ]
+ev_say dev "GOAL REPORT (goal 5): step 5"
+ev_met dev "$(cat "$L-g5.goal.txt")" 2026-09-30T20:00:00Z
+push_file dev .claude/goals/2026-10-dev-g5.status.md "COMPLETE (goal 5): 2026-09-30"
+at 2026-09-30T20:05:00Z dev="$WS4"
+check "every goal done: 'complete' note, phase 'done'" \
+    bash -c "tail -n1 '$FAKE/sent/dev' | jq -r . | grep -q 'The dev program is complete: every goal in its lanes manifest is COMPLETE' && grep -q '^phase=done' '$CLAUDE_GOAL_CHAIN_STATE/dev.state'"
+
+# The hold on its own: it lifts only when origin moved AND BLOCKED_RETRY passed.
+state_set hold blocked_5 "k sha1 1000"
+check "blocked_hold: same commit, long after: held" bash -c "CLAUDE_GOAL_CHAIN_NOW=$((1000 + 30000)); export CLAUDE_GOAL_CHAIN_NOW; source '$GC'; blocked_hold hold 5 sha1"
+check "blocked_hold: origin moved, too soon: held" bash -c "CLAUDE_GOAL_CHAIN_NOW=$((1000 + 3600)); export CLAUDE_GOAL_CHAIN_NOW; source '$GC'; blocked_hold hold 5 sha2"
+check "blocked_hold: origin moved and BLOCKED_RETRY passed: released" bash -c "CLAUDE_GOAL_CHAIN_NOW=$((1000 + 30000)); export CLAUDE_GOAL_CHAIN_NOW; source '$GC'; ! blocked_hold hold 5 sha2"
+check "blocked_hold: no record, nothing held" bash -c "source '$GC'; ! blocked_hold hold 7 sha1"
+
+mklanes bad '[[goal]]
+n = "one"'
+WS5="$TMPD/ws/bad"
+out="$("$GC" lanes "$WS5" 2>&1)"; rc=$?
+check "an unusable manifest: 'lanes' exits 2 and says why" bash -c "[ $rc = 2 ] && grep -q 'needs a whole number n' <<<\"\$1\"" _ "$out"
+mksession bad %5 "$WS5" idle
+ev_say bad "GOAL REPORT (goal 1): step 1"
+ev_met bad "$(cat "$WS5/.claude/goals/2026-10-bad-g1.goal.txt")" 2026-09-30T10:00:00Z
+push_file bad .claude/goals/2026-10-bad-g1.status.md "COMPLETE (goal 1): 2026-09-30"
+at 2026-09-30T10:05:00Z bad="$WS5"
+check "  ...and the chain stops with a note instead of guessing" \
+    bash -c "tail -n1 '$FAKE/sent/bad' | jq -r . | grep -q 'lanes manifest cannot be used' && grep -q '^phase=stopped' '$CLAUDE_GOAL_CHAIN_STATE/bad.state'"
+out="$("$GC" lanes "$TMPD/ws/home" 2>&1)"; rc=$?
+check "a program without a manifest: 'lanes' exits 2 (the strict n, n+1 chain above is unchanged)" bash -c "[ $rc = 2 ] && grep -q '0 lanes manifests' <<<\"\$1\"" _ "$out"
 
 echo "== start, status, and the lock =="
 CLAUDE_GOAL_CHAIN_NOW="$(date +%s)" "$GC" start lab 2 "$WS3" >/dev/null 2>&1

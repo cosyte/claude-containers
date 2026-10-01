@@ -30,6 +30,35 @@
 # the Claude app (that starts one short turn there). A new goal set by hand in a stopped
 # session resumes the chain.
 #
+# Lanes. A program may commit `.claude/goals/<prefix>.lanes.toml` (read from origin):
+#   [lanes]                      # optional: lane name = what it covers
+#   input = "keyboards and mice"
+#   [[goal]]
+#   n = 5                        # <prefix>-g5.goal.txt
+#   lane = "input"               # optional; omitted = a program-wide goal
+#   after = [4]                  # goals that must be COMPLETE first
+#   parked_until = [             # optional; present = it waits on the owner's physical step
+#     { file = "hw/pick.toml", match = '^round2 = "g6r' },  # a line on origin matches the ERE
+#     { file = "CHECKPOINT-A.ok" },                          # the file exists on origin
+#     { note = "the PLA campaign is done" },                 # the goal checks it itself
+#   ]
+# `after` defaults to the previous [[goal]] of the same lane (none for a lane's first), and
+# for a goal with no lane, or a goal file the manifest does not list, to n-1. Per goal, on
+# origin: done (its ledger has `COMPLETE (goal n)`), waiting (an `after` goal is not done, or a
+# CHECKPOINT-*.approved its file names is missing), parked (a file or match condition fails),
+# else ready (a note-only parked goal is ready; the goal decides). The program has FINISHED
+# when every goal without parked_until is done, and is COMPLETE when every goal is done.
+# With a manifest, after a goal is met:
+#   - a BLOCKED report does not stop the chain: that goal is held until origin's default
+#     branch has moved past the commit it blocked at and BLOCKED_RETRY seconds have passed
+#   - a checkpoint without an approval file only holds the goals that name it (the delegated
+#     review still runs first when delegated; one that does not approve holds them too)
+#   - the lowest-numbered ready goal starts; if none is ready, it notes once what the rest
+#     wait on (and that the program has finished, when it has), re-checks every PARK_POLL
+#     seconds, and starts a goal as soon as one turns ready
+# A met goal whose ledger has no COMPLETE line still stops the chain. Without a manifest,
+# goals run strictly n, n+1, ... as above.
+#
 # The delegated checkpoint review (--review-checkpoints "<the owner's words>") approves a
 # checkpoint on the owner's behalf: it re-runs the gate, has a fresh adversarial subagent
 # check the packet and ledger, decides the open proposals, and commits
@@ -43,6 +72,7 @@
 #   claude-goal-chain [--review-checkpoints "<quote>"] [--interval S] [--once] WINDOW[=REPO] ...
 #   claude-goal-chain status
 #   claude-goal-chain start WINDOW N [REPO]     # /clear + goal N now (e.g. after fixing a BLOCKED cause)
+#   claude-goal-chain lanes REPO [PREFIX]       # every goal's lane and state; exit 0 when finished
 # WINDOW is a window of tmux session "claude" (CLAUDE_GOAL_CHAIN_TMUX_SESSION); REPO
 # defaults to /workspace/WINDOW. State and a log live in $CLAUDE_CONFIG_DIR/goal-chain.
 set -uo pipefail
@@ -58,6 +88,8 @@ SET_TIMEOUT="${CLAUDE_GOAL_CHAIN_SET_TIMEOUT:-120}"      # seconds for "Goal set
 STEP_SLEEP="${CLAUDE_GOAL_CHAIN_STEP_SLEEP:-1}"          # pause between keystroke steps
 NOTE_TAG="[goal-chain]"
 OWNER="${CLAUDE_GOAL_CHAIN_OWNER:-Noah}"                  # whose checkpoints and whose words the review quotes
+BLOCKED_RETRY="${CLAUDE_GOAL_CHAIN_BLOCKED_RETRY:-21600}" # lanes: a BLOCKED goal is retried no sooner than this
+PARK_POLL="${CLAUDE_GOAL_CHAIN_PARK_POLL:-600}"           # lanes: nothing ready, re-check origin this often
 
 # The machine's SSH agent reaches tmux windows through the tmux environment; a shell
 # started some other way may not have it, and `git fetch` needs it.
@@ -214,6 +246,138 @@ needed_checkpoints() {  # needed_checkpoints <goal-file>
         | { if [[ -n "$own" ]]; then command grep -vx "CHECKPOINT-$own.approved"; else cat; fi; }
 }
 
+# --- lanes: an optional .claude/goals/<prefix>.lanes.toml on origin (see the header) ---------------
+lanes_file() { echo ".claude/goals/$1.lanes.toml"; }   # lanes_file <prefix>
+has_lanes() { on_origin "$1" "$(lanes_file "$2")"; }   # has_lanes <repo> <prefix>
+
+# The manifest resolved against origin's goal files, as TSV (never an empty field):
+#   goal <n> <lane|-> <after: n,n|-> <parked 0|1>     one per goal file or [[goal]]
+#   cond <n> exists <path> | cond <n> match <path> <ERE> | cond <n> note <text>
+# Exit 2 with the reason on stderr when there is no manifest or it cannot be used.
+lanes_read() {  # lanes_read <repo> <prefix>
+    python3 - "$1" "$(default_ref "$1")" "$2" <<'PY'
+import re, subprocess, sys, tomllib
+repo, ref, prefix = sys.argv[1:4]
+def git(*a):
+    r = subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else None
+def die(why):
+    print(f"{prefix}.lanes.toml: {why}", file=sys.stderr); sys.exit(2)
+def flat(s):
+    return re.sub(r"[\t\n\r]+", " ", s).strip()
+text = git("show", f"{ref}:.claude/goals/{prefix}.lanes.toml")
+if text is None: die(f"not on {ref}")
+try: man = tomllib.loads(text)
+except tomllib.TOMLDecodeError as e: die(str(e))
+pat = re.compile(rf"\.claude/goals/{re.escape(prefix)}-g([0-9]+)\.goal\.txt")
+files = {int(m.group(1)) for m in map(pat.fullmatch, (git("ls-tree", "--name-only", ref, ".claude/goals/") or "").split()) if m}
+goals = man.get("goal", [])
+if not isinstance(goals, list): die("goal must be an array of tables ([[goal]])")
+listed = {}
+for g in goals:
+    n = g.get("n") if isinstance(g, dict) else None
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1: die(f"a [[goal]] needs a whole number n >= 1: {g}")
+    if n in listed: die(f"goal {n} is listed twice")
+    lane = g.get("lane")
+    if lane is not None and not (isinstance(lane, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", lane)):
+        die(f"goal {n}: lane must be a name of letters, digits, '_', '.' or '-'")
+    after = g.get("after")
+    if after is not None and not (isinstance(after, list) and all(isinstance(a, int) and not isinstance(a, bool) and 0 < a != n for a in after)):
+        die(f"goal {n}: after must be a list of other goal numbers")
+    conds = g.get("parked_until")
+    if conds is not None:
+        if not isinstance(conds, list) or not conds: die(f"goal {n}: parked_until must be a non-empty list of tables")
+        for c in conds:
+            ok = isinstance(c, dict) and (
+                (isinstance(c.get("file"), str) and c["file"].strip() and "note" not in c
+                 and (isinstance(c.get("match"), str) and c["match"] != "" or "match" not in c))
+                or (isinstance(c.get("note"), str) and c["note"].strip() and "file" not in c and "match" not in c))
+            if not ok: die(f"goal {n}: each parked_until entry is {{ file, match }}, {{ file }} or {{ note }}: {c}")
+    listed[n] = g
+prev_in_lane = {}
+for n in sorted(set(files) | set(listed)):
+    g = listed.get(n, {})
+    lane = g.get("lane")
+    if "after" in g: after = g["after"]
+    elif lane is not None: after = [prev_in_lane[lane]] if lane in prev_in_lane else []
+    else: after = [n - 1] if n > 1 else []
+    if lane is not None: prev_in_lane[lane] = n
+    conds = g.get("parked_until") or []
+    print("goal", n, lane or "-", ",".join(map(str, after)) or "-", 1 if conds else 0, sep="\t")
+    for c in conds:
+        if "note" in c: print("cond", n, "note", flat(c["note"]), sep="\t")
+        elif "match" in c: print("cond", n, "match", flat(c["file"]), flat(c["match"]), sep="\t")
+        else: print("cond", n, "exists", flat(c["file"]), sep="\t")
+PY
+}
+
+# Every goal's state on origin, by n, as TSV: <n> <lane|-> <parked 0|1> <state> <why|->
+#   state: done | waiting | parked | ready (see the header)
+lanes_states() {  # lanes_states <repo> <prefix>
+    local repo="$1" prefix="$2" man ref tmp kind n lane after parked a c ck path match why rc
+    man="$(lanes_read "$repo" "$prefix")" || return 2
+    ref="$(default_ref "$repo")"
+    tmp="$(mktemp)"
+    while IFS=$'\t' read -r kind n lane after parked; do
+        [[ "$kind" == goal ]] || continue
+        if ledger_complete "$repo" "$prefix" "$n"; then
+            printf '%s\t%s\t%s\tdone\t-\n' "$n" "$lane" "$parked"; continue
+        fi
+        why=""
+        if [[ "$after" != - ]]; then
+            for a in ${after//,/ }; do
+                ledger_complete "$repo" "$prefix" "$a" || why+="${why:+, }goal $a"
+            done
+            [[ -n "$why" ]] && why="after $why"
+        fi
+        if git -C "$repo" show "$ref:.claude/goals/$prefix-g$n.goal.txt" > "$tmp" 2>/dev/null; then
+            while read -r c; do
+                [[ -n "$c" ]] || continue
+                on_origin "$repo" ".claude/goals/$c" || why+="${why:+; }$c"
+            done < <(needed_checkpoints "$tmp")
+        else
+            why+="${why:+; }no $prefix-g$n.goal.txt on origin"
+        fi
+        if [[ -n "$why" ]]; then
+            printf '%s\t%s\t%s\twaiting\t%s\n' "$n" "$lane" "$parked" "$why"; continue
+        fi
+        while IFS=$'\t' read -r ck c kind path match; do
+            [[ "$ck" == cond && "$c" == "$n" ]] || continue
+            case "$kind" in
+                exists) on_origin "$repo" "$path" || why+="${why:+; }$path is not on origin" ;;
+                match)
+                    git -C "$repo" show "$ref:$path" 2>/dev/null | command grep -qE -- "$match" 2>/dev/null; rc=$?
+                    if (( rc == 2 )); then why+="${why:+; }'$match' is not a valid ERE"
+                    elif (( rc != 0 )); then why+="${why:+; }no line of $path matches '$match'"; fi ;;
+            esac
+        done <<<"$man"
+        if [[ -n "$why" ]]; then
+            printf '%s\t%s\t%s\tparked\t%s\n' "$n" "$lane" "$parked" "$why"
+        else
+            printf '%s\t%s\t%s\tready\t-\n' "$n" "$lane" "$parked"
+        fi
+    done <<<"$man"
+    rm -f "$tmp"
+}
+
+# A goal that ended BLOCKED is held until origin has moved past the commit it blocked at and
+# BLOCKED_RETRY seconds have passed. The record is "<event-key> <sha> <epoch>".
+blocked_record() {  # blocked_record <window> <n> <event-key> <repo>: once per event
+    local rec sha
+    rec="$(state_get "$1" "blocked_$2")"
+    [[ "${rec%% *}" == "$3" ]] && return 0
+    sha="$(git -C "$4" rev-parse -q --verify "$(default_ref "$4")" 2>/dev/null)"
+    state_set "$1" "blocked_$2" "$3 ${sha:-unknown} $(now)"
+}
+blocked_hold() {  # blocked_hold <window> <n> <origin-sha>: true while the goal is held
+    local rec key bsha bat
+    rec="$(state_get "$1" "blocked_$2")"
+    [[ -n "$rec" ]] || return 1
+    read -r key bsha bat <<<"$rec"
+    [[ "$3" == "$bsha" ]] && return 0
+    (( $(now) - ${bat:-0} < BLOCKED_RETRY ))
+}
+
 # --- acting on the session ----------------------------------------------------------------------
 send_line() {  # send_line <window> <text>: type it literally, then Enter
     tmux send-keys -t "$SESSION:$1" -l "$2" && sleep "$STEP_SLEEP" && tmux send-keys -t "$SESSION:$1" Enter
@@ -304,6 +468,7 @@ tick() {  # tick <window> <repo>
     # A goal set or running: if the chain had stopped, someone restarted it by hand.
     if [[ "$kind" == set || "$kind" == active ]]; then
         [[ "$phase" == stopped ]] && { log "$w: a new goal is running; the chain resumes"; state_set "$w" phase watching; }
+        [[ "$phase" == parked ]] && state_set "$w" phase watching
         return 0
     fi
     [[ "$(state_get "$w" handled)" == "$key" ]] && return 0
@@ -344,6 +509,12 @@ tick() {  # tick <window> <repo>
     [[ "$status" == idle ]] || return 0
     age=$(( $(now) - $(date -d "$ts" +%s 2>/dev/null || now) ))
     (( age >= IDLE_SECONDS )) || return 0
+    # Lanes with nothing ready: re-check no more often than PARK_POLL.
+    if [[ "$phase" == parked && "$(state_get "$w" parked_key)" == "$key" ]]; then
+        local polled
+        polled="$(state_get "$w" polled_at)"
+        [[ -n "$polled" ]] && (( $(now) - polled < PARK_POLL )) && return 0
+    fi
     fetch_origin "$repo" || log "$w: git fetch failed in $repo; using what is fetched"
 
     # A finished checkpoint review.
@@ -351,6 +522,17 @@ tick() {  # tick <window> <repo>
         read -r x program n <<<"$g"
         if on_origin "$repo" ".claude/goals/CHECKPOINT-$x.approved"; then
             advance "$w" "$repo" "$program" "$n" "$key"
+            return 0
+        fi
+        file="$(goal_file "$repo" "$program" "$n")"
+        prefix="$(basename "${file:-x}" "-g$n.goal.txt")"
+        if [[ -n "$file" ]] && has_lanes "$repo" "$prefix"; then
+            # Lanes: only the goals that name the checkpoint wait for it.
+            if [[ "$(state_get "$w" review_noted)" != "$key" ]]; then
+                note "$w" "The Checkpoint $x review did not approve; see its report above. Goals that need CHECKPOINT-$x.approved wait for it; other lanes go on."
+                state_set "$w" review_noted "$key"
+            fi
+            schedule "$w" "$repo" "$program" "$prefix" "$key"
         else
             state_set "$w" handled "$key"
             stop "$w" "the Checkpoint $x review did not approve; see its report above" "$key"
@@ -367,9 +549,16 @@ tick() {  # tick <window> <repo>
         return 0
     fi
     prefix="$(basename "$file" "-g$n.goal.txt")"
-    local final
+    local final lanes=0
+    has_lanes "$repo" "$prefix" && lanes=1
     final="$(last_assistant_text "$tr" 6)"
     if command grep -qE "BLOCKED \(goal $n\)" <<<"$final" && ! command grep -qE "GOAL REPORT \(goal $n\)" <<<"$final"; then
+        if (( lanes )); then
+            # Lanes: hold this goal and go on with the others.
+            blocked_record "$w" "$n" "$key" "$repo"
+            schedule "$w" "$repo" "$program" "$prefix" "$key"
+            return 0
+        fi
         state_set "$w" handled "$key"
         stop "$w" "$program goal $n ended BLOCKED: its precondition is not met" "$key"
         return 0
@@ -391,6 +580,9 @@ tick() {  # tick <window> <repo>
             log "$w: $program goal $n is COMPLETE; running the delegated Checkpoint $x review"
             start_goal_file "$w" "$(review_condition "$x" "$program" "$n" "$total" "$repo" "$prefix" "$packet")" \
                 "the Checkpoint $x review" && state_set "$w" phase reviewing
+        elif (( lanes )); then
+            # Lanes: only the goals that name the checkpoint wait for it.
+            schedule "$w" "$repo" "$program" "$prefix" "$key"
         else
             # Wait for the owner's approval file; note it once.
             if [[ "$(state_get "$w" stopped_note)" != "wait:$key" ]]; then
@@ -405,8 +597,15 @@ tick() {  # tick <window> <repo>
 }
 
 # Start goal n+1 when its checkpoint files are all on origin; otherwise wait or finish.
+# A program with a lanes manifest is scheduled instead.
 advance() {  # advance <window> <repo> <program> <n> <event-key>
-    local w="$1" repo="$2" program="$3" n="$4" key="$5" nextfile missing="" c
+    local w="$1" repo="$2" program="$3" n="$4" key="$5" nextfile missing="" c file prefix
+    file="$(goal_file "$repo" "$program" "$n")"
+    prefix="$(basename "${file:-x}" "-g$n.goal.txt")"
+    if [[ -n "$file" ]] && has_lanes "$repo" "$prefix"; then
+        schedule "$w" "$repo" "$program" "$prefix" "$key"
+        return 0
+    fi
     nextfile="$(goal_file "$repo" "$program" "$((n + 1))")"
     if [[ -z "$nextfile" ]]; then
         state_set "$w" handled "$key"
@@ -430,6 +629,55 @@ advance() {  # advance <window> <repo> <program> <n> <event-key>
     start_goal_file "$w" "$nextfile" "$program goal $((n + 1))"
 }
 
+# Lanes: start the lowest-numbered ready goal. If none is ready, say once what the rest wait
+# on (and that the program has finished, when it has); `tick` re-checks every PARK_POLL.
+schedule() {  # schedule <window> <repo> <program> <prefix> <event-key>
+    local w="$1" repo="$2" program="$3" prefix="$4" key="$5" states sha n lane parked st why
+    local next="" open="" finished=1 complete=1 msg
+    if ! states="$(lanes_states "$repo" "$prefix" 2>&1)"; then
+        state_set "$w" handled "$key"
+        stop "$w" "the $program lanes manifest cannot be used (${states//$'\n'/ })" "$key"
+        return 0
+    fi
+    sha="$(git -C "$repo" rev-parse -q --verify "$(default_ref "$repo")" 2>/dev/null)"
+    while IFS=$'\t' read -r n lane parked st why; do
+        [[ -n "$n" && "$st" != done ]] || continue
+        complete=0
+        (( parked )) || finished=0
+        if [[ "$st" == ready ]] && blocked_hold "$w" "$n" "$sha"; then
+            st=blocked; why="it ended BLOCKED; retried once origin moves and ${BLOCKED_RETRY}s pass"
+        fi
+        if [[ "$st" == ready && -z "$next" ]]; then next="$n"; continue; fi
+        [[ "$why" == - ]] && why=""
+        open+="${open:+; }goal $n$([[ "$lane" != - ]] && echo " ($lane)") $st${why:+: $why}"
+    done <<<"$states"
+    state_set "$w" polled_at "$(now)"
+    if [[ -n "$next" ]]; then
+        state_set "$w" handled "$key"
+        start_goal_file "$w" "$repo/.claude/goals/$prefix-g$next.goal.txt" "$program goal $next"
+        return 0
+    fi
+    if (( complete )); then
+        state_set "$w" handled "$key"
+        state_set "$w" phase done
+        note "$w" "The $program program is complete: every goal in its lanes manifest is COMPLETE."
+        return 0
+    fi
+    if (( finished )); then
+        msg="The $program program has finished: every goal an agent can do is COMPLETE. Still open: $open."
+    else
+        msg="$program: no goal can start yet. Still open: $open."
+    fi
+    (( ${#msg} > 900 )) && msg="${msg:0:880} ... (claude-goal-chain lanes $repo)"
+    if [[ "$(state_get "$w" stopped_note)" != "park:$(cksum <<<"$msg")" ]]; then
+        note "$w" "$msg Re-checked every ${PARK_POLL}s; a goal starts as soon as it is ready."
+        state_set "$w" stopped_note "park:$(cksum <<<"$msg")"
+    fi
+    state_set "$w" phase parked
+    state_set "$w" parked_key "$key"
+    return 0   # not handled: checked again every PARK_POLL
+}
+
 # --- commands ------------------------------------------------------------------------------------
 cmd_status() {
     local f w
@@ -451,6 +699,34 @@ cmd_start() {  # cmd_start <window> <n> [repo]
     start_goal_file "$w" "${m[0]}" "goal $n"
 }
 
+cmd_lanes() {  # cmd_lanes <repo> [prefix]: every goal's lane and state; 0 finished, 1 not, 2 error
+    local repo="$1" prefix="${2:-}" states n lane parked st why finished=1 complete=1
+    local -a found=()
+    git -C "$repo" rev-parse -q --git-dir >/dev/null 2>&1 || { echo "claude-goal-chain: $repo is not a git repo" >&2; return 2; }
+    fetch_origin "$repo" || echo "claude-goal-chain: git fetch failed in $repo; using what is fetched" >&2
+    if [[ -z "$prefix" ]]; then
+        mapfile -t found < <(git -C "$repo" ls-tree --name-only "$(default_ref "$repo")" .claude/goals/ 2>/dev/null \
+            | sed -n 's|^\.claude/goals/\(.*\)\.lanes\.toml$|\1|p')
+        if (( ${#found[@]} != 1 )); then
+            echo "claude-goal-chain: ${#found[@]} lanes manifests (.claude/goals/*.lanes.toml) on $(default_ref "$repo") in $repo; name the PREFIX" >&2
+            (( ${#found[@]} )) && printf '  %s\n' "${found[@]}" >&2
+            return 2
+        fi
+        prefix="${found[0]}"
+    fi
+    states="$(lanes_states "$repo" "$prefix")" || return 2
+    printf '%-5s %-12s %-6s %-8s %s\n' goal lane needs state why
+    while IFS=$'\t' read -r n lane parked st why; do
+        [[ -n "$n" ]] || continue
+        if [[ "$st" != done ]]; then complete=0; (( parked )) || finished=0; fi
+        printf '%-5s %-12s %-6s %-8s %s\n' "$n" "$lane" "$( (( parked )) && echo owner || echo agent)" "$st" "${why#-}"
+    done <<<"$states"
+    echo "finished: $( (( finished )) && echo yes || echo no) (every goal an agent can do is COMPLETE)"
+    echo "complete: $( (( complete )) && echo yes || echo no) (every goal is COMPLETE)"
+    (( finished )) && return 0
+    return 1
+}
+
 main() {
     local once=0 arg w repo
     local -a windows=()
@@ -458,6 +734,8 @@ main() {
         status) cmd_status; return ;;
         start)  shift; [[ $# -ge 2 ]] || { echo "usage: claude-goal-chain start WINDOW N [REPO]" >&2; return 2; }
                 cmd_start "$@"; return ;;
+        lanes)  shift; [[ $# -ge 1 ]] || { echo "usage: claude-goal-chain lanes REPO [PREFIX]" >&2; return 2; }
+                cmd_lanes "$@"; return ;;
         ""|-h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//'; return 0 ;;
     esac
     while [[ $# -gt 0 ]]; do
