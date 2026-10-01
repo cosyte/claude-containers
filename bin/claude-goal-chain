@@ -721,8 +721,8 @@ cmd_lanes() {  # cmd_lanes <repo> [prefix]: every goal's lane and state; 0 finis
         if [[ "$st" != done ]]; then complete=0; (( parked )) || finished=0; fi
         printf '%-5s %-12s %-6s %-8s %s\n' "$n" "$lane" "$( (( parked )) && echo owner || echo agent)" "$st" "${why#-}"
     done <<<"$states"
-    echo "finished: $( (( finished )) && echo yes || echo no) (every goal an agent can do is COMPLETE)"
-    echo "complete: $( (( complete )) && echo yes || echo no) (every goal is COMPLETE)"
+    echo "finished: $( (( finished )) && echo yes || echo no) (finished means every goal an agent can do is COMPLETE)"
+    echo "complete: $( (( complete )) && echo yes || echo no) (complete means every goal is COMPLETE)"
     (( finished )) && return 0
     return 1
 }
