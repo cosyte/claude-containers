@@ -89,7 +89,7 @@ state_set() {  # state_set <window> <key> <value>
 # --- the session behind a window --------------------------------------------------------------
 # Prints "<pid> <sessionId> <status> <cwd>" for the live claude process in the window's pane.
 session_info() {  # session_info <window>
-    local pane f pid
+    local pane f pid ps
     pane="$(tmux list-panes -t "$SESSION:$1" -F '#{pane_id}' 2>/dev/null | head -n1)" || return 1
     [[ -n "$pane" ]] || return 1
     for f in "$CONFIG_DIR"/sessions/*.json; do
@@ -97,6 +97,11 @@ session_info() {  # session_info <window>
         jq -e --arg p "$pane" '(.tmux // "") | endswith("." + $p)' "$f" >/dev/null 2>&1 || continue
         pid="$(jq -r '.pid' "$f")"
         kill -0 "$pid" 2>/dev/null || continue
+        # The same process that wrote the file: pids are reused after a container restart.
+        ps="$(jq -r '.procStart // empty' "$f")"
+        if [[ -n "$ps" ]]; then
+            [[ "$(sed -E 's/^[0-9]+ \(.*\) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $20}')" == "$ps" ]] || continue
+        fi
         [[ "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" == *claude* ]] || continue
         jq -r '"\(.pid) \(.sessionId) \(.status // "unknown") \(.cwd)"' "$f"
         return 0
