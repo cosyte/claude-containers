@@ -10,7 +10,7 @@ name: Em-dash gate
 #   The PR-text half below needs the `edited` activity type, which is not a
 #   default. Without it a title or body edited after the last push is never
 #   re-checked, and because this repo squash-merges, the PR title and body ARE the
-#   commit message that lands on main. ci.yml's triggers drive the lint + eleven
+#   commit message that lands on main. ci.yml's triggers drive the lint + the
 #   unit suites; re-running all of that every time someone fixes a typo in a PR
 #   description is a large cost for no extra safety.
 #

@@ -45,3 +45,5 @@ jobs:
         run: test/pkg-install-guide-unit.sh
       - name: goal-chain unit tests (a met goal advances only with a COMPLETE ledger and its checkpoints on origin, BLOCKED stops, the delegated checkpoint review, usage-limit nudges, a fake tmux session)
         run: test/goal-chain-unit.sh
+      - name: sessions unit tests (several sessions per container, the CLAUDE_SESSIONS spec, boot and reconcile, supervise, stop/start/restart/rm, the account switch, compose-gen --session and --env, against a fake tmux)
+        run: test/sessions-unit.sh

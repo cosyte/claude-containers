@@ -391,7 +391,7 @@ echo 8192 > "$TMPD/cg/pids.max"; echo 7000 > "$TMPD/cg/pids.current"
 echo 1000 > "$TMPD/cg/memory.current"; echo 8589934592 > "$TMPD/cg/memory.max"
 out="$("$CS" health)"
 [[ "$out" == *"pids 85% (7000/8192)"* && "$out" != *memory* ]] && ok "health adds 'pids 85%' at 80% and above" || bad "health: $out"
-out="$("$CS" supervise --once 2>&1)"
+"$CS" supervise --once > "$TMPD/sup.out" 2>&1; out="$(cat "$TMPD/sup.out")"   # a file: watchdogs it starts keep a pipe open
 [[ "$out" == *"WARNING: capacity: pids 7000/8192 (85%)"* && "$out" == *"Heaviest: "*" threads, "* ]] \
     && ok "the supervisor warns and names the heaviest processes by threads" || bad "capacity warning: $out"
 echo 100 > "$TMPD/cg/pids.current"

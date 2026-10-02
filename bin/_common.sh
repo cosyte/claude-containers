@@ -106,7 +106,9 @@ harden_run_args() {
 # defeating every other control here, so this is the highest-leverage check.
 preflight_runc() {
     local rv base M m p
-    rv="$(runc --version 2>/dev/null | awk '/^runc version/{print $3; exit}')"
+    # `|| true`: under the callers' `set -eo pipefail` a host with no runc on PATH (rc 127)
+    # would otherwise end the launch here, before the docker-info fallback below.
+    rv="$(runc --version 2>/dev/null | awk '/^runc version/{print $3; exit}' || true)"
     [[ -z "$rv" ]] && rv="$(docker info 2>/dev/null | sed -n 's/.*[Rr]unc version[: ]*v\?\([0-9][^ ,]*\).*/\1/p' | head -1)"
     if [[ -z "$rv" ]]; then
         warn "could not determine host runC version: ensure it is >= 1.2.8 / 1.3.3 (CVE-2025-31133/52565/52881 escapes)"
