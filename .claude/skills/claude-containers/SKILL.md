@@ -345,6 +345,13 @@ SSH-into-session. Real OAuth + the phone-app green-dot remain manual.
   relaunch with `claude-session`.
 - **Git push fails** → `GIT_SSH_KEY` missing/not authorized on the remote;
   public/https still clone. Wrong author → set `GIT_AUTHOR_*` in `.env`.
+- **Changing the account** → log the new one into the volume the containers mount
+  (`claude-account-login <name>` / `make login`); running containers follow with no restart
+  (credential in ~30 s, each session at its next idle moment, resumed; fresh RC links under the
+  new account). `claude-account-list` = in sync / moving; `claude-sessions -C <p> account
+  [--now]`. Never copy a container's credential up to the master across accounts: the sync
+  refuses while any pre-switch Claude process lives (`reconcile_once`, `old_claude_running`),
+  and a stale container replaces its copy at boot. `CLAUDE_AUTH_FOLLOW=0` turns it off.
 - **Auth went stale across containers** → reconcile loop converges every ~30s;
   restart the container to re-seed immediately; full reset
   `docker volume rm claude-auth && make login`.

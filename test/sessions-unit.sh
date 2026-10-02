@@ -30,7 +30,7 @@ cleanup() {
     local p
     for p in "$TMPD"/run/*.pid; do [[ -f "$p" ]] && kill "$(cat "$p")" 2>/dev/null; done
     (( ${#KILL[@]} )) && kill "${KILL[@]}" 2>/dev/null
-    rm -rf "$TMPD"
+    rm -rf "${TMPD:?}"
 }
 trap cleanup EXIT
 
@@ -118,7 +118,7 @@ EOF
 chmod +x "$FAKE/bin/"*
 export PATH="$FAKE/bin:$PATH"
 
-tm_reset() { rm -rf "$FAKE/tm"; mkdir -p "$FAKE/tm/w" "$FAKE/tm/env" "$FAKE/tm/buf"; : > "$FAKE/tm/order"; touch "$FAKE/tm/alive"; }
+tm_reset() { rm -rf "${FAKE:?}/tm"; mkdir -p "$FAKE/tm/w" "$FAKE/tm/env" "$FAKE/tm/buf"; : > "$FAKE/tm/order"; touch "$FAKE/tm/alive"; }
 tm_main() { mkdir -p "$FAKE/tm/w/main"; echo "%0" > "$FAKE/tm/w/main/pane"; echo main >> "$FAKE/tm/order"; }
 win_cmd() { cat "$FAKE/tm/w/$1/cmd" 2>/dev/null; }
 win_dir() { cat "$FAKE/tm/w/$1/dir" 2>/dev/null; }
@@ -224,7 +224,7 @@ check "boot with no CLAUDE_SESSIONS and no registry says nothing" \
 # ======================================================================================
 echo "== claude-sessions env: what claude-session sees =="
 export CLAUDE_SESSIONS='home goal=.claude/goals/g1.goal.txt; review dir=home model=sonnet mode=plan rc=off resume=off'
-tm_reset; tm_main; rm -rf "$REG"; "$CS" boot >/dev/null 2>&1
+tm_reset; tm_main; rm -rf "${REG:?}"; "$CS" boot >/dev/null 2>&1
 envof() { ( eval "$("$CS" env "$1")"; eval "echo \"\$$2\"" ); }
 check "home: Remote Control name <project>-<name>" test "$(envof home S_RCNAME)" = maker-home
 check "home: goal path resolved against its dir" test "$(envof home S_PROMPT_KIND):$(envof home S_PROMPT_PATH)" = "goal:$WS/home/.claude/goals/g1.goal.txt"
@@ -342,7 +342,7 @@ check "main still starts when claude-sessions is missing" test -s "$FAKE/claude.
 # ======================================================================================
 echo "== supervise: conversations recorded, one watchdog per linked session =="
 export CLAUDE_SESSIONS='home; review dir=home rc=off'
-tm_reset; tm_main; rm -rf "$REG" "$TMPD/run" "$FAKE/watchdog.calls"; "$CS" boot >/dev/null 2>&1
+tm_reset; tm_main; rm -rf "${REG:?}" "${TMPD:?}/run" "${FAKE:?}/watchdog.calls"; "$CS" boot >/dev/null 2>&1
 mksess() {  # mksess <pane> <sid>: a live "claude" whose session file maps it to a pane
     bash -c 'exec -a claude-fake sleep 1800' & KILL+=($!)
     jq -n --argjson p "$!" --arg s "$2" --arg t "claude:@1.$1" '{pid:$p,sessionId:$s,status:"idle",tmux:$t,cwd:"/x"}' \
@@ -556,6 +556,111 @@ gen --out "$TMPD/d.yml" acme/site --env 'site=ANTHROPIC_API_KEY=x'; rc=$?
 check "--env ANTHROPIC_API_KEY is refused" test "$rc" -ne 0
 
 # ======================================================================================
+echo "== the entrypoint follows an account change in the shared credential =="
+SYNC="$(awk '/^# >>> credential sync/{f=1} f{print} /^# <<< credential sync/{exit}' "$REPO_ROOT/entrypoint.sh")"
+AU="$TMPD/auth"; CF="$TMPD/cfgsync"; mkdir -p "$AU" "$CF"
+cred() { printf '{"claudeAiOauth":{"accessToken":"%s","refreshToken":"r-%s"}}\n' "$1" "$1"; }
+acct() { printf '{"oauthAccount":{"accountUuid":"%s","emailAddress":"%s@example.com"}}\n' "$1" "$1"; }
+cred tok-new > "$AU/.credentials.json"; acct acct-new > "$AU/.claude.json"
+cred tok-old > "$CF/.credentials.json"; acct acct-old > "$CF/.claude.json"
+touch -d '1 hour ago' "$CF/.credentials.json"
+{
+    echo 'set -euo pipefail'
+    echo 'log() { echo "[entrypoint] $*"; }'
+    echo "AUTH_DIR='$AU' CLAUDE_CONFIG_DIR='$CF' CLAUDE_UID=$(id -u) CLAUDE_GID=$(id -g) CLAUDE_BIN_RE='^/fake/bin/claude\$'"
+    printf '%s\n' "$SYNC"
+    cat <<'EOS'
+cred() { printf '{"claudeAiOauth":{"accessToken":"%s","refreshToken":"r-%s"}}\n' "$1" "$1"; }
+acct() { printf '{"oauthAccount":{"accountUuid":"%s","emailAddress":"%s@example.com"}}\n' "$1" "$1"; }
+tok() { sed -E 's/.*"accessToken":"([^"]*)".*/\1/' "$1"; }
+CF="$CLAUDE_CONFIG_DIR" AU="$AUTH_DIR"
+step() {
+    reconcile_once || true
+    local sw=none; [[ -s "$CF/.account-changed" ]] && sw="$(cut -d' ' -f2 "$CF/.account-changed")"
+    echo "[$1] local=$(tok "$CF/.credentials.json") master=$(tok "$AU/.credentials.json") acct=$(cat "$CF/.credentials-account") cached=$(jq -r .oauthAccount.accountUuid "$CF/.claude.json") switch=$sw"
+}
+echo "[boot] local=$(tok "$CF/.credentials.json") acct=$(cat "$CF/.credentials-account")"
+sleep 1.1; cred tok-new2 > "$CF/.credentials.json"; step refresh-same-account
+bash -c 'exec -a /fake/bin/claude sleep 30' & old=$!; sleep 1.2
+cred tok-other > "$AU/.credentials.json"; acct acct-other > "$AU/.claude.json"; step account-change
+sleep 1.1; cred tok-OLD-refresh > "$CF/.credentials.json"; step old-session-refreshes
+kill "$old"; wait "$old" 2>/dev/null || true; step old-sessions-gone
+sleep 1.1; cred tok-other2 > "$CF/.credentials.json"; step refresh-after-switch
+printf '{"claudeAiOauth":{"accessToken":""}}\n' > "$AU/.credentials.json"; acct acct-third > "$AU/.claude.json"
+sleep 1.1; cred tok-mine > "$CF/.credentials.json"; step master-logged-out-other-account
+EOS
+} > "$TMPD/sync.sh"
+out="$(bash "$TMPD/sync.sh" 2>&1)"
+grep -q "^\[entrypoint\] Auth account        : this container's own credential was another account's (acct-old" <<<"$out" \
+    && grep -q '^\[boot\] local=tok-new acct=acct-new$' <<<"$out" \
+    && ok "boot: a container holding another account's credential takes the shared one before any session starts" || bad "boot: $out"
+grep -q '^\[refresh-same-account\] local=tok-new2 master=tok-new2 ' <<<"$out" \
+    && ok "a token refresh of the same account is still pushed up to the shared credential" || bad "same-account push: $(grep refresh-same <<<"$out")"
+grep -q '^\[account-change\] local=tok-other master=tok-other acct=acct-other cached=acct-other switch=acct-other$' <<<"$out" \
+    && grep -q "the shared credential is now acct-other@example.com" <<<"$out" \
+    && ok "a new account in the shared credential is taken over at once: credential, cached identity, switch request" || bad "account change: $(grep account-change <<<"$out")"
+grep -q '^\[old-session-refreshes\] local=tok-other master=tok-other ' <<<"$out" \
+    && ok "while an old-account Claude still runs, its refresh is never pushed up (the shared one is put back)" || bad "old refresh: $(grep old-session <<<"$out")"
+grep -q "every Claude process now runs on acct-other@example.com" <<<"$out" \
+    && grep -q '^\[refresh-after-switch\] local=tok-other2 master=tok-other2 ' <<<"$out" \
+    && ok "once every old process is gone, sync is back to normal (refreshes pushed up again)" || bad "after switch: $out"
+grep -q '^\[master-logged-out-other-account\] local=tok-mine master= ' <<<"$out" \
+    && ok "a logged-out shared credential naming another account is never filled with this one" || bad "logged out: $(grep master-logged <<<"$out")"
+
+cred tok-A > "$AU/.credentials.json"; acct acct-A > "$AU/.claude.json"; touch -d '1 hour ago' "$AU/.credentials.json"
+cred tok-B > "$CF/.credentials.json"; acct acct-B > "$CF/.claude.json"; rm -f "${CF:?}/.credentials-account" "${CF:?}/.account-changed"
+out="$( { echo 'log() { echo "[entrypoint] $*"; }'; echo "AUTH_DIR='$AU' CLAUDE_CONFIG_DIR='$CF' CLAUDE_UID=$(id -u) CLAUDE_GID=$(id -g) CLAUDE_AUTH_FOLLOW=0"; printf '%s\n' "$SYNC"; echo 'reconcile_once || true'; } | bash 2>&1; echo "master=$(sed -E 's/.*"accessToken":"([^"]*)".*/\1/' "$AU/.credentials.json") switch=$([[ -e "$CF/.account-changed" ]] && echo yes || echo no)")"
+[[ "$out" == *"account changes are NOT followed (CLAUDE_AUTH_FOLLOW=0)"* && "$out" == *"master=tok-B switch=no"* ]] \
+    && ok "CLAUDE_AUTH_FOLLOW=0 turns it off: the old newest-wins sync, and the boot log says so" || bad "follow off: $out"
+
+echo "== the supervisor moves sessions onto a new account =="
+tm_reset; tm_main; rm -rf "${REG:?}" "${TMPD:?}/run" "${FAKE:?}/watchdog.calls"
+export CLAUDE_SESSIONS='home; review dir=home'
+"$CS" boot >/dev/null 2>&1
+rm -f "${CLAUDE_CONFIG_DIR:?}/sessions/"*.json
+mksess "$(cat "$FAKE/tm/w/home/pane")" s-home
+mksess "$(cat "$FAKE/tm/w/review/pane")" s-review
+sj_review="$(grep -l '"s-review"' "$CLAUDE_CONFIG_DIR"/sessions/*.json)"
+jq '.status = "busy"' "$sj_review" > "$sj_review.t" && mv "$sj_review.t" "$sj_review"
+echo "$(( $(date +%s) + 5 )) acct-new" > "$CLAUDE_CONFIG_DIR/.account-changed"
+check "health says sessions are still moving to the new account" bash -c "'$CS' health | grep -q 'moving to a new account (2 sessions to go)'"
+"$CS" supervise --once > "$TMPD/sup.out" 2>&1; out="$(cat "$TMPD/sup.out")"   # a file: watchdogs it starts keep a pipe open
+[[ "$out" == *"home: restarted onto the new account"* && "$out" != *"review: restarted"* ]] \
+    && ok "an idle session is restarted onto the new account; a busy one is left to finish its turn" || bad "switch pass: $out"
+check "the restart resumes the session's conversation" grep -q '^--respawn target=claude:home .*--session home --continue' "$FAKE/watchdog.calls"
+check "the switch stays open while a session still runs the old account" test -s "$CLAUDE_CONFIG_DIR/.account-changed"
+acct acct-new > "$CLAUDE_CONFIG_DIR/.claude.json"; echo acct-new > "$CLAUDE_CONFIG_DIR/.credentials-account"
+out="$("$CS" account)"
+[[ "$out" == *"account: acct-new@example.com (acct-new)"* && "$out" == *"in progress since"*"still on the previous account: home review"* ]] \
+    && ok "claude-sessions account names the account and who is still on the previous one" || bad "account: $out"
+echo "You've hit your weekly limit · resets Mon 12:00am" > "$FAKE/tm/w/home/screen"; : > "$FAKE/tm/w/home/sent"
+CLAUDE_SESSIONS_SWITCH_NUDGE_TRIES=1 "$CS" supervise --once > "$TMPD/sup.out" 2>&1
+grep -q "home: a usage limit had stopped it; told to continue on the new account" "$TMPD/sup.out" \
+    && grep -q "^\[account-switch\] This container now uses a different Claude account" "$FAKE/tm/w/home/sent" \
+    && ok "a session a usage limit had stopped is told to continue after it moves" || bad "nudge: $(cat "$TMPD/sup.out")"
+: > "$FAKE/tm/w/home/screen"
+n0="$(grep -c '^--respawn target=claude:review ' "$FAKE/watchdog.calls" || true)"
+"$CS" account --now > "$TMPD/acct.out" 2>&1
+check "account --now moves a busy session too" test "$(grep -c '^--respawn target=claude:review ' "$FAKE/watchdog.calls")" -gt "$n0"
+n0="$(grep -c '^--respawn target=claude:review ' "$FAKE/watchdog.calls")"
+CLAUDE_SESSIONS_SWITCH_FORCE_AFTER=1 "$CS" supervise --once > "$TMPD/sup.out" 2>&1
+check "CLAUDE_SESSIONS_SWITCH_FORCE_AFTER stays quiet until the deadline (the switch is 5 s in the future here)" \
+    test "$(grep -c '^--respawn target=claude:review ' "$FAKE/watchdog.calls")" -eq "$n0"
+for f in "$CLAUDE_CONFIG_DIR"/sessions/*.json; do jq ".startedAt = $(( ($(date +%s) + 60) * 1000 ))" "$f" > "$f.t" && mv "$f.t" "$f"; done
+"$CS" supervise --once > "$TMPD/sup.out" 2>&1; out="$(cat "$TMPD/sup.out")"   # a file: watchdogs it starts keep a pipe open
+[[ "$out" == *"every session now runs on the new account"* && ! -e "$CLAUDE_CONFIG_DIR/.account-changed" ]] \
+    && ok "when every session started after the switch, it is closed" || bad "switch close: $out"
+check "account then reports no switch in progress" bash -c "'$CS' account | grep -q 'switch : none in progress'"
+
+echo "== a stale session file never hands a window another conversation =="
+f="$(grep -l '"s-home"' "$CLAUDE_CONFIG_DIR"/sessions/*.json)"; pid="$(jq -r .pid "$f")"
+jq '.procStart = "1"' "$f" > "$f.t" && mv "$f.t" "$f"
+rm -f "${REG:?}/home.state"; "$CS" record
+check "a file whose procStart is not its pid's start time is ignored" bash -c "! grep -q 's-home' '$REG/home.state' 2>/dev/null"
+jq --arg ps "$(sed -E 's/^[0-9]+ \(.*\) //' "/proc/$pid/stat" | awk '{print $20}')" '.procStart = $ps' "$f" > "$f.t" && mv "$f.t" "$f"
+"$CS" record
+check "the same file with the right procStart is used" grep -qx 'sid=s-home' "$REG/home.state"
+
 echo "== the entrypoint caps library thread pools =="
 TB="$(awk '/^# --- 12-threads\. Library thread pools/{f=1} f{print} f&&/^unset _tpp$/{exit}' "$REPO_ROOT/entrypoint.sh")"
 tp() {  # tp <env...>: run the extracted block, print the resulting values and the profile file

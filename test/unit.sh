@@ -725,10 +725,12 @@ else
     bad "could not extract creds_have_token() from entrypoint.sh: the guard test is a no-op"
 fi
 
-# Structural tripwire: reconcile_creds must gate propagation on creds_have_token and
-# delegate the atomic move to publish_creds (no raw 'mv -f' that could republish a
-# tokenless file). Locks the fix against an accidental revert to unguarded copying.
-RECON_FN="$(awk '/^reconcile_creds\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$ENTRYPOINT")"
+# Structural tripwire: the sync pass (reconcile_once, which reconcile_creds loops over) must
+# gate propagation on creds_have_token and delegate the atomic move to publish_creds (no raw
+# 'mv -f' that could republish a tokenless file). Locks the fix against an accidental revert
+# to unguarded copying.
+RECON_FN="$(awk '/^reconcile_once\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$ENTRYPOINT")"
+grep -q 'reconcile_once' <<<"$(awk '/^reconcile_creds\(\) \{/,/\}/' "$ENTRYPOINT")" || RECON_FN=""
 if [[ -n "$RECON_FN" ]] && grep -q 'creds_have_token' <<<"$RECON_FN" && ! grep -q 'mv -f' <<<"$RECON_FN"; then
     ok  "reconcile_creds gates every propagation on creds_have_token (no unguarded copy)"
 else

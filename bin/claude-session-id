@@ -20,10 +20,14 @@ pane="$(awk -F'|' -v w="${TARGET#*:}" '$1==w{print $2; exit}' <<<"$wins")"
 if [[ -n "$pane" ]]; then
     for f in "$CONFIG_DIR"/sessions/*.json; do
         [[ -f "$f" ]] || continue
-        read -r pid sid < <(jq -r --arg p "$pane" --arg s "${TARGET%%:*}:" \
-            'select((.tmux // "") | startswith($s) and endswith("." + $p)) | "\(.pid) \(.sessionId // "")"' \
+        read -r pid sid ps < <(jq -r --arg p "$pane" --arg s "${TARGET%%:*}:" \
+            'select((.tmux // "") | startswith($s) and endswith("." + $p)) | "\(.pid) \(.sessionId // "") \(.procStart // "")"' \
             "$f" 2>/dev/null) || continue
         [[ -n "$sid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || continue
+        # The same process that wrote the file (pids are reused after a restart).
+        if [[ -n "$ps" ]]; then
+            [[ "$(sed -E 's/^[0-9]+ \(.*\) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $20}')" == "$ps" ]] || continue
+        fi
         echo "$sid"
         exit 0
     done

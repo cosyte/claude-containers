@@ -19,10 +19,24 @@ Remove `ANTHROPIC_API_KEY` from `.env` and your shell. This image is
 subscription-OAuth only; an API key would silently bill per token.
 
 **Logged in but sessions say unauthenticated.** The credential reconcile loop
-converges `/auth` and the per-container copy every ~30s. If you just ran
-`make login` while a container was already up, restart it
-(`claude-stop`/`claude-launch`) so it re-seeds immediately. Re-auth from
+converges `/auth` and the per-container copy every ~30s, and running sessions are
+restarted onto a new login by themselves (next entry). Re-auth from
 scratch: `docker volume rm claude-auth && make login`.
+
+**I logged a different account into the volume. What happens to running containers?** They
+follow it, no restart: the credential within ~30 s, each session at its next idle moment
+(it restarts and resumes its conversation). `claude-account-list` shows each container as
+`in sync` or `moving, N to go`; `claude-sessions -C <project> account` names the sessions still
+on the previous account, and `account --now` moves them at once. Things to know:
+- The sessions get **new Remote Control links owned by the new account** (Claude refuses to
+  reattach another account's link, `Restored-pointer reattach vetoed` in the RC debug log). Look
+  for them in the Claude app of the new account; the old links show offline in the old one.
+- A session that stays busy for hours stays on the old account until it idles. That is safe:
+  until every session has moved, the sync never pushes the container's credential up, so the
+  old account's refreshed token cannot overwrite the new login.
+- `Auth account : account changes are NOT followed` in the boot log means `CLAUDE_AUTH_FOLLOW=0`.
+- No `Auth account` line at all means the volume has no `.claude.json` beside its credential
+  (a login made by some other route): the account is then unknown and only the token sync runs.
 
 **Every session at once reports `Login expired · Please run /login` (Remote
 Control offline fleet-wide).** The claude.ai OAuth **refresh token** expired (or

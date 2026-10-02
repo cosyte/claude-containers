@@ -84,6 +84,21 @@ write wins; refreshes are infrequent (hours apart) so this is acceptable for a
 homelab. A token-rotation regression would surface as a re-login prompt, not
 data loss.
 
+**A changed account is followed.** "Newest wins" is only right while both files belong to
+one account. The master's account is the `oauthAccount.accountUuid` in the `.claude.json` the
+login writes beside it; the container records the account its own copy came from
+(`.credentials-account`). When they differ, the operator logged another account in, and the
+container takes the master's credential, refreshes its cached identity and asks
+`claude-sessions supervise` (through `.account-changed`) to restart each session at its next
+idle moment. Two rules keep the new login from being undone: while any Claude process that
+started before the switch is alive (start times from `/proc`, in milliseconds), nothing is
+pushed up, because such a process refreshes the OLD account's token into the container's file;
+and a container whose own copy is another account's replaces it at boot, before any session
+starts. Sessions are restarted rather than left to pick the token up because Remote Control
+links are owned by an account: Claude refuses to reattach one across accounts and mints a new
+one on start. Before this, changing accounts meant restarting every container by hand, and a
+stopped container started later could push the previous account back into the shared volume.
+
 ## Decision: per-container workspace defaults to a named volume
 
 `claude-ws-<project>` (named volume) is the default: consistent with the other

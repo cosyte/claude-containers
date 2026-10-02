@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# claude-account-list: show every named account created by claude-account-login
-# (plus the bare single-account `claude-auth` volume from `make login`, if any),
-# with token/email status for each.
+# claude-account-list: show every credential volume (the named accounts from
+# claude-account-login, plus the bare `claude-auth` volume from `make login`), the account
+# logged into each, and the running containers that use it: whether each is on that account
+# already or still moving its sessions onto it.
+#
+# To change the account a container or stack uses, log the new one into the volume it mounts
+# (`claude-account-login <name>` for claude-auth-<name>, `make login` for claude-auth). Running
+# containers follow by themselves: the credential within ~30 s, each session at its next idle
+# moment (`claude-sessions -C <project> account` shows progress).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 # shellcheck disable=SC1091
@@ -16,7 +22,24 @@ if [[ -z "$vols" ]]; then
     exit 0
 fi
 
-printf '%-20s %-10s %s\n' "ACCOUNT" "TOKEN" "EMAIL"
+# What a running container says about the account it is on: "in sync", "moving (N to go)",
+# or "another account" when it has not taken this volume's account (yet).
+container_state() {  # container_state <container> <volume's accountUuid>
+    local c="$1" want="$2" have health
+    have="$(docker exec -u "${CLAUDE_USER:-claude}" "$c" cat /home/claude/.claude/.credentials-account 2>/dev/null || true)"
+    health="$(docker exec -u "${CLAUDE_USER:-claude}" "$c" claude-sessions health 2>/dev/null || true)"
+    if [[ "$health" =~ moving\ to\ a\ new\ account\ \(([0-9]+) ]]; then
+        echo "moving, ${BASH_REMATCH[1]} to go"
+    elif [[ -z "$have" || -z "$want" ]]; then
+        echo "unknown"
+    elif [[ "$have" == "$want" ]]; then
+        echo "in sync"
+    else
+        echo "another account"
+    fi
+}
+
+printf '%-20s %-6s %-30s %s\n' "ACCOUNT" "TOKEN" "EMAIL" "USED BY (running)"
 while IFS= read -r vol; do
     [[ -n "$vol" ]] || continue
     name="${vol#claude-auth}"
@@ -30,10 +53,15 @@ while IFS= read -r vol; do
             tok="no"
         fi
         email="$(jq -r ".oauthAccount.emailAddress // \"?\"" /auth/.claude.json 2>/dev/null || echo "?")"
-        echo "${tok}|${email}"
-    ' 2>/dev/null || echo "error|?")"
+        uuid="$(jq -r ".oauthAccount.accountUuid // \"\"" /auth/.claude.json 2>/dev/null || true)"
+        echo "${tok}|${email}|${uuid}"
+    ' 2>/dev/null || echo "error|?|")"
 
-    tok="${status%%|*}"
-    email="${status#*|}"
-    printf '%-20s %-10s %s\n' "$name" "$tok" "$email"
+    IFS='|' read -r tok email uuid <<<"$status"
+    users=""
+    while IFS= read -r c; do
+        [[ -n "$c" ]] || continue
+        users+="${users:+, }${c} ($(container_state "$c" "$uuid"))"
+    done < <(docker ps --filter "volume=$vol" --filter 'label=claude.managed=1' --format '{{.Names}}' 2>/dev/null || true)
+    printf '%-20s %-6s %-30s %s\n' "$name" "$tok" "$email" "${users:--}"
 done <<< "$vols"

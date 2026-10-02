@@ -46,6 +46,10 @@
 #   claude-sessions rm NAME                stop and unregister a `new` session
 #   claude-sessions attach NAME            open that window (tmux)
 #   claude-sessions send NAME TEXT...      type a prompt into the session and submit it
+#   claude-sessions account [--now]        the Claude account in use, and any switch in progress
+#                                          (a new login in the shared credential is followed
+#                                          automatically: each session moves at its next idle
+#                                          moment; --now moves the busy ones too)
 #   claude-sessions check SPEC             validate a CLAUDE_SESSIONS value (works anywhere)
 #   claude-sessions -C PROJECT CMD ...     from the host: run CMD in container claude-PROJECT
 # Internal (the entrypoint, claude-session, the healthcheck): prepare, boot [--no-reconcile],
@@ -293,18 +297,31 @@ window_pane() {
 }
 
 # Every live Claude process's own session file ($CLAUDE_CONFIG_DIR/sessions/<pid>.json maps a
-# tmux pane to its conversation). One line each: <pane_id> <sessionId> <status> <pid>.
+# tmux pane to its conversation). One line each, tab-separated:
+#   <pane_id> <sessionId> <status> <pid> <startedAt ms> <statusUpdatedAt ms>
+# A file counts only while its pid is the SAME process that wrote it: procStart is that process's
+# start time (/proc/<pid>/stat field 22). After a container restart pids start over, and a stale
+# file whose pid now belongs to some other process (a watchdog, a shell) would otherwise hand a
+# window another session's conversation.
+proc_start() { sed -E 's/^[0-9]+ \(.*\) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; }
 live_sessions() {
-    local f pane sid st pid
+    local f pane sid st pid ps started upd
     for f in "$CONFIG_DIR"/sessions/*.json; do
         [[ -f "$f" ]] || continue
-        IFS=$'\t' read -r pane sid st pid < <(jq -r --arg s "$TMUX_SESSION" '
+        # '|'-joined, not @tsv: read collapses runs of tabs, so an empty field (no procStart on an
+        # older CLI) would shift every later one.
+        IFS='|' read -r pane sid st pid ps started upd < <(jq -r --arg s "$TMUX_SESSION" '
             select((.tmux // "") | startswith($s + ":"))
-            | [(.tmux | sub(".*\\."; "")), (.sessionId // ""), (.status // "unknown"), (.pid | tostring)] | @tsv' "$f" 2>/dev/null) || continue
+            | [(.tmux | sub(".*\\."; "")), (.sessionId // ""), (.status // "unknown"), (.pid | tostring),
+               (.procStart // "" | tostring), (.startedAt // 0 | tostring), (.statusUpdatedAt // .updatedAt // 0 | tostring)] | join("|")' "$f" 2>/dev/null) || continue
         [[ -n "$pane" && -n "$sid" && "$pid" =~ ^[0-9]+$ ]] || continue
         kill -0 "$pid" 2>/dev/null || continue
-        [[ "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" == *claude* ]] || continue
-        printf '%s\t%s\t%s\t%s\n' "$pane" "$sid" "$st" "$pid"
+        if [[ -n "$ps" ]]; then
+            [[ "$(proc_start "$pid")" == "$ps" ]] || continue
+        else
+            [[ "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" == *claude* ]] || continue
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$pane" "$sid" "$st" "$pid" "$started" "$upd"
     done
     return 0
 }
@@ -574,6 +591,7 @@ cmd_boot() {
 # /clear is followed), and keep a Remote Control watchdog beside every running session.
 supervise_once() {
     cmd_record
+    account_switch_pass
     local n
     for n in $(registered); do ensure_watchdog "$n"; done
     return 0
@@ -591,6 +609,98 @@ cmd_record() {
         [[ -n "$sid" && "$sid" != "$(sget "$n" sid)" ]] && sset "$n" sid "$sid"
     done
     return 0
+}
+
+# --- following an account change ------------------------------------------------------------------
+# The entrypoint's credential sync writes ACCOUNT_SWITCH_FILE ("<epoch> <account>") when the operator
+# logs a different account into the shared credential volume. Each session whose Claude started
+# before that is restarted onto the new account once it has been idle for SWITCH_IDLE seconds
+# (never mid-turn), resuming its conversation; Remote Control mints a fresh link under the new
+# account. A window whose Claude has exited picks the new account up whenever it starts. When no
+# session runs the old account, the file is removed.
+ACCOUNT_SWITCH_FILE="${CLAUDE_SESSIONS_SWITCH_FILE:-$CONFIG_DIR/.account-changed}"
+SWITCH_IDLE="${CLAUDE_SESSIONS_SWITCH_IDLE:-45}"
+SWITCH_FORCE_AFTER="${CLAUDE_SESSIONS_SWITCH_FORCE_AFTER:-0}"   # seconds; 0 = a busy session is never interrupted
+SWITCH_NUDGE="${CLAUDE_SESSIONS_SWITCH_NUDGE:-1}"               # tell a limit-stopped session to continue
+LIMIT_RE="you.ve hit your (session|weekly|opus) limit|claude usage limit reached|you.ve reached your usage limit"
+pane_limited() {  # the window shows a usage-limit message (the same phrases claude-usage-watchdog anchors on)
+    local p; p="$(tmux capture-pane -p -t "$TMUX_SESSION:$1" -S -50 2>/dev/null)" || return 1
+    grep -qiE "$LIMIT_RE" <<<"$p"
+}
+# Restart one session onto the new account, resuming its conversation. A session a usage limit
+# had stopped is then told to continue: getting past a limit is the usual reason to switch.
+switch_one() {  # switch_one <name>
+    local n="$1" limited=0 i st=""
+    pane_limited "$n" && limited=1
+    record_one "$n"
+    respawn_one "$n" --continue >/dev/null 2>&1 || return 1
+    say "$n: restarted onto the new account (its conversation resumes)"
+    if (( limited )) && is_on "$SWITCH_NUDGE"; then
+        for i in $(seq 1 "${CLAUDE_SESSIONS_SWITCH_NUDGE_TRIES:-20}"); do
+            st="$(session_state "$n" "$(live_sessions)")"; [[ "$st" == idle ]] && break; sleep 3
+        done
+        if [[ "$st" == idle ]] && ( cmd_send "$n" "[account-switch] This container now uses a different Claude account, so the usage limit that stopped you no longer applies. Continue what you were doing." ) >/dev/null 2>&1; then
+            say "$n: a usage limit had stopped it; told to continue on the new account"
+        fi
+    fi
+    return 0
+}
+switch_pending() {  # names of sessions still on the account from before the switch
+    local t acct live wins n pane line started
+    [[ -s "$ACCOUNT_SWITCH_FILE" ]] || return 0
+    read -r t acct < "$ACCOUNT_SWITCH_FILE"; [[ "$t" =~ ^[0-9]+$ ]] || return 0
+    live="$(live_sessions)"
+    wins="$(tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}|#{pane_id}' 2>/dev/null)" || return 0
+    for n in main $(registered); do
+        pane="$(awk -F'|' -v w="$n" '$1==w{print $2; exit}' <<<"$wins")"; [[ -n "$pane" ]] || continue
+        line="$(awk -F'\t' -v p="$pane" '$1==p{print; exit}' <<<"$live")"; [[ -n "$line" ]] || continue
+        started="$(cut -f5 <<<"$line")"; [[ "$started" =~ ^[0-9]+$ ]] || continue
+        (( started / 1000 < t )) && echo "$n"
+    done
+    return 0
+}
+account_switch_pass() {
+    [[ -s "$ACCOUNT_SWITCH_FILE" ]] || return 0
+    local n line now st upd pane live left=0 t acct force="${1:-}"
+    read -r t acct < "$ACCOUNT_SWITCH_FILE"; [[ "$t" =~ ^[0-9]+$ ]] || t=0
+    now="$(date +%s)"; live="$(live_sessions)"
+    (( SWITCH_FORCE_AFTER > 0 && now - t >= SWITCH_FORCE_AFTER )) && force=--now
+    for n in $(switch_pending); do
+        pane="$(window_pane "$n")"
+        line="$(awk -F'\t' -v p="$pane" '$1==p{print; exit}' <<<"$live")"
+        st="$(cut -f3 <<<"$line")"; upd="$(cut -f6 <<<"$line")"
+        if [[ "$force" == --now ]] || { [[ "$st" == idle && "$upd" =~ ^[0-9]+$ ]] && (( now - upd / 1000 >= SWITCH_IDLE )); }; then
+            switch_one "$n" && continue
+        fi
+        left=$((left + 1))
+    done
+    if (( left == 0 )) && [[ -z "$(switch_pending)" ]]; then
+        rm -f "$ACCOUNT_SWITCH_FILE"
+        say "account switch: every session now runs on the new account"
+    fi
+    return 0
+}
+
+# account [--now]: the Claude account this container uses, and how far a switch has got.
+cmd_account() {
+    local email acct t a pend
+    email="$(jq -r '.oauthAccount.emailAddress // "unknown"' "$CONFIG_DIR/.claude.json" 2>/dev/null || echo unknown)"
+    acct="$(cat "$CONFIG_DIR/.credentials-account" 2>/dev/null || true)"
+    echo "account: $email${acct:+ (${acct:0:8})}"
+    if [[ ! -s "$ACCOUNT_SWITCH_FILE" ]]; then
+        echo "switch : none in progress (every session runs on this account)"
+        return 0
+    fi
+    read -r t a < "$ACCOUNT_SWITCH_FILE"
+    if [[ "${1:-}" == --now ]]; then account_switch_pass --now; fi
+    pend="$(switch_pending | paste -sd' ' -)"
+    if [[ -n "$pend" ]]; then
+        echo "switch : in progress since $(date -u -d "@$t" +%FT%TZ 2>/dev/null || echo "$t"); still on the previous account: $pend"
+        echo "         each moves at its next idle moment (claude-sessions account --now moves them now, mid-turn)"
+    else
+        account_switch_pass
+        echo "switch : complete (every session runs on this account)"
+    fi
 }
 
 # --- capacity: pids and memory near the container's limits --------------------------------------
@@ -700,8 +810,10 @@ cmd_health() {
                    fi ;;
         esac
     done
-    local out="" c pp pc pm mp mc mm
+    local out="" c pp pc pm mp mc mm pend
     (( total )) && out="sessions: $up/$total up${problems:+ ($problems)}"
+    pend="$(switch_pending | wc -w)"
+    (( pend > 0 )) && out+="${out:+; }moving to a new account ($pend session$( (( pend > 1 )) && echo s) to go)"
     c="$(capacity)"
     if [[ -n "$c" ]]; then
         read -r pp pc pm mp mc mm <<<"$c"
@@ -906,6 +1018,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         check)      [[ $# -ge 1 ]] || die "usage: claude-sessions check SPEC"
                     check_spec "$1" || exit 1
                     echo "ok: $(split_entries "$1" | wc -l) session entries" ;;
+        account)    cmd_account "$@" ;;
         prepare)    cmd_prepare ;;
         boot)       cmd_boot "$@" ;;
         supervise)  cmd_supervise "$@" ;;
