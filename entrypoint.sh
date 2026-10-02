@@ -1022,8 +1022,9 @@ if echo "$EXISTING_SETTINGS" | jq -e '.env // {} | (.DISABLE_TELEMETRY // .DO_NO
     rm -rf "$CLAUDE_CONFIG_DIR/statsig" 2>/dev/null || true
 fi
 
-# 8c. Plugins: declarative. Claude Code installs/syncs the marketplaces and
-#     enabled plugins from settings.json on startup (idempotent). We union the
+# 8c. Plugins: declarative. Claude Code registers the marketplaces from settings.json on
+#     startup; a baked plugin from a git source may still need `claude plugin install` once
+#     (the runtime kit hook below installs what IT declares). We union the
 #     two plugin keys into existing settings; existing entries win on conflict.
 if [[ -f "$BAKE_DIR/plugins/plugins.json" ]]; then
     jq -s '
@@ -1038,38 +1039,20 @@ if [[ -f "$BAKE_DIR/plugins/plugins.json" ]]; then
     log "Merged baked-in plugin marketplaces/plugins into settings.json"
 fi
 
-# 8c-bis. Runtime plugin injection: no rebuild required.
-# CLAUDE_EXTRA_MARKETPLACES: "name=url[,name=url,...]"  (git source, autoUpdate=true)
+# 8c-bis. Runtime kit injection: no rebuild required (bin/claude-kit).
+# CLAUDE_EXTRA_MARKETPLACES: "name=url[#ref][,...]"  git source; "#ref" pins a branch or tag
+#                            and turns autoUpdate off (a pin and auto-update contradict).
 # CLAUDE_EXTRA_PLUGINS:      "plugin@marketplace[,...]"
-# Existing settings.json entries always win (same semantics as the baked merge above).
+# A declared marketplace replaces the settings.json entry of that name (adding, moving or
+# dropping #ref takes effect at the next start); for enabledPlugins an existing value wins.
+# The plugins are installed by the CLI, as the agent user, in §12d before any session starts.
 if [[ -n "${CLAUDE_EXTRA_MARKETPLACES:-}" ]] || [[ -n "${CLAUDE_EXTRA_PLUGINS:-}" ]]; then
-    MKT_JSON="{}"
-    if [[ -n "${CLAUDE_EXTRA_MARKETPLACES:-}" ]]; then
-        IFS=',' read -ra _MKT_ENTRIES <<< "$CLAUDE_EXTRA_MARKETPLACES"
-        for _entry in "${_MKT_ENTRIES[@]}"; do
-            _name="${_entry%%=*}"; _url="${_entry#*=}"
-            [[ -n "$_name" && -n "$_url" && "$_name" != "$_url" ]] || continue
-            MKT_JSON="$(jq --arg n "$_name" --arg u "$_url" \
-                '. + {($n): {"source": {"source": "git", "url": $u}, "autoUpdate": true}}' \
-                <<< "$MKT_JSON")"
-        done
+    if /usr/local/bin/claude-kit settings "$CLAUDE_CONFIG_DIR/settings.json"; then
+        log "Merged runtime plugin marketplaces/plugins into settings.json"
+    else
+        log "WARNING: claude-kit could not merge CLAUDE_EXTRA_MARKETPLACES / CLAUDE_EXTRA_PLUGINS into settings.json"
     fi
-    PLG_JSON="{}"
-    if [[ -n "${CLAUDE_EXTRA_PLUGINS:-}" ]]; then
-        IFS=',' read -ra _PLG_ENTRIES <<< "$CLAUDE_EXTRA_PLUGINS"
-        for _entry in "${_PLG_ENTRIES[@]}"; do
-            [[ -n "$_entry" ]] || continue
-            PLG_JSON="$(jq --arg p "$_entry" '. + {($p): true}' <<< "$PLG_JSON")"
-        done
-    fi
-    jq --argjson mkt "$MKT_JSON" --argjson plg "$PLG_JSON" '
-        .extraKnownMarketplaces = ($mkt + (.extraKnownMarketplaces // {}))
-        | .enabledPlugins       = ($plg + (.enabledPlugins // {}))
-    ' "$CLAUDE_CONFIG_DIR/settings.json" \
-        > "$CLAUDE_CONFIG_DIR/settings.json.tmp" \
-        && mv -f "$CLAUDE_CONFIG_DIR/settings.json.tmp" "$CLAUDE_CONFIG_DIR/settings.json"
     chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
-    log "Merged runtime plugin marketplaces/plugins into settings.json"
 fi
 
 # 8d. Custom slash commands
@@ -1491,6 +1474,15 @@ fi
 # Claude process is running to rewrite .claude.json under us. The trust seeded for
 # /workspace in §7 does not cover /workspace/<repo>: without this a named session would sit
 # on the trust dialog. Never fatal.
+# The kit's plugins (CLAUDE_EXTRA_MARKETPLACES / CLAUDE_EXTRA_PLUGINS, §8c-bis) are installed
+# here, before any Claude session exists, so every session loads them from its first start
+# (a plugin's SessionStart hook included). Bounded per CLI call, and never fatal: a kit that
+# cannot be fetched is a warning in this log, and the container boots without it.
+if [[ -n "${CLAUDE_EXTRA_MARKETPLACES:-}" ]] || [[ -n "${CLAUDE_EXTRA_PLUGINS:-}" ]]; then
+    asclaude /usr/local/bin/claude-kit install \
+        || log "WARNING: claude-kit install failed; declared plugins may be missing (claude-kit status)"
+fi
+
 asclaude /usr/local/bin/claude-sessions prepare \
     || log "WARNING: claude-sessions prepare failed; named sessions may be missing (claude-sessions ls)"
 
@@ -1575,6 +1567,12 @@ asclaude /usr/local/bin/claude-sessions boot --no-reconcile \
     || log "WARNING: claude-sessions boot failed; named sessions may be missing (claude-sessions ls)"
 asclaude /usr/local/bin/claude-sessions supervise &
 SESSIONS_PID=$!
+# The kit's optional start command (CLAUDE_EXTRA_START_CMD), once per container start, in the
+# background, after the sessions are up. Never fatal.
+if [[ -n "${CLAUDE_EXTRA_START_CMD:-}" ]]; then
+    asclaude /usr/local/bin/claude-kit start \
+        || log "WARNING: claude-kit start failed; CLAUDE_EXTRA_START_CMD did not run (claude-kit status)"
+fi
 
 echo
 if [[ "$CLAUDE_MODE" == "autopilot" ]]; then

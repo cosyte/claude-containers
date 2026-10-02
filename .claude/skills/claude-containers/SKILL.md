@@ -112,6 +112,8 @@ small descriptive commits as you change things.
 | `test/unit.sh` | Docker-free unit tests (version-floor helper, warn-only runc posture, the §0 retired-env guard, and the prune gates: the removed bins stay removed, `CLAUDE_CONTROLLER=1` is refused, and the autopilot never invokes `claude` without a command). Also pins that the removed per-session Docker engine stays removed at every live site. |
 | `bin/claude-gpu` | In-container NVIDIA GPU guard (baked): `status` (ok / degraded (reason) / off), `run -- cmd` (waits for free VRAM, low utilization and few NVENC sessions on the SHARED card, else CPU; retries a GPU OOM once on CPU; says which device ran), `blender` (Cycles OptiX, else CUDA, else CPU via `--cycles-device`), `env gpu|cpu` (the device contract). |
 | `bin/claude-blender-install` | Baked: installs the pinned, SHA-256-verified Blender LTS rootless into the shared `/cache/blender/<ver>` under a lock (fail closed on a checksum mismatch; blender.org then two official mirrors). `blender` on PATH runs it. |
+| `bin/claude-kit` | Baked: the kit hook. `settings FILE` (entrypoint §8c-bis: merge `CLAUDE_EXTRA_MARKETPLACES` `name=url[#ref]` and `CLAUDE_EXTRA_PLUGINS` into settings.json; `#ref` = pinned git source + `autoUpdate: false`), `install` (as the agent user before sessions: `claude plugin marketplace add` / `plugin install --scope user` for what is missing, bounded by `CLAUDE_KIT_TIMEOUT`, warnings only), `start` (`CLAUDE_EXTRA_START_CMD` once per boot, detached, log `~/.claude/kit-start.log`), `check`, `status`. Never fails a boot. |
+| `test/kit-unit.sh` | Docker-free kit-hook tests against a fake `claude` CLI: the declaration parser, the settings merge (pin vs auto-update, who wins), install once and idempotent, a moved pin warned and left alone, failing or hung CLI = warning + exit 0, the start command detached and logged, the entrypoint order (settings, install before sessions, start after), generator and launcher emission and validation (`--marketplace #ref`, `--plugin`, `--start-cmd`, `--pids`). CI. |
 | `test/sessions-unit.sh` | Docker-free multi-session tests against a fake tmux (prints control chars as `_` like the real one) and a fake claude: spec validation, boot/reconcile/`*`/stop/drop, trust seeding, claude-session argv (RC name, dir, model, mode, goal once, resume by id, `--continue` only when unambiguous, main unchanged), supervise, ls/health, new/rm/reset/send, claude-session-id by window, RC watchdog pane-scoped kill, usage watchdog per-session respawn, launch/compose-gen `--session`/`--env`, entrypoint wiring: CI. |
 | `test/gpu-unit.sh` | Docker-free `--gpu` tests: generator emission (CDI device, RAM `/scratch`, `CLAUDE_GPU=1`, runc, cap_drop kept, non-GPU services byte-identical, unknown repo refused), `claude-launch --gpu` args against a stubbed docker, the guard against a fake `nvidia-smi` (idle / busy co-tenant / short VRAM / OOM then CPU / NVML failure / hang), the installer failing closed, §2b degrading without failing the boot, the healthcheck GPU line: CI. |
 | `test/launch-unit.sh` | Docker-free tests for the container boundary: `harden_run_args` (cap-drop ALL + no-new-privileges), no `--privileged` / host socket anywhere, the removed `--docker`/`--no-docker`/`--sysbox` flags refusing, every compose service on plain runc, and the disk-backed `/scratch`: CI. |
@@ -179,10 +181,12 @@ reachable. Default Astro/Vite/Next dev ports: 4321 / 5173 / 3000.
 entrypoint auto-starts it on boot in a separate tmux `dev` window
 (`tmux select-window -t claude:dev` to watch it; `claude-dev` to rerun).
 Pair `--expose` + `--dev-cmd` for a browsable dev site.
-`--marketplace REPO=NAME=URL` and `--plugin REPO=PLUGIN[,…]` write
-`CLAUDE_EXTRA_MARKETPLACES` / `CLAUDE_EXTRA_PLUGINS` onto a service; the
-entrypoint merges them into `settings.json` on every boot (existing user
-entries win on conflict, so per-container edits stick). No rebuild needed. Two real gotchas:
+`--marketplace REPO=NAME=URL[#REF]`, `--plugin REPO=PLUGIN[,…]` and `--start-cmd SVC=COMMAND` write
+`CLAUDE_EXTRA_MARKETPLACES` / `CLAUDE_EXTRA_PLUGINS` / `CLAUDE_EXTRA_START_CMD` onto a service: the
+kit hook (`bin/claude-kit`: settings merge, plugins installed by the CLI before any session, the
+start command once per boot in the background; `#REF` pins and sets `autoUpdate` false, since a
+pin and auto-update contradict; a declared marketplace replaces the settings entry of that name, an existing `enabledPlugins` value wins; a marketplace added in this boot gets its declared plugins updated). No
+rebuild needed. `--pids SVC=N` sets one service's pids limit. Two real gotchas:
 the dev server **must bind 0.0.0.0** (localhost = published port reaches
 nothing); and `npm run` needs `-- ` before forwarded flags while
 `pnpm`/`yarn` must NOT get a literal `--` (it makes Astro/Vite ignore

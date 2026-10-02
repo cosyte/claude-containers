@@ -31,10 +31,14 @@
 #   --extra-args "<args>"      extra args passed to claude via CLAUDE_EXTRA_ARGS
 #   --expose <h:c>             publish an extra host:container port (repeatable)
 #   --dev-cmd <command>        auto-start a dev server on boot in a tmux 'dev' window
-#   --marketplace <name=url>   add a git plugin marketplace at runtime (repeatable)
-#                              e.g. --marketplace claude-skills=git@github.com:org/repo.git
-#   --plugin <name@mkt>        enable a plugin at runtime (repeatable)
+#   --marketplace <name=url[#ref]>  add a git plugin marketplace at runtime (repeatable);
+#                              #ref pins a branch or tag and turns its auto-update off
+#                              e.g. --marketplace claude-skills=git@github.com:org/repo.git#v1.2.0
+#   --plugin <name@mkt>        enable and install a plugin at runtime (repeatable)
 #                              e.g. --plugin software-engineering@claude-skills
+#   --start-cmd <command>      run once per container start, as the agent user, in the
+#                              background after the sessions are up (a kit's own installer
+#                              or service; log: ~/.claude/kit-start.log). See claude-kit --help.
 #   --cache <volume>           shared tool cache volume mounted at /cache
 #                              (default: claude-cache). Reused across restarts
 #                              for mise/cargo/go/npm/uv installs.
@@ -43,7 +47,7 @@
 #                              in its own tmux window with its own Remote Control link
 #                              (<name>-<session>). Repeatable. SPEC is NAME [key=value ...]
 #                              with dir= model= mode= goal=FILE prompt-file=FILE rc=off
-#                              resume=off chain; NAME '*' = one per repo of a multi-repo
+#                              resume=off; NAME '*' = one per repo of a multi-repo
 #                              workspace. e.g. --session "home goal=.claude/goals/g1.goal.txt"
 #                              Sets CLAUDE_SESSIONS (see `claude-sessions --help`).
 #   --env <KEY=VALUE>          pass one more environment variable into the container
@@ -73,7 +77,7 @@ PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT="" REPOS=()
 # flags below override. Without seeding them here, the explicit `-e` flags on
 # `docker run` would shadow any value set in .env with an empty string.
 EXTRA="${CLAUDE_EXTRA_ARGS:-}" MCP_LIST="${CLAUDE_MCP_ENABLED:-}" DEVCMD="${CLAUDE_DEV_CMD:-}"
-MKTS="${CLAUDE_EXTRA_MARKETPLACES:-}" PLUGINS="${CLAUDE_EXTRA_PLUGINS:-}"
+MKTS="${CLAUDE_EXTRA_MARKETPLACES:-}" PLUGINS="${CLAUDE_EXTRA_PLUGINS:-}" STARTCMD="${CLAUDE_EXTRA_START_CMD:-}"
 ACCOUNTS="${CLAUDE_ACCOUNTS:-}"
 SESSIONS="${CLAUDE_SESSIONS:-}" EXTRA_ENV=()
 # Empty here means "unset": the container's entrypoint then defaults it to opus
@@ -119,6 +123,7 @@ while [[ $# -gt 0 ]]; do
         --dev-cmd)     DEVCMD="$2"; OPTS_GIVEN=1; shift 2 ;;
         --marketplace) MKTS="${MKTS:+$MKTS,}$2"; OPTS_GIVEN=1; shift 2 ;;
         --plugin)      PLUGINS="${PLUGINS:+$PLUGINS,}$2"; OPTS_GIVEN=1; shift 2 ;;
+        --start-cmd)   STARTCMD="$2"; OPTS_GIVEN=1; shift 2 ;;
         --cache)       CACHE_ARG="$2"; OPTS_GIVEN=1; shift 2 ;;
         --no-cache)    CACHE_ARG="off"; OPTS_GIVEN=1; shift ;;
         --accounts)    ACCOUNTS="${ACCOUNTS:+$ACCOUNTS,}$2"; OPTS_GIVEN=1; shift 2 ;;
@@ -190,6 +195,13 @@ if [[ -n "${SESSIONS//[[:space:];]/}" ]]; then
 $(sed 's/^/       /' <<<"$spec_errs")"
     # Valid, but it may still say something (the removed `chain` setting): pass it on.
     [[ -z "$spec_errs" ]] || warn "$(sed 's/^CLAUDE_SESSIONS: warning: //' <<<"$spec_errs")"
+fi
+# The kit declaration (marketplaces, plugins): validated HERE with the container's own parser.
+if [[ -n "$MKTS$PLUGINS" ]]; then
+    kit_errs="$(CLAUDE_EXTRA_MARKETPLACES="$MKTS" CLAUDE_EXTRA_PLUGINS="$PLUGINS" CLAUDE_EXTRA_START_CMD="" \
+        "$LAUNCH_BIN_DIR/claude-kit" check 2>&1 >/dev/null)" \
+        || die "--marketplace / --plugin is not valid:
+$(sed 's/^/       /' <<<"$kit_errs")"
 fi
 ENV_ARGS=()
 for kv in "${EXTRA_ENV[@]:-}"; do
@@ -412,6 +424,7 @@ docker run -d \
     "${BROWSER_ENV[@]}" \
     -e CLAUDE_EXTRA_MARKETPLACES="$MKTS" \
     -e CLAUDE_EXTRA_PLUGINS="$PLUGINS" \
+    -e CLAUDE_EXTRA_START_CMD="$STARTCMD" \
     "${AUTH_ENV_ARGS[@]}" \
     -e CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}" \
     -e CLAUDE_MANAGED_POLICY="${CLAUDE_MANAGED_POLICY:-1}" \

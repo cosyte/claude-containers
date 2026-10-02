@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+# claude-kit: install a kit from a git URL when the container starts, with no image rebuild.
+#
+# A kit is a git repository that is a Claude Code plugin marketplace: skills, commands, hooks
+# and agents packaged as plugins, optionally with a tool of its own. It can be private (it is
+# cloned with the container's git credentials). Three values declare it, all optional, set at
+# creation time (claude-launch reads them from the environment; claude-compose-gen has
+# --marketplace, --plugin and --start-cmd):
+#
+#   CLAUDE_EXTRA_MARKETPLACES   name=url[#ref][,name=url[#ref]...]
+#       Each becomes an extraKnownMarketplaces entry in ~/.claude/settings.json (git source).
+#       NAME must be the name the marketplace gives itself in .claude-plugin/marketplace.json.
+#       Without #ref the entry follows the repository's default branch with "autoUpdate": true:
+#       Claude Code refreshes it and updates its plugins in the background after startup.
+#       With #ref (a branch or tag) the entry is pinned and gets "autoUpdate": false, because
+#       auto-update and a pin contradict each other: an auto-updating marketplace moves its
+#       plugins whenever the catalog moves, which is what a pin exists to prevent. A plugin
+#       entry that pins its own source (ref / sha in marketplace.json) wants the pinned form.
+#   CLAUDE_EXTRA_PLUGINS        plugin@marketplace[,plugin@marketplace...]
+#       Each is enabled in settings.json (enabledPlugins) and installed at user scope if it is
+#       not installed yet: enabling a plugin from a git source does not install it by itself.
+#   CLAUDE_EXTRA_START_CMD      one shell command, run once per container start as the agent
+#       user, in the background, after the sessions are up (for example the kit's own
+#       installer or a supervisor it ships). Its output goes to ~/.claude/kit-start.log.
+#
+# Commands (the entrypoint runs the first three, in this order):
+#   claude-kit settings FILE   merge the marketplaces and plugins into settings.json FILE.
+#                              A declared marketplace replaces the entry of that name (the
+#                              container's declaration is what the operator last said: adding,
+#                              moving or dropping #ref takes effect at the next start). For
+#                              enabledPlugins an existing value wins, so a plugin switched off
+#                              by hand stays off.
+#   claude-kit install         as the agent user, before any session starts: add each declared
+#                              marketplace the CLI does not know (a marketplace whose declared
+#                              source changed counts: the CLI no longer lists it), install
+#                              each declared plugin it does not have, update a declared plugin
+#                              whose marketplace was added in this run, then write each
+#                              declared marketplace's autoUpdate into settings.json (the CLI's
+#                              own add drops the key). Bounded by CLAUDE_KIT_TIMEOUT per CLI
+#                              call (default 120 s). A failure is a warning: it never fails a
+#                              boot.
+#   claude-kit start           run CLAUDE_EXTRA_START_CMD in the background.
+#   claude-kit check           validate the three values and print what they declare.
+#   claude-kit status          what is declared, known to the CLI and installed.
+set -uo pipefail
+
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+CLAUDE_BIN="${CLAUDE_KIT_CLAUDE_BIN:-claude}"
+KIT_TIMEOUT="${CLAUDE_KIT_TIMEOUT:-120}"
+START_LOG="${CLAUDE_KIT_START_LOG:-$CONFIG_DIR/kit-start.log}"
+NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+
+say()  { echo "[kit] $*"; }
+warn() { echo "[kit] WARNING: $*" >&2; }
+die()  { echo "claude-kit: $*" >&2; exit 1; }
+
+# --- the declaration ----------------------------------------------------------------------------
+# parse: fills MK_NAME[] MK_URL[] MK_REF[] and PLUGINS[]; a problem goes to ERRS[] and the entry
+# is skipped, so one typo never hides the rest.
+MK_NAME=() MK_URL=() MK_REF=() PLUGINS=() ERRS=()
+parse() {
+    local entry name rest url ref
+    local -a entries=()
+    IFS=',' read -ra entries <<<"${CLAUDE_EXTRA_MARKETPLACES:-}"
+    for entry in "${entries[@]}"; do
+        entry="${entry#"${entry%%[![:space:]]*}"}"; entry="${entry%"${entry##*[![:space:]]}"}"
+        [[ -n "$entry" ]] || continue
+        if [[ "$entry" != *=* ]]; then ERRS+=("CLAUDE_EXTRA_MARKETPLACES: '$entry' is not name=url[#ref]"); continue; fi
+        name="${entry%%=*}"; rest="${entry#*=}"
+        url="${rest%%#*}"; ref=""
+        [[ "$rest" == *"#"* ]] && ref="${rest#*#}"
+        if [[ ! "$name" =~ $NAME_RE ]]; then ERRS+=("CLAUDE_EXTRA_MARKETPLACES: '$name' is not a marketplace name"); continue; fi
+        if [[ -z "$url" ]]; then ERRS+=("CLAUDE_EXTRA_MARKETPLACES: $name has no url"); continue; fi
+        if [[ "$rest" == *"#"* && ! "$ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+            ERRS+=("CLAUDE_EXTRA_MARKETPLACES: $name: '#$ref' is not a branch or tag"); continue
+        fi
+        MK_NAME+=("$name"); MK_URL+=("$url"); MK_REF+=("$ref")
+    done
+    IFS=',' read -ra entries <<<"${CLAUDE_EXTRA_PLUGINS:-}"
+    for entry in "${entries[@]}"; do
+        entry="${entry#"${entry%%[![:space:]]*}"}"; entry="${entry%"${entry##*[![:space:]]}"}"
+        [[ -n "$entry" ]] || continue
+        if [[ ! "${entry%@*}" =~ $NAME_RE || ! "${entry##*@}" =~ $NAME_RE || "$entry" != *@* ]]; then
+            ERRS+=("CLAUDE_EXTRA_PLUGINS: '$entry' is not plugin@marketplace"); continue
+        fi
+        PLUGINS+=("$entry")
+    done
+    return 0
+}
+declared_p() { (( ${#MK_NAME[@]} + ${#PLUGINS[@]} > 0 )); }
+report_errs() { local e; for e in "${ERRS[@]:-}"; do [[ -n "$e" ]] && warn "$e (skipped)"; done; return 0; }
+
+# --- settings -----------------------------------------------------------------------------------
+cmd_settings() {
+    local file="${1:-}"
+    [[ -n "$file" ]] || die "usage: claude-kit settings FILE"
+    parse; report_errs
+    declared_p || return 0
+    [[ -s "$file" ]] || echo '{}' > "$file"
+    local mkt='{}' pin='{}' plg='{}' i p
+    for i in "${!MK_NAME[@]}"; do
+        if [[ -n "${MK_REF[$i]}" ]]; then
+            pin="$(jq --arg n "${MK_NAME[$i]}" --arg u "${MK_URL[$i]}" --arg r "${MK_REF[$i]}" \
+                '. + {($n): {"source": {"source": "git", "url": $u, "ref": $r}, "autoUpdate": false}}' <<<"$pin")"
+        else
+            mkt="$(jq --arg n "${MK_NAME[$i]}" --arg u "${MK_URL[$i]}" \
+                '. + {($n): {"source": {"source": "git", "url": $u}, "autoUpdate": true}}' <<<"$mkt")"
+        fi
+    done
+    for p in "${PLUGINS[@]:-}"; do
+        [[ -n "$p" ]] && plg="$(jq --arg p "$p" '. + {($p): true}' <<<"$plg")"
+    done
+    # Marketplaces: the declaration wins for every name it carries (pinned or not), so adding,
+    # moving or dropping #ref takes effect. Plugins: an existing value wins (a plugin switched
+    # off by hand stays off).
+    jq --argjson mkt "$mkt" --argjson pin "$pin" --argjson plg "$plg" '
+        .extraKnownMarketplaces = ((.extraKnownMarketplaces // {}) + $mkt + $pin)
+        | .enabledPlugins       = ($plg + (.enabledPlugins // {}))
+    ' "$file" > "$file.tmp.$$" && mv -f "$file.tmp.$$" "$file" || { rm -f "$file.tmp.$$"; die "could not merge into $file"; }
+    say "settings: ${#MK_NAME[@]} marketplace(s), ${#PLUGINS[@]} plugin(s) merged into $file"
+}
+
+# --- install ------------------------------------------------------------------------------------
+cli() { timeout -k 5 "$KIT_TIMEOUT" "$CLAUDE_BIN" "$@"; }
+
+# The CLI's own `marketplace add` rewrites the settings entry without autoUpdate, and a
+# third-party marketplace then defaults to off: write what the declaration means, after it.
+write_autoupdate() {
+    local file="$CONFIG_DIR/settings.json" want='{}' i
+    [[ -s "$file" && -w "$file" ]] || return 0
+    for i in "${!MK_NAME[@]}"; do
+        if [[ -n "${MK_REF[$i]}" ]]; then want="$(jq --arg n "${MK_NAME[$i]}" '. + {($n): false}' <<<"$want")"
+        else want="$(jq --arg n "${MK_NAME[$i]}" '. + {($n): true}' <<<"$want")"; fi
+    done
+    jq --argjson want "$want" '
+        reduce ($want | to_entries[]) as $e (.;
+            if (.extraKnownMarketplaces[$e.key] | type) == "object"
+            then .extraKnownMarketplaces[$e.key].autoUpdate = $e.value else . end)
+    ' "$file" > "$file.tmp.$$" 2>/dev/null && mv -f "$file.tmp.$$" "$file" || { rm -f "$file.tmp.$$"; warn "could not write autoUpdate into $file"; }
+}
+
+cmd_install() {
+    parse; report_errs
+    declared_p || return 0
+    command -v "$CLAUDE_BIN" >/dev/null 2>&1 || { warn "no '$CLAUDE_BIN' on PATH, nothing installed"; return 0; }
+    local known installed i n u r src have p out
+    declare -A added=() failed=()
+    known="$(cli plugin marketplace list --json 2>/dev/null)" || known='[]'
+    jq -e 'type == "array"' <<<"$known" >/dev/null 2>&1 || known='[]'
+    for i in "${!MK_NAME[@]}"; do
+        n="${MK_NAME[$i]}" u="${MK_URL[$i]}" r="${MK_REF[$i]}"
+        if jq -e --arg n "$n" 'any(.[]; .name == $n)' <<<"$known" >/dev/null; then
+            have="$(jq -r --arg n "$n" '.[] | select(.name == $n) | .ref // ""' <<<"$known" | head -n1)"
+            if [[ -n "$r" && "$have" != "$r" ]]; then
+                warn "marketplace $n is registered at '${have:-the default branch}', the container declares '#$r', and its settings entry was not moved. It is left as it is (removing a marketplace uninstalls its plugins). To move it: claude plugin marketplace remove $n && claude-kit install"
+            else
+                say "marketplace $n: already registered"
+            fi
+            continue
+        fi
+        src="$u"; [[ -n "$r" ]] && src="$u#$r"
+        if out="$(cli plugin marketplace add "$src" 2>&1)"; then
+            say "marketplace $n: added from $src"
+            added[$n]=1
+        else
+            warn "marketplace $n: could not add $src: $(tail -n1 <<<"$out")"
+            failed[$n]=1
+            continue
+        fi
+        known="$(cli plugin marketplace list --json 2>/dev/null)" || known='[]'
+        jq -e --arg n "$n" 'type == "array" and any(.[]; .name == $n)' <<<"$known" >/dev/null 2>&1 \
+            || warn "the marketplace at $u does not call itself '$n': use the name in its .claude-plugin/marketplace.json, or its plugins will not resolve"
+    done
+    installed="$(cli plugin list --json 2>/dev/null)" || installed='[]'
+    jq -e 'type == "array"' <<<"$installed" >/dev/null 2>&1 || installed='[]'
+    for p in "${PLUGINS[@]:-}"; do
+        [[ -n "$p" ]] || continue
+        if [[ -n "${failed[${p##*@}]:-}" ]]; then
+            warn "plugin $p: skipped, its marketplace could not be added"
+        elif jq -e --arg p "$p" 'any(.[]; .id == $p)' <<<"$installed" >/dev/null; then
+            if [[ -n "${added[${p##*@}]:-}" ]]; then
+                # Installed already, but its marketplace was (re-)added just now: its source or
+                # pin changed. Bring the plugin to what the marketplace offers now.
+                if out="$(cli plugin update "$p" 2>&1)"; then say "plugin $p: updated to its marketplace's current version"
+                else warn "plugin $p: could not update: $(tail -n1 <<<"$out")"; fi
+            else
+                say "plugin $p: already installed"
+            fi
+        elif out="$(cli plugin install "$p" --scope user 2>&1)"; then
+            say "plugin $p: installed"
+        else
+            warn "plugin $p: could not install: $(tail -n1 <<<"$out")"
+        fi
+    done
+    write_autoupdate
+    return 0
+}
+
+# --- the start command --------------------------------------------------------------------------
+cmd_start() {
+    local cmd="${CLAUDE_EXTRA_START_CMD:-}"
+    [[ -n "${cmd//[[:space:]]/}" ]] || return 0
+    mkdir -p "${START_LOG%/*}" 2>/dev/null || true
+    # Keep the log small: it is a boot log, appended on every start.
+    if [[ -f "$START_LOG" ]] && (( $(stat -c %s "$START_LOG" 2>/dev/null || echo 0) > 1048576 )); then
+        tail -c 262144 "$START_LOG" > "$START_LOG.tmp.$$" 2>/dev/null && mv -f "$START_LOG.tmp.$$" "$START_LOG"
+    fi
+    {
+        echo "== $(date -u +%Y-%m-%dT%H:%M:%SZ) start command =="
+    } >> "$START_LOG" 2>/dev/null || { warn "cannot write $START_LOG, start command not run"; return 0; }
+    # Detached, with its own session: it outlives this script and holds none of its pipes.
+    ( cd "${CLAUDE_WORKSPACE:-/workspace}" 2>/dev/null || cd /
+      setsid bash -lc "$cmd" >> "$START_LOG" 2>&1 < /dev/null &
+    )
+    say "start command launched in the background (log: $START_LOG)"
+}
+
+# --- check / status -----------------------------------------------------------------------------
+cmd_check() {
+    parse
+    local i e rc=0
+    for e in "${ERRS[@]:-}"; do [[ -n "$e" ]] && { echo "$e" >&2; rc=1; }; done
+    for i in "${!MK_NAME[@]}"; do
+        if [[ -n "${MK_REF[$i]}" ]]; then echo "marketplace ${MK_NAME[$i]}: ${MK_URL[$i]} pinned to ${MK_REF[$i]} (autoUpdate off)"
+        else echo "marketplace ${MK_NAME[$i]}: ${MK_URL[$i]} on its default branch (autoUpdate on)"; fi
+    done
+    for e in "${PLUGINS[@]:-}"; do
+        [[ -n "$e" ]] || continue
+        echo "plugin $e"
+        local m="${e##*@}" found=0
+        for i in "${!MK_NAME[@]}"; do [[ "${MK_NAME[$i]}" == "$m" ]] && found=1; done
+        (( found )) || echo "note: plugin $e names marketplace '$m', which CLAUDE_EXTRA_MARKETPLACES does not declare (fine if it is baked in or already registered)" >&2
+    done
+    [[ -n "${CLAUDE_EXTRA_START_CMD:-}" ]] && echo "start command: ${CLAUDE_EXTRA_START_CMD}"
+    return $rc
+}
+
+cmd_status() {
+    cmd_check || true
+    command -v "$CLAUDE_BIN" >/dev/null 2>&1 || { echo "cli: no '$CLAUDE_BIN' on PATH"; return 0; }
+    echo "registered marketplaces: $(cli plugin marketplace list --json 2>/dev/null | jq -r '[.[] | .name + (if .ref then "#" + .ref else "" end)] | join(", ")' 2>/dev/null)"
+    echo "installed plugins: $(cli plugin list --json 2>/dev/null | jq -r '[.[] | .id + " " + (.version // "?")] | join(", ")' 2>/dev/null)"
+    [[ -f "$START_LOG" ]] && echo "start log: $START_LOG ($(wc -l < "$START_LOG") lines)"
+    return 0
+}
+
+case "${1:-}" in
+    settings) shift; cmd_settings "$@" ;;
+    install)  cmd_install ;;
+    start)    cmd_start ;;
+    check)    cmd_check ;;
+    status)   cmd_status ;;
+    -h|--help|help|"") sed -n '2,/^set -uo pipefail$/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//' ;;
+    *) die "unknown command '$1' (settings, install, start, check, status)" ;;
+esac
