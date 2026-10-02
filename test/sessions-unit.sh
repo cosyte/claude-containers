@@ -31,6 +31,9 @@ cleanup() {
     local p
     for p in "$TMPD"/run/*.pid; do [[ -f "$p" ]] && kill "$(cat "$p")" 2>/dev/null; done
     (( ${#KILL[@]} )) && kill "${KILL[@]}" 2>/dev/null
+    # Every fake watchdog this run started, also the ones whose pid file was replaced: a
+    # survivor keeps the suite's stdout open, and a caller reading it through a pipe waits.
+    pkill -TERM -f "$TMPD/.*fake-rc-watchdog" 2>/dev/null
     rm -rf "${TMPD:?}"
 }
 trap cleanup EXIT
@@ -103,7 +106,7 @@ EOF
 cat > "$FAKE/bin/fake-rc-watchdog" <<'EOF'
 #!/usr/bin/env bash
 echo "${1:-loop} target=$CLAUDE_RC_TMUX_TARGET log=${CLAUDE_RC_DEBUG_LOG:-} cmd=${CLAUDE_RC_RESPAWN_CMD:-} lock=${CLAUDE_RESPAWN_LOCK_DIR:-}" >> "$FAKE/watchdog.calls"
-[[ $# -eq 0 ]] && { sleep 300 & wait; }
+[[ $# -eq 0 ]] && { sleep 300 >/dev/null 2>&1 & trap 'kill $! 2>/dev/null; exit 0' TERM; wait; }
 exit 0
 EOF
 # A fake claude: records its argv (one per line) and working directory; appends one line per

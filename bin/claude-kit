@@ -25,13 +25,20 @@
 #
 # Commands (the entrypoint runs the first three, in this order):
 #   claude-kit settings FILE   merge the marketplaces and plugins into settings.json FILE.
-#                              Existing entries win, as for the baked plugins.json, except a
-#                              pinned marketplace: the declared pin replaces the entry of that
-#                              name, so changing #ref and recreating the container moves it.
+#                              A declared marketplace replaces the entry of that name (the
+#                              container's declaration is what the operator last said: adding,
+#                              moving or dropping #ref takes effect at the next start). For
+#                              enabledPlugins an existing value wins, so a plugin switched off
+#                              by hand stays off.
 #   claude-kit install         as the agent user, before any session starts: add each declared
-#                              marketplace the CLI does not know, install each declared plugin
-#                              it does not have. Bounded by CLAUDE_KIT_TIMEOUT per CLI call
-#                              (default 120 s). A failure is a warning: it never fails a boot.
+#                              marketplace the CLI does not know (a marketplace whose declared
+#                              source changed counts: the CLI no longer lists it), install
+#                              each declared plugin it does not have, update a declared plugin
+#                              whose marketplace was added in this run, then write each
+#                              declared marketplace's autoUpdate into settings.json (the CLI's
+#                              own add drops the key). Bounded by CLAUDE_KIT_TIMEOUT per CLI
+#                              call (default 120 s). A failure is a warning: it never fails a
+#                              boot.
 #   claude-kit start           run CLAUDE_EXTRA_START_CMD in the background.
 #   claude-kit check           validate the three values and print what they declare.
 #   claude-kit status          what is declared, known to the CLI and installed.
@@ -103,22 +110,41 @@ cmd_settings() {
     for p in "${PLUGINS[@]:-}"; do
         [[ -n "$p" ]] && plg="$(jq --arg p "$p" '. + {($p): true}' <<<"$plg")"
     done
-    # Unpinned: an existing entry wins (the baked merge's rule). Pinned: the declaration wins.
+    # Marketplaces: the declaration wins for every name it carries (pinned or not), so adding,
+    # moving or dropping #ref takes effect. Plugins: an existing value wins (a plugin switched
+    # off by hand stays off).
     jq --argjson mkt "$mkt" --argjson pin "$pin" --argjson plg "$plg" '
-        .extraKnownMarketplaces = ($mkt + (.extraKnownMarketplaces // {}) + $pin)
+        .extraKnownMarketplaces = ((.extraKnownMarketplaces // {}) + $mkt + $pin)
         | .enabledPlugins       = ($plg + (.enabledPlugins // {}))
     ' "$file" > "$file.tmp.$$" && mv -f "$file.tmp.$$" "$file" || { rm -f "$file.tmp.$$"; die "could not merge into $file"; }
     say "settings: ${#MK_NAME[@]} marketplace(s), ${#PLUGINS[@]} plugin(s) merged into $file"
 }
 
 # --- install ------------------------------------------------------------------------------------
-cli() { timeout "$KIT_TIMEOUT" "$CLAUDE_BIN" "$@"; }
+cli() { timeout -k 5 "$KIT_TIMEOUT" "$CLAUDE_BIN" "$@"; }
+
+# The CLI's own `marketplace add` rewrites the settings entry without autoUpdate, and a
+# third-party marketplace then defaults to off: write what the declaration means, after it.
+write_autoupdate() {
+    local file="$CONFIG_DIR/settings.json" want='{}' i
+    [[ -s "$file" && -w "$file" ]] || return 0
+    for i in "${!MK_NAME[@]}"; do
+        if [[ -n "${MK_REF[$i]}" ]]; then want="$(jq --arg n "${MK_NAME[$i]}" '. + {($n): false}' <<<"$want")"
+        else want="$(jq --arg n "${MK_NAME[$i]}" '. + {($n): true}' <<<"$want")"; fi
+    done
+    jq --argjson want "$want" '
+        reduce ($want | to_entries[]) as $e (.;
+            if (.extraKnownMarketplaces[$e.key] | type) == "object"
+            then .extraKnownMarketplaces[$e.key].autoUpdate = $e.value else . end)
+    ' "$file" > "$file.tmp.$$" 2>/dev/null && mv -f "$file.tmp.$$" "$file" || { rm -f "$file.tmp.$$"; warn "could not write autoUpdate into $file"; }
+}
 
 cmd_install() {
     parse; report_errs
     declared_p || return 0
     command -v "$CLAUDE_BIN" >/dev/null 2>&1 || { warn "no '$CLAUDE_BIN' on PATH, nothing installed"; return 0; }
     local known installed i n u r src have p out
+    declare -A added=() failed=()
     known="$(cli plugin marketplace list --json 2>/dev/null)" || known='[]'
     jq -e 'type == "array"' <<<"$known" >/dev/null 2>&1 || known='[]'
     for i in "${!MK_NAME[@]}"; do
@@ -126,7 +152,7 @@ cmd_install() {
         if jq -e --arg n "$n" 'any(.[]; .name == $n)' <<<"$known" >/dev/null; then
             have="$(jq -r --arg n "$n" '.[] | select(.name == $n) | .ref // ""' <<<"$known" | head -n1)"
             if [[ -n "$r" && "$have" != "$r" ]]; then
-                warn "marketplace $n is registered at '${have:-the default branch}', the container declares '#$r'. It is left as it is (removing a marketplace uninstalls its plugins). To move it: claude plugin marketplace remove $n && claude-kit install"
+                warn "marketplace $n is registered at '${have:-the default branch}', the container declares '#$r', and its settings entry was not moved. It is left as it is (removing a marketplace uninstalls its plugins). To move it: claude plugin marketplace remove $n && claude-kit install"
             else
                 say "marketplace $n: already registered"
             fi
@@ -135,8 +161,10 @@ cmd_install() {
         src="$u"; [[ -n "$r" ]] && src="$u#$r"
         if out="$(cli plugin marketplace add "$src" 2>&1)"; then
             say "marketplace $n: added from $src"
+            added[$n]=1
         else
             warn "marketplace $n: could not add $src: $(tail -n1 <<<"$out")"
+            failed[$n]=1
             continue
         fi
         known="$(cli plugin marketplace list --json 2>/dev/null)" || known='[]'
@@ -147,14 +175,24 @@ cmd_install() {
     jq -e 'type == "array"' <<<"$installed" >/dev/null 2>&1 || installed='[]'
     for p in "${PLUGINS[@]:-}"; do
         [[ -n "$p" ]] || continue
-        if jq -e --arg p "$p" 'any(.[]; .id == $p)' <<<"$installed" >/dev/null; then
-            say "plugin $p: already installed"
+        if [[ -n "${failed[${p##*@}]:-}" ]]; then
+            warn "plugin $p: skipped, its marketplace could not be added"
+        elif jq -e --arg p "$p" 'any(.[]; .id == $p)' <<<"$installed" >/dev/null; then
+            if [[ -n "${added[${p##*@}]:-}" ]]; then
+                # Installed already, but its marketplace was (re-)added just now: its source or
+                # pin changed. Bring the plugin to what the marketplace offers now.
+                if out="$(cli plugin update "$p" 2>&1)"; then say "plugin $p: updated to its marketplace's current version"
+                else warn "plugin $p: could not update: $(tail -n1 <<<"$out")"; fi
+            else
+                say "plugin $p: already installed"
+            fi
         elif out="$(cli plugin install "$p" --scope user 2>&1)"; then
             say "plugin $p: installed"
         else
             warn "plugin $p: could not install: $(tail -n1 <<<"$out")"
         fi
     done
+    write_autoupdate
     return 0
 }
 

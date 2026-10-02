@@ -60,15 +60,17 @@ check "nothing declared: check prints nothing and exits 0" test -z "$(kit check 
 # ======================================================================================
 echo "== settings: the merge into settings.json =="
 S="$TMPD/settings.json"
-echo '{"model":"opus","extraKnownMarketplaces":{"skills":{"source":{"source":"git","url":"https://old.invalid/skills.git"},"autoUpdate":false}},"enabledPlugins":{"lint@skills":false}}' > "$S"
+echo '{"model":"opus","extraKnownMarketplaces":{"skills":{"source":{"source":"git","url":"https://old.invalid/skills.git"},"autoUpdate":false},"other":{"source":{"source":"git","url":"https://old.invalid/other.git"}}},"enabledPlugins":{"lint@skills":false}}' > "$S"
 KENV=(CLAUDE_EXTRA_MARKETPLACES='plain=https://git.example.com/org/plain.git,skills=https://new.invalid/skills.git'
       CLAUDE_EXTRA_PLUGINS='a@plain,lint@skills')
 kit settings "$S" >/dev/null 2>&1; rc=$?
 check "settings exits 0" test "$rc" -eq 0
 check "an unpinned marketplace is a git source with autoUpdate=true (as before the hook)" \
     test "$(jq -c '.extraKnownMarketplaces.plain' "$S")" = '{"source":{"source":"git","url":"https://git.example.com/org/plain.git"},"autoUpdate":true}'
-check "an existing entry wins over an unpinned declaration" \
-    test "$(jq -r '.extraKnownMarketplaces.skills.source.url' "$S")" = "https://old.invalid/skills.git"
+check "a declared marketplace replaces the entry of that name (the declaration is the operator's last word)" \
+    test "$(jq -c '.extraKnownMarketplaces.skills' "$S")" = '{"source":{"source":"git","url":"https://new.invalid/skills.git"},"autoUpdate":true}'
+check "an entry the declaration does not name is left alone" \
+    test "$(jq -r '.extraKnownMarketplaces.other.source.url' "$S")" = "https://old.invalid/other.git"
 check "an existing enabledPlugins value wins (a plugin switched off stays off)" \
     test "$(jq -c '.enabledPlugins' "$S")" = '{"a@plain":true,"lint@skills":false}'
 check "other settings keys are untouched" test "$(jq -r .model "$S")" = opus
@@ -80,6 +82,10 @@ KENV=(CLAUDE_EXTRA_MARKETPLACES='skills=https://new.invalid/skills.git#v2.1.0')
 kit settings "$S" >/dev/null 2>&1
 check "a pinned declaration replaces the older entry of that name (changing #ref moves the pin)" \
     test "$(jq -r '.extraKnownMarketplaces.skills.source.ref' "$S")" = "v2.1.0"
+KENV=(CLAUDE_EXTRA_MARKETPLACES='skills=https://new.invalid/skills.git')
+kit settings "$S" >/dev/null 2>&1
+check "dropping '#ref' from the declaration unpins the entry" \
+    test "$(jq -c '.extraKnownMarketplaces.skills' "$S")" = '{"source":{"source":"git","url":"https://new.invalid/skills.git"},"autoUpdate":true}'
 before="$(cat "$S")"; KENV=()
 kit settings "$S" >/dev/null 2>&1
 check "nothing declared: settings.json is not rewritten" test "$(cat "$S")" = "$before"
@@ -93,7 +99,10 @@ out="$(kit settings "$TMPD/new.json" 2>&1)"; rc=$?
 
 # ======================================================================================
 echo "== install: against a fake claude CLI =="
-# A fake `claude`: keeps its marketplaces and plugins as JSON files, records every call.
+# A fake `claude`: keeps its marketplaces and plugins as JSON files, records every call. Like
+# the real CLI (checked against it), `marketplace list` leaves out a marketplace whose settings
+# entry no longer matches how it was registered, `marketplace add` rewrites the settings entry
+# WITHOUT autoUpdate, and `plugin update` moves a plugin to what its marketplace offers.
 FAKE="$TMPD/fake"; mkdir -p "$FAKE/bin"
 cat > "$FAKE/bin/claude" <<'EOF'
 #!/usr/bin/env bash
@@ -101,42 +110,68 @@ echo "$*" >> "$FAKE/calls"
 [[ -f "$FAKE/mk.json" ]] || echo '[]' > "$FAKE/mk.json"
 [[ -f "$FAKE/pl.json" ]] || echo '[]' > "$FAKE/pl.json"
 [[ -n "${FAKE_SLEEP:-}" ]] && sleep "$FAKE_SLEEP"
+SJ="$CLAUDE_CONFIG_DIR/settings.json"; [[ -s "$SJ" ]] || echo '{}' > "$SJ"
 case "$1 $2 ${3:-}" in
-    "plugin marketplace list") cat "$FAKE/mk.json" ;;
+    "plugin marketplace list")
+        jq --slurpfile s "$SJ" '[.[] | . as $m | ($s[0].extraKnownMarketplaces[$m.name].source // null) as $src
+            | select($src == null or (($src.url // "") == $m.url and ($src.ref // "") == ($m.ref // "")))]' "$FAKE/mk.json" ;;
     "plugin marketplace add")
         [[ -n "${FAKE_FAIL_ADD:-}" ]] && { echo "fatal: could not read from remote repository" >&2; exit 1; }
         src="$4"; url="${src%%#*}"; ref=""; [[ "$src" == *"#"* ]] && ref="${src#*#}"
         name="$(basename "${url%.git}")"; [[ -n "${FAKE_NAME:-}" ]] && name="$FAKE_NAME"
         jq --arg n "$name" --arg u "$url" --arg r "$ref" \
-            '. + [{name: $n, source: "git", url: $u} + (if $r == "" then {} else {ref: $r} end)]' "$FAKE/mk.json" > "$FAKE/mk.tmp" && mv "$FAKE/mk.tmp" "$FAKE/mk.json" ;;
+            '[.[] | select(.name != $n)] + [{name: $n, source: "git", url: $u} + (if $r == "" then {} else {ref: $r} end)]' "$FAKE/mk.json" > "$FAKE/mk.tmp" && mv "$FAKE/mk.tmp" "$FAKE/mk.json"
+        jq --arg n "$name" --arg u "$url" --arg r "$ref" \
+            '.extraKnownMarketplaces[$n] = {source: ({source: "git", url: $u} + (if $r == "" then {} else {ref: $r} end))}' "$SJ" > "$SJ.t" && mv "$SJ.t" "$SJ" ;;
     "plugin list "*|"plugin list") cat "$FAKE/pl.json" ;;
     "plugin install "*)
         [[ -n "${FAKE_FAIL_INSTALL:-}" ]] && { echo "Plugin not found in marketplace" >&2; exit 1; }
         jq --arg p "$3" '. + [{id: $p, version: "1.0.0", scope: "user", enabled: true}]' "$FAKE/pl.json" > "$FAKE/pl.tmp" && mv "$FAKE/pl.tmp" "$FAKE/pl.json" ;;
+    "plugin update "*)
+        [[ -n "${FAKE_FAIL_INSTALL:-}" ]] && { echo "Failed to update plugin" >&2; exit 1; }
+        jq --arg p "$3" 'map(if .id == $p then .version = "2.0.0" else . end)' "$FAKE/pl.json" > "$FAKE/pl.tmp" && mv "$FAKE/pl.tmp" "$FAKE/pl.json" ;;
 esac
 exit 0
 EOF
 chmod +x "$FAKE/bin/claude"
 export FAKE
-reset_fake() { rm -f "$FAKE/calls" "$FAKE/mk.json" "$FAKE/pl.json"; }
+reset_fake() { rm -f "$FAKE/calls" "$FAKE/mk.json" "$FAKE/pl.json" "$CLAUDE_CONFIG_DIR/settings.json"; }
+boot() { kit settings "$CLAUDE_CONFIG_DIR/settings.json" 2>&1; kit install 2>&1; }   # the entrypoint's order
+mk_entry() { jq -c ".extraKnownMarketplaces.$1" "$CLAUDE_CONFIG_DIR/settings.json"; }
 calls() { grep -c -- "$1" "$FAKE/calls" 2>/dev/null; }
 KENV=(PATH="$FAKE/bin:$PATH" CLAUDE_EXTRA_MARKETPLACES='kit=https://git.example.com/org/kit.git#v1.2.0'
       CLAUDE_EXTRA_PLUGINS='helper@kit')
 reset_fake
-out="$(kit install 2>&1)"; rc=$?
+out="$(boot)"; rc=$?
 check "install exits 0" test "$rc" -eq 0
 check "the marketplace is added from url#ref (the CLI's own pin syntax)" \
     grep -qxF 'plugin marketplace add https://git.example.com/org/kit.git#v1.2.0' "$FAKE/calls"
 check "the plugin is installed at user scope" grep -qxF 'plugin install helper@kit --scope user' "$FAKE/calls"
 [[ "$out" == *"marketplace kit: added"* && "$out" == *"plugin helper@kit: installed"* ]] \
     && ok "the boot log says what was added and installed" || bad "install output: $out"
-out="$(kit install 2>&1)"
-[[ "$(calls 'marketplace add')" == 1 && "$(calls 'plugin install')" == 1 && "$out" == *"already registered"* && "$out" == *"already installed"* ]] \
-    && ok "the next boot adds and installs nothing again (idempotent)" || bad "second install repeated work: $(cat "$FAKE/calls")"
+check "a pinned marketplace ends the first boot with autoUpdate=false (the CLI's add drops the key; install writes it back)" \
+    test "$(mk_entry kit)" = '{"source":{"source":"git","url":"https://git.example.com/org/kit.git","ref":"v1.2.0"},"autoUpdate":false}'
+out="$(boot)"
+[[ "$(calls 'marketplace add')" == 1 && "$(calls 'plugin install')" == 1 && "$(calls 'plugin update')" == 0 && "$out" == *"already registered"* && "$out" == *"already installed"* ]] \
+    && ok "the next boot adds, installs and updates nothing (idempotent)" || bad "second boot repeated work: $(cat "$FAKE/calls")"
 KENV=(PATH="$FAKE/bin:$PATH" CLAUDE_EXTRA_MARKETPLACES='kit=https://git.example.com/org/kit.git#v1.3.0' CLAUDE_EXTRA_PLUGINS='helper@kit')
+out="$(boot)"; rc=$?
+[[ $rc -eq 0 && "$out" == *"marketplace kit: added from https://git.example.com/org/kit.git#v1.3.0"* && "$out" == *"plugin helper@kit: updated"* \
+   && "$(calls 'plugin update helper@kit')" == 1 && "$(calls 'marketplace remove')" == 0 && "$(jq -r '.[0].version' "$FAKE/pl.json")" == "2.0.0" ]] \
+    && ok "a moved pin re-registers the marketplace at the new ref and updates its declared plugin, so kit and plugin move together" || bad "moved pin: rc=$rc $out"
+check "the moved pin is what settings.json says, with autoUpdate=false" \
+    test "$(mk_entry kit)" = '{"source":{"source":"git","url":"https://git.example.com/org/kit.git","ref":"v1.3.0"},"autoUpdate":false}'
+KENV=(PATH="$FAKE/bin:$PATH" CLAUDE_EXTRA_MARKETPLACES='kit=https://git.example.com/org/kit.git' CLAUDE_EXTRA_PLUGINS='helper@kit')
+out="$(boot)"; out2="$(boot)"
+[[ "$(mk_entry kit)" == '{"source":{"source":"git","url":"https://git.example.com/org/kit.git"},"autoUpdate":true}' && "$out2" == *"already registered"* ]] \
+    && ok "dropping '#ref' unpins: default branch, autoUpdate=true, and it stays true on the next boot" || bad "unpin: $(mk_entry kit) / $out2"
+# The settings entry was not moved (install run without the settings step): warn, touch nothing.
+KENV=(PATH="$FAKE/bin:$PATH" CLAUDE_EXTRA_MARKETPLACES='kit=https://git.example.com/org/kit.git#v9' CLAUDE_EXTRA_PLUGINS='helper@kit')
+jq 'del(.extraKnownMarketplaces.kit)' "$CLAUDE_CONFIG_DIR/settings.json" > "$TMPD/s.t" && mv "$TMPD/s.t" "$CLAUDE_CONFIG_DIR/settings.json"
+n_add="$(calls 'marketplace add')"
 out="$(kit install 2>&1)"; rc=$?
-[[ $rc -eq 0 && "$out" == *"registered at 'v1.2.0', the container declares '#v1.3.0'"* && "$(calls 'marketplace add')" == 1 && "$(calls 'marketplace remove')" == 0 ]] \
-    && ok "a moved pin is a warning that names both refs; nothing is removed behind the operator's back" || bad "moved pin: rc=$rc $out"
+[[ $rc -eq 0 && "$out" == *"registered at 'the default branch', the container declares '#v9'"* && "$(calls 'marketplace add')" == "$n_add" && "$(calls 'marketplace remove')" == 0 ]] \
+    && ok "a registered marketplace at another ref whose settings entry did not move is a warning; nothing is removed" || bad "ref mismatch: rc=$rc $out"
 reset_fake
 KENV=(PATH="$FAKE/bin:$PATH" FAKE_NAME=other CLAUDE_EXTRA_MARKETPLACES='kit=https://git.example.com/org/kit.git')
 out="$(kit install 2>&1)"
@@ -144,8 +179,12 @@ out="$(kit install 2>&1)"
 reset_fake
 KENV=(PATH="$FAKE/bin:$PATH" FAKE_FAIL_ADD=1 FAKE_FAIL_INSTALL=1 CLAUDE_EXTRA_MARKETPLACES='kit=https://git.example.com/org/kit.git' CLAUDE_EXTRA_PLUGINS='helper@kit')
 out="$(kit install 2>&1)"; rc=$?
-[[ $rc -eq 0 && "$out" == *"WARNING: marketplace kit: could not add"*"could not read from remote repository"* && "$out" == *"WARNING: plugin helper@kit: could not install"* ]] \
-    && ok "an unreachable kit is two warnings and exit 0: it never fails a boot" || bad "failing CLI: rc=$rc $out"
+[[ $rc -eq 0 && "$out" == *"WARNING: marketplace kit: could not add"*"could not read from remote repository"* && "$out" == *"WARNING: plugin helper@kit: skipped, its marketplace could not be added"* && "$(calls 'plugin install')" == 0 ]] \
+    && ok "an unreachable kit is two warnings and exit 0, and its plugin is not tried (no second timeout): it never fails a boot" || bad "failing CLI: rc=$rc $out"
+reset_fake
+KENV=(PATH="$FAKE/bin:$PATH" FAKE_FAIL_INSTALL=1 CLAUDE_EXTRA_MARKETPLACES='kit=https://git.example.com/org/kit.git' CLAUDE_EXTRA_PLUGINS='helper@kit')
+out="$(kit install 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$out" == *"WARNING: plugin helper@kit: could not install"* ]] && ok "a plugin that cannot be installed is a warning and exit 0" || bad "failing install: rc=$rc $out"
 reset_fake
 KENV=(PATH="$FAKE/bin:$PATH" FAKE_SLEEP=5 CLAUDE_KIT_TIMEOUT=1 CLAUDE_EXTRA_MARKETPLACES='kit=https://git.example.com/org/kit.git' CLAUDE_EXTRA_PLUGINS='helper@kit')
 s=$SECONDS; out="$(kit install 2>&1)"; rc=$?
@@ -162,11 +201,14 @@ check "nothing declared: the CLI is never called" test ! -e "$FAKE/calls"
 echo "== start: the optional start command =="
 LOG="$TMPD/kit-start.log"; mkdir -p "$TMPD/ws"
 KENV=(CLAUDE_KIT_START_LOG="$LOG" CLAUDE_WORKSPACE="$TMPD/ws" MARK="$TMPD/mark"
-      CLAUDE_EXTRA_START_CMD='echo "started in $PWD"; sleep 0.3; echo done > "$MARK"')
+      CLAUDE_EXTRA_START_CMD='echo "started in $PWD"; ps -o sid= -p $$ | tr -d " " > "$MARK.sid"; sleep 0.3; echo done > "$MARK"')
 out="$(kit start 2>&1)"; rc=$?
 check "start returns at once (the command runs in the background)" test ! -e "$TMPD/mark"
 for _ in $(seq 1 50); do [[ -e "$TMPD/mark" ]] && break; sleep 0.1; done
 check "start exits 0 and the command ran to its end, detached" bash -c "(( $rc == 0 )) && [[ -e '$TMPD/mark' ]]"
+my_sid="$(ps -o sid= -p $$ | tr -d ' ')"
+[[ -s "$TMPD/mark.sid" && "$(cat "$TMPD/mark.sid")" != "$my_sid" ]] \
+    && ok "the command runs in a session of its own (setsid): it does not die with the boot script" || bad "start command shares the caller's session ($my_sid): $(cat "$TMPD/mark.sid" 2>/dev/null)"
 check "its output is in the log, under a dated header, run from the workspace" \
     bash -c "grep -q '^== .*Z start command ==\$' '$LOG' && grep -qxF 'started in $TMPD/ws' '$LOG'"
 out="$("$KIT" start 2>&1; echo "rc=$?")"
@@ -220,6 +262,10 @@ gen --out "$TMPD/d.yml" acme/site --plugin 'site=noat' ; rc=$?
 check "an invalid --plugin fails the generator and writes nothing" bash -c "(( $rc != 0 )) && [[ ! -e '$TMPD/d.yml' ]] && grep -q \"is not plugin@marketplace\" '$TMPD/gen.log'"
 gen --out "$TMPD/d.yml" acme/site --pids 'site=lots'; rc=$?
 check "--pids takes a positive integer" bash -c "(( $rc != 0 )) && grep -q 'positive integer' '$TMPD/gen.log'"
+gen --out "$TMPD/d.yml" acme/site --pids 'nosuch=99'; rc=$?
+check "--pids / --start-cmd naming an unknown service is an error" bash -c "(( $rc != 0 )) && [[ ! -e '$TMPD/d.yml' ]] && grep -q 'not a service in this stack' '$TMPD/gen.log'"
+gen --out "$TMPD/d.yml" acme/site --start-cmd $'site=echo a\necho b'; rc=$?
+check "--start-cmd refuses a newline (YAML would fold it into one line)" bash -c "(( $rc != 0 )) && grep -q 'holds a newline' '$TMPD/gen.log'"
 gen --out "$TMPD/d.yml" acme/site --env 'site=CLAUDE_EXTRA_START_CMD=x'; rc=$?
 check "--env refuses CLAUDE_EXTRA_START_CMD (it has its own flag)" bash -c "(( $rc != 0 )) && grep -q 'use its own flag' '$TMPD/gen.log'"
 
