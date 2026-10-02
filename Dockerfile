@@ -502,8 +502,6 @@ COPY bin/claude-rc-watchdog /usr/local/bin/claude-rc-watchdog
 COPY bin/claude-usage-watchdog /usr/local/bin/claude-usage-watchdog
 COPY bin/claude-session-id /usr/local/bin/claude-session-id
 COPY bin/claude-sessions /usr/local/bin/claude-sessions
-# Runs a /goal program's goals back to back in their sessions (see README "Goal programs").
-COPY bin/claude-goal-chain /usr/local/bin/claude-goal-chain
 COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
 # The GPU guard (--gpu sessions; says "off" elsewhere) and the pinned Blender installer.
 # `blender` on PATH runs the build claude-blender-install put in the shared /cache, or says

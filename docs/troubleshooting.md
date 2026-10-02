@@ -276,7 +276,7 @@ shell in that window), `down` (no window) or `stopped` (stopped by hand).
   a thread and crashes. The image caps those pools per process (`CLAUDE_THREADS_PER_PROCESS`,
   default 4), crashed sessions relaunch and resume (`CLAUDE_SESSION_CRASH_RESTARTS`), and the
   supervisor warns before the limit. Also: cap test parallelism for suites that size it from
-  the quota (`SHOPKIT_WORKERS`, `-n`), run one heavy suite at a time, and size `pids_limit`
+  the quota (a suite's own worker variable, `pytest -n`), run one heavy suite at a time, and size `pids_limit`
   for the session count (the boot log warns under 1024 per session). To recover by hand: find
   the heavy processes (`ps -eo pid,nlwp,rss,args --sort=-nlwp | head`), end the runaway run,
   then `claude-sessions restart` each session that shows `exited`.

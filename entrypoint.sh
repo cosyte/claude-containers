@@ -1333,7 +1333,6 @@ export CLAUDE_MODE \
 # claude-sessions run from an SSH login reads them back from tmux's global environment.
 export CLAUDE_SESSIONS="${CLAUDE_SESSIONS:-}" \
        CLAUDE_MAIN_RESUME="${CLAUDE_MAIN_RESUME:-0}" \
-       CLAUDE_GOAL_CHAIN_REVIEW="${CLAUDE_GOAL_CHAIN_REVIEW:-}" \
        CLAUDE_RC_WATCHDOG="${CLAUDE_RC_WATCHDOG:-1}"
 
 # OpenTelemetry: opt-in fleet observability. Claude Code reads OTEL_* + the
