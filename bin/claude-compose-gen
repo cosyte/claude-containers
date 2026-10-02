@@ -85,14 +85,29 @@
 #                       NVIDIA Container Toolkit's CDI spec on the host (nvidia-ctk cdi
 #                       generate); without it Docker refuses to create the service.
 #     --marketplace <map>  add a git plugin marketplace to a repo at runtime.
-#                       Format REPO=NAME=URL (repeatable). The repo's service
-#                       gets CLAUDE_EXTRA_MARKETPLACES with this entry appended,
-#                       e.g. --marketplace site=claude-skills=git@github.com:org/repo.git
-#     --plugin <map>    enable plugins on a repo at runtime. Format
-#                       REPO=PLUGIN[,PLUGIN...] (repeatable). Each PLUGIN is
-#                       NAME@MKT (the MKT must come from a --marketplace on the
-#                       same repo). Sets CLAUDE_EXTRA_PLUGINS on the service.
+#                       Format REPO=NAME=URL[#REF] (repeatable). The repo's service
+#                       gets CLAUDE_EXTRA_MARKETPLACES with this entry appended. NAME is
+#                       the name the marketplace gives itself. #REF pins a branch or tag
+#                       and turns the marketplace's auto-update off (a pin and auto-update
+#                       contradict; without #REF it follows the default branch and
+#                       auto-updates), e.g.
+#                       --marketplace site=claude-skills=git@github.com:org/repo.git#v1.2.0
+#     --plugin <map>    enable plugins on a repo at runtime and install them when the
+#                       container starts. Format REPO=PLUGIN[,PLUGIN...] (repeatable).
+#                       Each PLUGIN is NAME@MKT (the MKT must come from a --marketplace
+#                       on the same repo). Sets CLAUDE_EXTRA_PLUGINS on the service.
 #                       e.g. --plugin site=software-engineering@claude-skills,data@claude-skills
+#     --start-cmd <map> one command run once per container start, as the agent user, in
+#                       the background after the sessions are up: a kit's own installer
+#                       or service. Format SVC=COMMAND. Sets CLAUDE_EXTRA_START_CMD on the
+#                       service; output goes to ~/.claude/kit-start.log. Together with
+#                       --marketplace and --plugin this installs a (private) kit from a
+#                       git URL with no image rebuild; see `claude-kit --help`. e.g.
+#                       --start-cmd site='uv tool install git+https://git.example.com/org/kit.git@v1.2.0 && kit serve --ensure'
+#     --pids <map>      pids limit for one service. Format SVC=N (repeatable). Services
+#                       without one keep CLAUDE_PIDS_LIMIT (browser services their own
+#                       cap). Threads count as pids: a service that runs several sessions
+#                       and parallel test suites needs far more than one session does.
 #     --mount <map>     mount an EXISTING named volume into a repo's service at an
 #                       extra path. Format REPO=VOLUME:/PATH[:ro] (repeatable).
 #                       Use it to give one session read access to another's
@@ -222,7 +237,7 @@ NETWORK=""
 CACHE_VOL="$CACHE_VOLUME"
 BUILD_CONTEXT=""
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() GPU_RAW=() GROUP_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=() ACCOUNTS_RAW=() SESSION_RAW=() ENV_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() STARTCMD_RAW=() PIDS_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() GPU_RAW=() GROUP_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=() ACCOUNTS_RAW=() SESSION_RAW=() ENV_RAW=()
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
 # follow so they override scalars (--out/--org/--port-base) and append to
 # repeatables (--active/--expose/…). --scenario/--env-file were consumed in the
@@ -238,6 +253,8 @@ while [[ $# -gt 0 ]]; do
         --active)          ACTIVE_RAW+=("$2"); shift 2 ;;
         --expose)          EXPOSE_RAW+=("$2"); shift 2 ;;
         --dev-cmd)         DEVCMD_RAW+=("$2"); shift 2 ;;
+        --start-cmd)       STARTCMD_RAW+=("$2"); shift 2 ;;
+        --pids)            PIDS_RAW+=("$2"); shift 2 ;;
         --cpu)             CPU_RAW+=("$2"); shift 2 ;;
         --mem)             MEM_RAW+=("$2"); shift 2 ;;
         --model)           MODEL_RAW+=("$2"); shift 2 ;;
@@ -322,6 +339,22 @@ for tok in "${DEVCMD_RAW[@]:-}"; do
     DEVCMD["$(sanitize "${tok%%=*}")"]="${tok#*=}"
 done
 
+# The kit's start command per service: svc -> command string (claude-kit start, at boot).
+declare -A STARTCMD=()
+for tok in "${STARTCMD_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == *=* && -n "${tok#*=}" ]] || die "--start-cmd must be SVC=COMMAND (got '$tok')"
+    STARTCMD["$(sanitize "${tok%%=*}")"]="${tok#*=}"
+done
+# Per-service pids limit: svc -> N.
+declare -A PIDS=()
+for tok in "${PIDS_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == *=* ]] || die "--pids must be SVC=N (got '$tok')"
+    [[ "${tok#*=}" =~ ^[1-9][0-9]*$ ]] || die "--pids value must be a positive integer (got '${tok#*=}')"
+    PIDS["$(sanitize "${tok%%=*}")"]="${tok#*=}"
+done
+
 # Per-repo resource overrides: svc -> value. Repos with no entry fall back to
 # the global CLAUDE_CPU_LIMIT / CLAUDE_MEM_LIMIT at emit time.
 declare -A CPU=() MEM=()
@@ -391,6 +424,14 @@ for tok in "${PLUGINS_RAW[@]:-}"; do
     [[ -n "$pv" ]] || die "--plugin '$tok' has no plugins after '='"
     PLUGINS[$ps]="${PLUGINS[$ps]:-}${PLUGINS[$ps]:+,}${pv}"
 done
+# Validate each service's kit declaration with the container's own parser, so a typo fails
+# the generation, not the boot.
+for ks in "${!MKTS[@]}" "${!PLUGINS[@]}"; do
+    kit_errs="$(CLAUDE_EXTRA_MARKETPLACES="${MKTS[$ks]:-}" CLAUDE_EXTRA_PLUGINS="${PLUGINS[$ks]:-}" CLAUDE_EXTRA_START_CMD="" \
+        "$(dirname "${BASH_SOURCE[0]}")/claude-kit" check 2>&1 >/dev/null)" \
+        || die "--marketplace / --plugin for $ks is not valid:
+$(sed 's/^/       /' <<<"$kit_errs")"
+done
 
 # Extra named volumes per service: svc -> newline-separated "VOLUME:/PATH[:ro]".
 # Each --mount value is REPO=VOLUME:/PATH[:ro]. The volume is FOREIGN by design
@@ -443,7 +484,7 @@ done
 
 # Extra environment per service: svc -> newline-separated KEY=VALUE. A key this generator
 # already writes has its own flag, and a second copy would be a duplicate YAML key.
-GENERATED_ENV_RE='^(CLAUDE_PROJECT_NAME|CLAUDE_MODEL|CLAUDE_PERMISSION_MODE|CLAUDE_MANAGED_POLICY|CLAUDE_SECRET_GUARD|CLAUDE_BROKER_GIT_KEY|CLAUDE_EGRESS_[A-Z_]+|CLAUDE_OTEL_[A-Z_]+|OTEL_[A-Z_]+|CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION|BASH_DEFAULT_TIMEOUT_MS|BASH_MAX_TIMEOUT_MS|API_TIMEOUT_MS|GIT_REPO_URL|GIT_REPOS|GIT_REPO_BRANCH|CLAUDE_DEV_CMD|CLAUDE_BROWSER|CLAUDE_GPU[A-Z_]*|CLAUDE_ACCOUNTS|TMPDIR|CLAUDE_EXTRA_MARKETPLACES|CLAUDE_EXTRA_PLUGINS|GIT_AUTHOR_[A-Z]+|GIT_COMMITTER_[A-Z]+|GH_TOKEN|CLAUDE_SESSIONS)$'
+GENERATED_ENV_RE='^(CLAUDE_PROJECT_NAME|CLAUDE_MODEL|CLAUDE_PERMISSION_MODE|CLAUDE_MANAGED_POLICY|CLAUDE_SECRET_GUARD|CLAUDE_BROKER_GIT_KEY|CLAUDE_EGRESS_[A-Z_]+|CLAUDE_OTEL_[A-Z_]+|OTEL_[A-Z_]+|CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION|BASH_DEFAULT_TIMEOUT_MS|BASH_MAX_TIMEOUT_MS|API_TIMEOUT_MS|GIT_REPO_URL|GIT_REPOS|GIT_REPO_BRANCH|CLAUDE_DEV_CMD|CLAUDE_BROWSER|CLAUDE_GPU[A-Z_]*|CLAUDE_ACCOUNTS|TMPDIR|CLAUDE_EXTRA_MARKETPLACES|CLAUDE_EXTRA_PLUGINS|CLAUDE_EXTRA_START_CMD|GIT_AUTHOR_[A-Z]+|GIT_COMMITTER_[A-Z]+|GH_TOKEN|CLAUDE_SESSIONS)$'
 declare -A ENVS=()
 for tok in "${ENV_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
@@ -453,7 +494,7 @@ for tok in "${ENV_RAW[@]:-}"; do
     ek="${ekv%%=*}"
     [[ "$ek" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "--env key '$ek' is not a variable name (in '$tok')"
     [[ "$ek" != ANTHROPIC_API_KEY ]] || die "--env ANTHROPIC_API_KEY: this stack is OAuth-subscription only"
-    [[ ! "$ek" =~ $GENERATED_ENV_RE ]] || die "--env $ek: the generator already sets it; use its own flag (--model, --session, --dev-cmd, ...) or the stack's .env"
+    [[ ! "$ek" =~ $GENERATED_ENV_RE ]] || die "--env $ek: the generator already sets it; use its own flag (--model, --session, --dev-cmd, --start-cmd, ...) or the stack's .env"
     [[ "$ekv" != *$'\n'* ]] || die "--env $ek: the value must be one line"
     ENVS[$es]="${ENVS[$es]:-}${ENVS[$es]:+$'\n'}${ekv}"
 done
@@ -736,7 +777,7 @@ for row in "${FINAL[@]}"; do
     if [[ "$svc_mem" == "$CLAUDE_MEM_LIMIT" ]]; then svc_res="$CLAUDE_MEM_RESERVATION"
     else svc_res="$(mem_reservation_for "$svc_mem")" \
         || die "--mem '$svc_mem' for $svc is unparseable (want e.g. 4g)"; fi
-    svc_pids="${CLAUDE_PIDS_LIMIT}"
+    svc_pids="${PIDS[$svc]:-$CLAUDE_PIDS_LIMIT}"
     # Browser variants: cap pids harder (a chromium/ffmpeg leak fails fast instead of
     # piling up) and put /scratch on a RAM tmpfs (svc_scratch_tmpfs, appended to the
     # tmpfs list) with NO disk volume mount/declaration (svc_scratch_vol left empty).
@@ -746,7 +787,7 @@ for row in "${FINAL[@]}"; do
     if [[ -n "${BROWSER[$svc]:-}" || -n "${GPU[$svc]:-}" ]]; then
         svc_scratch_size=""
         if [[ -n "${BROWSER[$svc]:-}" ]]; then
-            svc_pids="${BROWSER_PIDS_LIMIT}"
+            svc_pids="${PIDS[$svc]:-$BROWSER_PIDS_LIMIT}"
             svc_scratch_size="$BROWSER_SCRATCH_TMPFS"
         fi
         if [[ -n "${GPU[$svc]:-}" ]] && { [[ -z "$svc_scratch_size" ]] \
@@ -928,6 +969,11 @@ EOF
         pv="${pv//\\/\\\\}"; pv="${pv//\"/\\\"}"; pv="${pv//\$/\$\$}"
         echo "      CLAUDE_EXTRA_PLUGINS: \"${pv}\""
     fi
+    if [[ -n "${STARTCMD[$svc]:-}" ]]; then
+        sc="${STARTCMD[$svc]}"
+        sc="${sc//\\/\\\\}"; sc="${sc//\"/\\\"}"; sc="${sc//\$/\$\$}"
+        echo "      CLAUDE_EXTRA_START_CMD: \"${sc}\""
+    fi
     # Named sessions and --env values: quoted and escaped like CLAUDE_DEV_CMD, so compose
     # never interpolates a '$' in them.
     if [[ -n "${SESSIONS[$svc]:-}" ]]; then
@@ -1086,6 +1132,8 @@ for r in "${FINAL[@]}"; do
         n_plugs="$(awk -F, '{print NF}' <<<"${PLUGINS[$s]}")"
         extra="$extra +plugins($n_plugs)"
     fi
+    [[ -n "${STARTCMD[$s]:-}" ]] && extra="$extra +start-cmd"
+    [[ -n "${PIDS[$s]:-}" ]] && extra="$extra +pids(${PIDS[$s]})"
     if [[ -n "${ACCOUNTS[$s]:-}" ]]; then
         n_accts="$(awk -F, '{print NF}' <<<"${ACCOUNTS[$s]}")"
         extra="$extra +accounts($n_accts)"

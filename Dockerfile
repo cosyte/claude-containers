@@ -502,6 +502,9 @@ COPY bin/claude-rc-watchdog /usr/local/bin/claude-rc-watchdog
 COPY bin/claude-usage-watchdog /usr/local/bin/claude-usage-watchdog
 COPY bin/claude-session-id /usr/local/bin/claude-session-id
 COPY bin/claude-sessions /usr/local/bin/claude-sessions
+# Installs a kit (a plugin marketplace from a git URL, its plugins, an optional start command)
+# declared by CLAUDE_EXTRA_MARKETPLACES / CLAUDE_EXTRA_PLUGINS / CLAUDE_EXTRA_START_CMD.
+COPY bin/claude-kit /usr/local/bin/claude-kit
 COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
 # The GPU guard (--gpu sessions; says "off" elsewhere) and the pinned Blender installer.
 # `blender` on PATH runs the build claude-blender-install put in the shared /cache, or says
@@ -539,6 +542,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude /usr/local/bin/c
         /usr/local/bin/claude-usage-watchdog \
         /usr/local/bin/claude-session-id \
         /usr/local/bin/claude-sessions \
+        /usr/local/bin/claude-kit \
         /usr/local/bin/claude-healthcheck \
         /usr/local/bin/claude-gpu \
         /usr/local/bin/claude-blender-install \

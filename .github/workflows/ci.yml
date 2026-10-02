@@ -45,3 +45,5 @@ jobs:
         run: test/pkg-install-guide-unit.sh
       - name: sessions unit tests (several sessions per container, the CLAUDE_SESSIONS spec, boot and reconcile, supervise, stop/start/restart/rm, the account switch, compose-gen --session and --env, an old `chain` setting only warns, against a fake tmux)
         run: test/sessions-unit.sh
+      - name: kit unit tests (the kit hook, a plugin marketplace from a git URL with an optional pin, its plugins installed once, the start command, never a failed boot, against a fake claude CLI)
+        run: test/kit-unit.sh
