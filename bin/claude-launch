@@ -188,6 +188,8 @@ if [[ -n "${SESSIONS//[[:space:];]/}" ]]; then
     spec_errs="$("$LAUNCH_BIN_DIR/claude-sessions" check "$SESSIONS" 2>&1 >/dev/null)" \
         || die "--session / CLAUDE_SESSIONS is not valid:
 $(sed 's/^/       /' <<<"$spec_errs")"
+    # Valid, but it may still say something (the removed `chain` setting): pass it on.
+    [[ -z "$spec_errs" ]] || warn "$(sed 's/^CLAUDE_SESSIONS: warning: //' <<<"$spec_errs")"
 fi
 ENV_ARGS=()
 for kv in "${EXTRA_ENV[@]:-}"; do

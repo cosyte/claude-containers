@@ -115,14 +115,14 @@
 #                       (<service>-<name>). Format SVC=SPEC (repeatable, accumulates per
 #                       service; a SPEC may hold several entries separated by ';'). SPEC
 #                       entries are NAME [key=value ...]: dir= model= mode= goal=FILE
-#                       prompt-file=FILE rc=off resume=off chain, and NAME '*' is one
+#                       prompt-file=FILE rc=off resume=off, and NAME '*' is one
 #                       session per repo of a --group. See `claude-sessions --help`. e.g.
 #                       --session maker=*
-#                       --session maker=home goal=.claude/goals/2026-09-home-g1.goal.txt chain
+#                       --session maker=api goal=docs/first.goal.txt
 #                       --session site=review model=sonnet mode=plan
 #     --env <map>       one more environment variable for a service. Format
 #                       SVC=KEY=VALUE (repeatable), e.g.
-#                       --env maker=CLAUDE_GOAL_CHAIN_REVIEW=it reviews and approves for me
+#                       --env maker=CLAUDE_MAIN_RESUME=1
 #                       A key the generator already sets (it has its own flag) is refused.
 #     --build-context <dir>  build.context for every service (default: the checkout
 #                       this script runs from). Pin it in the scenario when the
@@ -437,6 +437,8 @@ for ss in "${!SESSIONS[@]}"; do
     spec_errs="$("$(dirname "${BASH_SOURCE[0]}")/claude-sessions" check "${SESSIONS[$ss]}" 2>&1 >/dev/null)" \
         || die "--session for $ss is not valid:
 $(sed 's/^/       /' <<<"$spec_errs")"
+    # Valid, but it may still say something (the removed `chain` setting): pass it on.
+    [[ -z "$spec_errs" ]] || warn "--session for $ss: $(sed 's/^CLAUDE_SESSIONS: warning: //' <<<"$spec_errs")"
 done
 
 # Extra environment per service: svc -> newline-separated KEY=VALUE. A key this generator

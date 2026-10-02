@@ -43,7 +43,5 @@ jobs:
         run: test/manifest-hardening-unit.sh
       - name: pkg-install-guide unit tests (content contract on the baked global CLAUDE.md, mise-first per ecosystem, PEP-668 dead-ends, the shared /cache, no-sudo/no-break-system-packages refusal)
         run: test/pkg-install-guide-unit.sh
-      - name: goal-chain unit tests (a met goal advances only with a COMPLETE ledger and its checkpoints on origin, BLOCKED stops, the delegated checkpoint review, usage-limit nudges, a fake tmux session)
-        run: test/goal-chain-unit.sh
-      - name: sessions unit tests (several sessions per container, the CLAUDE_SESSIONS spec, boot and reconcile, supervise, stop/start/restart/rm, the account switch, compose-gen --session and --env, against a fake tmux)
+      - name: sessions unit tests (several sessions per container, the CLAUDE_SESSIONS spec, boot and reconcile, supervise, stop/start/restart/rm, the account switch, compose-gen --session and --env, an old `chain` setting only warns, against a fake tmux)
         run: test/sessions-unit.sh

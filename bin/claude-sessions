@@ -15,7 +15,7 @@
 #
 # SPEC: entries separated by ';' or newlines. Each entry is NAME [key=value ...]:
 #   NAME            [a-z0-9][a-z0-9_-]*, at most 32 characters: the tmux window and the
-#                   Remote Control suffix. main, dev, scm and goal-chain are taken.
+#                   Remote Control suffix. main, dev and scm are taken.
 #                   '*' means one session per git repo directly under /workspace (the repos
 #                   of a --group / several --repo container), named after the repo.
 #   dir=PATH        working directory, absolute or relative to /workspace. Default:
@@ -27,16 +27,15 @@
 #   prompt-file=F   on its first start, begin with the contents of F as the first prompt
 #   rc=off          no Remote Control link (reachable over SSH/tmux only)
 #   resume=off      a fresh conversation on every boot (default: resume the last one)
-#   chain           run the session's /goal program back to back with claude-goal-chain
-#                   (one 'goal-chain' window watches every chained session;
-#                   CLAUDE_GOAL_CHAIN_REVIEW="<your words>" delegates checkpoint reviews)
-# e.g.  CLAUDE_SESSIONS="home goal=.claude/goals/home-g1.goal.txt chain; 3d; review model=sonnet mode=plan"
+#   chain           REMOVED: the goal runner it started left this image. An entry that
+#                   still says `chain` (or chain=on) starts as a plain session, with a warning.
+# e.g.  CLAUDE_SESSIONS="api goal=docs/first.goal.txt; web; review model=sonnet mode=plan"
 #       CLAUDE_SESSIONS="* model=opus"
 #
 # Commands (inside the container, as the claude user):
 #   claude-sessions [ls] [--json]         every session: window, state, dir, Remote Control
 #   claude-sessions new NAME [--dir D] [--model M] [--mode M] [--goal F | --prompt-file F |
-#                   --prompt TEXT] [--no-rc] [--no-resume] [--chain]
+#                   --prompt TEXT] [--no-rc] [--no-resume]
 #   claude-sessions start NAME... | --all  start registered sessions that are not running
 #   claude-sessions stop NAME...           end them; they stay stopped across restarts
 #   claude-sessions restart NAME [--fresh | --resume ID]  resume its conversation in a new
@@ -74,11 +73,10 @@ REG="${CLAUDE_SESSIONS_REGISTRY:-$CONFIG_DIR/session-registry}"
 WORKSPACE="${CLAUDE_WORKSPACE:-/workspace}"
 SESSION_CMD="${CLAUDE_SESSION_CMD:-/usr/local/bin/claude-session}"
 WATCHDOG_BIN="${CLAUDE_RC_WATCHDOG_BIN:-/usr/local/bin/claude-rc-watchdog}"
-GOAL_CHAIN_BIN="${CLAUDE_GOAL_CHAIN_BIN:-claude-goal-chain}"
 RUN_DIR="${CLAUDE_SESSIONS_RUN_DIR:-/tmp/claude-sessions}"
 TICK="${CLAUDE_SESSIONS_TICK:-15}"
 CGROUP_DIR="${CLAUDE_SESSIONS_CGROUP:-/sys/fs/cgroup}"
-RESERVED=" main dev scm goal-chain "
+RESERVED=" main dev scm "
 NAME_RE='^[a-z0-9][a-z0-9_-]{0,31}$'
 MODEL_RE='^[][A-Za-z0-9._:@/-]+$'      # an alias (opus), an id (claude-opus-4-8), or opus[1m]
 
@@ -108,7 +106,7 @@ name_ok() {  # name_ok <name>: valid and not reserved (sets SPEC_ERR)
         return 1
     fi
     if [[ "$RESERVED" == *" $1 "* ]]; then
-        spec_err "session name '$1' is taken (main, dev, scm and goal-chain are this container's own windows)"
+        spec_err "session name '$1' is taken (main, dev and scm are this container's own windows)"
         return 1
     fi
 }
@@ -131,8 +129,12 @@ bool_val() {  # bool_val <key> <value>: sets BOOL to on|off (no subshell, so SPE
     esac
 }
 
-# parse_entry <entry>: sets E_NAME E_DIR E_MODEL E_MODE E_GOAL E_PROMPT E_RC E_RESUME E_CHAIN,
-# or sets SPEC_ERR and returns 1.
+# The removed `chain` setting: still parsed, so a container declared with it keeps booting.
+CHAIN_GONE="'chain' is no longer a session setting (the goal runner it started left this image) and is ignored"
+
+# parse_entry <entry>: sets E_NAME E_DIR E_MODEL E_MODE E_GOAL E_PROMPT E_RC E_RESUME, and
+# E_CHAIN=on when the entry still carries the removed `chain` setting (callers warn, nothing
+# else reads it), or sets SPEC_ERR and returns 1.
 parse_entry() {
     local -a tok
     read -ra tok <<<"$1"
@@ -161,8 +163,8 @@ parse_entry() {
             prompt-file) E_PROMPT="$v" ;;
             rc)          bool_val "$k" "$v" || return 1; E_RC="$BOOL" ;;
             resume)      bool_val "$k" "$v" || return 1; E_RESUME="$BOOL" ;;
-            chain)       bool_val "$k" "$v" || return 1; E_CHAIN="$BOOL" ;;
-            *) spec_err "unknown key '$k' in the entry for $E_NAME (dir, model, mode, goal, prompt-file, rc, resume, chain)"; return 1 ;;
+            chain)       E_CHAIN=on ;;   # removed: any value is accepted and ignored
+            *) spec_err "unknown key '$k' in the entry for $E_NAME (dir, model, mode, goal, prompt-file, rc, resume)"; return 1 ;;
         esac
     done
     if [[ -n "$E_GOAL" && -n "$E_PROMPT" ]]; then
@@ -174,7 +176,8 @@ parse_entry() {
     return 0
 }
 
-# check_spec <spec>: every problem on stderr; 0 when the whole spec is valid.
+# check_spec <spec>: every problem on stderr; 0 when the whole spec is valid. The removed
+# `chain` setting is a warning on stderr, never a failure.
 check_spec() {
     local entry rc=0
     declare -A seen=()
@@ -182,6 +185,7 @@ check_spec() {
         if ! parse_entry "$entry"; then
             echo "CLAUDE_SESSIONS: $SPEC_ERR" >&2; rc=1; continue
         fi
+        [[ "$E_CHAIN" == on ]] && echo "CLAUDE_SESSIONS: warning: $E_NAME: $CHAIN_GONE" >&2
         if [[ -n "${seen[$E_NAME]:-}" ]]; then
             echo "CLAUDE_SESSIONS: '$E_NAME' is declared twice" >&2; rc=1
         fi
@@ -224,7 +228,7 @@ write_conf() {  # write_conf <name> <source> <order>: from the E_* values
     local f; f="$(conf "$1")"
     mkdir -p "$REG"
     printf '%s\n' "source=$2" "order=$3" "dir=$E_DIR" "model=$E_MODEL" "mode=$E_MODE" \
-        "goal=$E_GOAL" "prompt_file=$E_PROMPT" "rc=$E_RC" "resume=$E_RESUME" "chain=$E_CHAIN" \
+        "goal=$E_GOAL" "prompt_file=$E_PROMPT" "rc=$E_RC" "resume=$E_RESUME" \
         > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
 }
 
@@ -475,10 +479,11 @@ reconcile_env() {
     local spec entry idx=0 d nm
     spec="$(cenv CLAUDE_SESSIONS)"
     declare -A want=()
-    local -a stars=()
+    local -a stars=() chained=()
     # Pass 1: named entries. A bad entry is skipped, never fatal: the container still boots.
     while IFS= read -r entry; do
         if ! parse_entry "$entry"; then say "CLAUDE_SESSIONS: skipped '$entry': $SPEC_ERR"; continue; fi
+        [[ "$E_CHAIN" == on ]] && chained+=("$E_NAME")
         if [[ "$E_NAME" == "*" ]]; then stars+=("$entry"); continue; fi
         if [[ -n "${want[$E_NAME]:-}" ]]; then say "CLAUDE_SESSIONS: '$E_NAME' is declared twice, the first one is used"; continue; fi
         if registered_p "$E_NAME" && [[ "$(cget "$E_NAME" source)" != env ]]; then
@@ -504,6 +509,8 @@ reconcile_env() {
         done
         (( found )) || say "CLAUDE_SESSIONS '*': no git repos directly under $WORKSPACE, so no sessions from it"
     done
+    (( ${#chained[@]} )) && say "WARNING: CLAUDE_SESSIONS: $CHAIN_GONE (entries: ${chained[*]}). The sessions start as plain sessions; drop the word from --session / CLAUDE_SESSIONS."
+    [[ -n "$(cenv CLAUDE_GOAL_CHAIN_REVIEW)" ]] && say "WARNING: CLAUDE_GOAL_CHAIN_REVIEW is set but no longer read (the goal runner left this image); drop it from the container's environment."
     # Declared before, not any more: unregister (its conversations stay on disk).
     local n
     for n in $(registered); do
@@ -511,32 +518,6 @@ reconcile_env() {
         rm -f "$(conf "$n")" "$(state "$n")"
         say "$n: no longer in CLAUDE_SESSIONS, unregistered"
     done
-}
-
-start_goal_chain() {  # (re)start the goal-chain window over every chained session
-    local -a targets=()
-    local n
-    for n in $(registered); do
-        [[ "$(cget "$n" chain)" == on && "$(sget "$n" stopped)" != 1 ]] || continue
-        targets+=("$n=$(session_dir "$n")")
-    done
-    (( ${#targets[@]} )) || return 0
-    local review cmd t
-    review="$(cenv CLAUDE_GOAL_CHAIN_REVIEW)"
-    cmd="$GOAL_CHAIN_BIN"
-    [[ -n "$review" ]] && cmd+=" --review-checkpoints $(printf '%q' "$review")"
-    for t in "${targets[@]}"; do cmd+=" $(printf '%q' "$t")"; done
-    cmd+="; echo 'claude-goal-chain exited (rerun: claude-sessions start --all, or run it by hand)'; exec bash -l"
-    if window_exists goal-chain; then
-        [[ "${1:-}" == --restart ]] || { say "goal-chain: already running"; return 0; }
-        tmux kill-window -t "$TMUX_SESSION:goal-chain" 2>/dev/null || true
-        sleep 1
-    fi
-    if tmux new-window -d -t "$TMUX_SESSION:" -n goal-chain "$cmd"; then
-        say "goal-chain: watching ${targets[*]%%=*} in window $TMUX_SESSION:goal-chain$([[ -n "$review" ]] && echo ', checkpoint reviews delegated')"
-    else
-        say "goal-chain: WARNING, could not open its window"
-    fi
 }
 
 # Memory and pids are shared by every session in the container, so say what each gets.
@@ -581,7 +562,6 @@ cmd_boot() {
         start_one "$n" --boot && up=$((up + 1))
     done
     (( total )) || return 0
-    start_goal_chain
     capacity_note $((up + 1))
     say "$up of $total sessions started; attach with: claude-sessions attach NAME (or Ctrl-b w in tmux)"
 }
@@ -859,7 +839,7 @@ cmd_mark() {  # mark <name> KEY=VALUE
 # --- new / rm / reset / send / attach ---------------------------------------------------------
 cmd_new() {
     local n="${1:-}"; shift || true
-    [[ -n "$n" ]] || die "usage: claude-sessions new NAME [--dir D] [--model M] [--mode M] [--goal F | --prompt-file F | --prompt TEXT] [--no-rc] [--no-resume] [--chain]"
+    [[ -n "$n" ]] || die "usage: claude-sessions new NAME [--dir D] [--model M] [--mode M] [--goal F | --prompt-file F | --prompt TEXT] [--no-rc] [--no-resume]"
     name_ok "$n" || die "$SPEC_ERR"
     registered_p "$n" && die "'$n' already exists (claude-sessions start|restart $n, or rm it first)"
     local prompt_text="" have_prompt=0
@@ -905,8 +885,8 @@ cmd_new() {
         [[ "$f" == /* ]] || f="$d/$f"
         [[ -f "$f" ]] || { rm -f "$(conf "$n")" "$REG/$n.prompt"; die "first-prompt file $f does not exist"; }
     done
+    [[ "$E_CHAIN" == on ]] && say "WARNING: --chain: $CHAIN_GONE"
     start_one "$n" --boot || return 1
-    [[ "$E_CHAIN" == on ]] && start_goal_chain --restart
     return 0
 }
 
@@ -918,10 +898,8 @@ cmd_rm() {
         die "'$n' is declared by the container's CLAUDE_SESSIONS and would come back on the next boot.
        Stop it instead (claude-sessions stop $n), or drop it from --session / CLAUDE_SESSIONS and recreate the container."
     fi
-    local chained; chained="$(cget "$n" chain)"
     stop_one "$n" >/dev/null
     rm -f "$(conf "$n")" "$(state "$n")" "$REG/$n.prompt"
-    [[ "$chained" == on ]] && start_goal_chain --restart
     say "$n: removed (its conversations stay in $CONFIG_DIR/projects)"
 }
 
@@ -960,15 +938,13 @@ cmd_start() {
     local -a names=()
     if [[ "${1:-}" == --all ]]; then mapfile -t names < <(registered); else names=("$@"); fi
     (( ${#names[@]} )) || die "usage: claude-sessions start NAME... | --all"
-    local n rc=0 chained=0
+    local n rc=0
     for n in "${names[@]}"; do
         [[ "$n" == main ]] && { say "main always runs (claude-sessions restart main)"; continue; }
         registered_p "$n" || { say "$n: no such session"; rc=1; continue; }
         sset "$n" stopped 0
         start_one "$n" --boot || rc=1
-        [[ "$(cget "$n" chain)" == on ]] && chained=1
     done
-    (( chained )) && start_goal_chain
     return $rc
 }
 

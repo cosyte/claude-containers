@@ -8,8 +8,9 @@
 #   - the spec: names, keys, values, '*', duplicates (claude-sessions check)
 #   - boot: CLAUDE_SESSIONS reconciled into the registry, one window per session with the
 #     right directory and command, '*' expanded per repo, a named entry beating '*', the
-#     goal-chain window, a stopped session left stopped, a dropped entry unregistered, a
-#     runtime session kept, a bad entry skipped without failing the boot
+#     removed `chain` setting warned about and ignored, a stopped session left stopped, a
+#     dropped entry unregistered, a runtime session kept, a bad entry skipped without failing
+#     the boot
 #   - claude-session: Remote Control name, directory, model, mode, debug log, the first
 #     prompt / goal exactly once, resume by recorded id, --continue only when unambiguous,
 #     main unchanged by default and resumable with CLAUDE_MAIN_RESUME=1
@@ -128,7 +129,7 @@ WS="$TMPD/ws"
 export CLAUDE_CONFIG_DIR="$TMPD/config" CLAUDE_WORKSPACE="$WS" CLAUDE_PROJECT_NAME=maker \
        CLAUDE_RC_WATCHDOG_BIN="$FAKE/bin/fake-rc-watchdog" CLAUDE_SESSIONS_RUN_DIR="$TMPD/run" \
        CLAUDE_SESSIONS_CGROUP="$TMPD/cg" CLAUDE_RC_DEBUG_LOG="$TMPD/rc/claude-rc-debug.log" \
-       CLAUDE_GOAL_CHAIN_BIN=claude-goal-chain CLAUDE_MODEL=opus CLAUDE_SESSIONS_SEND_DELAY=0
+       CLAUDE_MODEL=opus CLAUDE_SESSIONS_SEND_DELAY=0
 unset CLAUDE_SESSIONS CLAUDE_MAIN_RESUME CLAUDE_GOAL_CHAIN_REVIEW CLAUDE_RC_WATCHDOG TMUX
 mkdir -p "$CLAUDE_CONFIG_DIR/sessions" "$TMPD/rc" "$TMPD/cg" "$TMPD/home"
 REG="$CLAUDE_CONFIG_DIR/session-registry"
@@ -140,19 +141,29 @@ echo "home program, GOAL 1 of 3: foundations" > "$WS/home/.claude/goals/g1.goal.
 echo "== the spec (claude-sessions check) =="
 spec_ok()  { "$CS" check "$1" >/dev/null 2>&1; }
 spec_bad() { local out; out="$("$CS" check "$1" 2>&1 >/dev/null)" && return 1; [[ "$out" == *"$2"* ]]; }
-check "a full spec is valid" spec_ok 'home goal=.claude/goals/g1.goal.txt chain; 3d; review model=sonnet mode=plan rc=off resume=off'
+check "a full spec is valid" spec_ok 'home goal=.claude/goals/g1.goal.txt; 3d; review model=sonnet mode=plan rc=off resume=off'
 check "newlines separate entries too, blanks and ';;' are fine" spec_ok $'api\n\n web model=claude-opus-4-8 ;; x model=opus[1m]'
 check "'*' with options is valid" spec_ok '* model=sonnet'
 check "an uppercase name is refused" spec_bad 'Home' "must be lowercase"
 check "a dotted name is refused (tmux reads '.' as a pane)" spec_bad 'a.b' "must be lowercase"
-check "main / dev / scm / goal-chain are taken" spec_bad 'dev' "is taken"
+check "main / dev / scm are taken" spec_bad 'dev' "is taken"
 check "an unknown key is refused, naming the known ones" spec_bad 'x colour=red' "unknown key 'colour'"
-check "a bare word that is not 'chain' is refused" spec_bad 'x fast' "not key=value"
+check "a bare word is refused" spec_bad 'x fast' "not key=value"
 check "rc= takes on/off only" spec_bad 'x rc=maybe' "use on or off"
 check "'\$' in a value is refused (compose and tmux would expand it)" spec_bad 'x dir=$HOME' "not allowed"
 check "goal= and prompt-file= together are refused" spec_bad 'x goal=a prompt-file=b' "give one"
 check "'*' cannot take dir=" spec_bad '* dir=a' "cannot take dir="
 check "a name declared twice is refused" spec_bad 'x; y; x' "declared twice"
+
+echo "== the removed 'chain' setting: a warning, never an error =="
+# The value a long-running container was created with before the goal runner left the image.
+OLD_SPEC='home chain; 3d chain; api chain; web chain; docs chain; *'
+out="$("$CS" check "$OLD_SPEC" 2>&1 >/dev/null)"; rc=$?
+check "check accepts a spec that still says 'chain' (exit 0)" test "$rc" -eq 0
+[[ "$out" == *"warning: home: 'chain' is no longer a session setting"* && "$out" == *"warning: docs:"* ]] \
+    && ok "check warns on stderr, once per entry" || bad "no chain warning: $out"
+check "chain=on and chain=off are accepted the same way" spec_ok 'x chain=on; y chain=off'
+check "a spec without it prints no warning" test -z "$("$CS" check 'home; 3d' 2>&1 >/dev/null)"
 
 # ======================================================================================
 echo "== boot: CLAUDE_SESSIONS becomes one window per session =="
@@ -160,21 +171,37 @@ tm_reset; tm_main
 printf '%s' 'maker' > "$FAKE/tm/env/CLAUDE_PROJECT_NAME"
 echo 8589934592 > "$TMPD/cg/memory.max"; echo 2048 > "$TMPD/cg/pids.max"
 export CLAUDE_SESSIONS='home goal=.claude/goals/g1.goal.txt chain; review dir=home model=sonnet mode=plan rc=off; *; bad name=x'
-export CLAUDE_GOAL_CHAIN_REVIEW="it reviews and approves for me"
+export CLAUDE_GOAL_CHAIN_REVIEW="it reviews and approves for me"   # an old container's environment
 out="$("$CS" boot 2>&1)"; rc=$?
 check "boot exits 0 even with a bad entry" test "$rc" -eq 0
 [[ "$out" == *"skipped 'bad name=x'"* ]] && ok "the bad entry is skipped with a log line" || bad "bad entry not reported: $out"
 check "windows: main, then declared order, then '*' repos (named entry wins 'home')" \
-    test "$(windows)" = "main home review 3d foo-bar goal-chain"
+    test "$(windows)" = "main home review 3d foo-bar"
 check "home runs in /workspace/home, started with --boot" \
     test "$(win_dir home)|$(win_cmd home)" = "$WS/home|/usr/local/bin/claude-session --session home --boot"
 check "review's relative dir=home resolves under /workspace" test "$(win_dir review)" = "$WS/home"
 check "'*' names Foo.Bar's session foo-bar and runs it in the real directory" test "$(win_dir foo-bar)" = "$WS/Foo.Bar"
 [[ "$out" == *"no session for $WS/main"* ]] && ok "a repo named 'main' gets no session, and the log says how to add one" || bad "repo 'main' not reported: $out"
 [[ ! -e "$FAKE/tm/w/notes" ]] && ok "a directory that is not a git repo gets no session" || bad "notes/ got a session"
-gc="$(win_cmd goal-chain)"
-[[ "$gc" == "claude-goal-chain --review-checkpoints it\\ reviews\\ and\\ approves\\ for\\ me home=$WS/home;"* ]] \
-    && ok "goal-chain watches the chained session, with the delegated review quoted" || bad "goal-chain command: $gc"
+[[ "$out" == *"WARNING: CLAUDE_SESSIONS: 'chain' is no longer a session setting"*"(entries: home)"* ]] \
+    && ok "an old 'chain' entry boots as a plain session, with one warning naming it" || bad "no chain warning at boot: $out"
+[[ "$out" == *"WARNING: CLAUDE_GOAL_CHAIN_REVIEW is set but no longer read"* ]] \
+    && ok "an old CLAUDE_GOAL_CHAIN_REVIEW is named as unused" || bad "no CLAUDE_GOAL_CHAIN_REVIEW warning: $out"
+check "no goal-chain window is opened, and no conf carries the setting" \
+    bash -c "[[ ! -e '$FAKE/tm/w/goal-chain' ]] && ! grep -q '^chain=' '$REG'/*.conf"
+unset CLAUDE_GOAL_CHAIN_REVIEW
+# The shape a real long-running container was declared with (five chained sessions and "*"),
+# under placeholder names: every session starts.
+( export CLAUDE_SESSIONS="$OLD_SPEC" CLAUDE_SESSIONS_REGISTRY="$TMPD/old-reg" CLAUDE_GOAL_CHAIN_REVIEW="it reviews"
+  for r in api web docs; do mkdir -p "$WS/$r/.git"; done
+  tm_reset; tm_main
+  out="$("$CS" boot 2>&1)"; rc=$?
+  for r in api web docs; do rm -rf "${WS:?}/$r"; done
+  [[ $rc -eq 0 && "$(windows)" == "main home 3d api web docs foo-bar" \
+     && "$out" == *"(entries: home 3d api web docs)"* && "$out" == *"6 of 6 sessions started"* ]] ) \
+    && ok "a container declared with five chained sessions and '*' boots all six, warned once" \
+    || bad "the old CLAUDE_SESSIONS did not boot cleanly"
+tm_reset; tm_main; "$CS" boot >/dev/null 2>&1
 check "every declared session is registered as source=env" \
     test "$(grep -l '^source=env' "$REG"/*.conf | wc -l)" -eq 4
 [[ "$out" == *"Capacity: 5 Claude sessions share 8192 MiB"* && "$out" != *"WARNING: under 1 GiB"* ]] \
@@ -217,7 +244,6 @@ out="$("$CS" boot 2>&1)"
 [[ "$out" == *"3d: stopped by hand, not started"* && ! -e "$FAKE/tm/w/3d" ]] \
     && ok "a session stopped by hand stays stopped across a boot" || bad "3d started anyway: $out"
 check "the runtime session comes back after a boot" test -e "$FAKE/tm/w/scratch"
-check "no chained session now, so no goal-chain window" test ! -e "$FAKE/tm/w/goal-chain"
 check "boot with no CLAUDE_SESSIONS and no registry says nothing" \
     test -z "$(env -u CLAUDE_SESSIONS CLAUDE_SESSIONS_REGISTRY="$TMPD/empty-reg" "$CS" boot 2>&1)"
 
@@ -430,8 +456,10 @@ out="$("$CS" new nodir --dir nowhere 2>&1)"; rc=$?
 check "new refuses a missing directory, leaving nothing registered" bash -c "(( $rc != 0 )) && [[ ! -f '$REG/nodir.conf' ]]"
 out="$("$CS" new g --dir home --goal missing.txt 2>&1)"; rc=$?
 check "new refuses a missing goal file" bash -c "(( $rc != 0 )) && [[ ! -f '$REG/g.conf' ]]"
-"$CS" new chained --dir home --chain >/dev/null 2>&1
-[[ "$(win_cmd goal-chain)" == *"chained=$WS/home"* ]] && ok "new --chain (re)starts goal-chain with it" || bad "goal-chain: $(win_cmd goal-chain)"
+out="$("$CS" new chained --dir home --chain 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$out" == *"WARNING: --chain: 'chain' is no longer a session setting"* && -e "$FAKE/tm/w/chained" && ! -e "$FAKE/tm/w/goal-chain" ]] \
+    && ok "new --chain still starts the session, warns, and opens no goal-chain window" || bad "new --chain: rc=$rc $out"
+"$CS" rm chained >/dev/null 2>&1
 "$CS" rm tmp >/dev/null 2>&1
 check "rm removes a runtime session and its window" bash -c "[[ ! -f '$REG/tmp.conf' && ! -f '$REG/tmp.prompt' && ! -e '$FAKE/tm/w/tmp' ]]"
 "$CS" reset home >/dev/null 2>&1
@@ -533,19 +561,22 @@ GEN="$REPO_ROOT/bin/claude-compose-gen"
 svc_block() { awk -v s="  $2:" 'index($0,s)==1{f=1;next} f && /^  [a-z0-9-]+:$/{exit} f{print}' "$1"; }
 gen() { env -u CLAUDE_SESSIONS STUB_STATE="$TMPD" PATH="$STUBD:$PATH" CLAUDE_PORTS_USED_OVERRIDE= "$GEN" "$@" >"$TMPD/gen.log" 2>&1; }
 gen --out "$TMPD/c.yml" --group maker=me/home,me/3d --session 'maker=*' --session 'maker=review model=sonnet mode=plan' \
-    --env 'maker=CLAUDE_GOAL_CHAIN_REVIEW=it says $HOME "hi"' acme/site; rc=$?
+    --env 'maker=MY_NOTE=it says $HOME "hi"' acme/site; rc=$?
 mk="$(svc_block "$TMPD/c.yml" maker)"; st="$(svc_block "$TMPD/c.yml" site)"
 check "the group service gets CLAUDE_SESSIONS with both entries" \
     bash -c "(( $rc == 0 )) && grep -qxF '      CLAUDE_SESSIONS: \"*; review model=sonnet mode=plan\"' <<<\"\$1\"" _ "$mk"
 check "--env is emitted escaped (\$\$ for compose, \\\" for YAML)" \
-    grep -qxF '      CLAUDE_GOAL_CHAIN_REVIEW: "it says $$HOME \"hi\""' <<<"$mk"
-check "other services are untouched" bash -c "! grep -qE 'CLAUDE_SESSIONS|GOAL_CHAIN' <<<\"\$1\"" _ "$st"
+    grep -qxF '      MY_NOTE: "it says $$HOME \"hi\""' <<<"$mk"
+check "other services are untouched" bash -c "! grep -qE 'CLAUDE_SESSIONS|MY_NOTE' <<<\"\$1\"" _ "$st"
 grep -q '+sessions(\*,review) +env(1)' "$TMPD/gen.log" && ok "the summary names the sessions" || bad "summary: $(grep maker "$TMPD/gen.log")"
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     cfg="$(docker compose -f "$TMPD/c.yml" config 2>&1)" \
-        && [[ "$cfg" == *'CLAUDE_GOAL_CHAIN_REVIEW: it says $$HOME "hi"'* ]] \
+        && [[ "$cfg" == *'MY_NOTE: it says $$HOME "hi"'* ]] \
         && ok "docker compose parses it and keeps the value literal" || bad "compose config: $(head -3 <<<"$cfg")"
 fi
+gen --out "$TMPD/e.yml" acme/site --session 'site=a chain'; rc=$?
+check "an old 'chain' in --session still generates, with a warning" \
+    bash -c "(( $rc == 0 )) && [[ -e '$TMPD/e.yml' ]] && grep -q \"'chain' is no longer a session setting\" '$TMPD/gen.log'"
 gen --out "$TMPD/d.yml" acme/site --session 'site=a colour=red'; rc=$?
 check "an invalid --session fails the generator and writes nothing" bash -c "(( $rc != 0 )) && [[ ! -e '$TMPD/d.yml' ]] && grep -q \"unknown key 'colour'\" '$TMPD/gen.log'"
 gen --out "$TMPD/d.yml" acme/site --session 'nosuch=a'; rc=$?
@@ -691,8 +722,10 @@ check "prepare (trust + registry) runs before main's window, so nothing races on
 check "a failed prepare or boot never fails the container" \
     bash -c "grep -q 'claude-sessions prepare \\\\$' '$EP' && grep -q 'claude-sessions boot --no-reconcile \\\\$' '$EP'"
 check "main starts with --boot" grep -qF 'MAIN_PANE_CMD="/usr/local/bin/claude-session --boot"' "$EP"
-check "CLAUDE_SESSIONS / CLAUDE_MAIN_RESUME / CLAUDE_GOAL_CHAIN_REVIEW reach tmux's environment" \
-    bash -c "grep -q 'export CLAUDE_SESSIONS=' '$EP' && grep -q 'CLAUDE_MAIN_RESUME=' '$EP' && grep -q 'CLAUDE_GOAL_CHAIN_REVIEW=' '$EP'"
+check "CLAUDE_SESSIONS / CLAUDE_MAIN_RESUME reach tmux's environment" \
+    bash -c "grep -q 'export CLAUDE_SESSIONS=' '$EP' && grep -q 'CLAUDE_MAIN_RESUME=' '$EP'"
+check "the goal runner is gone from the image: no script, no COPY, no env export" \
+    bash -c "[[ ! -e '$REPO_ROOT/bin/claude-goal-chain' ]] && ! grep -q 'claude-goal-chain' '$REPO_ROOT/Dockerfile' && ! grep -q 'CLAUDE_GOAL_CHAIN' '$EP'"
 check "the supervisor is stopped on shutdown" grep -q 'kill "$SESSIONS_PID"' "$EP"
 check "shutdown records every window's conversation before tmux goes" \
     bash -c "awk '/^shutdown\\(\\) \\{/{f=1} f&&/claude-sessions record/{r=NR} f&&/tmux kill-server/{k=NR; exit} END{exit !(r && k && r < k)}' '$EP'"
