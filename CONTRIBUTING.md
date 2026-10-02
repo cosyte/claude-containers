@@ -27,10 +27,10 @@ vulnerabilities go through private reporting rather than an issue.
 1. Fork and branch from `main`.
 2. **Run the gates locally before pushing:**
    ```bash
-   make lint      # bash -n over every shell entrypoint
+   npm run lint   # make lint (bash -n over every shell entrypoint) plus the no-em-dash check
    npm test       # the unit suites (no Docker required)
    ```
-   Both must be clean. CI runs exactly these.
+   Both must be clean. CI runs exactly these (the required checks `ci` and `no-emdash`).
 3. `make smoke` builds the image and exercises a real container. It is **not** in
    CI: a hosted runner cannot build and run the image usefully, so run it
    yourself for anything touching the Dockerfile, the entrypoint, or launch.
