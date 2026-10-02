@@ -343,14 +343,15 @@ done
 declare -A STARTCMD=()
 for tok in "${STARTCMD_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
-    [[ "$tok" == *=* && -n "${tok#*=}" ]] || die "--start-cmd must be SVC=COMMAND (got '$tok')"
+    [[ "$tok" == ?*=* && -n "${tok#*=}" ]] || die "--start-cmd must be SVC=COMMAND (got '$tok')"
+    [[ "${tok#*=}" != *$'\n'* ]] || die "--start-cmd for ${tok%%=*} holds a newline: give one command line (join steps with && or ;)"
     STARTCMD["$(sanitize "${tok%%=*}")"]="${tok#*=}"
 done
 # Per-service pids limit: svc -> N.
 declare -A PIDS=()
 for tok in "${PIDS_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
-    [[ "$tok" == *=* ]] || die "--pids must be SVC=N (got '$tok')"
+    [[ "$tok" == ?*=* ]] || die "--pids must be SVC=N (got '$tok')"
     [[ "${tok#*=}" =~ ^[1-9][0-9]*$ ]] || die "--pids value must be a positive integer (got '${tok#*=}')"
     PIDS["$(sanitize "${tok%%=*}")"]="${tok#*=}"
 done
@@ -672,6 +673,10 @@ done
 for g in "${!SESSIONS[@]}" "${!ENVS[@]}"; do
     [[ -n "${SEEN[$g]:-}" ]] \
         || die "--session/--env names '$g', which is not a service in this stack (services: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
+done
+for g in "${!STARTCMD[@]}" "${!PIDS[@]}"; do
+    [[ -n "${SEEN[$g]:-}" ]] \
+        || die "--start-cmd/--pids names '$g', which is not a service in this stack (services: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
 done
 
 # --- Stable SSH port assignment ----------------------------------------------

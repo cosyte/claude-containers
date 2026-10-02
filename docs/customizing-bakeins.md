@@ -60,19 +60,24 @@ Verify in a session with `/mcp`.
 
 `claude-config/plugins/plugins.json` declares `extraKnownMarketplaces` and
 `enabledPlugins` (`"<plugin>@<marketplace>"`). The entrypoint unions these into
-`settings.json`; Claude Code installs/syncs them on startup, idempotently.
+`settings.json`; Claude Code registers the marketplaces on startup. A plugin from
+a git source may still need installing once (`claude plugin install
+<plugin>@<marketplace>`): enabling it in settings does not by itself install it.
 Replace the shipped example marketplace with your own. Verify with `/plugin`.
 
 To add a marketplace and plugins to one container without rebuilding the image, declare
 them at creation time instead (`--marketplace`, `--plugin`, `--start-cmd`): see "Install a
-kit at session start" in the README. Those are also installed by the CLI at boot, which a
-`settings.json` entry alone does not do for a plugin from a git source.
+kit at session start" in the README. Those are also installed by the CLI at boot.
 
 ## Slash commands
 
 Markdown files in `claude-config/commands/`, optional YAML frontmatter
 (`description:`). `container-info.md` ships as a working example. Invoke as
 `/container-info`. Add your own `*.md` and rebuild.
+
+A command or skill that a newer image no longer ships is not removed from an existing
+config volume either (nothing baked is ever deleted there): remove
+`~/.claude/commands/<name>.md` by hand if you do not want it.
 
 A baked command is copied only if that file doesn't already exist in the
 container's config volume, so editing one here reaches existing containers

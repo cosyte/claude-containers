@@ -88,9 +88,9 @@ it).
 `--plugin REPO=PLUGIN[,…]` write `CLAUDE_EXTRA_MARKETPLACES` /
 `CLAUDE_EXTRA_PLUGINS` onto a service. The entrypoint merges these into
 Claude Code's `settings.json` on every boot and installs the plugins before
-any session starts: no image rebuild, no manual edit. Existing `settings.json`
-entries win on conflict (so per-container user choices stick), except a pinned
-marketplace (`#REF`), whose declared pin wins. Same syntax as the
+any session starts: no image rebuild, no manual edit. A declared marketplace
+replaces the `settings.json` entry of that name; for `enabledPlugins` an
+existing value wins (a plugin you switched off stays off). Same syntax as the
 single-container `claude-launch --marketplace` / `--plugin`, with a `REPO=`
 prefix to say which service. With `--start-cmd` this is the kit hook: see
 [Install a kit at session start](../README.md#install-a-kit-at-session-start).

@@ -1,5 +1,5 @@
 {
-  "_comment": "Declarative plugin bake-in. The entrypoint unions extraKnownMarketplaces and enabledPlugins into ~/.claude/settings.json; Claude Code installs/syncs them on startup (idempotent). Ships empty so the image is generic. Add your own marketplaces/plugins and rebuild, or mount your own plugins.json / settings.json at runtime.",
+  "_comment": "Declarative plugin bake-in. The entrypoint unions extraKnownMarketplaces and enabledPlugins into ~/.claude/settings.json; Claude Code registers the marketplaces on startup; a plugin from a git source may still need `claude plugin install` once (the runtime kit hook, --marketplace / --plugin, does that at boot for what it declares). Ships empty so the image is generic. Add your own marketplaces/plugins and rebuild, or mount your own plugins.json / settings.json at runtime.",
 
   "_example": {
     "extraKnownMarketplaces": {

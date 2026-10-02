@@ -1022,8 +1022,9 @@ if echo "$EXISTING_SETTINGS" | jq -e '.env // {} | (.DISABLE_TELEMETRY // .DO_NO
     rm -rf "$CLAUDE_CONFIG_DIR/statsig" 2>/dev/null || true
 fi
 
-# 8c. Plugins: declarative. Claude Code installs/syncs the marketplaces and
-#     enabled plugins from settings.json on startup (idempotent). We union the
+# 8c. Plugins: declarative. Claude Code registers the marketplaces from settings.json on
+#     startup; a baked plugin from a git source may still need `claude plugin install` once
+#     (the runtime kit hook below installs what IT declares). We union the
 #     two plugin keys into existing settings; existing entries win on conflict.
 if [[ -f "$BAKE_DIR/plugins/plugins.json" ]]; then
     jq -s '
@@ -1042,7 +1043,8 @@ fi
 # CLAUDE_EXTRA_MARKETPLACES: "name=url[#ref][,...]"  git source; "#ref" pins a branch or tag
 #                            and turns autoUpdate off (a pin and auto-update contradict).
 # CLAUDE_EXTRA_PLUGINS:      "plugin@marketplace[,...]"
-# Existing settings.json entries win, except a pinned marketplace (the declared pin wins).
+# A declared marketplace replaces the settings.json entry of that name (adding, moving or
+# dropping #ref takes effect at the next start); for enabledPlugins an existing value wins.
 # The plugins are installed by the CLI, as the agent user, in §12d before any session starts.
 if [[ -n "${CLAUDE_EXTRA_MARKETPLACES:-}" ]] || [[ -n "${CLAUDE_EXTRA_PLUGINS:-}" ]]; then
     if /usr/local/bin/claude-kit settings "$CLAUDE_CONFIG_DIR/settings.json"; then

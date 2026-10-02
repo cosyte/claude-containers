@@ -185,7 +185,7 @@ Pair `--expose` + `--dev-cmd` for a browsable dev site.
 `CLAUDE_EXTRA_MARKETPLACES` / `CLAUDE_EXTRA_PLUGINS` / `CLAUDE_EXTRA_START_CMD` onto a service: the
 kit hook (`bin/claude-kit`: settings merge, plugins installed by the CLI before any session, the
 start command once per boot in the background; `#REF` pins and sets `autoUpdate` false, since a
-pin and auto-update contradict; existing user entries win on conflict except a declared pin). No
+pin and auto-update contradict; a declared marketplace replaces the settings entry of that name, an existing `enabledPlugins` value wins; a marketplace added in this boot gets its declared plugins updated). No
 rebuild needed. `--pids SVC=N` sets one service's pids limit. Two real gotchas:
 the dev server **must bind 0.0.0.0** (localhost = published port reaches
 nothing); and `npm run` needs `-- ` before forwarded flags while

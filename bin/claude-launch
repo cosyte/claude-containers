@@ -47,7 +47,7 @@
 #                              in its own tmux window with its own Remote Control link
 #                              (<name>-<session>). Repeatable. SPEC is NAME [key=value ...]
 #                              with dir= model= mode= goal=FILE prompt-file=FILE rc=off
-#                              resume=off chain; NAME '*' = one per repo of a multi-repo
+#                              resume=off; NAME '*' = one per repo of a multi-repo
 #                              workspace. e.g. --session "home goal=.claude/goals/g1.goal.txt"
 #                              Sets CLAUDE_SESSIONS (see `claude-sessions --help`).
 #   --env <KEY=VALUE>          pass one more environment variable into the container
