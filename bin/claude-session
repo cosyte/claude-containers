@@ -1,21 +1,47 @@
 #!/usr/bin/env bash
-# The command tmux runs in the 'claude' session pane.
+# The command tmux runs in a Claude session's pane: window 'main' (the container's own
+# session), or one window per named session (bin/claude-sessions).
 # Launches Claude Code with Remote Control + skip-permissions, then drops to an
 # interactive shell if Claude exits so the SSH/tmux session stays usable. Run
 # `claude-session` (this script) again from that shell to relaunch.
 #
-# Usage: claude-session [--continue | --resume <id>]
-#   --continue     resume the most recent conversation. The RC watchdog passes
-#                  this when it restarts a session whose Remote Control link died,
-#                  so the conversation survives the restart.
+# Usage: claude-session [--session NAME] [--boot | --continue | --resume <id> | --fresh]
+#   --session NAME a named session: its directory, Remote Control name (<project>-NAME),
+#                  model, permission mode and first prompt come from claude-sessions.
+#                  Without it this is the main session: /workspace, Remote Control name
+#                  = the project, exactly as it has always been.
+#   --boot         started at container boot (or by `claude-sessions start`): resume the
+#                  session's last conversation when its resume policy says so (named
+#                  sessions: on unless resume=off; main: CLAUDE_MAIN_RESUME=1); a session's
+#                  very first start sends its first prompt / goal instead.
+#   --continue     resume this session's conversation. The RC watchdog passes this
+#                  when it restarts a session whose Remote Control link died, so the
+#                  conversation survives the restart. It resumes the exact conversation
+#                  claude-sessions recorded for this window, and falls back to the most
+#                  recent one in the directory only when no other session shares it.
 #   --resume <id>  resume a specific conversation by session id (see
 #                  claude-session-id). bin/claude-usage-watchdog passes this on
-#                  an account-rotation respawn, since by the time it restarts
-#                  the pane "most recent" could be ambiguous.
+#                  an account-rotation respawn.
+#   --fresh        a new conversation, no first prompt.
+# If Claude crashes (any exit but 0, 130 or 143) it is relaunched, resuming the conversation,
+# up to CLAUDE_SESSION_CRASH_RESTARTS (5) times in CLAUDE_SESSION_CRASH_WINDOW (900) seconds.
 set -uo pipefail
 
-cd /workspace || cd "$HOME"
+SESSION="" MODE="" RESUME_ID=""
+while (( $# )); do
+    case "$1" in
+        --session)     SESSION="${2:-}"; shift; shift || true ;;
+        --boot)        MODE=boot; shift ;;
+        --continue|-c) MODE=continue; shift ;;
+        --resume)      MODE=resume; RESUME_ID="${2:-}"; shift; shift || true ;;
+        --fresh)       MODE=fresh; shift ;;
+        *)             echo "claude-session: ignoring unknown argument '$1'"; shift ;;
+    esac
+done
+[[ "$SESSION" == main ]] && SESSION=""
 
+SESSIONS_BIN="${CLAUDE_SESSIONS_BIN:-/usr/local/bin/claude-sessions}"
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 NAME="${CLAUDE_PROJECT_NAME:-claude}"
 EXTRA="${CLAUDE_EXTRA_ARGS:-}"
 PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
@@ -35,8 +61,39 @@ MODEL="${CLAUDE_MODEL:-opus}"
 # Remote Control debug log. Claude writes RC bridge events here so the
 # healthcheck and the RC watchdog can tell when the Remote Control link drops
 # (and whether it recovered). Opt out by launching with CLAUDE_RC_DEBUG_LOG="".
+# A named session writes its own (claude-rc-debug-NAME.log beside this one).
 RC_DEBUG_LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
 RC_DEBUG_FILTER="${CLAUDE_RC_DEBUG_FILTER:-bridge}"
+
+# This session's view from claude-sessions: its recorded conversation, resume policy and,
+# for a named session, everything else. For main the lookup is best-effort: if it fails,
+# main starts exactly as it did before named sessions existed.
+S_DIR="" S_RCNAME="" S_MODEL="" S_MODE="" S_RC=on S_RESUME=off S_PROMPT_KIND="" S_PROMPT_PATH=""
+S_STARTED="" S_SID="" S_DEBUG_LOG="$RC_DEBUG_LOG" S_SHARED=0
+if [[ -n "$SESSION" ]]; then
+    if ! envs="$("$SESSIONS_BIN" env "$SESSION" 2>&1)"; then
+        echo "claude-session: cannot start session '$SESSION': $envs"
+        exec bash -l
+    fi
+    eval "$envs"
+    if ! cd "$S_DIR"; then
+        echo "claude-session: session '$SESSION': its directory $S_DIR is missing"
+        exec bash -l
+    fi
+    NAME="$S_RCNAME"
+    [[ -n "$S_MODEL" ]] && MODEL="$S_MODEL"
+    [[ -n "$S_MODE" ]] && PERM_MODE="$S_MODE"
+    RC_DEBUG_LOG="$S_DEBUG_LOG"
+else
+    cd /workspace || cd "$HOME"
+    if envs="$("$SESSIONS_BIN" env main 2>/dev/null)"; then
+        eval "$envs"
+        S_RC=on; RC_DEBUG_LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
+        # <project>-main in a container with named sessions, <project> alone (claude-sessions).
+        [[ -n "$S_RCNAME" ]] && NAME="$S_RCNAME"
+    fi
+fi
+[[ "$S_RC" == off ]] && RC_DEBUG_LOG=""
 
 # Permission posture from CLAUDE_PERMISSION_MODE. bypassPermissions keeps the
 # historical --dangerously-skip-permissions (verified to combine with Remote
@@ -46,16 +103,58 @@ case "$PERM_MODE" in
     bypassPermissions|bypass|"") ARGS=(--dangerously-skip-permissions) ;;
     *)                           ARGS=(--permission-mode "$PERM_MODE") ;;
 esac
-ARGS+=(--remote-control "$NAME")
+[[ "$S_RC" != off ]] && ARGS+=(--remote-control "$NAME")
+# The display name too, every start: a resumed conversation reuses the Remote Control session it
+# was created with, and keeps that session's old name in the Claude app unless it is renamed.
+ARGS+=(--name "$NAME")
 [[ -n "$MODEL" ]] && ARGS+=(--model "$MODEL")
 
-if [[ "${1:-}" == "--continue" || "${1:-}" == "-c" ]]; then
-    ARGS+=(--continue)
-    echo "Resuming the most recent conversation (--continue)."
-elif [[ "${1:-}" == "--resume" && -n "${2:-}" ]]; then
-    ARGS+=(--resume "$2")
-    echo "Resuming conversation $2 (--resume)."
-fi
+# Resume this session's own conversation: the one claude-sessions recorded for its window
+# (exact, and it follows a /clear), else the directory's most recent one, but only when no
+# other session works in the same directory (there `--continue` could pick up a sibling's).
+# Returns 1 when there is nothing to resume, so the caller starts fresh instead of letting
+# `claude --continue` fail on an empty history and drop the pane to a shell.
+sid_ok() { [[ -n "$S_SID" ]] && compgen -G "$CONFIG_DIR/projects/*/$S_SID.jsonl" >/dev/null; }
+dir_has_history() { compgen -G "$CONFIG_DIR/projects/$(pwd | sed 's/[^A-Za-z0-9]/-/g')/*.jsonl" >/dev/null; }
+resume_last() {
+    if sid_ok; then
+        ARGS+=(--resume "$S_SID"); echo "Resuming conversation $S_SID."; return 0
+    fi
+    if [[ "$S_SHARED" != 1 ]] && dir_has_history; then
+        ARGS+=(--continue); echo "Resuming the most recent conversation (--continue)."; return 0
+    fi
+    return 1
+}
+
+PROMPT=()
+first_start() {  # a session's first start sends its first prompt or goal, once
+    [[ "$S_STARTED" == 1 || -z "$S_PROMPT_KIND" ]] && return 0
+    if [[ ! -f "$S_PROMPT_PATH" ]]; then
+        echo "WARNING: first-prompt file $S_PROMPT_PATH is missing: starting without it."
+        return 0
+    fi
+    local body; body="$(cat "$S_PROMPT_PATH")"
+    if [[ "$S_PROMPT_KIND" == goal ]]; then
+        PROMPT=("/goal $body"); echo "First start: /goal from $S_PROMPT_PATH"
+    else
+        PROMPT=("$body"); echo "First start: prompt from $S_PROMPT_PATH"
+    fi
+}
+
+case "$MODE" in
+    continue)
+        resume_last || echo "No earlier conversation to resume: starting a fresh one." ;;
+    resume)
+        if [[ -n "$RESUME_ID" ]]; then
+            ARGS+=(--resume "$RESUME_ID"); echo "Resuming conversation $RESUME_ID (--resume)."
+        else
+            echo "--resume needs a conversation id: starting a fresh one."
+        fi ;;
+    boot)
+        if [[ "$S_RESUME" == on && "$S_STARTED" == 1 ]] && resume_last; then :; else first_start; fi ;;
+esac
+# Record the start before Claude runs, so a crash in its first seconds never replays a goal.
+"$SESSIONS_BIN" mark "${SESSION:-main}" started=1 >/dev/null 2>&1 || true
 
 if [[ -n "$RC_DEBUG_LOG" ]]; then
     # Truncate so detection only ever sees the current session's events.
@@ -63,17 +162,51 @@ if [[ -n "$RC_DEBUG_LOG" ]]; then
     ARGS+=(--debug "$RC_DEBUG_FILTER" --debug-file "$RC_DEBUG_LOG")
 fi
 
-echo "Starting Claude Code  (Remote Control name: ${NAME})"
+if [[ "$S_RC" != off ]]; then
+    echo "Starting Claude Code  (Remote Control name: ${NAME})"
+else
+    echo "Starting Claude Code  (session ${SESSION}, no Remote Control)"
+fi
 echo "  workspace: $(pwd)"
 echo "  flags    : ${ARGS[*]} ${EXTRA}"
 echo
 
 # shellcheck disable=SC2086  # EXTRA is intentionally word-split
-claude "${ARGS[@]}" $EXTRA
+claude "${ARGS[@]}" $EXTRA "${PROMPT[@]}"
 
 code=$?
+
+# Crash recovery. A deliberate end (/exit is 0, Ctrl-C 130, a SIGTERM from `claude-sessions
+# stop` or a watchdog respawn 143) drops to a shell as it always has. Anything else is a crash
+# (an abort, a segfault, an OOM kill, a failed thread create when the container is out of
+# pids): relaunch after a backoff, resuming this conversation, at most
+# CLAUDE_SESSION_CRASH_RESTARTS times in CLAUDE_SESSION_CRASH_WINDOW seconds (0 = never).
+# Before this, a crashed session sat in a shell until someone noticed.
+case "$code" in
+    0|130|143) ;;
+    *)
+        now="$(date +%s)"; window="${CLAUDE_SESSION_CRASH_WINDOW:-900}"; max="${CLAUDE_SESSION_CRASH_RESTARTS:-5}"
+        recent=""; for t in ${CLAUDE_SESSION_CRASH_TIMES:-}; do (( now - t < window )) && recent+="$t "; done
+        n="$(wc -w <<<"$recent")"
+        if (( max > 0 && n < max )); then
+            delay=$(( ${CLAUDE_SESSION_CRASH_BACKOFF:-5} * (1 << n) )); (( delay > 120 )) && delay=120
+            echo
+            echo "Claude Code crashed (status ${code}). Restarting in ${delay}s, resuming this conversation (restart $((n + 1)) of ${max} in ${window}s)."
+            sleep "$delay"
+            export CLAUDE_SESSION_CRASH_TIMES="${recent}${now}"
+            if [[ -n "$SESSION" ]]; then exec "${BASH_SOURCE[0]}" --session "$SESSION" --continue; fi
+            exec "${BASH_SOURCE[0]}" --continue
+        fi
+        echo
+        echo "Claude Code crashed ${n} times in ${window}s: not restarting it automatically again." ;;
+esac
 echo
 echo "Claude Code exited (status ${code}). Dropping to a shell."
-echo "Relaunch with:  claude-session            (fresh conversation)"
-echo "            or: claude-session --continue  (resume this one)"
+if [[ -n "$SESSION" ]]; then
+    echo "Relaunch with:  claude-sessions restart ${SESSION}          (resume this conversation)"
+    echo "            or: claude-sessions restart ${SESSION} --fresh  (a new one)"
+else
+    echo "Relaunch with:  claude-session            (fresh conversation)"
+    echo "            or: claude-session --continue  (resume this one)"
+fi
 exec bash -l

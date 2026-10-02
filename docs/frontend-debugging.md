@@ -1,4 +1,4 @@
-## Frontend debugging (optional)
+# Frontend debugging (optional)
 
 Off by default. When you want Claude to *see and drive* a frontend the agent
 is building, build the browser variant: **launching on it is enough**, the

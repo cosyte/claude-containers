@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # claude-launch <project-name> [options]
-#   --repo <url>               git URL to clone into a fresh workspace volume
-#   --branch <branch>          branch to check out
+#   --repo <url>               git URL to clone into a fresh workspace volume. Give it
+#                              more than once for a multi-repo workspace: each repo is
+#                              cloned into /workspace/<repo> and the session starts in
+#                              /workspace (pick a branch per repo with URL#BRANCH)
+#   --branch <branch>          branch to check out (single --repo only)
 #   --depth <n>                shallow-clone depth
 #   --workspace <path>         bind-mount a local checkout instead of cloning
 #   --image <ref>              container image to run (overrides CLAUDE_IMAGE/.env;
@@ -18,26 +21,37 @@
 #                              WITH_BROWSER=1, i.e. `make build-browser`; a browser
 #                              image auto-enables it even without this flag)
 #   --no-browser               opt out of the chrome-devtools MCP on a browser image
-#   --docker                   give the session its own Docker engine, so it can build
-#                              images and run containers/compose stacks. Requires an
-#                              image built with WITH_DOCKER=1 (`make build-docker`) and
-#                              the Sysbox runtime on the host: the container then runs
-#                              under --runtime=sysbox-runc, which contains the inner
-#                              daemon in a user namespace (no --privileged, no host
-#                              socket mount). The inner image store persists in the
-#                              claude-docker-<project> volume.
-#   --no-docker                opt out when CLAUDE_DOCKER=1 is set in .env
+#   --gpu                      give the session the host's NVIDIA GPU: the CDI device
+#                              nvidia.com/gpu=all on plain runc (cap-drop ALL kept),
+#                              /scratch on a RAM tmpfs (CLAUDE_GPU_SCRATCH_TMPFS, 4g)
+#                              and CLAUDE_GPU=1 for the claude-gpu guard. Needs the NVIDIA
+#                              Container Toolkit's CDI spec on the host. CLAUDE_GPU=1 in
+#                              .env makes it the default.
+#   --no-gpu                   opt out when CLAUDE_GPU=1 is set in .env
 #   --extra-args "<args>"      extra args passed to claude via CLAUDE_EXTRA_ARGS
 #   --expose <h:c>             publish an extra host:container port (repeatable)
 #   --dev-cmd <command>        auto-start a dev server on boot in a tmux 'dev' window
-#   --marketplace <name=url>   add a git plugin marketplace at runtime (repeatable)
-#                              e.g. --marketplace claude-skills=git@github.com:org/repo.git
-#   --plugin <name@mkt>        enable a plugin at runtime (repeatable)
+#   --marketplace <name=url[#ref]>  add a git plugin marketplace at runtime (repeatable);
+#                              #ref pins a branch or tag and turns its auto-update off
+#                              e.g. --marketplace claude-skills=git@github.com:org/repo.git#v1.2.0
+#   --plugin <name@mkt>        enable and install a plugin at runtime (repeatable)
 #                              e.g. --plugin software-engineering@claude-skills
+#   --start-cmd <command>      run once per container start, as the agent user, in the
+#                              background after the sessions are up (a kit's own installer
+#                              or service; log: ~/.claude/kit-start.log). See claude-kit --help.
 #   --cache <volume>           shared tool cache volume mounted at /cache
 #                              (default: claude-cache). Reused across restarts
 #                              for mise/cargo/go/npm/uv installs.
 #   --no-cache                 disable the shared cache (per-container installs)
+#   --session <spec>           another Claude session in this container, started at boot
+#                              in its own tmux window with its own Remote Control link
+#                              (<name>-<session>). Repeatable. SPEC is NAME [key=value ...]
+#                              with dir= model= mode= goal=FILE prompt-file=FILE rc=off
+#                              resume=off chain; NAME '*' = one per repo of a multi-repo
+#                              workspace. e.g. --session "home goal=.claude/goals/g1.goal.txt"
+#                              Sets CLAUDE_SESSIONS (see `claude-sessions --help`).
+#   --env <KEY=VALUE>          pass one more environment variable into the container
+#                              (repeatable), e.g. --env CLAUDE_MAIN_RESUME=1
 #   --accounts <name[,...]>    named OAuth accounts (from claude-account-login) this
 #                              container can rotate between on a usage-limit hit
 #                              (bin/claude-usage-watchdog). Repeatable/comma-list, works
@@ -45,23 +59,27 @@
 #                              once its usage window resets, no rotation needed for that).
 #                              Mutually exclusive with the default single AUTH_VOLUME mount.
 #
-# --broker / --sysbox / --worker-tarball were REMOVED with the nested-Sysbox
-# worker-broker substrate was retired in favor of Claude Code subagents in git
-# worktrees: see docs/legacy-sysbox-broker.md). Passing any of them is a hard error.
-# The Sysbox RUNTIME is back, but as an implementation detail of --docker, not a flag.
+# REMOVED flags are hard errors that name the removal, never silent no-ops:
+#   --docker / --no-docker / --sysbox   the per-session Docker engine (it needed the
+#                              Sysbox runtime on the host) was removed. Build and run
+#                              containers from the host, or in CI.
+#   --broker / --worker-tarball         the retired worker-broker substrate.
+# History: docs/legacy-sysbox-broker.md.
 set -euo pipefail
 LAUNCH_BIN_DIR="$(dirname "${BASH_SOURCE[0]}")"
 source "$LAUNCH_BIN_DIR/_common.sh"
 
-usage() { sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+# The help is the header up to (not including) its "REMOVED flags" note.
+usage() { sed -n '2,/^# REMOVED flags/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
-PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT=""
+PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT="" REPOS=()
 # EXTRA/MCP_LIST/DEVCMD/MKTS/PLUGINS default from .env (sourced by _common.sh);
 # flags below override. Without seeding them here, the explicit `-e` flags on
 # `docker run` would shadow any value set in .env with an empty string.
 EXTRA="${CLAUDE_EXTRA_ARGS:-}" MCP_LIST="${CLAUDE_MCP_ENABLED:-}" DEVCMD="${CLAUDE_DEV_CMD:-}"
-MKTS="${CLAUDE_EXTRA_MARKETPLACES:-}" PLUGINS="${CLAUDE_EXTRA_PLUGINS:-}"
+MKTS="${CLAUDE_EXTRA_MARKETPLACES:-}" PLUGINS="${CLAUDE_EXTRA_PLUGINS:-}" STARTCMD="${CLAUDE_EXTRA_START_CMD:-}"
 ACCOUNTS="${CLAUDE_ACCOUNTS:-}"
+SESSIONS="${CLAUDE_SESSIONS:-}" EXTRA_ENV=()
 # Empty here means "unset": the container's entrypoint then defaults it to opus
 # (best available). A value from .env/env seeds the default; --model overrides.
 MODEL="${CLAUDE_MODEL:-}"
@@ -69,8 +87,8 @@ MODEL="${CLAUDE_MODEL:-}"
 # key is held in a root-owned ssh-agent that the agent user cannot read, and only
 # a RECOGNISED disabling value (0/false/no/off) opts out to a readable
 # ~/.ssh/id_ed25519. Normalise the unset case to 1 HERE, once, before anything
-# below reads it: this script passes the variable through with `-e ...:-0` and
-# also warns on the --docker combination, and seeding "0" at either site would
+# below reads it: this script passes the variable through with `-e ...:-0`, and
+# seeding "0" there would
 # hand every operator who never heard of this flag the readable key the default
 # exists to avoid. An operator's own value (including a typo, which the
 # entrypoint brokers) is passed through untouched.
@@ -83,14 +101,12 @@ CLAUDE_BROKER_GIT_KEY="${CLAUDE_BROKER_GIT_KEY:-1}"
 # CACHE_ARG: the shared tool cache. Empty = the CACHE_VOLUME default
 # (claude-cache) is mounted at /cache; --cache <vol> overrides the name;
 # --cache off / --no-cache disables it (per-container installs).
-# DOCKER mirrors BROWSER's tri-state ("" = off unless CLAUDE_DOCKER says otherwise,
-# 1 = on, 0 = explicit opt-out), with DOCKER_EXPLICIT tracking a CLI flag so only an
-# explicit --docker hard-fails on an engine-less image.
 EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER="" BROWSER_EXPLICIT=0 IMAGE_EXPLICIT=0 CACHE_ARG=""
-DOCKER="" DOCKER_EXPLICIT=0
+# GPU: "" = follow CLAUDE_GPU from .env/env (off when unset), 1 = on, 0 = explicit opt-out.
+GPU=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --repo)        REPO="$2"; OPTS_GIVEN=1; shift 2 ;;
+        --repo)        REPOS+=("$2"); OPTS_GIVEN=1; shift 2 ;;
         --branch)      BRANCH="$2"; OPTS_GIVEN=1; shift 2 ;;
         --depth)       DEPTH="$2"; OPTS_GIVEN=1; shift 2 ;;
         --workspace)   WS_PATH="$2"; OPTS_GIVEN=1; shift 2 ;;
@@ -100,23 +116,23 @@ while [[ $# -gt 0 ]]; do
         --mcp)         MCP_LIST="${MCP_LIST:+$MCP_LIST,}$2"; OPTS_GIVEN=1; shift 2 ;;
         --browser)     BROWSER=1; BROWSER_EXPLICIT=1; OPTS_GIVEN=1; shift ;;
         --no-browser)  BROWSER=0; BROWSER_EXPLICIT=1; OPTS_GIVEN=1; shift ;;
-        --docker)      DOCKER=1; DOCKER_EXPLICIT=1; OPTS_GIVEN=1; shift ;;
-        --no-docker)   DOCKER=0; DOCKER_EXPLICIT=1; OPTS_GIVEN=1; shift ;;
+        --gpu)         GPU=1; OPTS_GIVEN=1; shift ;;
+        --no-gpu)      GPU=0; OPTS_GIVEN=1; shift ;;
         --extra-args)  EXTRA="$2"; OPTS_GIVEN=1; shift 2 ;;
         --expose)      EXPOSE_RAW+=("$2"); OPTS_GIVEN=1; shift 2 ;;
         --dev-cmd)     DEVCMD="$2"; OPTS_GIVEN=1; shift 2 ;;
         --marketplace) MKTS="${MKTS:+$MKTS,}$2"; OPTS_GIVEN=1; shift 2 ;;
         --plugin)      PLUGINS="${PLUGINS:+$PLUGINS,}$2"; OPTS_GIVEN=1; shift 2 ;;
+        --start-cmd)   STARTCMD="$2"; OPTS_GIVEN=1; shift 2 ;;
         --cache)       CACHE_ARG="$2"; OPTS_GIVEN=1; shift 2 ;;
         --no-cache)    CACHE_ARG="off"; OPTS_GIVEN=1; shift ;;
         --accounts)    ACCOUNTS="${ACCOUNTS:+$ACCOUNTS,}$2"; OPTS_GIVEN=1; shift 2 ;;
-        # --sysbox named the retired broker's runtime toggle. The runtime is back (it is
-        # what makes an inner daemon safe), but it is no longer a flag of its own: --docker
-        # selects it. Point there rather than dying with a dead-end "removed" message.
-        --sysbox)
-            die "claude-launch: --sysbox was removed (the nested worker-broker substrate). To run containers inside a
-       session, use --docker: it selects --runtime=sysbox-runc for you.
-       (The worker broker it used to serve is gone: docs/legacy-sysbox-broker.md.)" ;;
+        --session)     SESSIONS="${SESSIONS:+$SESSIONS; }$2"; OPTS_GIVEN=1; shift 2 ;;
+        --env)         EXTRA_ENV+=("$2"); OPTS_GIVEN=1; shift 2 ;;
+        --docker|--no-docker|--sysbox)
+            die "claude-launch: $1 was removed along with the per-session Docker engine and the
+       Sysbox runtime it needed. A session can no longer build images or run containers
+       itself: do that on the host or in CI. (History: docs/legacy-sysbox-broker.md.)" ;;
         --broker|--worker-tarball)
             die "claude-launch: $1 was removed (the legacy Sysbox worker-broker substrate is retired; see docs/legacy-sysbox-broker.md)" ;;
         -h|--help)     usage 0 ;;
@@ -136,16 +152,64 @@ if [[ -z "$BROWSER" ]]; then
         0|false|no|off) BROWSER=0 ;;
     esac
 fi
-# Same for --docker / CLAUDE_DOCKER. Unlike BROWSER there is no "auto": the runtime is a
-# create-time choice the image cannot make for itself, so an unset value means off.
-if [[ -z "$DOCKER" ]]; then
-    case "$(printf '%s' "${CLAUDE_DOCKER:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" in
-        1|true|yes|on)  DOCKER=1 ;;
-        *)              DOCKER=0 ;;
+# CLAUDE_DOCKER=1 in .env asked for the removed per-session Docker engine. An explicit
+# request that can no longer be met refuses, like the removed flag; 0 or unset is inert.
+case "$(printf '%s' "${CLAUDE_DOCKER:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+        die "CLAUDE_DOCKER=${CLAUDE_DOCKER} is set, but the per-session Docker engine was removed
+       (it needed the Sysbox runtime on the host). Delete the line from your .env.
+       (History: docs/legacy-sysbox-broker.md.)" ;;
+esac
+if [[ -z "$GPU" ]]; then
+    case "$(printf '%s' "${CLAUDE_GPU:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) GPU=1 ;;
+        *)             GPU=0 ;;
     esac
 fi
 [[ -n "$PROJECT" ]] || usage 1
-[[ -n "$REPO" && -n "$WS_PATH" ]] && die "--repo and --workspace are mutually exclusive"
+[[ ${#REPOS[@]} -gt 0 && -n "$WS_PATH" ]] && die "--repo and --workspace are mutually exclusive"
+# One --repo clones into /workspace itself (GIT_REPO_URL, as always). Several make a
+# multi-repo workspace: the entrypoint clones each into /workspace/<repo> (GIT_REPOS).
+MULTI_REPOS=""
+if (( ${#REPOS[@]} == 1 )); then
+    REPO="${REPOS[0]}"
+elif (( ${#REPOS[@]} > 1 )); then
+    [[ -z "$BRANCH" ]] || die "--branch applies to a single --repo; with several, give each one as URL#BRANCH"
+    declare -A _dirs=()
+    for _r in "${REPOS[@]}"; do
+        [[ "$_r" =~ ^[^[:space:]]+$ ]] || die "--repo '$_r' contains whitespace"
+        _d="${_r%%#*}"; _d="${_d%/}"; _d="${_d##*/}"; _d="${_d##*:}"; _d="${_d%.git}"
+        [[ "$_d" =~ ^[A-Za-z0-9._-]+$ ]] || die "--repo '$_r': cannot derive a directory name from it"
+        [[ -z "${_dirs[$_d]:-}" ]] || die "--repo: two repos would both clone into /workspace/$_d"
+        _dirs[$_d]=1
+    done
+    unset _dirs _r _d
+    MULTI_REPOS="${REPOS[*]}"
+fi
+
+# Named sessions: validate the whole spec HERE, with the same parser the container uses,
+# so a typo fails the launch instead of becoming a skipped session in a boot log.
+if [[ -n "${SESSIONS//[[:space:];]/}" ]]; then
+    spec_errs="$("$LAUNCH_BIN_DIR/claude-sessions" check "$SESSIONS" 2>&1 >/dev/null)" \
+        || die "--session / CLAUDE_SESSIONS is not valid:
+$(sed 's/^/       /' <<<"$spec_errs")"
+    # Valid, but it may still say something (the removed `chain` setting): pass it on.
+    [[ -z "$spec_errs" ]] || warn "$(sed 's/^CLAUDE_SESSIONS: warning: //' <<<"$spec_errs")"
+fi
+# The kit declaration (marketplaces, plugins): validated HERE with the container's own parser.
+if [[ -n "$MKTS$PLUGINS" ]]; then
+    kit_errs="$(CLAUDE_EXTRA_MARKETPLACES="$MKTS" CLAUDE_EXTRA_PLUGINS="$PLUGINS" CLAUDE_EXTRA_START_CMD="" \
+        "$LAUNCH_BIN_DIR/claude-kit" check 2>&1 >/dev/null)" \
+        || die "--marketplace / --plugin is not valid:
+$(sed 's/^/       /' <<<"$kit_errs")"
+fi
+ENV_ARGS=()
+for kv in "${EXTRA_ENV[@]:-}"; do
+    [[ -n "$kv" ]] || continue
+    [[ "$kv" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "--env must be KEY=VALUE (got '$kv')"
+    [[ "${kv%%=*}" != ANTHROPIC_API_KEY ]] || die "--env ANTHROPIC_API_KEY: this stack is OAuth-subscription only"
+    ENV_ARGS+=(-e "$kv")
+done
 
 # Validate --expose maps (HOSTPORT:CONTAINERPORT) and build the docker -p args.
 EXPOSE_ARGS=()
@@ -220,68 +284,23 @@ if [[ "$BROWSER" == "1" ]]; then
         fi
     fi
 fi
-# Pre-flight --docker, same shape as --browser: an explicit flag against an engine-less
-# image is an error; an ambient CLAUDE_DOCKER=1 must not brick ordinary lean launches, so
-# it warns and falls back to off. Then check the HOST can actually run it: the image
-# having dockerd is only half of it, the runtime is the other half.
-DOCKER_RUNTIME_ARGS=() DOCKER_VOL_ARGS=() DOCKER_ENV=()
-if [[ "$DOCKER" == "1" ]]; then
-    img_docker="$(docker image inspect -f '{{ index .Config.Labels "claude.docker" }}' "$CLAUDE_IMAGE" 2>/dev/null || true)"
-    if [[ "$img_docker" != "1" ]]; then
-        if [[ "$DOCKER_EXPLICIT" == "1" ]]; then
-            die "--docker was requested, but image '$CLAUDE_IMAGE' was not built with
-       WITH_DOCKER=1: it has no Docker engine, so the session cannot build or run
-       containers.
-       Rebuild the docker variant:  make build-docker
-         (both engine + Chromium:   make build-docker-browser)
-       Or drop --docker to launch the lean image."
-        else
-            warn "CLAUDE_DOCKER=1 is set but image '$CLAUDE_IMAGE' is lean (no WITH_DOCKER=1)."
-            warn "  Launching without an inner Docker engine. Build the docker variant"
-            warn "  (make build-docker), or pass --no-docker to silence this."
-            DOCKER=0
-        fi
-    fi
-fi
-if [[ "$DOCKER" == "1" ]]; then
-    preflight_sysbox
-    DOCKER_RUNTIME_ARGS=(--runtime=sysbox-runc)
-    DOCKER_ENV=(-e CLAUDE_DOCKER=1)
-    DOCKER_VOL_ARGS=(-v "$(docker_volume "$PROJECT"):/var/lib/docker")
-
-    # Inner containers live in THIS container's cgroup: every process, byte of RAM and CPU
-    # second they use is charged to the session's limits. A compose stack in a 4g box OOM-
-    # kills a nested container with a confusing inner-daemon error, not an obvious limit
-    # error, so say it here while the operator can still act on it.
-    if mem_mib="$(size_to_mib "$CLAUDE_MEM_LIMIT" 2>/dev/null)" && (( mem_mib < 8192 )); then
-        warn "--docker with CLAUDE_MEM_LIMIT=$CLAUDE_MEM_LIMIT: inner containers share this"
-        warn "  container's cgroup, so a compose stack has to fit inside it too. 8g+ is a"
-        warn "  saner floor for building images / bringing up stacks."
-    fi
-
-    # Docker socket access is a path to root INSIDE the container (docker run -v /:/rootfs).
-    # Sysbox keeps that root off the host, so the host boundary holds, but these two
-    # controls exist to separate the agent from CONTAINER-root, and they no longer do.
-    # Git-key brokering IS on by default (normalised above), egress lockdown is not; warn
-    # rather than refuse, because the operator may genuinely want docker on a container
-    # whose git key is already low-value.
-    if [[ "${CLAUDE_BROKER_GIT_KEY:-0}" =~ ^(1|true|yes|on)$ ]]; then
-        warn "CLAUDE_BROKER_GIT_KEY=1 with --docker: the git-key broker no longer protects the key."
-        warn "  It hides the deploy key in a root-owned ssh-agent, but an agent with Docker can"
-        warn "  read it straight off the filesystem (docker run -v /:/rootfs). Treat the key as"
-        warn "  readable by the agent, or drop --docker on this container."
-    fi
-    # `strict` is in this test for a reason: it is the spelling an operator picks when
-    # they mean to CONTAIN the agent, so they are the last person who should discover
-    # by accident that the allowlist does not reach inner containers. Strict does not
-    # refuse here: the OUTPUT ruleset still applies inside this container, it simply
-    # does not cover what the inner daemon forwards.
-    if [[ "${CLAUDE_EGRESS_LOCKDOWN:-0}" =~ ^(1|true|yes|on|strict)$ ]]; then
-        warn "CLAUDE_EGRESS_LOCKDOWN=${CLAUDE_EGRESS_LOCKDOWN:-0} with --docker: the egress allowlist no longer binds."
-        warn "  Inner containers' traffic is FORWARDed (the allowlist filters OUTPUT), and an"
-        warn "  agent that can reach container-root can flush the rules outright. Do not rely"
-        warn "  on it to contain a --docker session."
-    fi
+# GPU: the CDI device must be resolvable NOW, because Docker refuses to create a container
+# whose CDI device it cannot find, and that refusal cannot degrade into a CPU-only session.
+# Everything the device needs arrives through the CDI spec: no runtime, no capability.
+GPU_ARGS=() SCRATCH_ARGS=(-v "$(scratch_volume "$PROJECT"):/scratch")
+if [[ "$GPU" == "1" ]]; then
+    cdi="$(docker info --format '{{range .DiscoveredDevices}}{{.ID}} {{end}}' 2>/dev/null || true)"
+    [[ " $cdi " == *" nvidia.com/gpu=all "* ]] || die "--gpu: Docker lists no CDI device nvidia.com/gpu=all on this host.
+       Install the NVIDIA Container Toolkit and generate its CDI spec (as root):
+         nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml
+       then check:  docker info | grep nvidia.com/gpu
+       Or drop --gpu to launch without the GPU."
+    gpu_scratch="${CLAUDE_GPU_SCRATCH_TMPFS:-4g}"
+    size_to_mib "$gpu_scratch" >/dev/null || die "CLAUDE_GPU_SCRATCH_TMPFS '$gpu_scratch' is not a size like 4g"
+    GPU_ARGS=(--device nvidia.com/gpu=all -e CLAUDE_GPU=1)
+    # /scratch (TMPDIR) on RAM, like the generator does for GPU services: render temp and
+    # kernel caches stay off the disk pool. Charged to --memory; see .env.example.
+    SCRATCH_ARGS=(--tmpfs "/scratch:rw,nosuid,nodev,exec,size=${gpu_scratch}")
 fi
 
 [[ -n "$PORT" ]] || PORT="$(alloc_port)"
@@ -303,7 +322,8 @@ if [[ -n "$WS_PATH" ]]; then
 else
     WS_MOUNT=(-v "$WS_VOL:/workspace")
     REPO_LABEL="${REPO:-$WS_VOL}"
-    if [[ -z "$REPO" ]] && ! docker volume inspect "$WS_VOL" >/dev/null 2>&1; then
+    [[ -n "$MULTI_REPOS" ]] && REPO_LABEL="group:${MULTI_REPOS// /,}"
+    if [[ -z "$REPO" && -z "$MULTI_REPOS" ]] && ! docker volume inspect "$WS_VOL" >/dev/null 2>&1; then
         die "no --repo, no --workspace, and no existing workspace volume '$WS_VOL'.
        First launch of a project needs --repo <url> or --workspace <path>."
     fi
@@ -365,17 +385,13 @@ GH_MAIL="$(git config --global user.email 2>/dev/null || true)"
 ENV_FILE_ARG=()
 [[ -f "$CLAUDE_DOCKER_ROOT/.env" ]] && ENV_FILE_ARG=(--env-file "$CLAUDE_DOCKER_ROOT/.env")
 
-# Per-container resource profile + escape hardening. Two runtimes now: plain runc for an
-# ordinary session, and sysbox-runc for --docker (the user namespace is what lets an inner
-# dockerd run with no --privileged and no host socket). harden_run_args takes the mode
-# because docker mode must NOT cap-drop: an inner daemon cannot run under the minimal set,
-# and under Sysbox the full set is namespaced to a container-root that maps to an
-# unprivileged host uid anyway. preflight_runc's escape warning still applies to both.
+# Per-container resource profile + escape hardening (plain runc, cap-drop ALL + the
+# minimal set, no-new-privileges). preflight_runc warns on an escape-vulnerable runC.
 FLAT_PROFILE=(--cpus "$CLAUDE_CPU_LIMIT" --memory "$CLAUDE_MEM_LIMIT" \
               --memory-reservation "$CLAUDE_MEM_RESERVATION" --pids-limit "$CLAUDE_PIDS_LIMIT")
 preflight_runc
 HARDEN_ARGS=()
-read -r -a HARDEN_ARGS <<<"$(harden_run_args "$DOCKER")"
+read -r -a HARDEN_ARGS <<<"$(harden_run_args)"
 SIZING_ARGS=("${FLAT_PROFILE[@]}")
 
 # Only pin CLAUDE_BROWSER when the user forced it on/off; in auto mode leave it
@@ -385,13 +401,11 @@ BROWSER_ENV=()
 [[ -n "$BROWSER" ]] && BROWSER_ENV=(-e CLAUDE_BROWSER="$BROWSER")
 
 info "Creating container '$CN' (SSH host port $PORT)…"
-[[ "$DOCKER" == "1" ]] && info "  docker mode: sysbox-runc, inner image store on $(docker_volume "$PROJECT")"
 docker run -d \
     --name "$CN" \
     --hostname "$PROJECT" \
     --restart unless-stopped \
     --init \
-    "${DOCKER_RUNTIME_ARGS[@]}" \
     "${HARDEN_ARGS[@]}" \
     --shm-size "$CLAUDE_SHM_SIZE" \
     "${SIZING_ARGS[@]}" \
@@ -399,9 +413,8 @@ docker run -d \
     -p "$SSH_PUBLISH" \
     "${EXPOSE_ARGS[@]}" \
     "${ENV_FILE_ARG[@]}" \
-    "${DOCKER_ENV[@]}" \
-    "${DOCKER_VOL_ARGS[@]}" \
-    -v "$(scratch_volume "$PROJECT"):/scratch" \
+    "${GPU_ARGS[@]}" \
+    "${SCRATCH_ARGS[@]}" \
     -e TMPDIR=/scratch \
     -e CLAUDE_PROJECT_NAME="$PROJECT" \
     -e CLAUDE_MODEL="$MODEL" \
@@ -411,6 +424,7 @@ docker run -d \
     "${BROWSER_ENV[@]}" \
     -e CLAUDE_EXTRA_MARKETPLACES="$MKTS" \
     -e CLAUDE_EXTRA_PLUGINS="$PLUGINS" \
+    -e CLAUDE_EXTRA_START_CMD="$STARTCMD" \
     "${AUTH_ENV_ARGS[@]}" \
     -e CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}" \
     -e CLAUDE_MANAGED_POLICY="${CLAUDE_MANAGED_POLICY:-1}" \
@@ -420,12 +434,15 @@ docker run -d \
     -e CLAUDE_EGRESS_EXTRA_HOSTS="${CLAUDE_EGRESS_EXTRA_HOSTS:-}" \
     -e CLAUDE_EGRESS_REFRESH_INTERVAL="${CLAUDE_EGRESS_REFRESH_INTERVAL:-}" \
     -e GIT_REPO_URL="$REPO" \
+    -e GIT_REPOS="$MULTI_REPOS" \
     -e GIT_REPO_BRANCH="$BRANCH" \
     -e GIT_REPO_DEPTH="$DEPTH" \
     -e GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-$GH_NAME}" \
     -e GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-$GH_MAIL}" \
     -e GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-$GH_NAME}" \
     -e GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$GH_MAIL}" \
+    -e CLAUDE_SESSIONS="$SESSIONS" \
+    "${ENV_ARGS[@]}" \
     "${AUTH_MOUNT_ARGS[@]}" \
     -v "$SSHKEYS_VOLUME:/etc/ssh/host-keys" \
     -v "$CFG_VOL:/home/claude/.claude" \
@@ -436,7 +453,6 @@ docker run -d \
     --label claude.project="$PROJECT" \
     --label claude.ssh_port="$PORT" \
     --label claude.repo="$REPO_LABEL" \
-    --label claude.docker="$DOCKER" \
     "$CLAUDE_IMAGE" >/dev/null
 
 # Surface a fast-failing entrypoint (bad repo, missing auth) instead of a
@@ -458,10 +474,16 @@ if (( ${#EXPOSE_RAW[@]} )); then
     echo
 fi
 info "Model: ${MODEL:-opus (best available, container default)}"
+if [[ -n "${SESSIONS//[[:space:];]/}" ]]; then
+    info "Sessions: main + $(tr ';\n' '\n\n' <<<"$SESSIONS" | awk 'NF{print $1}' | paste -sd' ' -) (each its own tmux window and Remote Control link $PROJECT-<name>)"
+    info "  claude-attach $PROJECT <name>   |   claude-sessions -C $PROJECT ls"
+fi
 [[ -n "$DEVCMD" ]] && \
     info "Dev server auto-starts on boot in tmux window 'dev' (claude-attach, then: tmux select-window -t claude:dev)"
 # Only announce an explicit choice; in auto mode the entrypoint decides by image
 # (a browser image auto-registers, a lean image stays silent): no noise here.
+[[ "$GPU" == "1" ]] && \
+    info "GPU: nvidia.com/gpu=all via CDI; run 'claude-gpu status' inside (see docs/troubleshooting.md, GPU)"
 case "$BROWSER" in
     1) info "Frontend debug: chrome-devtools MCP force-enabled (headless Chromium in-container)" ;;
     0) info "Frontend debug: chrome-devtools MCP opted out (--no-browser)" ;;

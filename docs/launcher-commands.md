@@ -1,9 +1,11 @@
-## Launcher commands
+# Launcher commands
 
 ```
-claude-launch <name> [--repo URL | --workspace PATH] [--branch B] [--depth N]
+claude-launch <name> [--repo URL [--repo URL[#BRANCH]]... | --workspace PATH] [--branch B] [--depth N]
                       [--port N] [--model NAME] [--mcp NAME ...] [--browser|--no-browser]
+                      [--gpu|--no-gpu]
                       [--extra-args "…"] [--expose H:C ...] [--dev-cmd "…"]
+                      [--session "NAME [key=value ...]" ...] [--env KEY=VALUE ...]
 claude-tui                        interactive whiptail menu over the whole fleet: per-session
                                    (attach/start/stop/restart/logs/remove/launch), grouped by
                                    compose stack (bring up a dormant repo, switch a stack's auth
@@ -12,18 +14,17 @@ claude-tui                        interactive whiptail menu over the whole fleet
                                    Discovers stacks live from `com.docker.compose.project`
                                    labels; set CLAUDE_TUI_STACKS to pre-seed one with no
                                    containers created yet. Wraps the commands below; no new logic.
-claude-list                       table of all sessions
-claude-attach <name>              attach to its live tmux session (local host)
+claude-list                       table of all containers (SESSIONS = named sessions up, from the healthcheck)
+claude-attach <name> [session]    attach to its live tmux session (local host), on a named
+                                   session's window if given
+claude-sessions -C <name> CMD     manage the sessions inside a container from the host
+                                   (ls, new, start, stop, restart, send, ...; see below)
 claude-stop  <name>               graceful stop (state preserved)
 claude-rm    <name> [--yes] [--purge]   remove (+volumes with --purge)
 claude-logs  <name> [-n LINES]    tail the entrypoint/sshd log
 claude-disk-gc [--loop]           GC docker image/build-cache layers + trim the shared cache
 claude-disk-verify                prove disk-hygiene logic (docker-free, safe anywhere)
 ```
-
-`claude-launch --broker` used to spawn autonomous nested workers via a root-owned broker.
-That substrate is retired: see [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md).
-The flag now errors rather than silently doing nothing.
 
 Inside an autopilot container (over SSH), `claude-enqueue "<prompt>"` adds a task
 to the durable queue (`CLAUDE_AUTOPILOT_QUEUE=1`); `--priority N` orders it
@@ -47,7 +48,8 @@ claude-compose-gen --org ORG --out FILE [--active REPOS]... [--dormant-profile N
                    [--expose REPO:HOSTPORT:CONTAINERPORT]...
                    [--dev-cmd REPO=COMMAND]...
                    [--cpu REPO=N]... [--mem REPO=SIZE]... [--model REPO=MODEL]...
-                   [--browser REPOS]...
+                   [--browser REPOS]... [--gpu REPOS]...
+                   [--group NAME=REPO[:BRANCH],REPO[:BRANCH],...]...
                    [--marketplace REPO=NAME=URL]... [--plugin REPO=PLUGIN[,...]]...
                    [--include GLOB] [--exclude GLOB] [--forks] [--archived]
 claude-compose-gen --out FILE repo-a repo-b:dev      # explicit list, no gh needed
@@ -82,13 +84,16 @@ Then `http://<host>:4321` serves the live dev site; SSH in and
 `tmux select-window -t claude:dev` to watch its output (`claude-dev` reruns
 it).
 
-**Runtime plugin marketplaces.** `--marketplace REPO=NAME=URL` and
+**Runtime plugin marketplaces.** `--marketplace REPO=NAME=URL[#REF]` and
 `--plugin REPO=PLUGIN[,…]` write `CLAUDE_EXTRA_MARKETPLACES` /
 `CLAUDE_EXTRA_PLUGINS` onto a service. The entrypoint merges these into
-Claude Code's `settings.json` on every boot: no image rebuild, no manual
-edit. Existing `settings.json` entries win on conflict (so per-container user
-choices stick). Same syntax as the single-container `claude-launch
---marketplace` / `--plugin`, with a `REPO=` prefix to say which service:
+Claude Code's `settings.json` on every boot and installs the plugins before
+any session starts: no image rebuild, no manual edit. Existing `settings.json`
+entries win on conflict (so per-container user choices stick), except a pinned
+marketplace (`#REF`), whose declared pin wins. Same syntax as the
+single-container `claude-launch --marketplace` / `--plugin`, with a `REPO=`
+prefix to say which service. With `--start-cmd` this is the kit hook: see
+[Install a kit at session start](../README.md#install-a-kit-at-session-start).
 
 ```
 ./bin/claude-compose-gen --org ORG --out FILE --active site \

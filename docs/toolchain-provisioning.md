@@ -65,10 +65,8 @@ agent immediately: no `sudo`, no image rebuild.
      the GitHub-released python-build-standalone, which is on the base allowlist, so it works under
      lockdown as-is.
 
-   System `.so` libraries are **out of scope** entirely: no self-service path provisions them (a
-   worker-tier `apt` used to close this gap, but was retired along with the Sysbox
-   substrate it depended on; see [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md)). A system
-   library needs a base-image rebuild.
+   System `.so` libraries are **out of scope** entirely: no self-service path provisions them. A
+   system library needs a base-image rebuild.
 
 ## The deliberate trust decision: `trusted_config_paths = /workspace`, not `/`
 
@@ -140,8 +138,7 @@ per-repo `/workspace/.npmrc` opt-out) is documented in
 ## Non-goals (inherited + new)
 
 - **No system `.so` libraries.** mise provisions binaries and language toolchains, not arbitrary
-  system libraries: those need a base-image rebuild (the worker-tier apt path that used to close
-  this gap has been retired; see docs/legacy-sysbox-broker.md).
+  system libraries: those need a base-image rebuild.
 - **No blanket config trust.** `/workspace` only; never `/`. See above.
 - **Language toolchains are not reachable under egress lockdown yet.** `node@`/`go@`/`rust` fetch their
   runtimes from vendor hosts (`nodejs.org`, `go.dev`, `static.rust-lang.org`) not on the current
@@ -150,5 +147,4 @@ per-repo `/workspace/.npmrc` opt-out) is documented in
   and `python@`/`github:`/`aqua:` under lockdown are unaffected. (How it's wired §4.)
 - **`mise use` is not a security boundary on its own.** It sits on top of the egress containment
   (curated egress, credentials-unreachable-during-fetch) and the script hardening: it does
-  not replace them. (The `install-then-relock` window was the apt tier's mechanism, retired with the
-  Sysbox/broker substrate; see `docs/legacy-sysbox-broker.md`.)
+  not replace them.

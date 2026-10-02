@@ -1,4 +1,4 @@
-## Unattended autopilot
+# Unattended autopilot
 
 A container has two modes, selected by `CLAUDE_AUTOPILOT`:
 

@@ -2,7 +2,7 @@
 
 ## Component map
 
-- **Dockerfile**: `node:24-bookworm-slim`, system packages, `gh`, `uv`,
+- **Dockerfile**: `node:24-trixie-slim`, system packages, `gh`, `uv`,
   Claude Code via npm (pinned), non-root `claude` user, hardened sshd config,
   baked-in `claude-config/`.
 - **entrypoint.sh**: runs as root: refuses API-key auth, sets up sshd, fixes
@@ -11,22 +11,30 @@
   Claude Code inside a detached tmux session. Stays PID 1 for clean signals.
 - **claude-session**: the tmux pane command: `cd /workspace`, exec
   `claude --dangerously-skip-permissions --remote-control "<project>"`, and
-  fall back to a shell if Claude exits so SSH stays usable.
+  fall back to a shell if Claude exits so SSH stays usable. With `--session NAME`
+  it runs a named session instead (its directory, Remote Control name, model,
+  first prompt and resume come from `claude-sessions`).
+- **claude-sessions**: several sessions in one container: reconciles
+  `CLAUDE_SESSIONS` into a registry on the config volume, pre-accepts workspace
+  trust for each session's directory, opens one tmux window per session, and runs a
+  supervisor that records each window's conversation and keeps an RC watchdog beside
+  every linked session. Also the operator's `ls/new/start/stop/restart/send/rm`.
 - **bash_profile**: interactive SSH logins `exec tmux attach` to the live
   `claude` session; non-interactive SSH (scp/rsync) is untouched.
-- **bin/**: `claude-launch/list/stop/rm/logs` over a shared `_common.sh`.
+- **bin/**: `claude-launch/list/stop/rm/logs` over a shared `_common.sh`; inside the
+  image also `claude-gpu` (the GPU guard) and `claude-blender-install`.
 - **.claude/skills/claude-containers/**: project skill: when this repo is
   opened in Claude Code, it teaches the model the architecture, invariants,
   and operational playbook so it can drive build/login/launch/customize/debug.
 
-## Verified facts (Claude Code 2.1.258)
+## Verified facts (Claude Code 2.1.280)
 
 Everything below was checked against the installed binary, not just docs:
 
 - `--remote-control [name]` is a real top-level flag; `-n/--name` is a separate
   display-name flag. The **top-level** launch this image actually makes:
   `claude --dangerously-skip-permissions --remote-control "<project>"`: was
-  verified to parse and start on 2.1.258 (as the unprivileged `claude` user; the
+  verified to parse and start on 2.1.280 (as the unprivileged `claude` user; the
   CLI refuses skip-permissions when running as root, by design). Verify it on a
   TTY: with no tty the CLI falls into `--print` mode and exits on missing input
   *before* proving anything about the interactive launch.
@@ -76,6 +84,21 @@ write wins; refreshes are infrequent (hours apart) so this is acceptable for a
 homelab. A token-rotation regression would surface as a re-login prompt, not
 data loss.
 
+**A changed account is followed.** "Newest wins" is only right while both files belong to
+one account. The master's account is the `oauthAccount.accountUuid` in the `.claude.json` the
+login writes beside it; the container records the account its own copy came from
+(`.credentials-account`). When they differ, the operator logged another account in, and the
+container takes the master's credential, refreshes its cached identity and asks
+`claude-sessions supervise` (through `.account-changed`) to restart each session at its next
+idle moment. Two rules keep the new login from being undone: while any Claude process that
+started before the switch is alive (start times from `/proc`, in milliseconds), nothing is
+pushed up, because such a process refreshes the OLD account's token into the container's file;
+and a container whose own copy is another account's replaces it at boot, before any session
+starts. Sessions are restarted rather than left to pick the token up because Remote Control
+links are owned by an account: Claude refuses to reattach one across accounts and mints a new
+one on start. Before this, changing accounts meant restarting every container by hand, and a
+stopped container started later could push the previous account back into the shared volume.
+
 ## Decision: per-container workspace defaults to a named volume
 
 `claude-ws-<project>` (named volume) is the default: consistent with the other
@@ -122,82 +145,132 @@ Chrome is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
 (required in unprivileged Docker; Chrome's user-namespace sandbox conflicts
 with the default seccomp).
 
-## Decision: container workflows are an opt-in image variant on Sysbox
+## Decision: several repos share one workspace as sibling checkouts
 
-A session whose job involves containers (a Dockerfile, a compose stack,
-testcontainers) needs a real Docker engine. `WITH_DOCKER=1`
-(`make build-docker`, tag `claude-code-box:docker`) bakes dockerd + CLI +
-containerd + the compose and buildx plugins, ~400 MB. `--docker` (or
-`CLAUDE_DOCKER=1`, or `claude-compose-gen --docker REPO`) starts that daemon
-**inside** the session container and puts the agent in the `docker` group.
-Orthogonal to `WITH_BROWSER`: `make build-docker-browser` bakes both.
+`claude-compose-gen --group NAME=REPO,REPO,...` and a repeated `claude-launch --repo`
+give one container several repos. The entrypoint clones each into `/workspace/<repo>`
+(the list travels as `GIT_REPOS`, whitespace-separated `URL[#BRANCH]`) and the session
+starts in `/workspace`. Sibling checkouts, not submodules or a monorepo: every repo keeps
+its own history, remote, branch and `CLAUDE.md`, and nothing about the repos themselves
+changes. Each boot clones only what is missing and never touches an existing checkout, so
+growing the list is a restart, and a session's uncommitted work survives it. The single
+repo layout (`/workspace` is the repo) is unchanged and the two never mix: `GIT_REPOS`
+with `GIT_REPO_URL`, or on a workspace that already has a repo at its root, refuses to
+boot rather than nest one repo inside another. mise's trusted paths cover `/workspace`
+and everything below it. Claude Code's workspace trust does not: main is fine because it
+starts in `/workspace`, and a named session started in `/workspace/<repo>` gets its own
+trust entry (next decision).
 
-**Why an inner daemon under Sysbox, and not the two obvious alternatives.**
-There are exactly three ways to give a container Docker, and two of them end the
-same way:
+## Decision: several sessions share one container as tmux windows
 
-| approach | what the agent gets | host blast radius |
-|---|---|---|
-| mount `/var/run/docker.sock` | the **host** daemon | `docker run -v /:/host` → host root |
-| `--privileged` DinD | its own daemon, full host caps | mknod/mount host devices → host root |
-| **Sysbox** (`--runtime=sysbox-runc`) | its own daemon in a **user namespace** | container-root is an unprivileged host uid |
+`CLAUDE_SESSIONS` (from `claude-launch --session` / `claude-compose-gen --session`) and
+`claude-sessions new` run more Claude sessions beside `main`: one tmux window each, each
+its own `claude` process with its own Remote Control name (`<project>-<name>`), directory,
+model, permission mode and optional first prompt. The alternative, one container per
+session, is still the right call for unrelated repos, but it is wrong for several lanes
+over one workspace: a second container cannot share the first one's checkout without a
+foreign volume mount, and it doubles the image, the sshd, the watchdogs and the port.
 
-The first two are FORBIDDEN in this repo and asserted against in
-`test/unit.sh` + `test/docker-unit.sh`: with `--dangerously-skip-permissions`
-on by design, a prompt-injectable agent plus either shortcut is host root.
-Sysbox is the only option that keeps nested Docker a *boundary*. Measured on
-the r730xd (`docker run --runtime=sysbox-runc alpine cat /proc/self/status
-/proc/self/uid_map`):
+What had to change for a container to hold more than one session, and why:
 
-```
-runc         CapEff 00000000a80425fb   uid_map 0 0 4294967295   → container-root IS host root
-sysbox-runc  CapEff 000001ffffffffff   uid_map 0 165536 65536   → container-root is host uid 165536
-```
+- **Workspace trust is per directory.** The trust seeded for `/workspace` does not cover
+  `/workspace/<repo>`: a session started there sat on "Is this a project you trust?"
+  (observed on 2.1.280). `claude-sessions prepare` seeds the same entry for every session
+  directory and every repo under `/workspace`, as the claude user, *before* main starts,
+  so no running Claude rewrites `.claude.json` under it. A session added at runtime gets
+  its directory seeded best-effort and checked afterwards.
+- **Resume is by conversation id, not by directory.** `--continue` picks the most recent
+  conversation in the current directory, which is a sibling's whenever two sessions share
+  one. A supervisor records each window's conversation from Claude Code's own
+  `sessions/<pid>.json` (it maps a tmux pane to a session id and follows a `/clear`), and
+  every resume path (boot, RC recovery, usage rotation, `claude-sessions restart`) passes
+  `--resume <id>`. `--continue` remains only as a fallback where it cannot be ambiguous.
+  `claude-session-id` resolves by window for the same reason.
+- **A first prompt is sent exactly once.** The start is recorded before Claude runs, so a
+  restart resumes a session that is on goal 4 instead of replaying goal 1.
+- **Recovery is scoped to one pane.** The RC watchdog used `pkill -f remote-control`,
+  which with several sessions kills all of them. It now kills only the process tree under
+  its own pane, uses a per-window lock, exits when its window is gone, and one runs per
+  linked session (started by the supervisor, so its output reaches `docker logs`).
+- **Health is still about the container.** Named sessions are reported on the healthy line
+  and never make the container unhealthy: an unhealthy status only ever leads to a restart
+  of every session in it, which is the wrong response to one session's trouble.
+- **Declared vs added.** `CLAUDE_SESSIONS` is creation-time, so it is authoritative for its
+  entries on every boot (a dropped entry is unregistered); `new` sessions live on the
+  config volume until `rm`. A stop is remembered either way.
+- **tmux formats.** tmux prints a control character in a `-F` format as `_`, so fields are
+  split on `|`, and tmux output is captured before it is matched: under `pipefail` a
+  `grep -q` that exits early leaves tmux writing into a closed pipe and fails the match
+  for any window that is not the last one listed.
 
-So the `--docker` container carries the **full** capability set and that is
-fine: the caps are namespaced, and root maps to a host nobody. This is why
-`harden_run_args` **skips `--cap-drop ALL`** in docker mode: an inner daemon
-cannot start under the minimal set (it needs `NET_ADMIN` for its bridge and
-`SYS_ADMIN` to mount layers; neither is in Docker's *default* set either), and
-why skipping it costs nothing the userns isn't already providing. Verified end
-to end: with `no-new-privileges` still on, an inner dockerd starts, builds an
-image and runs a container, and the inner daemon selects `overlayfs` (not the
-slow `vfs` fallback). `no-new-privileges` is therefore kept; its one real cost
-is that setuid binaries *inside an inner container* (`sudo`, `ping`) cannot
-elevate. `preflight_sysbox` fails the launch closed if the runtime is absent
-rather than degrading to something unsafe.
+Main is unchanged unless asked: same window, same Remote Control name, a fresh
+conversation on boot unless `CLAUDE_MAIN_RESUME=1`.
 
-**What this deliberately gives up.** Socket access is a path to root *inside*
-the container. The host boundary holds, but two in-container controls assume
-root is separate from the agent, and on a `--docker` session they do not bind:
-`CLAUDE_BROKER_GIT_KEY` (root-owned `ssh-agent` hiding the deploy key, an agent
-with Docker reads the key file directly) and `CLAUDE_EGRESS_LOCKDOWN` (filters
-`OUTPUT`; inner-container traffic is `FORWARD`ed, and container-root can flush
-the rules). Egress lockdown defaults off; git-key brokering defaults ON, so the
-first one applies to a plain `--docker` session unless the operator opted out
-with `CLAUDE_BROKER_GIT_KEY=0`. The launcher and generator warn on the
-combination rather than refusing, since the operator may not care about either
-on a given box. Do not treat them as active on a `--docker` container.
+## Decision: GPU sessions are CDI devices on plain runc
 
-**Not the worker broker.** This reuses the retired substrate's *runtime* and
-nothing else: no broker, no worker plane, no spool, no controller
-([legacy-sysbox-broker.md](legacy-sysbox-broker.md)). It also inverts that
-design's central move: the broker chowned the socket to root and mediated every
-launch to keep the agent OFF the daemon; here the agent using Docker *is* the
-feature. Note the earlier prune had deleted `WITH_DOCKER` on the correct grounds that
-nothing could start the baked engine (no runtime, no privilege, no socket): the
-Sysbox runtime is precisely the missing piece, and `test/unit.sh` now pins the
-wiring (entrypoint starts it, launcher supplies the runtime) instead of pinning
-its absence.
+`--gpu` (`claude-compose-gen --gpu REPO`, `claude-launch --gpu`, `CLAUDE_GPU=1`) gives a
+session the host's NVIDIA GPU. NVIDIA only; no `/dev/dri`, no device selection.
 
-**Operational consequences.** Inner containers share the session's cgroup, so
-`CLAUDE_MEM_LIMIT`/`CPU`/`PIDS` must cover the whole stack (the launcher warns
-below 8g). The inner image store is a per-project `claude-docker-<name>` volume
-so a recreate doesn't re-pull every base image; it can reach tens of GB and
-`claude-rm --purge` deletes it. The entrypoint's shutdown trap stops inner
-containers and the daemon before PID 1 exits: without that, force-killing a
-Sysbox container with a live inner daemon makes Docker fail the removal with
-"did not receive an exit event", which stranded volumes mid-purge.
+**Mechanism: the CDI device `nvidia.com/gpu=all`, requested by name, on the default `runc`
+runtime.** The NVIDIA Container Toolkit's CDI spec lists everything the device needs (the
+`/dev/nvidia*` nodes, the driver's user libraries including CUDA, OptiX, the EGL/GLX
+vendor libraries and the Vulkan ICD, and `nvidia-smi`), and Docker injects it at creation,
+matched to the host driver. Nothing about the hardening changes: `cap_drop: ALL`, the
+minimal cap set and `no-new-privileges` stay, no capability is added, nothing is
+privileged, no host network, no socket. The alternatives were rejected:
+
+| approach | why not |
+|---|---|
+| `runtime: nvidia` | a second runtime to keep installed and in step, for what CDI does on runc |
+| `--gpus all` (the legacy device request) | mounts the compute libraries only (no EGL vendor file), so no headless graphics: EEVEE and VTK fall back to Mesa |
+| baking driver libraries into the image | they must match the host's kernel module exactly; a copy drifts and shadows the right one |
+
+**Compose syntax, verified on Docker 28.5 with Compose 2.39.** Both
+`devices: [nvidia.com/gpu=all]` and `deploy.resources.reservations.devices` with
+`driver: cdi` produce the same thing on the container (`HostConfig.DeviceRequests`:
+`Driver cdi`, `DeviceIDs [nvidia.com/gpu=all]`, `Runtime runc`), and `nvidia-smi` works
+in both. The generator emits `devices:` because it is the same shape as
+`docker run --device nvidia.com/gpu=all` and carries no `deploy:` semantics. Compose
+prints it back as `source/target: nvidia.com/gpu=all`. `NVIDIA_DRIVER_CAPABILITIES` does
+nothing in CDI mode: the spec is generated with every capability, and the mounted
+library set is identical with or without the variable.
+
+**The image carries the vendor-neutral half, in every variant:** glvnd's dispatch
+libraries (`libEGL`, `libGL`, `libOpenGL`, `libGLX`), Mesa llvmpipe (the CPU renderer,
+and the only one a session without a GPU has), OSMesa for VTK, and the X client
+libraries Blender's official build links even when it runs headless. That is about
+230 MB, mostly LLVM for llvmpipe, and it is also what lets a CPU-only session render a
+preview at all (OCP, behind build123d, hard-links `libGL.so.1`). glvnd reads
+`/usr/share/glvnd/egl_vendor.d`: CDI mounts `10_nvidia.json`, the image has
+`50_mesa.json`, so EGL picks NVIDIA when the device is attached and Mesa when it is not.
+
+**Degrade, do not fail.** With `CLAUDE_GPU=1` the entrypoint probes the card once, bounded
+(20 s at most), records `ok` or `degraded (<reason>)` in root-owned
+`/run/claude-gpu/state`, and on a failure prints a banner and puts it on the tmux status
+line; `claude-healthcheck` appends the GPU state to its healthy line and never fails on
+it. A session that loses its GPU is still a working session, and an unhealthy verdict
+would only get it restarted into the same state. The boundary: a missing CDI spec makes
+Docker refuse to create the container, before any code of ours runs, so that case is a
+loud creation error instead (the launcher and generator check for the device first).
+
+**Sharing the card: `claude-gpu`.** A GPU on a homelab host is rarely exclusive (a media
+server's NVENC transcodes, a metrics exporter). From inside a container `nvidia-smi` sees
+only device-wide numbers, not other containers' processes, and those are exactly what a
+polite preflight needs: free VRAM, SM utilization, NVENC session count. `claude-gpu run`
+waits for all three to be under their limits, falls back to CPU through an environment
+contract (`CLAUDE_GPU_DEVICE`, `CUDA_VISIBLE_DEVICES=`, glvnd pointed at Mesa), retries
+a GPU out-of-memory failure once on CPU, and always says which device ran. Per-process
+attribution needs the host PID namespace, so it lives on the host side, not in the guard.
+
+**`/scratch` on RAM.** Blender's render temp and kernel caches, and throwaway venvs,
+churn under `TMPDIR`; on a spinning pool that churn is the D-state wedge class the browser
+variant already moved to RAM. 4g plus the 1g `/tmp` leaves 11g of the 16g default limit.
+
+**Blender is installed, not baked.** A pinned, SHA-256-verified blender.org LTS tarball
+(`claude-blender-install`) goes rootless into the shared `/cache/blender`, under a lock
+and renamed into place when complete: one download serves every container, the image
+stays the same size for sessions that never render, and a Blender bump is a one-line pin
+change, not an image variant.
 
 ## Decision: one substantive build stage
 
@@ -224,7 +297,7 @@ no `-p`: those each disable features we need.
 ## Permission mode & Remote Control
 
 Launch is `claude --dangerously-skip-permissions --remote-control "<project>"`.
-On 2.1.258 these compose correctly. Belt-and-suspenders: `settings.json` also
+On 2.1.280 these compose correctly. Belt-and-suspenders: `settings.json` also
 sets `permissions.defaultMode = bypassPermissions` and
 `skipDangerousModePermissionPrompt: true` (a real settings key). If a future
 Claude Code regresses the interaction, set `CLAUDE_PERMISSION_MODE=acceptEdits`.
@@ -262,14 +335,19 @@ and that was the sole reason Remote Control never appeared. They are now never
 set. `DISABLE_AUTOUPDATER=1` (unrelated to flags) is no longer set either: as of
 CC-CLAUDE-CODE-UPGRADE (the 2.1.258 bump), auto-update is ON by default, so a
 running container's binary can self-update past the pinned `CLAUDE_CODE_VERSION`
-unless an operator sets `DISABLE_AUTOUPDATER=1` themselves. The entrypoint
+unless an operator sets `DISABLE_AUTOUPDATER=1` themselves. (Until the 2.1.280
+bump that was only nominal: the CLI sat in root-owned `/usr/local`, so every
+update failed with "Insufficient permissions to install update". It now lives in
+the claude-owned npm prefix `/opt/claude-code`, and `/usr/local/bin/claude` is
+`bin/claude-launcher`, which re-runs the postinstall that the claude user's
+`ignore-scripts=true` skips during a self-update.) The entrypoint
 also self-heals pre-existing per-container config volumes: it strips these keys
 from `settings.json` and, if any were present, clears
 `cachedGrowthBookFeatures`/`statsig` so the next run re-resolves the gate.
 Trade-off accepted: this image cannot be fully telemetry-silent and also
 provide Remote Control; RC is the product, so telemetry stays on.
 
-## Retired: the nested-Sysbox worker-broker substrate
+## Retired: the nested-Sysbox worker-broker substrate, and the per-session Docker engine
 
 An earlier revision of this repo ran a nested-Sysbox "worker broker" substrate so a
 controller container could spawn autonomous nested workers: a root-owned
@@ -284,12 +362,21 @@ That whole substrate was retired on 2026-07-12 in favor of Claude Code subagents
 per-worktree git worktrees, and stripped from `main`. A follow-up prune
 (2026-07-14), pruned the residue the strip left behind: `bin/claude-controller` (by then
 a pass-through to `claude-autopilot`; `CLAUDE_CONTROLLER=1` now refuses to boot),
-`bin/claude-reaper` (it pruned a spool nothing writes to), the `WITH_DOCKER` controller
-image variant (an unreachable `dockerd`), and the autopilot's default command
-(`CLAUDE_AUTOPILOT_CMD` is now required). The frozen implementation, the full rationale,
-and the follow-up resolution live in
+`bin/claude-reaper` (it pruned a spool nothing writes to), the controller image variant
+(an unreachable `dockerd`), and the autopilot's default command
+(`CLAUDE_AUTOPILOT_CMD` is now required).
+
+A later per-session Docker engine (`--docker`: an inner `dockerd` in the session, under
+the same user-namespaced runtime, so the agent could build images and run containers)
+was removed as well. It was the last thing that needed a non-default runtime on the host,
+it had to skip the capability drop every other session keeps, and it voided two
+in-container controls (the git-key broker and egress lockdown) because socket access is
+a route to root inside the container. Every session now runs on plain `runc` with
+`--cap-drop ALL`; the removed flags refuse, naming the removal.
+
+The frozen implementation, the full rationale, and the follow-up resolution live in
 [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md); nothing above or below this
-note describes it.
+note describes either.
 
 ## Acceptance
 
@@ -302,4 +389,5 @@ note describes it.
 | 5 | Appears in app, named, green | `--remote-control "<project>"`, outbound HTTPS; name = project name |
 | 6 | stop→launch resumes | Per-container `claude-config`/`claude-ws` volumes survive `docker stop`; `claude-launch` does `docker start` |
 | 7 | Two parallel, independent | Distinct container names, ports (`alloc_port`), per-container volumes, separate app sessions |
+| 7b | Several sessions in one container | `--session` / `CLAUDE_SESSIONS`: one window + Remote Control link each, trusted, resumed by id; `test/sessions-unit.sh`, smoke §17c |
 | 8 | Baked MCP/plugins/commands/skills usable | In a session: `/mcp`, `/plugin`, `/container-info`, the `example-skill`; see customizing-bakeins.md |

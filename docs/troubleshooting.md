@@ -19,10 +19,24 @@ Remove `ANTHROPIC_API_KEY` from `.env` and your shell. This image is
 subscription-OAuth only; an API key would silently bill per token.
 
 **Logged in but sessions say unauthenticated.** The credential reconcile loop
-converges `/auth` and the per-container copy every ~30s. If you just ran
-`make login` while a container was already up, restart it
-(`claude-stop`/`claude-launch`) so it re-seeds immediately. Re-auth from
+converges `/auth` and the per-container copy every ~30s, and running sessions are
+restarted onto a new login by themselves (next entry). Re-auth from
 scratch: `docker volume rm claude-auth && make login`.
+
+**I logged a different account into the volume. What happens to running containers?** They
+follow it, no restart: the credential within ~30 s, each session at its next idle moment
+(it restarts and resumes its conversation). `claude-account-list` shows each container as
+`in sync` or `moving, N to go`; `claude-sessions -C <project> account` names the sessions still
+on the previous account, and `account --now` moves them at once. Things to know:
+- The sessions get **new Remote Control links owned by the new account** (Claude refuses to
+  reattach another account's link, `Restored-pointer reattach vetoed` in the RC debug log). Look
+  for them in the Claude app of the new account; the old links show offline in the old one.
+- A session that stays busy for hours stays on the old account until it idles. That is safe:
+  until every session has moved, the sync never pushes the container's credential up, so the
+  old account's refreshed token cannot overwrite the new login.
+- `Auth account : account changes are NOT followed` in the boot log means `CLAUDE_AUTH_FOLLOW=0`.
+- No `Auth account` line at all means the volume has no `.claude.json` beside its credential
+  (a login made by some other route): the account is then unknown and only the token sync runs.
 
 **Every session at once reports `Login expired · Please run /login` (Remote
 Control offline fleet-wide).** The claude.ai OAuth **refresh token** expired (or
@@ -79,7 +93,7 @@ contact Anthropic.
 
 ### Session present but not showing
 
-1. Needs Claude Code ≥ 2.1.52 (this image pins 2.1.258). Confirm in
+1. Needs Claude Code ≥ 2.1.52 (this image pins 2.1.280). Confirm in
    `claude-logs <name>` ("Claude Code session 'claude' started in tmux").
 2. Remote Control is **outbound HTTPS only**: no inbound port. If egress is
    firewalled/allowlisted, the session can't register. Temporarily allow
@@ -152,7 +166,7 @@ container to see which condition fails.
 ## `--dangerously-skip-permissions` with Remote Control
 
 There were earlier reports that skip-permissions didn't fully apply under
-Remote Control. On the pinned 2.1.258 the launch this image actually makes:
+Remote Control. On the pinned 2.1.280 the launch this image actually makes:
 `claude --dangerously-skip-permissions --remote-control "<project>"`: was
 verified to parse and start (as the unprivileged `claude` user), with no
 interlock between the two flags. Re-verify this on a TTY (`docker run -t`): with
@@ -195,7 +209,7 @@ prompt. If a future Claude Code version prompts anyway:
   `SSH_AUTHORIZED_KEYS`. Point it at a file containing your public key and
   relaunch. (Remote Control still works without SSH.)
 - Wrong port: `claude-list` shows the assigned port; `claude-launch <name>`
-  reprints the connect line. Ports are auto-assigned in 2200–2299.
+  reprints the connect line. Ports are auto-assigned in 2200-2299.
 - Host key changed after `docker volume rm claude-sshkeys`: clear the stale
   entry with `ssh-keygen -R "[host]:<port>"`.
 - Connects then immediately closes: that's the tmux attach exiting because the
@@ -209,6 +223,74 @@ the dialog, the per-container config volume didn't mount (check
 `docker inspect <ctr>` for the `/home/claude/.claude` mount) or `/workspace`
 isn't the path Claude opened. As a one-off, accept it once: it persists in the
 config volume.
+
+Trust is per directory: `/workspace`'s entry does not cover `/workspace/<repo>`. Named
+sessions get an entry for their own directory (and every repo under `/workspace`) from
+`claude-sessions prepare` at boot, so a session started by hand with plain `claude` in a
+repo directory can still ask once. The boot log's `Workspace trust :` line names what
+was pre-accepted.
+
+## Several sessions in one container (`--session`, `claude-sessions`)
+
+Start with `claude-sessions ls` inside (or `claude-sessions -C <project> ls` from the
+host). STATE is Claude Code's own status while Claude runs (`busy`, `idle`, `waiting`, or `shell` while
+a background shell runs), `starting`, `exited` (Claude exited to a
+shell in that window), `down` (no window) or `stopped` (stopped by hand).
+
+- **A session is missing at boot.** `claude-logs <project>` has a `[sessions]` line for
+  each one: `skipped '<entry>': <why>` (a bad `CLAUDE_SESSIONS` entry; the launchers
+  validate, so this is usually a hand-edited env), `NOT started, its directory ... does
+  not exist` (a `dir=` typo, or a repo that did not clone), or `stopped by hand` (run
+  `claude-sessions start NAME`). A session dropped from `--session` is unregistered on
+  the next recreate, by design.
+- **`exited`.** Claude exited in that window; its last lines are in the pane
+  (`claude-sessions attach NAME`). `claude-sessions restart NAME` resumes the same
+  conversation; `--fresh` starts over.
+- **It started a fresh conversation after a restart.** A session resumes the conversation
+  the supervisor recorded for its window. None is recorded until Claude has written a
+  transcript (a session that never received a prompt has nothing to resume), and a
+  `--continue` fallback is only used when no other session shares the directory. `resume=off`
+  in the spec and main without `CLAUDE_MAIN_RESUME=1` start fresh on purpose.
+- **Moving a conversation in from another container** (a standalone container folded into a
+  multi-session one). Once that session is idle and its workspace has nothing unpushed, stop
+  the old container, copy `projects/-workspace/<id>.jsonl` (and the `<id>/` directory beside it)
+  from its config volume into this one's `projects/-workspace-<repo>/`, then
+  `claude-sessions restart <repo> --resume <id>`. The conversation's paths still say
+  `/workspace`; tell the session its repo is now `/workspace/<repo>`. A `/goal` program's
+  goal files name the launch directory too, so amend them before its next goal starts.
+  "Nothing unpushed" includes linked worktrees: a goal's worktrees usually live on the shared
+  `/cache` (`git -C /workspace worktree list`), and each one's `.git` file points into the OLD
+  container's `/workspace/.git`, so inside the new container it is broken. Once its branch is
+  pushed and clean, delete the directory and `git worktree add` it again from the new checkout.
+  Settings in a repo's committed `.claude/settings.json` sized for the old container (build
+  jobs, agent counts) reach a running session on its next command once the file changes.
+- **Its goal was not sent.** A first prompt / goal is sent on the session's first start
+  only. `claude-sessions reset NAME` makes the next start a first start again. A missing
+  goal file is a warning in the pane, and the session starts without it.
+- **Sessions keep dropping, and pids are near the limit** (`docker stats` PIDS near
+  `pids_limit`; the healthcheck line ends `pids 9x% (...)`; `[sessions] WARNING: capacity:` in
+  `claude-logs`, naming the heaviest processes). Threads count as pids. Numeric and CAD
+  libraries (OpenMP, OpenBLAS, MKL) size their thread pools to the HOST's CPUs, not the
+  container's quota, so on a 56-thread host each Python test worker carried ~100 threads, and
+  two `pytest -n 28` runs held ~8,000 of 8,192 pids. At the limit a Claude process cannot start
+  a thread and crashes. The image caps those pools per process (`CLAUDE_THREADS_PER_PROCESS`,
+  default 4), crashed sessions relaunch and resume (`CLAUDE_SESSION_CRASH_RESTARTS`), and the
+  supervisor warns before the limit. Also: cap test parallelism for suites that size it from
+  the quota (a suite's own worker variable, `pytest -n`), run one heavy suite at a time, and size `pids_limit`
+  for the session count (the boot log warns under 1024 per session). To recover by hand: find
+  the heavy processes (`ps -eo pid,nlwp,rss,args --sort=-nlwp | head`), end the runaway run,
+  then `claude-sessions restart` each session that shows `exited`.
+- **Two sessions fight over git.** Sessions in the same directory share one working tree
+  and index. Give concurrent writers their own directory (a repo each, or `git worktree
+  add`) and keep a shared-directory session to reading (`mode=plan`).
+- **The container is OOM-killed.** Every session is a Claude process of 300-600 MiB plus
+  whatever it runs. The boot log's `Capacity:` line says what each gets; raise
+  `CLAUDE_MEM_LIMIT` / `--mem SVC=SIZE`, or stop a session (`claude-sessions stop NAME`,
+  remembered across restarts).
+- **One session's Remote Control is gone.** Each linked session has its own watchdog
+  (`[rc-watchdog:NAME]` in `claude-logs`) and its own debug log
+  (`/tmp/claude-rc-debug-NAME.log`); the healthcheck line names a dead link
+  (`sessions: 2/3 up (home: Remote Control dead)`) without marking the container unhealthy.
 
 ## Frontend debugging (`--browser` / `CLAUDE_BROWSER`)
 
@@ -281,6 +363,69 @@ tri-state: unset = auto (browser image self-enables), `1`/`--browser` = force on
   you stop and `claude-launch <name>` resumes, the MCP registration is in the
   per-container config volume and persists across restarts.
 
+## GPU sessions (`--gpu`)
+
+NVIDIA only. Start with `claude-gpu status` inside the session (or `docker exec <name>
+claude-gpu status`): `ok` names the card, driver, free VRAM, NVENC sessions and
+utilization; `degraded (<reason>)` quotes what broke; `off` means the container was not
+created with `--gpu`. The boot-time verdict is in `/run/claude-gpu/state` and in
+`docker logs <name>` (a `GPU DEGRADED` banner), and `claude-healthcheck` prints it as
+`healthy; gpu: ...`. A degraded GPU never makes the container unhealthy.
+
+**The service will not start at all: `CDI device injection failed: unresolvable CDI
+devices nvidia.com/gpu=all`.** The host has no CDI spec for the GPU (never generated, or
+deleted). Docker refuses to create a container whose device it cannot resolve, so this is
+the one GPU failure that cannot degrade. On the host, as root:
+`nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml` (or enable the toolkit's
+`nvidia-cdi-refresh` path/service units, which regenerate it after driver changes), then
+`docker info | grep nvidia.com/gpu` must list `nvidia.com/gpu=all`. To run the session
+without the GPU meanwhile, drop `--gpu` from the `.conf` (or the launch), regenerate and
+recreate. `claude-launch --gpu` and `claude-compose-gen` check for the device up front.
+
+**`gpu: degraded (nvidia-smi failed ...: Failed to initialize NVML: Driver/library version
+mismatch)`.** The host's kernel module and user-space driver disagree, almost always a
+driver update without a reboot. Nothing inside the container can fix it: reboot the host
+(or reload the NVIDIA kernel modules), check `nvidia-smi` on the host, then restart the
+container so CDI mounts the matching libraries. Until then GPU work runs on CPU.
+
+**`gpu: degraded (nvidia-smi is not in this container ...)`.** `CLAUDE_GPU=1` is set but no
+device was attached (the service was created without the CDI device, e.g. by hand).
+Recreate it through the generator or `claude-launch --gpu`.
+
+**Jobs keep landing on CPU: `device=CPU (GPU still busy ...)`.** The card is shared and the
+guard is being polite: another tenant (a media server's hardware transcodes, another GPU
+session) holds VRAM, keeps the SMs busy, or has NVENC sessions open. The line names the
+number that failed. Wait, lower the job's needs, or tune `--min-free-mib`, `--max-util`,
+`--max-nvenc` and `--wait` (or their `CLAUDE_GPU_*` defaults). Per-process attribution is
+only visible from the host (`nvidia-smi pmon -c 1`, then map the PID through
+`/proc/<pid>/cgroup` to a container); inside a container `nvidia-smi` shows only the
+device-wide numbers.
+
+**Out of memory on the GPU.** `claude-gpu run` and `claude-gpu blender` retry a GPU run
+that failed with an out-of-memory error once on CPU and say so. Make the scene or batch
+smaller, or raise `--min-free-mib` so it waits for more headroom.
+
+**EGL or OpenGL picks Mesa (`llvmpipe`) on a GPU session.** Check, in order:
+`/usr/share/glvnd/egl_vendor.d/10_nvidia.json` exists (CDI mounts it; if not, the device
+is not attached); `__EGL_VENDOR_LIBRARY_FILENAMES` is not set (the guard sets it only for
+CPU runs); nothing puts a private `libGL`/`libEGL` on `LD_LIBRARY_PATH` (a bundled copy
+shadows glvnd's dispatch and therefore NVIDIA); `DISPLAY` is unset (headless programs
+should go straight to EGL). Blender's OpenGL backend does not log its renderer: ask it
+(`blender -b --python-expr "import gpu; print(gpu.platform.renderer_get())"`). Note that
+`eglinfo`'s default platforms can crash on NVIDIA without `/dev/dri`; use
+`eglinfo -B -p surfaceless`.
+
+**`claude-blender-install` fails.** `CHECKSUM MISMATCH` means the download is not the
+pinned build: it was deleted and nothing was installed; do not work around it, re-run
+(another mirror is tried) or check the pin. blender.org can answer scripted downloads
+with a bot challenge, which is why two official mirrors follow it in the source list.
+The install lives in the shared `/cache/blender`, so a half-installed tree is never
+visible: the install is renamed into place only after it is complete.
+
+**CUDA says the device or architecture is unsupported.** CUDA 13 dropped compute
+capability below 7.5. Use userspace built for CUDA 12.x on such a card (for example
+`cupy-cuda12x` plus the `nvidia-*-cu12` runtime wheels).
+
 ## Container restart-loops
 
 `claude-launch` surfaces the last 30 log lines if startup fails. Common causes:
@@ -322,4 +467,5 @@ deliberately avoid them.
 This image installs Claude Code via npm (not the native installer), avoiding
 the historical startup filesystem scan that OOM'd containers. If a container is
 still memory-starved, raise `CLAUDE_MEM_LIMIT`. Builds in `/workspace` honor
-`CLAUDE_CPU_LIMIT`/`CLAUDE_MEM_LIMIT`.
+`CLAUDE_CPU_LIMIT`/`CLAUDE_MEM_LIMIT`. A container running several sessions shares that
+limit between them: see the boot log's `Capacity:` line.

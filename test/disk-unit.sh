@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# Unit tests for disk-hygiene logic: NO docker, NO sysbox, NO root.
+# Unit tests for disk-hygiene logic: NO docker, NO root.
 #
-# The substrate strip removed the broker's per-launch disk-floor refusal (broker_check_disk /
-# broker_check_disk_config, and the broker_process_request integration around it)
-# along with the nested-Sysbox worker-broker substrate it gated: see
-# docs/legacy-sysbox-broker.md. What survives, and what this covers:
+# What this covers:
 #   1. disk_free_mib (bin/_common.sh): df parsing, fail-closed on garbage/missing path
 #   2. disk_gc_plan / disk_gc_once (bin/claude-disk-gc): the plan is exactly the two safe
 #      prunes (never -a/--volumes), and disk_gc_once is fail-safe on a docker error

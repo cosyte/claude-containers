@@ -1,4 +1,4 @@
-## Toolchains on demand (`mise`)
+# Toolchains on demand (`mise`)
 
 The image bakes [`mise`](https://mise.jdx.dev) so a session can provision language
 toolchains and prebuilt CLIs **as the unprivileged `claude` user, with no `sudo`
@@ -37,11 +37,8 @@ idle-only and fail-safe. Full design + verification:
   need `CLAUDE_EGRESS_PACKAGES=1`; and the `node@`/`go@`/`rust` toolchains pull
   their runtime from vendor hosts (nodejs.org, go.dev, static.rust-lang.org) not
   yet on the allowlist, so they need those hosts via `CLAUDE_EGRESS_EXTRA_HOSTS`.
-- **System libraries (`apt`) are not available**: the agent is rootless, and the
-  worker-tier `apt` path that used to close that gap was retired along with the
-  Sysbox worker-broker substrate it depended on (see
-  [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md)). A system library
-  needs a base-image rebuild today.
+- **System libraries (`apt`) are not available**: the agent is rootless. A system
+  library needs a base-image rebuild.
 - The image sets `trusted_config_paths` to **`/workspace` only**: a deliberately
   scoped supply-chain trade so a repo's own `mise.toml` auto-applies while a config
   anywhere else stays untrusted (never a blanket `/`). Full design + verification:

@@ -347,29 +347,32 @@ if "$REPO_ROOT/bin/claude-compose-gen" --out "$GENOUT" \
     # Extract exactly one service's block (its `^  name:` header to the next
     # service or top-level key) so assertions don't depend on line offsets: the
     # environment block grows over time and fixed -A windows silently rot.
+    # Assertions feed the block through a here-string, never `svc_block | grep -q`: under
+    # pipefail, grep -q exits on an early match, awk takes SIGPIPE writing the rest of the
+    # block, and the check fails BECAUSE it matched (seen on "cpus: 7").
     svc_block(){ awk -v s="^  $1:\$" '
         $0 ~ s {f=1; print; next}
         f && /^  [A-Za-z0-9_-]+:$/ {exit}
         f && /^[A-Za-z]/ {exit}
         f {print}' "$GENOUT"; }
     check "--cpu override applies cpus to the target repo" \
-        'svc_block alpha | grep -q "cpus: 7"'
+        'grep -q "cpus: 7" <<<"$(svc_block alpha)"'
     check "--mem override applies mem_limit to the target repo" \
-        'svc_block alpha | grep -q "mem_limit: 777m"'
+        'grep -q "mem_limit: 777m" <<<"$(svc_block alpha)"'
     check "non-overridden repo keeps the global default (no override leak)" \
-        '! svc_block beta | grep -qE "cpus: 7|mem_limit: 777m"'
+        '! grep -qE "cpus: 7|mem_limit: 777m" <<<"$(svc_block beta)"'
     check "--browser sets CLAUDE_BROWSER on the target repo" \
-        'svc_block beta | grep -q "CLAUDE_BROWSER"'
+        'grep -q "CLAUDE_BROWSER" <<<"$(svc_block beta)"'
     check "--browser repo uses the browser image" \
-        'svc_block beta | grep -qE "image: .*:browser"'
+        'grep -qE "image: .*:browser" <<<"$(svc_block beta)"'
     check "--browser does not leak to non-browser repos" \
-        '! svc_block alpha | grep -q "CLAUDE_BROWSER"'
+        '! grep -q "CLAUDE_BROWSER" <<<"$(svc_block alpha)"'
     check "--model override sets the literal model on the target repo" \
-        'svc_block alpha | grep -q "CLAUDE_MODEL.*sonnet"'
+        'grep -q "CLAUDE_MODEL.*sonnet" <<<"$(svc_block alpha)"'
     check "non-overridden repo defaults CLAUDE_MODEL to opus (best available)" \
-        'svc_block beta | grep "CLAUDE_MODEL" | grep -q opus'
+        'grep "CLAUDE_MODEL" <<<"$(svc_block beta)" | grep -q opus'
     check "--model does not leak the override to other repos" \
-        '! svc_block beta | grep -q sonnet'
+        '! grep -q sonnet <<<"$(svc_block beta)"'
 else
     bad "claude-compose-gen failed to generate with --cpu/--mem/--model/--browser"
 fi
@@ -524,7 +527,11 @@ if [[ "$EG6_OK" != 1 ]]; then
     echo "  SKIP  live IPv6 allowlisted-host check (same reason)"
     echo "  SKIP  live IPv6 non-allowlisted drop check (same reason)"
     echo "  SKIP  live IPv6 agent-cannot-alter-the-rules check (same reason)"
-elif ! docker exec "$EG6CN" ip6tables -S OUTPUT 2>/dev/null | head -1 | grep -q "DROP"; then
+# Materialize, then test: under pipefail, `docker exec … | head -1 | grep -q` fails when
+# head exits before the producer has written everything (SIGPIPE, 141), and with a
+# realistic allowlist the ruleset is long enough for that to happen at random, which
+# sent a correctly applied ruleset down the "not applied" branch.
+elif eg6_policy="$(docker exec "$EG6CN" ip6tables -S OUTPUT 2>/dev/null || true)"; [[ "${eg6_policy%%$'\n'*}" != *DROP* ]]; then
     # The IPv6 ruleset did not apply. That is a legal outcome (fail-open is the posture),
     # but the boot log then owes the operator the word UNRESTRICTED, so check THAT and
     # skip the live allow/deny pair rather than pretending it ran.
@@ -732,6 +739,13 @@ echo "== 15. git-key handling: brokered BY DEFAULT, usable by the agent, not rea
 ssh-keygen -q -t ed25519 -f "$TMP/gitkey" -N ''
 printf 'not-a-private-key\n' > "$TMP/badkey"      # non-empty, so §5 engages; unloadable, so the broker fails
 GKPRIV="$(sed -n '2p' "$TMP/gitkey")"             # a base64 line of the PRIVATE key body
+# Make the fixture root-only for the agent WHATEVER uid runs this smoke. A key file the
+# runner owns at 0600 is readable by the agent whenever the runner's uid is the agent's
+# (1000, the common single-user host), because bind mounts keep host ownership: the check
+# below would then fail on the host's file mode, not on anything the image does. Mode 000
+# is what a root-owned 0600 key looks like to the agent (unreadable), while container root
+# still reads it through CAP_DAC_OVERRIDE, which the minimal capability set keeps.
+chmod 000 "$TMP/gitkey"
 # Every assertion in this section reads its container's log through a HERE-STRING, never
 # through `docker logs … | grep -q`. This file runs under `pipefail`, where `grep -q`
 # exits on the first match, `docker logs` then takes SIGPIPE (141), and the PIPELINE fails
@@ -923,9 +937,9 @@ else
         -e CLAUDE_BROWSER=1 -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
     wait_tmux "$BRWFCN" || true
     check "CLAUDE_BROWSER=1 on a non-browser image fails LOUD (ERROR, not a buried warn)" \
-        'docker logs "$BRWFCN" 2>&1 | grep -q "ERROR: CLAUDE_BROWSER=1"'
+        'grep -q "ERROR: CLAUDE_BROWSER=1" <<<"$(docker logs "$BRWFCN" 2>&1)"'
     check "the loud failure is actionable (names the rebuild command)" \
-        'docker logs "$BRWFCN" 2>&1 | grep -q "make build-browser"'
+        'grep -q "make build-browser" <<<"$(docker logs "$BRWFCN" 2>&1)"'
     check "no MCP is registered when the request cannot be satisfied (no silent op)" \
         '! mcp_get "$BRWFCN"'
     docker rm -f "$BRWFCN" >/dev/null 2>&1 || true
@@ -1003,9 +1017,9 @@ PROBE
 fi
 
 # --- 16f. Disk-backed scratch (TMPDIR) ----------------------------------------
-# /tmp is a 1g tmpfs in RAM. Anything honoring TMPDIR (pip/uv wheel builds, docker
-# save|load, the inner containerd) hits that wall and ENOSPCs while the pool has terabytes
-# free, so temp must land on a disk-backed volume instead.
+# /tmp is a 1g tmpfs in RAM. Anything honoring TMPDIR (pip/uv wheel builds, big
+# archives) hits that wall and ENOSPCs while the pool has terabytes free, so temp must
+# land on a disk-backed volume instead.
 #
 # Needs its OWN container: the scratch volume + TMPDIR are supplied by claude-launch, not
 # baked into the image, so $CN (a bare `docker run` above) has neither. Reproduce the
@@ -1044,57 +1058,158 @@ check "scratch is cleared on boot (a volume does not self-empty like a tmpfs)" \
 docker rm -f "$SCRCN" >/dev/null 2>&1 || true
 docker volume rm "$SCRVOL" >/dev/null 2>&1 || true
 
-# --- 17. Container workflows (--docker): the agent can actually build + run ----
-# The end-to-end proof, and the only one that matters: an UNPRIVILEGED agent inside the
-# session builds an image and runs a container, with no --privileged and no host socket.
-# Gated twice, because both halves are genuinely optional:
-#   - the image must have the engine baked (claude.docker LABEL / WITH_DOCKER=1)
-#   - the HOST must have the Sysbox runtime (CI runners do not)
-# A skip here is honest: it says the case was not exercised, rather than passing vacuously.
-IMG_IS_DOCKER="$(docker image inspect -f '{{ index .Config.Labels "claude.docker" }}' "$IMAGE" 2>/dev/null || echo 0)"
-HOST_HAS_SYSBOX=0
-docker info --format '{{range $r, $_ := .Runtimes}}{{$r}} {{end}}' 2>/dev/null | grep -qw sysbox-runc && HOST_HAS_SYSBOX=1
+# --- 17. The per-session Docker engine stays removed -----------------------------
+# The image must not carry a daemon: nothing can start one without extra privilege, and a
+# baked engine nobody can reach is dead weight that invites someone to "fix" it by adding a
+# privileged runtime back.
+check "the image ships no Docker daemon (the per-session engine was removed)" \
+    '! docker run --rm --entrypoint sh "$IMAGE" -c "command -v dockerd || command -v containerd"'
 
-if [ "$IMG_IS_DOCKER" != "1" ]; then
-    echo "  SKIP  17 container-workflow checks (\$IMAGE has no baked engine, build with WITH_DOCKER=1)"
-elif [ "$HOST_HAS_SYSBOX" != "1" ]; then
-    echo "  SKIP  17 container-workflow checks (host has no sysbox-runc runtime, nested Docker cannot be exercised)"
+# --- 17b. Several repos in one workspace (GIT_REPOS) ---------------------------------
+# Two local bare repos, mounted read-only and cloned over file://, so this needs no network
+# and no key. The session must boot, each repo must land in /workspace/<repo>, and the
+# Claude pane must start in /workspace, the parent of both.
+echo "== 17b. multi-repo workspace =="
+mkdir -p "$TMP/mr-bare"
+for r in alpha beta; do
+    git init -q -b main "$TMP/mr-src-$r"
+    echo "$r" > "$TMP/mr-src-$r/README"
+    git -C "$TMP/mr-src-$r" add README
+    GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+        git -C "$TMP/mr-src-$r" commit -qm init
+    git clone -q --bare "$TMP/mr-src-$r" "$TMP/mr-bare/$r.git"
+done
+chmod -R a+rX "$TMP/mr-bare"
+MRCN="claude-smoke-multirepo-$$"
+docker run -d --name "$MRCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=multirepo \
+    -e GIT_REPOS="file:///repos/alpha.git file:///repos/beta.git" \
+    -v "$TMP/mr-bare:/repos:ro" "$IMAGE" >/dev/null 2>&1 || true
+wait_tmux "$MRCN" || true
+mrlog="$(docker logs "$MRCN" 2>&1 || true)"
+check "the boot log says the workspace holds both repos" \
+    'grep -q "Workspace           : /workspace holds 2 repos (alpha beta)" <<<"$mrlog"'
+check "each repo is a checkout at /workspace/<repo>, owned by the agent" \
+    '[ "$(docker exec "$MRCN" gosu claude sh -c "cat /workspace/alpha/README /workspace/beta/README; git -C /workspace/beta rev-parse --is-inside-work-tree" | tr "\n" " ")" = "alpha beta true " ]'
+check "the Claude pane starts in /workspace, the parent of both" \
+    '[ "$(docker exec "$MRCN" gosu claude tmux display-message -p -t claude:main "#{pane_current_path}")" = "/workspace" ]'
+docker rm -f "$MRCN" >/dev/null 2>&1 || true
+
+echo "== 17c. several sessions in one container (CLAUDE_SESSIONS) =="
+# The multi-repo bare repos from 17b, one of them carrying a goal file: one session per
+# repo ('*'), alpha starting on that goal, plus a read-only reviewer with no Remote Control.
+git clone -q "$TMP/mr-bare/alpha.git" "$TMP/mr-goal"
+mkdir -p "$TMP/mr-goal/.claude/goals"
+echo "alpha program, GOAL 1 of 2: foundations" > "$TMP/mr-goal/.claude/goals/g1.goal.txt"
+git -C "$TMP/mr-goal" add -A
+GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git -C "$TMP/mr-goal" commit -qm goal
+git -C "$TMP/mr-goal" push -q origin HEAD:main
+SESSCN="claude-smoke-sessions-$$"
+SESSCFG="claude-smoke-sessions-cfg-$$"
+docker run -d --name "$SESSCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=multi \
+    -e GIT_REPOS="file:///repos/alpha.git file:///repos/beta.git" \
+    -e "CLAUDE_SESSIONS=alpha goal=.claude/goals/g1.goal.txt; *; review dir=alpha model=sonnet mode=plan rc=off" \
+    -v "$SESSCFG:/home/claude/.claude" -v "$TMP/mr-bare:/repos:ro" "$IMAGE" >/dev/null 2>&1 || true
+wait_tmux "$SESSCN" || true
+for _ in $(seq 1 30); do docker logs "$SESSCN" 2>&1 | grep -q "Named sessions" && break; sleep 1; done
+sesslog="$(docker logs "$SESSCN" 2>&1 || true)"
+sx() { docker exec "$SESSCN" gosu claude "$@"; }
+check "every declared session is started, '*' after the named ones" \
+    '[ "$(sx tmux list-windows -t claude -F "#{window_name}" | tr "\n" " ")" = "main alpha review beta " ]'
+check "each session runs in its own directory" \
+    '[ "$(for w in alpha review beta; do sx tmux display-message -p -t claude:$w "#{pane_current_path}"; done | tr "\n" " ")" = "/workspace/alpha /workspace/alpha /workspace/beta " ]'
+check "workspace trust was pre-accepted for each session directory, before Claude started" \
+    'sx jq -e ".projects[\"/workspace/alpha\"].hasTrustDialogAccepted and .projects[\"/workspace/beta\"].hasTrustDialogAccepted" /home/claude/.claude/.claude.json >/dev/null'
+for _ in $(seq 1 30); do sx tmux capture-pane -p -t claude:beta 2>/dev/null | grep -q "Claude Code v" && break; sleep 1; done
+check "no session is parked on the trust dialog" \
+    '! sx sh -c "for w in alpha beta review; do tmux capture-pane -p -t claude:\$w; done" | grep -q "Quick safety check"'
+check "alpha: its own Remote Control name, and its goal as the first prompt" \
+    'docker exec "$SESSCN" ps -eo args | grep -F -- "--remote-control multi-alpha" | grep -qF "/goal alpha program, GOAL 1 of 2"'
+check "review: plan mode, sonnet, and no Remote Control" \
+    'docker exec "$SESSCN" ps -eo args | grep -E "bin/claude .*--permission-mode plan --model sonnet" | grep -vq -- "--remote-control"'
+for _ in $(seq 1 40); do [ "$(docker exec "$SESSCN" pgrep -fc claude-rc-watchdog)" = 3 ] && break; sleep 1; done
+check "one RC watchdog per session with a link (main, alpha, beta), none for review" \
+    '[ "$(docker exec "$SESSCN" pgrep -fc claude-rc-watchdog)" = 3 ]'
+check "claude-sessions ls lists every session" \
+    '[ "$(sx claude-sessions ls --json | jq -r "[.[].name] | join(\",\")")" = "main,alpha,review,beta" ]'
+check "the healthcheck reports the named sessions" \
+    'docker exec "$SESSCN" sh -c "d=\$(mktemp -d); printf \"#!/bin/sh\nexit 0\n\" > \$d/pgrep; chmod +x \$d/pgrep; PATH=\$d:\$PATH /usr/local/bin/claude-healthcheck" | grep -q "; sessions: 3/3 up"'
+sx claude-sessions stop beta >/dev/null 2>&1
+docker restart "$SESSCN" >/dev/null 2>&1
+for _ in $(seq 1 60); do [ "$(docker logs --since 90s "$SESSCN" 2>&1 | grep -c "Named sessions")" -ge 1 ] && break; sleep 1; done
+sleep 8
+check "after a restart alpha resumes its conversation instead of re-sending goal 1" \
+    'p="$(sx tmux capture-pane -p -t claude:alpha -S -50)"; grep -q "Resuming conversation" <<<"$p" && ! grep -q "First start" <<<"$p"'
+check "a session stopped by hand stays stopped across the restart" \
+    '! sx tmux list-windows -t claude -F "#{window_name}" | grep -qx beta'
+docker rm -f "$SESSCN" >/dev/null 2>&1 || true
+docker volume rm "$SESSCFG" >/dev/null 2>&1 || true
+
+# --- 18. GPU sessions (--gpu) ----------------------------------------------------
+# 18a needs the NVIDIA Container Toolkit's CDI device on this host (a skip says so).
+# 18b needs no GPU at all: it is the "GPU unusable at boot" case, simulated the way it
+# happens for real (CLAUDE_GPU=1, but no usable device), and the session must still
+# start, say so loudly, and stay healthy.
+GPU_CDI=0
+[[ " $(docker info --format '{{range .DiscoveredDevices}}{{.ID}} {{end}}' 2>/dev/null) " == *" nvidia.com/gpu=all "* ]] && GPU_CDI=1
+GPUHARDEN="$(source "$REPO_ROOT/bin/_common.sh"; harden_run_args)"
+# The real healthcheck, in the real image, with only its liveness probe (pgrep) shimmed:
+# smoke has no OAuth, so `claude` is not running and the probe would stop at "unhealthy"
+# before it ever reached the GPU line this section is about.
+hc_gpu() {
+    docker exec "$1" sh -c 'd="$(mktemp -d)"; printf "#!/bin/sh\nexit 0\n" > "$d/pgrep"; chmod +x "$d/pgrep"; PATH="$d:$PATH" /usr/local/bin/claude-healthcheck; echo "rc=$?"' 2>&1
+}
+echo "== 18a. a --gpu session sees the card through CDI, on runc, fully hardened =="
+if [[ "$GPU_CDI" != 1 ]]; then
+    echo "  SKIP  18a GPU checks (this host's Docker lists no CDI device nvidia.com/gpu=all)"
 else
-    DKCN="claude-smoke-docker-$$"
-    docker run -d --name "$DKCN" --runtime=sysbox-runc --security-opt no-new-privileges \
-        -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=dockersmoke -e CLAUDE_DOCKER=1 \
+    GPUCN="claude-smoke-gpu-$$"
+    # shellcheck disable=SC2086
+    docker run -d --name "$GPUCN" $GPUHARDEN --device nvidia.com/gpu=all -e CLAUDE_GPU=1 \
+        -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=gpusmoke -e TMPDIR=/scratch \
+        --tmpfs /scratch:rw,nosuid,nodev,exec,size=4g \
         -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
-    wait_tmux "$DKCN" || true
-
-    check "the inner dockerd starts and reports ready" \
-        'docker logs "$DKCN" 2>&1 | grep -q "Inner dockerd.*ready"'
-    # The container must NOT be privileged and must NOT see the host socket. If either of
-    # these ever flips, the isolation story is gone regardless of what else passes.
-    check "the container is NOT privileged" \
-        '[ "$(docker inspect -f "{{.HostConfig.Privileged}}" "$DKCN")" = "false" ]'
-    check "no host docker socket is mounted into it" \
-        '! docker inspect -f "{{range .Mounts}}{{.Source}}{{end}}" "$DKCN" | grep -q "docker.sock"'
-    # Sysbox's userns is the whole mechanism: container-root must map to a NON-zero host uid.
-    check "container-root maps to an unprivileged host uid (Sysbox userns is active)" \
-        'docker exec "$DKCN" cat /proc/self/uid_map | awk "{exit !(\$2 != 0)}"'
-    # gosu, not `docker exec -u`: exec does not apply supplementary groups, so it would
-    # report a false failure here. gosu is how the entrypoint actually starts the agent.
-    check "the unprivileged agent is in the docker group (can reach the socket)" \
-        'docker exec "$DKCN" gosu claude id -nG | grep -qw docker'
-    check "the agent BUILDS an image" \
-        'docker exec "$DKCN" gosu claude sh -c "cd /tmp && printf \"FROM alpine\nRUN echo ok > /p\n\" > Dockerfile && docker build -q -t smoke:1 . >/dev/null"'
-    check "the agent RUNS a container from it" \
-        'docker exec "$DKCN" gosu claude docker run --rm smoke:1 cat /p | grep -q ok'
-    check "docker compose is available to the agent" \
-        'docker exec "$DKCN" gosu claude docker compose version >/dev/null 2>&1'
-    # Teardown regression: an inner container still running must not wedge removal. Before
-    # the entrypoint's TERM trap stopped the inner daemon, `docker rm -f` failed with
-    # "did not receive an exit event" and aborted claude-rm mid-purge, stranding volumes.
-    docker exec "$DKCN" gosu claude docker run -d --name linger alpine sleep 300 >/dev/null 2>&1 || true
-    check "the container stops cleanly even with a live inner container (no wedged teardown)" \
-        'docker stop -t 25 "$DKCN" >/dev/null 2>&1 && docker rm -f "$DKCN" >/dev/null 2>&1'
-    docker rm -f "$DKCN" >/dev/null 2>&1 || true
+    wait_tmux "$GPUCN" || true
+    gpulog="$(docker logs "$GPUCN" 2>&1 || true)"
+    check "the boot probe reports the GPU ok" 'grep -q "GPU                 : ok (" <<<"$gpulog"'
+    check "the boot log calls /scratch what it is here: a RAM tmpfs, not disk-backed" \
+        'grep -q "Scratch (TMPDIR)    : /scratch (RAM tmpfs, 4.0G; cleared on boot)" <<<"$gpulog"'
+    check "claude-gpu status is ok inside the session (exit 0)" \
+        'st="$(docker exec "$GPUCN" gosu claude claude-gpu status 2>&1)"; grep -qx "gpu: ok" <<<"$st"'
+    check "the healthcheck says 'healthy; gpu: ok' (exit 0)" \
+        '[[ "$(hc_gpu "$GPUCN")" == $'"'"'healthy; gpu: ok\nrc=0'"'"' ]]'
+    check "runtime is runc, CapDrop is ALL, and the CDI device is requested" \
+        '[[ "$(docker inspect -f "{{.HostConfig.Runtime}} {{.HostConfig.CapDrop}} {{json .HostConfig.DeviceRequests}}" "$GPUCN")" == "runc [ALL] "*"nvidia.com/gpu=all"* ]]'
+    check "glvnd sees both EGL vendors: NVIDIA (from CDI) and Mesa (from the image)" \
+        'docker exec "$GPUCN" test -f /usr/share/glvnd/egl_vendor.d/10_nvidia.json && docker exec "$GPUCN" test -f /usr/share/glvnd/egl_vendor.d/50_mesa.json'
+    check "the session's managed memory carries the GPU note" \
+        'docker exec "$GPUCN" grep -q "claude-gpu status" /etc/claude-code/CLAUDE.md'
+    check "blender on PATH explains how to install it (exit 127) before claude-blender-install" \
+        '! docker exec "$GPUCN" gosu claude blender --version >/dev/null 2>&1; [ "$(docker exec "$GPUCN" gosu claude sh -c "blender --version >/dev/null 2>&1; echo \$?")" = 127 ]'
+    docker rm -f "$GPUCN" >/dev/null 2>&1 || true
 fi
+echo "== 18b. GPU unusable at boot: the session degrades loudly, never fails =="
+GPUDCN="claude-smoke-gpu-degraded-$$"
+# shellcheck disable=SC2086
+docker run -d --name "$GPUDCN" $GPUHARDEN -e CLAUDE_GPU=1 \
+    -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=gpudegraded \
+    -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+wait_tmux "$GPUDCN" || true
+gpudlog="$(docker logs "$GPUDCN" 2>&1 || true)"
+check "the session still starts (tmux up) with CLAUDE_GPU=1 and no usable GPU" 'grep -q "started in tmux" <<<"$gpudlog"'
+check "the boot log carries the GPU DEGRADED banner with the reason" \
+    'grep -q "GPU DEGRADED: nvidia-smi is not in this container" <<<"$gpudlog"'
+check "claude-gpu status says degraded (exit 3)" \
+    '[ "$(docker exec "$GPUDCN" gosu claude sh -c "claude-gpu status >/dev/null; echo \$?")" = 3 ]'
+check "the healthcheck reports 'gpu: degraded (<reason>)' and still exits 0 (never fails health)" \
+    'hl="$(hc_gpu "$GPUDCN")"; [[ "$hl" == "healthy; gpu: degraded (nvidia-smi is not in this container"*"rc=0" ]]'
+check "the tmux status line shows GPU DEGRADED to anyone attached" \
+    'so="$(docker exec "$GPUDCN" gosu claude tmux show-options -t claude status-right 2>&1)"; grep -q "GPU DEGRADED" <<<"$so"'
+check "GPU work falls back to CPU and says so" \
+    'ro="$(docker exec "$GPUDCN" gosu claude claude-gpu run -- true 2>&1)"; grep -q "device=CPU (GPU degraded" <<<"$ro"'
+docker rm -f "$GPUDCN" >/dev/null 2>&1 || true
+check "a session WITHOUT --gpu gets no GPU note" \
+    '! docker exec "$CN" test -e /etc/claude-code/CLAUDE.md 2>/dev/null || ! docker exec "$CN" grep -q "GPU session note" /etc/claude-code/CLAUDE.md'
 
 echo
 echo "==============================================="

@@ -1,16 +1,16 @@
-## Temp space: `/scratch`, not `/tmp`
+# Temp space: `/scratch`, not `/tmp`
 
 `/tmp` is a **tmpfs**: it lives in RAM, is capped at 1 GB, and every page is charged to the
 container's memory cgroup. With `TMPDIR` unset, everything large defaults there: `pip`/`uv`
-building wheels, `docker save`/`load` tarballs, and (in a `--docker` session) the inner
-containerd's mount dirs. The result is an install that dies at 1 GiB with a confusing
+building wheels, big archives, compiler temp files. The result is an install that dies at
+1 GiB with a confusing
 `ENOSPC` while the host has terabytes free, or, worse, a session that OOM-kills itself
 because a build filled RAM it was accounted for.
 
 So every container gets a **disk-backed `claude-scratch-<name>` volume mounted at
 `/scratch`, and `TMPDIR` points at it**. Temp writes land on disk, where the space actually
-is; `/tmp` stays a small, fast tmpfs for what a tmpfs is good at. `dockerd` and `containerd`
-inherit `TMPDIR` from the entrypoint, and `bash_profile` re-exports it, so an SSH login gets
+is; `/tmp` stays a small, fast tmpfs for what a tmpfs is good at. Every process inherits
+`TMPDIR` from the entrypoint, and `bash_profile` re-exports it, so an SSH login gets
 the same behaviour as the agent (sshd builds a fresh environment and would otherwise fall
 back to `/tmp`).
 

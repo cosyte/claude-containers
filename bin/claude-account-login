@@ -31,5 +31,12 @@ docker run --rm -it \
     "$CLAUDE_IMAGE"
 
 ok "Login complete for account '$NAME'. Credentials are in volume '$VOL'."
+# Containers already running on this volume follow the new login by themselves.
+users="$(docker ps --filter "volume=$VOL" --filter 'label=claude.managed=1' --format '{{.Names}}' 2>/dev/null | paste -sd' ' - || true)"
+if [[ -n "$users" ]]; then
+    echo "  Running on this volume, and following the new login now (no restart needed): $users"
+    echo "  Each takes the credential within ~30 s and moves every session at its next idle moment."
+    echo -e "  Watch it:  ${C_B}claude-sessions -C <project> account${C_0}   (--now moves busy sessions too)"
+fi
 echo "  Launch a container that can rotate to it with:"
 echo -e "      ${C_B}claude-launch <project> --accounts ${NAME},... --workspace <path>${C_0}"

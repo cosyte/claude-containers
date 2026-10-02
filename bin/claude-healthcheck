@@ -12,6 +12,16 @@
 # alive and healthy when only the bridge dies (upstream bug #34255). So this
 # also reads the RC debug log written by claude-session.
 #
+# A --gpu session (CLAUDE_GPU=1) also reports its GPU on the healthy line
+# ("healthy; gpu: ok" or "healthy; gpu: degraded (<reason>)"), and a degraded GPU
+# NEVER makes the container unhealthy: the session is usable, GPU work falls back to
+# CPU, and an unhealthy status would only get a working session restarted.
+#
+# A container with named sessions (bin/claude-sessions) also reports them on the healthy
+# line ("healthy; sessions: 2/3 up (3d: claude exited)"). Like the GPU, a named session
+# NEVER makes the container unhealthy: its own RC watchdog recovers a dead link, and an
+# unhealthy status would only get every session in the container restarted. Main decides.
+#
 # Runs as root (the container's default user). The RC watchdog handles
 # recovery; this probe is the sensor: its result shows in `docker ps` and
 # `claude-list`. Output is one line; exit 0 = healthy, 1 = unhealthy.
@@ -45,5 +55,23 @@ if [[ -n "$LOG" && -s "$LOG" ]]; then
     esac
 fi
 
-echo "healthy"
+# --- GPU (reported, never fatal) ---------------------------------------------
+gpu=""
+if [[ "${CLAUDE_GPU:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    gpu="$(CLAUDE_GPU_PROBE_TIMEOUT=5 timeout 8 /usr/local/bin/claude-gpu status --oneline 2>/dev/null || true)"
+    case "$gpu" in
+        "gpu: ok"*)       gpu="gpu: ok" ;;
+        "gpu: degraded"*) ;;
+        *)                gpu="gpu: degraded (the GPU probe did not answer)" ;;
+    esac
+fi
+
+# --- named sessions (reported, never fatal) ---------------------------------------
+sessions=""
+if [[ -x /usr/local/bin/claude-sessions ]]; then
+    sessions="$(timeout 8 gosu "$CLAUDE_USER" env HOME="$(getent passwd "$CLAUDE_USER" | cut -d: -f6)" \
+        /usr/local/bin/claude-sessions health 2>/dev/null || true)"
+fi
+
+echo "healthy${gpu:+; $gpu}${sessions:+; $sessions}"
 exit 0

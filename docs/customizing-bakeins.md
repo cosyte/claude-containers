@@ -63,11 +63,20 @@ Verify in a session with `/mcp`.
 `settings.json`; Claude Code installs/syncs them on startup, idempotently.
 Replace the shipped example marketplace with your own. Verify with `/plugin`.
 
+To add a marketplace and plugins to one container without rebuilding the image, declare
+them at creation time instead (`--marketplace`, `--plugin`, `--start-cmd`): see "Install a
+kit at session start" in the README. Those are also installed by the CLI at boot, which a
+`settings.json` entry alone does not do for a plugin from a git source.
+
 ## Slash commands
 
 Markdown files in `claude-config/commands/`, optional YAML frontmatter
 (`description:`). `container-info.md` ships as a working example. Invoke as
 `/container-info`. Add your own `*.md` and rebuild.
+
+A baked command is copied only if that file doesn't already exist in the
+container's config volume, so editing one here reaches existing containers
+only after its copy there is removed (or the config volume is recreated).
 
 ## Skills
 

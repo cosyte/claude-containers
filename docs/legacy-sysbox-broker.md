@@ -175,32 +175,29 @@ The Remote-Control core (SSH → tmux → Claude Code), the unattended autopilot
 (driven by `CLAUDE_AUTOPILOT_CMD`, plus the durable task queue and the SCM observer),
 launch/compose-gen (minus broker flags), housekeeping (disk-gc, healthcheck), baked
 config (`claude-config/`), and the security floor (secret guard, egress firewall,
-`CLAUDE_BROKER_GIT_KEY`) all continue on `main`. The r730xd mobile-Remote-Control
+`CLAUDE_BROKER_GIT_KEY`) all continue on `main`. The mobile Remote Control
 workflow is unchanged.
 
-## Postscript: the Sysbox *runtime* came back, the broker did not
+## Postscript: the Sysbox *runtime* came back for `--docker`, then left for good
 
-`--docker` (2026-07-14) gives a session its own Docker engine so it can build images
-and run containers/compose stacks, and it runs the container under
-`--runtime=sysbox-runc`. That is a deliberate reuse of the **runtime** this substrate
-introduced, and of nothing else: there is no broker, no worker plane, no spool, no
-controller mode, no `CLAUDE_WORKER_*`. The retired flags (`--broker`, `--sysbox`,
-`--worker-tarball`) remain hard errors; `--sysbox` now redirects to `--docker`, which
-selects the runtime itself.
+`--docker` (2026-07-14) gave a session its own Docker engine so it could build images
+and run containers/compose stacks, by running the container under
+`--runtime=sysbox-runc`. That reused the **runtime** this substrate introduced and
+nothing else: no broker, no worker plane, no spool, no controller mode.
 
-It also **inverts** this substrate's central design move. The broker chowned the inner
-socket to root and mediated every launch specifically to keep the agent OFF the inner
-daemon (the agent was the untrusted party). Under `--docker`, the agent using Docker
-*is* the feature, so it is placed in the `docker` group and handed the socket, which
-means it can reach root inside its own container. Sysbox's user namespace is what makes
-that acceptable (container-root maps to an unprivileged host uid), but the consequence
-is that `CLAUDE_BROKER_GIT_KEY` and `CLAUDE_EGRESS_LOCKDOWN`: both of which assume root
-is separate from the agent: do not bind on a `--docker` container. See
-[architecture.md](architecture.md) ("container workflows are an opt-in image variant on
-Sysbox").
+It was **removed** on 2026-09-25, together with the `WITH_DOCKER` image variant, and the
+host no longer needs Sysbox for anything in this repo. The reasons:
 
-Worth recording for anyone reading that prune's commit: it deleted `WITH_DOCKER` on the
-correct grounds that the baked engine was unreachable: no runtime, no privilege, no
-socket, and nothing that started `dockerd`. The Sysbox runtime is exactly the missing
-piece, and `test/unit.sh` now pins the *wiring* rather than the absence, so the engine
-cannot silently become dead weight again.
+- It was the only reason to keep a non-default runtime installed on the host, and that
+  runtime's FUSE filesystem daemon was behind repeated wedges where a container could
+  not be stopped or removed without aborting the FUSE connection by hand.
+- A `--docker` session had to skip `--cap-drop ALL` (an inner daemon cannot start under
+  the minimal set), the one place the hardening floor had an exception.
+- Socket access is a route to root inside the container, so `CLAUDE_BROKER_GIT_KEY` and
+  `CLAUDE_EGRESS_LOCKDOWN` did not bind on a `--docker` session.
+
+Every session now runs on plain `runc` with the capability drop. `--docker`,
+`--no-docker` and `--sysbox` (launcher and generator) are hard errors that name the
+removal, an ambient `CLAUDE_DOCKER=1` refuses the launch, and the entrypoint warns if an
+old container still carries it. The last `main` commit that had `--docker` is tagged
+`legacy-docker-engine-2026-09-25` (annotated); recover the implementation from there.

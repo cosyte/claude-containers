@@ -4,12 +4,11 @@
 # in-container Claude Code session the mise-first package-install pattern per
 # ecosystem (Python / Node / Rust / Go), the PEP-668 dead-ends for the system
 # Python 3.11 interpreter, the no-sudo/no-apt reality of a container (system
-# libraries have no self-service path: the worker-tier apt path that used to
-# provide one was retired with the substrate; see docs/legacy-sysbox-broker.md),
+# libraries have no self-service path),
 # the /cache shared cache, and the explicit refusal of sudo /
 # --break-system-packages / edits to /etc,/opt,/usr.
 #
-# NO docker, NO sysbox. §8a of entrypoint.sh already installs the baked
+# NO docker. §8a of entrypoint.sh already installs the baked
 # CLAUDE.md into the running container on first start (proven by
 # test/unit.sh); this unit test is a **content contract** on the baked file
 # itself: an in-repo regression guard that every mandatory phrase survives
@@ -150,8 +149,7 @@ else
     bad "Go: 'go install' MUST be named as the second step"
 fi
 
-# A6. (e) System libraries: no sudo, no self-service path (the Sysbox-worker
-# apt tier was retired; see docs/legacy-sysbox-broker.md).
+# A6. (e) System libraries: no sudo, no self-service path.
 if has "$CLAUDE_MD" 'no `sudo`' \
    || has "$CLAUDE_MD" 'no sudo' \
    || has "$CLAUDE_MD" "**no \`sudo\`**"; then

@@ -10,9 +10,7 @@
 # Never force-removes a running container and never touches volumes: plain `-f` (no `-a`,
 # no `--volumes`) only ever reaps stopped/dangling/unused resources, so a live session's
 # image layers and data volumes are untouched. This is a standalone maintenance tool: run
-# it manually, or on a cron/timer of your own choosing (no entrypoint path auto-starts it;
-# it previously ran only inside the now-retired Sysbox nested-worker broker/controller mode.
-# See docs/legacy-sysbox-broker.md).
+# it manually, or on a cron/timer of your own choosing (no entrypoint path auto-starts it).
 #
 # Shared tool cache: the /cache volume (mise installs + cargo/go/npm/uv caches) is
 # a NAMED volume, so the prunes above deliberately never touch it, but it still needs

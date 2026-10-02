@@ -46,12 +46,8 @@ could strip it back out.
 The file is mode `644` owned by `root`, in a `755` directory owned by `root`, so
 a session running as `claude` cannot write it, replace it, chmod it, or unlink
 it. `test/smoke.sh` proves that against a live container rather than asserting
-it. Two things void it, and neither is a defect in this mechanism:
+it. One thing voids it, and it is not a defect in this mechanism:
 
-- **`--docker` sessions.** An inner Docker daemon gives the session a route to
-  root inside its own container, so it can rewrite the file. The boot log says so
-  on those containers. This is the same caveat `CLAUDE_BROKER_GIT_KEY` and
-  `CLAUDE_EGRESS_LOCKDOWN` carry.
 - **Anyone with host access.** That is the point: the operator can always change
   the policy from outside, which is what the next section is about.
 

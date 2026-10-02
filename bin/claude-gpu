@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# claude-gpu: the NVIDIA GPU guard for a --gpu session. Runs inside the container.
+#
+#   claude-gpu status [--oneline]
+#       ok | degraded (<reason>) | off, plus device, driver, VRAM, NVENC sessions and
+#       utilization. Exit 0 = ok, 3 = degraded, 4 = off.
+#   claude-gpu run [--min-free-mib N] [--wait SECONDS] [--max-util PCT] [--max-nvenc N]
+#                  [--cpu] [--no-oom-retry] -- <command> [args...]
+#       Preflight on the device-wide numbers (the card is shared, e.g. with a media
+#       server's NVENC transcodes): if the GPU is short of VRAM or busy, poll until
+#       --wait runs out, then run the command on CPU instead. A GPU run that fails with
+#       an out-of-memory error is retried once on CPU. Prints one line saying which
+#       device ran and why. Exits with the command's own status.
+#   claude-gpu blender <blender args...>
+#       Blender through the guard: Cycles on OptiX, else CUDA, else CPU (via Cycles'
+#       own `--cycles-device`, no GUI preferences file involved). EEVEE and Workbench
+#       follow the EGL vendor the guard picks (NVIDIA on GPU, Mesa llvmpipe on CPU).
+#   claude-gpu env gpu|cpu
+#       Print the device contract as shell exports (eval "$(claude-gpu env cpu)").
+#
+# The device contract every run gets (read it from your own tool to pick a backend):
+#   CLAUDE_GPU_DEVICE=gpu|cpu    what the guard decided
+#   CLAUDE_BLENDER_DEVICE=OPTIX|CUDA|CPU (blender) or auto|CPU (run)
+#   on CPU also: CUDA_VISIBLE_DEVICES= (CUDA sees no device), and glvnd is pointed at
+#   Mesa (__EGL_VENDOR_LIBRARY_FILENAMES, __GLX_VENDOR_LIBRARY_NAME, llvmpipe), so an
+#   EGL/GLX program (EEVEE, VTK, a build123d preview) renders in software.
+#
+# Defaults (override with the flags or these env vars):
+#   CLAUDE_GPU_MIN_FREE_MIB=2048  VRAM that must be free before GPU work starts. A modest
+#                                 render needs about 1 GiB; the rest is a reserve so a
+#                                 co-tenant's new NVENC sessions (a few hundred MiB each)
+#                                 still fit while the job runs.
+#   CLAUDE_GPU_WAIT=120           seconds to wait for the card before falling back to CPU
+#   CLAUDE_GPU_MAX_UTIL=80        busiest SM utilization (%) that still counts as free
+#   CLAUDE_GPU_MAX_NVENC=2        most concurrent NVENC sessions that still count as free
+#   CLAUDE_GPU_PROBE_TIMEOUT=5    seconds before a hung nvidia-smi counts as degraded
+#
+# NVIDIA only. Device-level numbers are global (every tenant's usage), which is exactly
+# what a polite guard needs; per-process attribution is only visible from the host.
+set -uo pipefail
+
+MIN_FREE="${CLAUDE_GPU_MIN_FREE_MIB:-2048}"
+WAIT="${CLAUDE_GPU_WAIT:-120}"
+MAX_UTIL="${CLAUDE_GPU_MAX_UTIL:-80}"
+MAX_NVENC="${CLAUDE_GPU_MAX_NVENC:-2}"
+PROBE_TIMEOUT="${CLAUDE_GPU_PROBE_TIMEOUT:-5}"
+POLL="${CLAUDE_GPU_POLL:-5}"
+MESA_EGL_VENDOR="${CLAUDE_GPU_MESA_EGL_VENDOR:-/usr/share/glvnd/egl_vendor.d/50_mesa.json}"
+
+say()  { echo "claude-gpu: $*" >&2; }
+die()  { say "$*"; exit 64; }
+usage() { sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+# --- probe --------------------------------------------------------------------
+# Sets G_STATE (ok|degraded|off), G_REASON, and on ok: G_NAME G_DRIVER G_TOTAL G_FREE
+# G_USED G_UTIL G_NVENC. Reads GPU 0 only: there is no device selection (the session
+# gets the whole card, or all cards, and the guard judges the first).
+probe() {
+    G_STATE="" G_REASON="" G_NAME="" G_DRIVER="" G_TOTAL="" G_FREE="" G_USED="" G_UTIL="" G_NVENC=""
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        if [[ "${CLAUDE_GPU:-0}" =~ ^(1|true|yes|on)$ ]]; then
+            G_STATE=degraded
+            G_REASON="nvidia-smi is not in this container: the GPU device was not attached (check the CDI device on the host)"
+        else
+            G_STATE=off G_REASON="not a GPU session"
+        fi
+        return
+    fi
+    local out rc line
+    out="$(timeout "$PROBE_TIMEOUT" nvidia-smi \
+        --query-gpu=name,driver_version,memory.total,memory.free,memory.used,utilization.gpu,encoder.stats.sessionCount \
+        --format=csv,noheader,nounits 2>&1)"; rc=$?
+    if (( rc == 124 )); then
+        G_STATE=degraded G_REASON="nvidia-smi hung for ${PROBE_TIMEOUT}s"; return
+    fi
+    if (( rc != 0 )); then
+        line="$(grep -m1 -v '^[[:space:]]*$' <<<"$out")"
+        G_STATE=degraded G_REASON="nvidia-smi failed (exit $rc): ${line:-no output}"; return
+    fi
+    line="$(head -n1 <<<"$out")"
+    IFS=',' read -r G_NAME G_DRIVER G_TOTAL G_FREE G_USED G_UTIL G_NVENC <<<"$line"
+    trim() { local v="$1"; v="${v#"${v%%[![:space:]]*}"}"; echo "${v%"${v##*[![:space:]]}"}"; }
+    G_NAME="$(trim "$G_NAME")" G_DRIVER="$(trim "$G_DRIVER")" G_TOTAL="$(trim "$G_TOTAL")"
+    G_FREE="$(trim "$G_FREE")" G_USED="$(trim "$G_USED")" G_UTIL="$(trim "$G_UTIL")" G_NVENC="$(trim "$G_NVENC")"
+    # A field nvidia-smi cannot read comes back as "[N/A]"; only the numbers the guard
+    # decides on must parse. NVENC and utilization default to 0 when a card cannot say.
+    int "$G_UTIL"  || G_UTIL=0
+    int "$G_NVENC" || G_NVENC=0
+    if [[ -z "$G_NAME" ]] || ! int "$G_TOTAL" || ! int "$G_FREE"; then
+        G_STATE=degraded G_REASON="unparseable nvidia-smi output: ${line:-empty}"; return
+    fi
+    G_STATE=ok
+}
+
+oneline() {
+    case "$G_STATE" in
+        ok)       echo "gpu: ok (${G_NAME}, driver ${G_DRIVER}, ${G_FREE}/${G_TOTAL} MiB free, util ${G_UTIL}%, nvenc ${G_NVENC})" ;;
+        degraded) echo "gpu: degraded (${G_REASON})" ;;
+        *)        echo "gpu: off" ;;
+    esac
+}
+
+cmd_status() {
+    local brief=0
+    [[ "${1:-}" == "--oneline" ]] && brief=1
+    probe
+    if (( brief )); then
+        oneline
+    else
+        echo "gpu: ${G_STATE}${G_REASON:+ (${G_REASON})}"
+        if [[ "$G_STATE" == ok ]]; then
+            echo "device: ${G_NAME}"
+            echo "driver: ${G_DRIVER}"
+            echo "vram: ${G_FREE} MiB free of ${G_TOTAL} MiB (${G_USED} MiB used)"
+            echo "nvenc sessions: ${G_NVENC}"
+            echo "utilization: ${G_UTIL}%"
+        fi
+    fi
+    case "$G_STATE" in ok) return 0 ;; degraded) return 3 ;; *) return 4 ;; esac
+}
+
+# --- device contract ----------------------------------------------------------
+# The environment a child gets for each device. Printed as exports for `env`, applied
+# with `export` for `run`.
+contract() {  # contract gpu|cpu
+    if [[ "$1" == gpu ]]; then
+        echo "export CLAUDE_GPU_DEVICE=gpu"
+        echo "export CLAUDE_BLENDER_DEVICE=\${CLAUDE_BLENDER_DEVICE:-auto}"
+    else
+        echo "export CLAUDE_GPU_DEVICE=cpu"
+        echo "export CLAUDE_BLENDER_DEVICE=CPU"
+        echo "export CUDA_VISIBLE_DEVICES="
+        echo "export __EGL_VENDOR_LIBRARY_FILENAMES=${MESA_EGL_VENDOR}"
+        echo "export __GLX_VENDOR_LIBRARY_NAME=mesa"
+        echo "export LIBGL_ALWAYS_SOFTWARE=1"
+        echo "export GALLIUM_DRIVER=llvmpipe"
+    fi
+}
+
+# --- preflight ----------------------------------------------------------------
+# Sets WHY to a human reason; returns 0 when the GPU may be used right now.
+WHY=""
+gpu_free_now() {
+    probe
+    case "$G_STATE" in
+        off)      WHY="no GPU in this session"; return 2 ;;
+        degraded) WHY="GPU degraded: ${G_REASON}"; return 2 ;;
+    esac
+    if (( G_FREE < MIN_FREE )); then
+        WHY="${G_FREE} MiB free < ${MIN_FREE} MiB required"; return 1
+    fi
+    if (( G_UTIL > MAX_UTIL )); then
+        WHY="utilization ${G_UTIL}% > ${MAX_UTIL}%"; return 1
+    fi
+    if (( G_NVENC > MAX_NVENC )); then
+        WHY="${G_NVENC} NVENC sessions > ${MAX_NVENC}"; return 1
+    fi
+    WHY="${G_NAME}, ${G_FREE}/${G_TOTAL} MiB free, util ${G_UTIL}%, nvenc ${G_NVENC}"
+    return 0
+}
+
+# decide: sets DEVICE (gpu|cpu) and WHY, waiting up to WAIT seconds for a busy card.
+decide() {
+    local force_cpu="$1" waited=0 rc
+    if (( force_cpu )); then DEVICE=cpu WHY="CPU requested (--cpu)"; return; fi
+    while :; do
+        gpu_free_now; rc=$?
+        (( rc == 0 )) && { DEVICE=gpu; return; }
+        (( rc == 2 )) && { DEVICE=cpu; return; }
+        if (( waited >= WAIT )); then
+            DEVICE=cpu WHY="GPU still busy after ${waited}s (${WHY})"; return
+        fi
+        (( waited == 0 )) && say "GPU busy (${WHY}); waiting up to ${WAIT}s before falling back to CPU"
+        sleep "$POLL"; waited=$(( waited + POLL ))
+    done
+}
+
+OOM_RE='out of memory|CUDA_ERROR_OUT_OF_MEMORY|cudaErrorMemoryAllocation|CUDA error: out of memory|OUT_OF_MEMORY|System is out of GPU memory|failed to allocate .*(device|GPU) memory|OPTIX_ERROR_.*MEMORY'
+
+# run_on <device> <cmd...>: run with the device contract, copying stdout and stderr (kept
+# separate, so a caller can still redirect either) into a log that an out-of-memory check
+# can read, and return the command's status. stderr goes through a FIFO whose reader is
+# waited for, so the log is complete before anyone greps it.
+RUN_LOG=""
+run_on() {
+    local dev="$1"; shift
+    local fifo teepid rc
+    RUN_LOG="$(mktemp "${TMPDIR:-/tmp}/claude-gpu.XXXXXX")"
+    fifo="${RUN_LOG}.err"
+    mkfifo "$fifo"
+    tee -a "$RUN_LOG" < "$fifo" >&2 &
+    teepid=$!
+    (
+        eval "$(contract "$dev")"
+        exec "$@"
+    ) 2>"$fifo" | tee -a "$RUN_LOG"
+    rc=${PIPESTATUS[0]}
+    wait "$teepid" 2>/dev/null
+    rm -f "$fifo"
+    return "$rc"
+}
+
+cmd_run() {
+    local force_cpu=0 oom_retry=1
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --min-free-mib) int "${2:-}" || die "--min-free-mib needs a number of MiB"; MIN_FREE="$2"; shift 2 ;;
+            --wait)         int "${2:-}" || die "--wait needs a number of seconds"; WAIT="$2"; shift 2 ;;
+            --max-util)     int "${2:-}" || die "--max-util needs a percentage"; MAX_UTIL="$2"; shift 2 ;;
+            --max-nvenc)    int "${2:-}" || die "--max-nvenc needs a count"; MAX_NVENC="$2"; shift 2 ;;
+            --cpu)          force_cpu=1; shift ;;
+            --no-oom-retry) oom_retry=0; shift ;;
+            --)             shift; break ;;
+            *)              die "unknown run option '$1' (the command goes after --)" ;;
+        esac
+    done
+    [[ $# -gt 0 ]] || die "run needs a command after --"
+    run_decided "$force_cpu" "$oom_retry" "$@"
+}
+
+# run_decided <force_cpu> <oom_retry> <cmd...>
+run_decided() {
+    local force_cpu="$1" oom_retry="$2"; shift 2
+    local t0 rc
+    decide "$force_cpu"
+    say "device=${DEVICE^^} (${WHY})"
+    t0=$SECONDS
+    run_on "$DEVICE" "$@"; rc=$?
+    if [[ "$DEVICE" == gpu && $rc -ne 0 && $oom_retry -eq 1 ]] && grep -qiE "$OOM_RE" "$RUN_LOG"; then
+        rm -f "$RUN_LOG"
+        say "device=CPU (the GPU run failed with an out-of-memory error after $(( SECONDS - t0 ))s; retrying once on CPU)"
+        t0=$SECONDS
+        run_on cpu "$@"; rc=$?
+        DEVICE=cpu
+    fi
+    rm -f "$RUN_LOG"
+    say "done on ${DEVICE^^}: exit ${rc}, $(( SECONDS - t0 ))s"
+    return "$rc"
+}
+
+# --- blender ------------------------------------------------------------------
+# Which Cycles GPU backends list this card. Asked of Blender itself, once per boot (the
+# answer only changes with the driver or the Blender build), cached under /tmp.
+blender_backends() {
+    local cache="/tmp/claude-gpu-blender-backends" out
+    if [[ -s "$cache" ]]; then cat "$cache"; return; fi
+    out="$(timeout 120 blender -b --factory-startup --python-expr '
+import bpy
+p = bpy.context.preferences.addons["cycles"].preferences
+p.refresh_devices()
+found = []
+for kind in ("OPTIX", "CUDA"):
+    try:
+        devs = p.get_devices_for_type(kind)
+    except Exception:
+        devs = []
+    if any(d.type == kind for d in devs):
+        found.append(kind)
+print("CLAUDE_GPU_BACKENDS=" + ",".join(found))
+' 2>/dev/null | sed -n 's/^CLAUDE_GPU_BACKENDS=//p' | tail -n1)"
+    printf '%s\n' "$out" > "$cache" 2>/dev/null || true
+    echo "$out"
+}
+
+cmd_blender() {
+    command -v blender >/dev/null 2>&1 && blender --version >/dev/null 2>&1 \
+        || die "blender is not installed: run claude-blender-install first"
+    local backends kind="CPU" force_cpu=0
+    [[ "${CLAUDE_BLENDER_DEVICE:-auto}" =~ ^[Cc][Pp][Uu]$ ]] && force_cpu=1
+    decide "$force_cpu"
+    if [[ "$DEVICE" == gpu ]]; then
+        backends="$(blender_backends)"
+        case ",$backends," in
+            *,OPTIX,*) kind=OPTIX ;;
+            *,CUDA,*)  kind=CUDA ;;
+            *)         DEVICE=cpu WHY="Blender's Cycles lists no OptiX or CUDA device for this card" ;;
+        esac
+        case "${CLAUDE_BLENDER_DEVICE:-auto}" in
+            OPTIX|CUDA) [[ ",$backends," == *",${CLAUDE_BLENDER_DEVICE},"* ]] && kind="$CLAUDE_BLENDER_DEVICE" ;;
+        esac
+    fi
+    [[ "$DEVICE" == cpu ]] && kind=CPU
+    # Cycles reads --cycles-device from the arguments after the FIRST `--`: insert it
+    # there, or append a `--` of our own when the caller passed none.
+    local args=() inserted=0 a
+    for a in "$@"; do
+        args+=("$a")
+        if [[ "$a" == "--" && $inserted -eq 0 ]]; then args+=(--cycles-device "$kind"); inserted=1; fi
+    done
+    (( inserted )) || args+=(-- --cycles-device "$kind")
+    export CLAUDE_BLENDER_DEVICE="$kind"
+    say "blender: Cycles device ${kind}"
+    # decide() already ran: hand run_decided the outcome instead of probing twice.
+    if [[ "$DEVICE" == cpu ]]; then
+        run_decided_fixed cpu blender "${args[@]}"
+    else
+        run_decided_fixed gpu blender "${args[@]}"
+    fi
+}
+
+# run_decided_fixed <dev> <cmd...>: like run_decided, with the device already chosen.
+# An out-of-memory GPU render is retried once with Cycles on CPU.
+run_decided_fixed() {
+    local dev="$1"; shift
+    local t0=$SECONDS rc
+    say "device=${dev^^} (${WHY})"
+    run_on "$dev" "$@"; rc=$?
+    if [[ "$dev" == gpu && $rc -ne 0 ]] && grep -qiE "$OOM_RE" "$RUN_LOG"; then
+        rm -f "$RUN_LOG"
+        say "device=CPU (the GPU render failed with an out-of-memory error after $(( SECONDS - t0 ))s; retrying once on CPU)"
+        local cpu_args=() a prev=""
+        for a in "$@"; do
+            [[ "$prev" == --cycles-device && "$a" =~ ^(OPTIX|CUDA)$ ]] && a=CPU
+            cpu_args+=("$a"); prev="$a"
+        done
+        export CLAUDE_BLENDER_DEVICE=CPU
+        t0=$SECONDS
+        run_on cpu "${cpu_args[@]}"; rc=$?
+        dev=cpu
+    fi
+    rm -f "$RUN_LOG"
+    say "done on ${dev^^}: exit ${rc}, $(( SECONDS - t0 ))s"
+    return "$rc"
+}
+
+case "${1:-}" in
+    status)   shift; cmd_status "$@" ;;
+    run)      shift; cmd_run "$@" ;;
+    blender)  shift; cmd_blender "$@" ;;
+    env)      shift; [[ "${1:-}" =~ ^(gpu|cpu)$ ]] || die "env needs gpu or cpu"; contract "$1" ;;
+    -h|--help|help) usage 0 ;;
+    "")       usage 64 ;;
+    *)        die "unknown command '$1' (try --help)" ;;
+esac

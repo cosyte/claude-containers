@@ -35,9 +35,8 @@ patched host runtime**: the launcher warns when host runC is older than
 
 What the stack does enforce, and therefore what a bypass of *is* a valid report:
 
-- **No `--privileged`, and no host Docker socket mount, ever.** Nested Docker
-  (`--docker`) runs under Sysbox so the inner daemon's root maps to an
-  unprivileged host uid. A path that obtains host root is in scope.
+- **No `--privileged`, and no host Docker socket mount, ever.** Every session runs
+  on plain `runc`. A path that obtains host root is in scope.
 - **Capability floor.** `--security-opt no-new-privileges`, plus (default)
   dropping all Linux capabilities and re-adding only the minimal set for sshd
   and privilege-dropping: `NET_RAW`, `MKNOD` and `SETFCAP` are removed.
@@ -91,10 +90,6 @@ Known and accepted, so **not** vulnerabilities in this project:
 - **Egress is open by default.** Lockdown is opt-in.
 - **An IP-pinned allowlist goes stale** as CDNs rotate addresses, and
   `statsig.anthropic.com` is not publicly resolvable so it cannot be pinned.
-- **Under `--docker` the agent can reach root inside its own container**, that
-  is what a Docker socket is. Sysbox keeps that root off the host. The launcher
-  warns that `CLAUDE_BROKER_GIT_KEY` and `CLAUDE_EGRESS_LOCKDOWN` assume root is
-  separate from the agent and therefore no longer bind in that mode.
 
 The full threat model: including the weaponized-agent supply-chain exfil case
 the package-provisioning tier is built against: is in

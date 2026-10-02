@@ -30,15 +30,24 @@
 #
 # Sources claude-rc-watchdog for pane_idle/dismiss_resume_menu/is_resume_menu/
 # with_respawn_lock/_kill_and_respawn_pane: both scripts can respawn the same
-# claude:main pane, and with_respawn_lock's mkdir-based mutex is what keeps
-# them from ever doing so at the same instant.
+# pane, and with_respawn_lock's mkdir-based mutex (one lock per window, shared with
+# that window's RC watchdog) is what keeps them from ever doing so at the same instant.
+#
+# Several sessions (bin/claude-sessions) share the container's one credential file, so
+# this watches every session window: the first to show a limit triggers the rotation, and
+# each limited session is resumed under the new account with its own conversation id. A
+# session that shows the limit later but has not been respawned since the rotation is
+# still on the old account: it is resumed, and no second rotation happens.
 #
 # Runs as the `claude` user, started by the entrypoint only when CLAUDE_ACCOUNTS
 # is set. Disable with CLAUDE_USAGE_WATCHDOG=0.
 set -uo pipefail
 
-# shellcheck disable=SC1091
-source /usr/local/bin/claude-rc-watchdog
+# shellcheck disable=SC1090,SC1091
+source "${CLAUDE_RC_WATCHDOG_BIN:-/usr/local/bin/claude-rc-watchdog}"
+SESSIONS_BIN="${CLAUDE_SESSIONS_BIN:-/usr/local/bin/claude-sessions}"
+SESSION_ID_BIN="${CLAUDE_SESSION_ID_BIN:-/usr/local/bin/claude-session-id}"
+SESSION_BIN="${CLAUDE_SESSION_CMD:-/usr/local/bin/claude-session}"
 
 # Override the sourced say()/watch_loop(): claude-rc-watchdog's own prefix and
 # main loop aren't this script's; everything else it defines (pane_idle,
@@ -170,45 +179,96 @@ request_account_switch() {
     [[ "$result" == "$target" ]]
 }
 
-# Mark the current account cooling down, wait for the pane to go idle (never
-# interrupt an in-flight turn), then try each round-robin candidate in order
+# Every session window running now: main plus the named sessions (bin/claude-sessions).
+# They all share this container's one credential file, so a usage limit is an account
+# event: whichever session hits it first starts the rotation, and every session that
+# shows the limit is resumed under the new account.
+session_windows() {
+    local names n
+    names="$("$SESSIONS_BIN" names 2>/dev/null)" || names=""
+    [[ -n "$names" ]] || names="${WINDOW#*:}"
+    local wins
+    wins="$(tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null)" || return 0
+    for n in $names; do
+        grep -qxF -- "$n" <<<"$wins" && echo "$n"
+    done
+    return 0
+}
+
+limited_windows() {  # the session windows showing a usage-limit message now
+    local w keep="$WINDOW"
+    for w in $(session_windows); do
+        WINDOW="$SESSION:$w"
+        [[ "$(usage_state)" == limited ]] && echo "$w"
+    done
+    WINDOW="$keep"
+    return 0
+}
+
+# Respawn each named window so it resumes its own conversation (under whatever account is
+# active now). Each window has its own respawn lock, shared with its RC watchdog.
+declare -A RESPAWNED_AT=()
+respawn_windows() {  # respawn_windows <window>...
+    local w sid rc=0 keep_window="$WINDOW" keep_log="$LOG" keep_lock="$RESPAWN_LOCK_DIR" base
+    base="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
+    for w in "$@"; do
+        WINDOW="$SESSION:$w"
+        sid="$("$SESSION_ID_BIN" "$WINDOW" 2>/dev/null)" || sid=""
+        if [[ "$w" == main ]]; then
+            RESPAWN_CMD="$SESSION_BIN ${sid:+--resume $sid}"
+            RESPAWN_LOCK_DIR="$keep_lock"; LOG="$keep_log"
+        else
+            RESPAWN_CMD="$SESSION_BIN --session $w ${sid:+--resume $sid}"
+            RESPAWN_LOCK_DIR="/tmp/claude-respawn-$w.lock"; LOG="${base:+${base%.log}-$w.log}"
+        fi
+        [[ -n "$sid" ]] || RESPAWN_CMD+="--continue"
+        if with_respawn_lock _kill_and_respawn_pane; then
+            RESPAWNED_AT[$w]="$(date +%s)"
+            say "Session '$w' respawned${sid:+ (conversation $sid)}."
+            dismiss_resume_menu
+        else
+            say "WARNING: could not respawn session '$w' (lock busy, or 'tmux respawn-pane' failed)."
+            rc=1
+        fi
+    done
+    WINDOW="$keep_window"; LOG="$keep_log"; RESPAWN_LOCK_DIR="$keep_lock"
+    return $rc
+}
+
+# Mark the current account cooling down, wait for the first limited pane to go idle
+# (never interrupt an in-flight turn), then try each round-robin candidate in order
 # until one actually accepts the switch: a candidate the listener rejects
 # (no valid token) gets a short cooldown of its own so it isn't retried every
-# cycle, and the next candidate is tried within the same pass.
-rotate_account() {
-    local current="$1" target sid candidates
+# cycle, and the next candidate is tried within the same pass. Then every limited
+# session is resumed under the new account.
+rotate_account() {  # rotate_account <current-account> <limited window>...
+    local current="$1" target candidates keep="$WINDOW"
+    shift
+    WINDOW="$SESSION:$1"
 
     mark_cooldown_if_new "$current"
 
     candidates="$(next_account "$current")"
-    [[ -n "$candidates" ]] || { say "No account eligible yet (all cooling down), will retry."; return 1; }
+    [[ -n "$candidates" ]] || { say "No account eligible yet (all cooling down), will retry."; WINDOW="$keep"; return 1; }
 
     say "Waiting for the pane to go idle before rotating…"
     while ! pane_idle; do
-        [[ "$(usage_state)" == limited ]] || { say "Recovered before rotation, standing down."; return 0; }
+        [[ "$(usage_state)" == limited ]] || { say "Recovered before rotation, standing down."; WINDOW="$keep"; return 0; }
     done
-    [[ "$(usage_state)" == limited ]] || { say "Recovered before rotation, standing down."; return 0; }
-
-    sid="$(/usr/local/bin/claude-session-id 2>/dev/null)" || sid=""
-    [[ -n "$sid" ]] || say "WARNING: could not determine the session id, falling back to --continue."
+    [[ "$(usage_state)" == limited ]] || { say "Recovered before rotation, standing down."; WINDOW="$keep"; return 0; }
+    WINDOW="$keep"
 
     while IFS= read -r target; do
         [[ -n "$target" ]] || continue
         if request_account_switch "$target"; then
             say "Switched credentials to account '$target'."
-            if [[ -n "$sid" ]]; then
-                RESPAWN_CMD="/usr/local/bin/claude-session --resume $sid"
-            else
-                RESPAWN_CMD="/usr/local/bin/claude-session --continue"
-            fi
-            if with_respawn_lock _kill_and_respawn_pane; then
-                say "Session respawned under account '$target'."
-                dismiss_resume_menu
+            LAST_ROTATION="$(date +%s)"
+            if respawn_windows "$@"; then
+                say "Sessions ($*) respawned under account '$target'."
                 return 0
-            else
-                say "WARNING: credentials switched to '$target' but the respawn failed (lock busy, or 'tmux respawn-pane' failed), will retry next cycle."
-                return 1
             fi
+            say "WARNING: credentials switched to '$target' but a respawn failed, will retry next cycle."
+            return 1
         else
             say "Account '$target' has no valid token right now: short cooldown, trying the next candidate."
             echo "$(( $(date +%s) + NO_TOKEN_COOLDOWN ))" > "$COOLDOWN_DIR/$target.cooldown-until"
@@ -219,6 +279,7 @@ rotate_account() {
     return 1
 }
 
+LAST_ROTATION=0
 watch_loop() {
     if [[ -z "${CLAUDE_ACCOUNTS:-}" ]]; then
         say "CLAUDE_ACCOUNTS is unset: nothing to watch. Exiting."
@@ -226,19 +287,33 @@ watch_loop() {
     fi
     mkdir -p "$COOLDOWN_DIR"
 
-    local restarts=0 last_attempt=0 now current
+    local restarts=0 last_attempt=0 now current w
+    local -a limited stale fresh
 
-    say "started: watching pane ${WINDOW} for a usage-limit hit (accounts: ${CLAUDE_ACCOUNTS}, check every ${CHECK_INTERVAL}s)"
+    say "started: watching every session window for a usage-limit hit (accounts: ${CLAUDE_ACCOUNTS}, check every ${CHECK_INTERVAL}s)"
 
     while sleep "$CHECK_INTERVAL"; do
         tmux has-session -t "$SESSION" >/dev/null 2>&1 || { say "tmux session gone: exiting."; break; }
 
         now="$(date +%s)"
-        if [[ "$(usage_state)" != limited ]]; then
+        mapfile -t limited < <(limited_windows)
+        if (( ${#limited[@]} == 0 )); then
             if (( restarts > 0 )) && (( now - last_attempt > ATTEMPT_COOLDOWN )); then
                 say "No usage-limit hit since the last rotation: resetting restart counter."
                 restarts=0
             fi
+            continue
+        fi
+
+        # A session that has not been respawned since the last rotation still runs on the
+        # previous account: resume it under the current one, which is not the one limited.
+        stale=() fresh=()
+        for w in "${limited[@]}"; do
+            if (( LAST_ROTATION > 0 && ${RESPAWNED_AT[$w]:-0} < LAST_ROTATION )); then stale+=("$w"); else fresh+=("$w"); fi
+        done
+        if (( ${#stale[@]} )); then
+            say "Sessions still on the previous account hit its limit: resuming them under the current one (${stale[*]})."
+            respawn_windows "${stale[@]}"
             continue
         fi
 
@@ -252,7 +327,7 @@ watch_loop() {
         [[ -n "$current" ]] || { say "WARNING: no active-account state found, cannot rotate."; continue; }
 
         last_attempt="$(date +%s)"
-        rotate_account "$current" && restarts=$((restarts + 1))
+        rotate_account "$current" "${fresh[@]}" && restarts=$((restarts + 1))
     done
 }
 

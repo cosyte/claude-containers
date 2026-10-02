@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
 # claude-disk-verify: prove disk-safety hygiene: docker-free, no root, no daemon needed.
 #
-# The substrate strip removed the on-host proof this script used to run against a real Sysbox
-# nested-worker controller (the broker's per-launch disk-floor refusal, N sequential
-# worker cycles, worker-image reuse), that whole substrate is retired; see
-# docs/legacy-sysbox-broker.md. What's left is the surviving, non-broker disk-hygiene
-# surface, all of it docker-free:
+# It checks the disk-hygiene surface, all of it docker-free:
 #
 #   1. disk_free_mib parses a real `df` correctly, and CLAUDE_DISK_FREE_MIB_OVERRIDE
 #      forces the value loudly;
@@ -17,7 +13,7 @@
 #      just a subset).
 #
 # The same logic is covered in CI by test/disk-unit.sh; this script re-runs it as a
-# one-command sanity pass, runnable anywhere (no Sysbox, no docker daemon needed).
+# one-command sanity pass, runnable anywhere (no docker daemon needed).
 #
 #   bin/claude-disk-verify    run all checks (docker-free, safe anywhere)
 set -euo pipefail

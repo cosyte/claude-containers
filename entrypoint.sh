@@ -63,6 +63,14 @@ if (( ${#_retired_set[@]} > 0 )); then
         esac
     done
 fi
+# CLAUDE_DOCKER=1 asked for the per-session Docker engine, which was removed along with
+# the host runtime it needed. A container created by an old launcher or compose file can
+# still carry it: boot (it is a leftover, not an unsafe request) but say plainly that
+# there is no engine, instead of letting the session discover it one failed build later.
+if [[ "${CLAUDE_DOCKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    log "WARNING: CLAUDE_DOCKER=${CLAUDE_DOCKER} is IGNORED: the per-session Docker engine was removed."
+    log "WARNING: This session has no Docker daemon. Recreate the container without it."
+fi
 unset _v _retired_set RETIRED_VARS
 
 # --- 0b. Refuse the retired CLAUDE_CONTROLLER mode ------------------
@@ -149,16 +157,16 @@ chmod 700 "$CLAUDE_HOME/.ssh"
 
 # --- 2a. Disk-backed scratch (TMPDIR) ----------------------------------------
 # /tmp is a tmpfs: RAM, ~1g, charged to the memory cgroup. With TMPDIR unset everything
-# large lands there: pip/uv wheel builds, `docker save|load` tarballs, the inner
-# containerd's mount dirs, and dies at the cap with an ENOSPC that reads like a bug, while
-# the host has terabytes free. So point TMPDIR at a disk-backed volume. TMPDIR is exported
-# by the launcher/compose (so dockerd, containerd and every child inherit it); this block
+# large lands there: pip/uv wheel builds, big archives, compiler temp files, and dies at
+# the cap with an ENOSPC that reads like a bug, while the host has terabytes free. So point
+# TMPDIR at a disk-backed volume. TMPDIR is exported by the launcher/compose (so every
+# child inherits it); this block
 # just makes the directory usable, and tolerates its absence so an older container (or a
 # plain `docker run` of this image) still boots with the historical /tmp behaviour.
 SCRATCH_DIR="${TMPDIR:-}"
 if [[ -n "$SCRATCH_DIR" && "$SCRATCH_DIR" != "/tmp" ]]; then
     if mkdir -p "$SCRATCH_DIR" 2>/dev/null; then
-        # 1777 like /tmp: the agent is unprivileged, but root writes here too (dockerd).
+        # 1777 like /tmp: the agent is unprivileged, but root writes here too.
         chown "$CLAUDE_UID:$CLAUDE_GID" "$SCRATCH_DIR" 2>/dev/null || true
         chmod 1777 "$SCRATCH_DIR" 2>/dev/null || true
         # Clear stale contents on boot. This is scratch, not state: a volume (unlike a tmpfs)
@@ -166,12 +174,60 @@ if [[ -n "$SCRATCH_DIR" && "$SCRATCH_DIR" != "/tmp" ]]; then
         # half-written tarball forever, and slowly fills the pool. Deleting only at boot means
         # nothing in flight is ever pulled out from under a running process.
         find "$SCRATCH_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
-        log "Scratch (TMPDIR)    : $SCRATCH_DIR (disk-backed; cleared on boot)"
+        # Say what it really is: --browser and --gpu services mount a RAM tmpfs here.
+        if [[ "$(stat -f -c %T "$SCRATCH_DIR" 2>/dev/null)" == tmpfs ]]; then
+            log "Scratch (TMPDIR)    : $SCRATCH_DIR (RAM tmpfs, $(df -h --output=size "$SCRATCH_DIR" 2>/dev/null | tail -1 | tr -d ' '); cleared on boot)"
+        else
+            log "Scratch (TMPDIR)    : $SCRATCH_DIR (disk-backed; cleared on boot)"
+        fi
     else
         log "WARNING: TMPDIR=$SCRATCH_DIR is not creatable, falling back to /tmp (a 1g tmpfs)."
         log "WARNING: Large installs/builds may fail with ENOSPC. Mount a scratch volume there."
         unset TMPDIR
     fi
+fi
+
+# --- 2b. GPU probe (CLAUDE_GPU=1, a --gpu session) ----------------------------
+# A --gpu session has the host's NVIDIA device injected by CDI at creation. Probe it once,
+# BOUNDED (a wedged driver must never hang boot), and record the result where the
+# healthcheck, the guard and anyone who SSHes in can read it. A GPU that is unusable at
+# boot DEGRADES the session loudly instead of failing it: the session still starts, CPU
+# fallbacks still work, and the operator sees why in this log, on the tmux status line
+# and in `claude-healthcheck`. The usual cause is a host driver update without a reboot
+# (NVML "Driver/library version mismatch"). A MISSING CDI spec on the host is different:
+# Docker refuses to create the container at all, so that case never reaches this code.
+# GPU_STATE_FILE / GPU_GUARD are named (not inlined) so test/gpu-unit.sh can run this
+# exact block unprivileged against a sandbox and a fake guard.
+GPU_STATE_FILE=/run/claude-gpu/state
+GPU_GUARD=/usr/local/bin/claude-gpu
+GPU_DEGRADED_REASON=""
+if [[ "${CLAUDE_GPU:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    mkdir -p "${GPU_STATE_FILE%/*}" && chmod 755 "${GPU_STATE_FILE%/*}"
+    # `&& ... ||` keeps a non-zero probe from tripping `set -e`: a degraded GPU is a
+    # result to report, not a reason to stop booting.
+    gpu_line="$(CLAUDE_GPU_PROBE_TIMEOUT="${CLAUDE_GPU_PROBE_TIMEOUT:-10}" \
+        timeout 20 "$GPU_GUARD" status --oneline 2>&1)" && gpu_rc=0 || gpu_rc=$?
+    case "$gpu_rc" in
+        0)   ;;
+        124) gpu_line="gpu: degraded (the boot probe timed out after 20s)" ;;
+        3)   ;;
+        *)   gpu_line="gpu: degraded (the boot probe failed, exit ${gpu_rc}: ${gpu_line:-no output})" ;;
+    esac
+    printf '%s\n' "$gpu_line" > "$GPU_STATE_FILE.tmp" && mv -f "$GPU_STATE_FILE.tmp" "$GPU_STATE_FILE"
+    chmod 644 "$GPU_STATE_FILE" 2>/dev/null || true
+    if [[ "$gpu_line" == "gpu: ok"* ]]; then
+        log "GPU                 : ${gpu_line#gpu: }"
+    else
+        GPU_DEGRADED_REASON="${gpu_line#gpu: degraded (}"; GPU_DEGRADED_REASON="${GPU_DEGRADED_REASON%)}"
+        log "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        log "GPU DEGRADED: ${GPU_DEGRADED_REASON}"
+        log "This --gpu session is starting WITHOUT a usable GPU. Everything else works, and"
+        log "GPU jobs fall back to CPU through claude-gpu. Fix it on the host (a driver update"
+        log "needs a reboot; 'nvidia-smi' on the host must work), then restart this container."
+        log "Details: docs/troubleshooting.md, GPU."
+        log "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    fi
+    unset gpu_line gpu_rc
 fi
 
 # --- 3. SSH host keys (persistent) -------------------------------------------
@@ -343,70 +399,6 @@ else
     log "No GH_TOKEN: git uses the SSH deploy key only; gh CLI is unauthenticated"
 fi
 
-# --- 5a. Inner Docker daemon (CLAUDE_DOCKER=1, the :docker image variant) ------
-# Gives the session a REAL Docker engine of its own, so the agent can build images and
-# run containers (Dockerfiles, compose stacks, testcontainers) as part of normal work.
-#
-# The daemon runs INSIDE this container. It is never the host daemon: mounting the host's
-# /var/run/docker.sock, or running --privileged, would each hand a prompt-injectable agent
-# root on the host, and both stay FORBIDDEN. What makes an inner daemon safe *without*
-# privilege is the runtime: under Sysbox (--runtime=sysbox-runc) this container's root is
-# mapped into a user namespace onto an unprivileged host uid, so dockerd gets the caps it
-# needs over its OWN namespace and none over the host. bin/claude-launch --docker selects it.
-#
-# NOTE: this deliberately INVERTS the retired worker-broker (docs/legacy-sysbox-broker.md),
-# which chowned the socket to root and brokered every launch to keep the agent OFF the inner
-# daemon. Here the agent using Docker IS the feature, so we put it in the `docker` group and
-# hand it the socket. The honest consequence: socket access is a path to root INSIDE this
-# container (`docker run -v /:/rootfs …`). Under Sysbox that root is still an unprivileged
-# nobody on the host: the boundary that matters holds, but it does mean in-container
-# controls that assume "root is separate from the agent" no longer bind. Two exist:
-# CLAUDE_BROKER_GIT_KEY (§5, root-owned ssh-agent hiding the deploy key) and
-# CLAUDE_EGRESS_LOCKDOWN (root-owned iptables). claude-launch warns when either is combined
-# with --docker; see README "Container workflows" and docs/architecture.md.
-if [[ "${CLAUDE_DOCKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
-    command -v dockerd >/dev/null 2>&1 \
-        || die "CLAUDE_DOCKER=1 needs the Docker engine, but 'dockerd' is not in this image.
-       Rebuild the docker variant:  make build-docker
-         (or:  make build WITH_DOCKER=1 CLAUDE_IMAGE=<tag>, then set CLAUDE_IMAGE)
-       and launch it with --docker (which selects --runtime=sysbox-runc)."
-
-    # Let the unprivileged agent talk to the socket. dockerd creates /var/run/docker.sock as
-    # root:docker 0660, so group membership is the whole mechanism. `groupadd -f` is a no-op
-    # when the docker-ce postinst already made the group; usermod is idempotent.
-    groupadd -f docker
-    usermod -aG docker "$CLAUDE_USER"
-
-    if docker info >/dev/null 2>&1; then
-        log "Inner dockerd       : already reachable, reusing it (not starting a second daemon)"
-    else
-        DOCKERD_WAIT="${CLAUDE_DOCKERD_WAIT:-60}"
-        # A POSITIVE integer with no leading zero: `(( … ))` reads a leading-zero value as
-        # octal (090 → error, spins forever), and 0 would time out before dockerd could even
-        # create its socket. Both are refused up front (fail closed, clear message).
-        [[ "$DOCKERD_WAIT" =~ ^[1-9][0-9]*$ ]] \
-            || die "CLAUDE_DOCKERD_WAIT '$DOCKERD_WAIT' is not a positive integer (no leading zero)"
-        # Clear a stale pidfile an ungracefully-killed daemon left behind, so a container
-        # restart (--restart unless-stopped) doesn't boot-loop on 'pidfile exists'.
-        rm -f /run/docker.pid /var/run/docker.pid 2>/dev/null || true
-        log "Inner dockerd       : starting (Sysbox-contained; log at /var/log/inner-dockerd.log)"
-        dockerd >> /var/log/inner-dockerd.log 2>&1 &
-        dwaited=0
-        until docker info >/dev/null 2>&1; do
-            if (( dwaited >= DOCKERD_WAIT )); then
-                log "inner dockerd did not become ready within ${DOCKERD_WAIT}s: last log lines:"
-                tail -n 20 /var/log/inner-dockerd.log 2>/dev/null | sed 's/^/    /' >&2 || true
-                die "inner dockerd failed to start. The usual cause is a missing
-       --runtime=sysbox-runc: without the user namespace Sysbox provides, an unprivileged
-       container cannot run a Docker daemon. Check 'docker info | grep sysbox' on the HOST,
-       and launch with --docker (claude-launch selects the runtime for you)."
-            fi
-            sleep 1; dwaited=$((dwaited + 1))
-        done
-        log "Inner dockerd       : ready after ${dwaited}s ($(docker --version 2>/dev/null))"
-    fi
-fi
-
 # --- 6. Credentials reconcile (shared auth volume) ---------------------------
 # Credentials are shared across all containers via the claude-auth volume; the
 # rest of the config dir is per-container so sessions never collide. Claude
@@ -447,6 +439,7 @@ else
     [[ -e "$AUTH_DIR/.credentials.json" ]] && { chown root:root "$AUTH_DIR/.credentials.json" 2>/dev/null || true; chmod 600 "$AUTH_DIR/.credentials.json" 2>/dev/null || true; }
 fi
 
+# >>> credential sync (test/sessions-unit.sh runs this block against a sandbox)
 # A .credentials.json is USABLE only if it carries a non-empty OAuth access
 # token. When a token refresh fails, Claude Code rewrites the file in place with
 # EMPTY token fields (accessToken/refreshToken => ""): i.e. it logs the session
@@ -477,36 +470,144 @@ publish_creds() {  # publish_creds <src> <dst>
     fi
 }
 
-reconcile_creds() {
-    local b="$CLAUDE_CONFIG_DIR/.credentials.json"  # per-container copy (claude:600)
-    while sleep 30; do
-        # Re-derive the master path every tick (not just once) so a rotation
-        # picked up mid-loop (bin/claude-usage-watchdog updates .active-account
-        # via account_switch_listener below) keeps token-refresh write-back
-        # flowing to whichever account is now active, not the one at boot.
-        local a
-        if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
-            a="/auth-accounts/$(cat "$CLAUDE_CONFIG_DIR/.active-account" 2>/dev/null || echo "${ACCOUNT_NAMES[0]}")/.credentials.json"
-        else
-            a="$AUTH_DIR/.credentials.json"          # shared fleet master (root:600)
-        fi
-        if creds_have_token "$b" && ! creds_have_token "$a"; then
-            # master absent/logged-out, local good -> seed or repair the master
-            publish_creds "$b" "$a"
-        elif creds_have_token "$a" && ! creds_have_token "$b"; then
-            # local absent/logged-out, master good -> repair the local copy
-            publish_creds "$a" "$b"
-        elif creds_have_token "$b" && [[ "$b" -nt "$a" ]] && ! cmp -s "$b" "$a"; then
-            # both good, local refreshed more recently -> push the refresh up
-            publish_creds "$b" "$a"
-        elif creds_have_token "$a" && [[ "$a" -nt "$b" ]] && ! cmp -s "$a" "$b"; then
-            # both good, master refreshed more recently -> pull the refresh down
-            publish_creds "$a" "$b"
-        fi
-        # both tokenless (a real refresh-token expiry): nothing to do, the loop
-        # never invents a token; recovery is `make login` on the host.
-    done
+# Which ACCOUNT each credential belongs to. The shared master's account is in the .claude.json
+# that `make login` / claude-account-login write beside it (oauthAccount.accountUuid). The
+# container records the account its OWN credential came from in ACCT_FILE whenever it takes the
+# master's. When the two differ, the operator logged a different account into the shared volume,
+# and the container follows with no restart: it takes the new credential, updates its cached
+# identity, and writes SWITCH_FILE, from which `claude-sessions supervise` restarts each session
+# onto the new account at its next idle moment (resuming its conversation; Remote Control mints
+# a fresh link under the new account). Until every Claude process has restarted, the loop NEVER
+# pushes the container's own credential up: a session still running on the old account
+# refreshes the OLD account's token into it, and pushing that would undo the operator's login.
+ACCT_FILE="${ACCT_FILE:-$CLAUDE_CONFIG_DIR/.credentials-account}"
+SWITCH_FILE="${SWITCH_FILE:-$CLAUDE_CONFIG_DIR/.account-changed}"
+CLAUDE_BIN_RE="${CLAUDE_BIN_RE:-^/opt/claude-code/bin/claude$}"
+SWITCH_AT=0
+master_dir() {
+    if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
+        echo "/auth-accounts/$(cat "$CLAUDE_CONFIG_DIR/.active-account" 2>/dev/null || echo "${ACCOUNT_NAMES[0]}")"
+    else
+        echo "$AUTH_DIR"
+    fi
 }
+account_of() { jq -r '.oauthAccount.accountUuid // empty' "$1/.claude.json" 2>/dev/null || true; }
+email_of()   { jq -r '.oauthAccount.emailAddress // empty' "$1/.claude.json" 2>/dev/null || true; }
+local_account() {  # the account the container's own credential came from
+    local a; a="$(cat "$ACCT_FILE" 2>/dev/null || true)"
+    [[ -n "$a" ]] || a="$(jq -r '.oauthAccount.accountUuid // empty' "$CLAUDE_CONFIG_DIR/.claude.json" 2>/dev/null || true)"
+    printf '%s' "$a"
+}
+set_local_account() {
+    printf '%s\n' "$1" > "$ACCT_FILE.tmp" || return 0
+    chown "$CLAUDE_UID:$CLAUDE_GID" "$ACCT_FILE.tmp" 2>/dev/null || true
+    chmod 644 "$ACCT_FILE.tmp" 2>/dev/null || true
+    mv -f "$ACCT_FILE.tmp" "$ACCT_FILE" || true
+}
+refresh_cached_account() {  # the container's .claude.json oauthAccount := the master's
+    local cj="$CLAUDE_CONFIG_DIR/.claude.json" acct
+    acct="$(jq -c '.oauthAccount // empty' "$1/.claude.json" 2>/dev/null)" || return 0
+    [[ -n "$acct" && -s "$cj" ]] || return 0
+    if jq --argjson a "$acct" '.oauthAccount = $a' "$cj" > "$cj.acct.$$" 2>/dev/null && [[ -s "$cj.acct.$$" ]]; then
+        chown "$CLAUDE_UID:$CLAUDE_GID" "$cj.acct.$$" 2>/dev/null || true
+        mv -f "$cj.acct.$$" "$cj" || rm -f "$cj.acct.$$"
+    else
+        rm -f "$cj.acct.$$"
+    fi
+    return 0
+}
+write_switch_file() {  # write_switch_file <epoch> <account>: the request claude-sessions acts on
+    printf '%s %s\n' "$1" "$2" > "$SWITCH_FILE.tmp" || return 0
+    chown "$CLAUDE_UID:$CLAUDE_GID" "$SWITCH_FILE.tmp" 2>/dev/null || true
+    mv -f "$SWITCH_FILE.tmp" "$SWITCH_FILE" || true
+}
+# A Claude process that started before the switch (so it still runs the previous account).
+# Exact, not `ps` elapsed seconds: each process's start comes from /proc (boot time + starttime
+# in clock ticks) and is compared in milliseconds. A whole-second comparison misjudged a process
+# started in the second before the switch as new, and its old-account refresh was pushed up.
+now_ms() { date +%s%3N; }
+old_claude_running() {  # old_claude_running <switch time, ms since the epoch>
+    local btime hz pid args st
+    btime="$(awk '/^btime /{print $2}' /proc/stat 2>/dev/null)"; hz="$(getconf CLK_TCK 2>/dev/null || echo 100)"
+    [[ "$btime" =~ ^[0-9]+$ ]] || return 0      # cannot tell: assume old, never push
+    while read -r pid args; do
+        [[ "${args%% *}" =~ $CLAUDE_BIN_RE ]] || continue
+        st="$(sed -E 's/^[0-9]+ \(.*\) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $20}')"
+        [[ "$st" =~ ^[0-9]+$ ]] || continue
+        (( btime * 1000 + st * 1000 / hz < $1 )) && return 0
+    done < <(ps -eo pid=,args= 2>/dev/null)
+    return 1
+}
+
+reconcile_once() {
+    local b="$CLAUDE_CONFIG_DIR/.credentials.json"  # per-container copy (claude:600)
+    # Re-derive the master every tick (not just once) so a rotation picked up mid-loop
+    # (bin/claude-usage-watchdog updates .active-account via account_switch_listener below)
+    # keeps token-refresh write-back flowing to whichever account is now active.
+    local md a m l
+    md="$(master_dir)"; a="$md/.credentials.json"          # the shared master (root:600)
+    m="$(account_of "$md")"; l="$(local_account)"
+    # CLAUDE_AUTH_FOLLOW=0: no account logic at all, the pre-existing newest-wins sync.
+    [[ "${CLAUDE_AUTH_FOLLOW:-1}" =~ ^(0|false|no|off)$ ]] && m=""
+    if [[ -n "$m" && "$m" != "$l" ]] && creds_have_token "$a"; then
+        # A different account was logged into the shared volume: follow it.
+        publish_creds "$a" "$b" || return 0
+        set_local_account "$m"
+        refresh_cached_account "$md"
+        SWITCH_AT="$(now_ms)"
+        write_switch_file "$(( SWITCH_AT / 1000 ))" "$m"
+        log "Auth account        : the shared credential is now $(email_of "$md") (${m:0:8}…, was ${l:0:8}…); taken over, and each session restarts onto it at its next idle moment"
+        return 0
+    fi
+    if (( SWITCH_AT > 0 )); then
+        if old_claude_running "$SWITCH_AT"; then
+            # Sessions still on the old account: the master wins, nothing is ever pushed up.
+            creds_have_token "$a" && ! cmp -s "$a" "$b" && publish_creds "$a" "$b"
+            return 0
+        fi
+        SWITCH_AT=0
+        refresh_cached_account "$md"
+        log "Auth account        : every Claude process now runs on $(email_of "$md")"
+    fi
+    if creds_have_token "$b" && ! creds_have_token "$a"; then
+        # master absent/logged-out, local good -> seed or repair the master, but only with a
+        # credential of the master's own account (or when the master names none)
+        [[ -z "$m" || "$m" == "$l" ]] && publish_creds "$b" "$a"
+    elif creds_have_token "$a" && ! creds_have_token "$b"; then
+        # local absent/logged-out, master good -> repair the local copy
+        publish_creds "$a" "$b"
+    elif creds_have_token "$b" && [[ "$b" -nt "$a" ]] && ! cmp -s "$b" "$a"; then
+        # both good, local refreshed more recently -> push the refresh up (same account only)
+        [[ -z "$m" || "$m" == "$l" ]] && publish_creds "$b" "$a"
+    elif creds_have_token "$a" && [[ "$a" -nt "$b" ]] && ! cmp -s "$a" "$b"; then
+        # both good, master refreshed more recently -> pull the refresh down
+        publish_creds "$a" "$b"
+    fi
+    # both tokenless (a real refresh-token expiry): nothing to do, the loop
+    # never invents a token; recovery is `make login` on the host.
+    return 0
+}
+
+# At boot, before any Claude starts: a container whose own credential is another account's
+# (a dormant service, or one stopped across an account change) takes the master's now, so no
+# session ever starts on, or refreshes, the old account.
+_md="$(master_dir)"; _m="$(account_of "$_md")"
+if [[ "${CLAUDE_AUTH_FOLLOW:-1}" =~ ^(0|false|no|off)$ ]]; then
+    log "Auth account        : account changes are NOT followed (CLAUDE_AUTH_FOLLOW=${CLAUDE_AUTH_FOLLOW}); a new login needs a container restart"
+elif [[ -n "$_m" ]] && creds_have_token "$_md/.credentials.json"; then
+    _l="$(local_account)"
+    if [[ "$_l" != "$_m" ]]; then
+        publish_creds "$_md/.credentials.json" "$CLAUDE_CONFIG_DIR/.credentials.json"
+        [[ -n "$_l" ]] && log "Auth account        : this container's own credential was another account's (${_l:0:8}…); replaced with the shared one before any session started"
+    fi
+    set_local_account "$_m"
+    log "Auth account        : $(email_of "$_md") (${_m:0:8}…); account changes in the shared credential are followed without a restart"
+fi
+unset _md _m _l
+# <<< credential sync
+
+# `|| true`: errexit is off inside, so one failed pass can never end the loop for good.
+reconcile_creds() { while sleep 30; do reconcile_once || true; done; }
 reconcile_creds &
 RECONCILE_PID=$!
 
@@ -535,6 +636,8 @@ account_switch_listener() {
         local src="/auth-accounts/$req/.credentials.json"
         if creds_have_token "$src"; then
             publish_creds "$src" "$CLAUDE_CONFIG_DIR/.credentials.json"
+            # The watchdog respawns what it rotates; this is not an operator's account change.
+            set_local_account "$(account_of "/auth-accounts/$req")"
             echo "$req" > "$CLAUDE_CONFIG_DIR/.active-account.tmp" \
                 && mv -f "$CLAUDE_CONFIG_DIR/.active-account.tmp" "$CLAUDE_CONFIG_DIR/.active-account"
             echo "$req" > "$done_file.tmp" && mv -f "$done_file.tmp" "$done_file"
@@ -814,10 +917,24 @@ if (( managed_ok == 1 )); then
 else
     log "Managed policy       : NOT ENFORCED ($managed_why). NO setting is managed: everything stays overridable from inside the container, exactly as it was before this image delivered any policy."
 fi
-if [[ "${CLAUDE_DOCKER:-0}" =~ ^(1|true|yes|on)$ ]]; then
-    # Same caveat CLAUDE_BROKER_GIT_KEY and CLAUDE_EGRESS_LOCKDOWN carry: an inner
-    # daemon hands the session a route to root inside its own container.
-    log "Managed policy       : NOTE, this container runs an inner Docker daemon (CLAUDE_DOCKER), which gives the session a route to root inside the container. A session that takes it CAN rewrite $MANAGED_FILE, so read the line above as advisory here, not as containment."
+
+# --- 7b. GPU note for the session (CLAUDE_GPU=1) -----------------------------------
+# The session has to discover the GPU tooling on its own, so a GPU session gets a short
+# note in Claude Code's MANAGED memory file (root-owned, read above the user's own
+# CLAUDE.md). Written only when CLAUDE_GPU=1, rewritten on every boot (it lives in the
+# container layer), and never over a file an operator put there: ours carries a marker.
+GPU_NOTE_SRC="/opt/claude-config/CLAUDE.gpu.md"
+GPU_NOTE_DST="/etc/claude-code/CLAUDE.md"
+GPU_NOTE_MARK="claude-containers: GPU session note"
+if [[ "${CLAUDE_GPU:-0}" =~ ^(1|true|yes|on)$ && -f "$GPU_NOTE_SRC" ]]; then
+    if [[ -e "$GPU_NOTE_DST" ]] && ! grep -qF "$GPU_NOTE_MARK" "$GPU_NOTE_DST" 2>/dev/null; then
+        log "GPU note            : NOT written, $GPU_NOTE_DST is an operator's own file"
+    elif mkdir -p "${GPU_NOTE_DST%/*}" && chmod 755 "${GPU_NOTE_DST%/*}" \
+            && install -o root -g root -m 644 "$GPU_NOTE_SRC" "$GPU_NOTE_DST"; then
+        log "GPU note            : $GPU_NOTE_DST (claude-gpu, claude-blender-install)"
+    else
+        log "GPU note            : WARNING, could not write $GPU_NOTE_DST"
+    fi
 fi
 
 # --- 8. Merge baked-in config ------------------------------------------------
@@ -921,38 +1038,19 @@ if [[ -f "$BAKE_DIR/plugins/plugins.json" ]]; then
     log "Merged baked-in plugin marketplaces/plugins into settings.json"
 fi
 
-# 8c-bis. Runtime plugin injection: no rebuild required.
-# CLAUDE_EXTRA_MARKETPLACES: "name=url[,name=url,...]"  (git source, autoUpdate=true)
+# 8c-bis. Runtime kit injection: no rebuild required (bin/claude-kit).
+# CLAUDE_EXTRA_MARKETPLACES: "name=url[#ref][,...]"  git source; "#ref" pins a branch or tag
+#                            and turns autoUpdate off (a pin and auto-update contradict).
 # CLAUDE_EXTRA_PLUGINS:      "plugin@marketplace[,...]"
-# Existing settings.json entries always win (same semantics as the baked merge above).
+# Existing settings.json entries win, except a pinned marketplace (the declared pin wins).
+# The plugins are installed by the CLI, as the agent user, in §12d before any session starts.
 if [[ -n "${CLAUDE_EXTRA_MARKETPLACES:-}" ]] || [[ -n "${CLAUDE_EXTRA_PLUGINS:-}" ]]; then
-    MKT_JSON="{}"
-    if [[ -n "${CLAUDE_EXTRA_MARKETPLACES:-}" ]]; then
-        IFS=',' read -ra _MKT_ENTRIES <<< "$CLAUDE_EXTRA_MARKETPLACES"
-        for _entry in "${_MKT_ENTRIES[@]}"; do
-            _name="${_entry%%=*}"; _url="${_entry#*=}"
-            [[ -n "$_name" && -n "$_url" && "$_name" != "$_url" ]] || continue
-            MKT_JSON="$(jq --arg n "$_name" --arg u "$_url" \
-                '. + {($n): {"source": {"source": "git", "url": $u}, "autoUpdate": true}}' \
-                <<< "$MKT_JSON")"
-        done
+    if /usr/local/bin/claude-kit settings "$CLAUDE_CONFIG_DIR/settings.json"; then
+        log "Merged runtime plugin marketplaces/plugins into settings.json"
+    else
+        log "WARNING: claude-kit could not merge CLAUDE_EXTRA_MARKETPLACES / CLAUDE_EXTRA_PLUGINS into settings.json"
     fi
-    PLG_JSON="{}"
-    if [[ -n "${CLAUDE_EXTRA_PLUGINS:-}" ]]; then
-        IFS=',' read -ra _PLG_ENTRIES <<< "$CLAUDE_EXTRA_PLUGINS"
-        for _entry in "${_PLG_ENTRIES[@]}"; do
-            [[ -n "$_entry" ]] || continue
-            PLG_JSON="$(jq --arg p "$_entry" '. + {($p): true}' <<< "$PLG_JSON")"
-        done
-    fi
-    jq --argjson mkt "$MKT_JSON" --argjson plg "$PLG_JSON" '
-        .extraKnownMarketplaces = ($mkt + (.extraKnownMarketplaces // {}))
-        | .enabledPlugins       = ($plg + (.enabledPlugins // {}))
-    ' "$CLAUDE_CONFIG_DIR/settings.json" \
-        > "$CLAUDE_CONFIG_DIR/settings.json.tmp" \
-        && mv -f "$CLAUDE_CONFIG_DIR/settings.json.tmp" "$CLAUDE_CONFIG_DIR/settings.json"
     chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
-    log "Merged runtime plugin marketplaces/plugins into settings.json"
 fi
 
 # 8d. Custom slash commands
@@ -992,7 +1090,47 @@ if (( ${#ws_entries[@]} )); then
     done
 fi
 
-if [[ "$ws_populated" == "1" ]]; then
+# Multi-repo mode (GIT_REPOS, from claude-compose-gen --group or several claude-launch
+# --repo): /workspace is a parent directory and each repo lives in /workspace/<name>, the
+# last path component of its URL without .git. Entries are whitespace-separated
+# URL[#BRANCH]. Every boot clones only what is missing, so a repo added to the list later
+# appears on the next restart, and an existing checkout is never touched (it is the
+# session's work, whatever state it is in). The session starts in /workspace and sees
+# them all.
+ws_repos_list="${GIT_REPOS:-}"     # unset is the common case: never expand it bare under set -u
+if [[ -n "${ws_repos_list//[[:space:]]/}" ]]; then
+    [[ -z "${GIT_REPO_URL:-}" ]] \
+        || die "GIT_REPOS and GIT_REPO_URL are both set: a workspace holds one repo at its root,
+       or several in subdirectories, not both."
+    [[ ! -e "$WORKSPACE/.git" ]] \
+        || die "GIT_REPOS is set, but $WORKSPACE already holds a single repo at its root.
+       Cloning others inside it would nest repos. Use a fresh workspace volume for a
+       multi-repo container."
+    declare -A ws_repo_seen=(); ws_repo_names=()
+    for ws_spec in $ws_repos_list; do
+        ws_url="${ws_spec%%#*}" ws_branch=""
+        [[ "$ws_spec" == *#* ]] && ws_branch="${ws_spec#*#}"
+        ws_name="${ws_url%/}"; ws_name="${ws_name##*/}"; ws_name="${ws_name##*:}"; ws_name="${ws_name%.git}"
+        [[ "$ws_name" =~ ^[A-Za-z0-9._-]+$ && "$ws_name" != "." && "$ws_name" != ".." ]] \
+            || die "GIT_REPOS: cannot derive a directory name from '$ws_url'"
+        [[ -z "${ws_repo_seen[$ws_name]:-}" ]] \
+            || die "GIT_REPOS: two repos would both clone into $WORKSPACE/$ws_name"
+        ws_repo_seen[$ws_name]=1; ws_repo_names+=("$ws_name")
+        ws_dest="$WORKSPACE/$ws_name"
+        if [[ -e "$ws_dest/.git" || -n "$(ls -A "$ws_dest" 2>/dev/null)" ]]; then
+            log "Workspace repo      : $ws_name (existing checkout, left as it is)"
+            continue
+        fi
+        clone_args=()
+        [[ -n "$ws_branch" ]] && clone_args+=(--branch "$ws_branch")
+        [[ -n "${GIT_REPO_DEPTH:-}" ]] && clone_args+=(--depth "$GIT_REPO_DEPTH")
+        log "Workspace repo      : cloning $ws_url${ws_branch:+ (branch $ws_branch)} into $ws_dest"
+        asclaude git clone "${clone_args[@]}" "$ws_url" "$ws_dest" \
+            || die "git clone of $ws_url into $ws_dest failed (check the URL, the git SSH key, the branch)"
+    done
+    log "Workspace           : $WORKSPACE holds ${#ws_repo_names[@]} repos (${ws_repo_names[*]})"
+    unset ws_repo_seen ws_repo_names ws_spec ws_url ws_branch ws_name ws_dest
+elif [[ "$ws_populated" == "1" ]]; then
     log "Using existing workspace contents at $WORKSPACE"
 elif [[ -n "${GIT_REPO_URL:-}" ]]; then
     log "Cloning $GIT_REPO_URL into $WORKSPACE"
@@ -1002,7 +1140,7 @@ elif [[ -n "${GIT_REPO_URL:-}" ]]; then
     asclaude git clone "${clone_args[@]}" "$GIT_REPO_URL" "$WORKSPACE" \
         || die "git clone failed (check GIT_REPO_URL / git SSH key / branch)"
 else
-    die "Empty workspace and no GIT_REPO_URL. Set GIT_REPO_URL or bind-mount a
+    die "Empty workspace and no GIT_REPO_URL or GIT_REPOS. Set one, or bind-mount a
        checkout onto $WORKSPACE (use 'claude-launch --repo' or --workspace)."
 fi
 chown -R "$CLAUDE_UID:$CLAUDE_GID" "$WORKSPACE" 2>/dev/null || true
@@ -1151,7 +1289,9 @@ log "Model               : $CLAUDE_MODEL (override with CLAUDE_MODEL; 'default' 
 # removed and is refused up in §0b: long before we get here.
 case "${CLAUDE_AUTOPILOT:-0}" in
     1|true|yes|on) CLAUDE_MODE=autopilot;   MAIN_PANE_CMD=/usr/local/bin/claude-autopilot ;;
-    *)             CLAUDE_MODE=interactive; MAIN_PANE_CMD=/usr/local/bin/claude-session ;;
+    # --boot: resume main's last conversation when CLAUDE_MAIN_RESUME=1; otherwise (the
+    # default) a fresh one, exactly as before named sessions existed.
+    *)             CLAUDE_MODE=interactive; MAIN_PANE_CMD="/usr/local/bin/claude-session --boot" ;;
 esac
 export CLAUDE_MODE \
        CLAUDE_AUTOPILOT_CMD="${CLAUDE_AUTOPILOT_CMD:-}" \
@@ -1170,6 +1310,11 @@ export CLAUDE_MODE \
        CLAUDE_SCM_PR_LIMIT="${CLAUDE_SCM_PR_LIMIT:-}" \
        CLAUDE_SCM_PRIORITY="${CLAUDE_SCM_PRIORITY:-}" \
        CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
+# Named sessions (bin/claude-sessions, §12d). Exported so the tmux server carries them:
+# claude-sessions run from an SSH login reads them back from tmux's global environment.
+export CLAUDE_SESSIONS="${CLAUDE_SESSIONS:-}" \
+       CLAUDE_MAIN_RESUME="${CLAUDE_MAIN_RESUME:-0}" \
+       CLAUDE_RC_WATCHDOG="${CLAUDE_RC_WATCHDOG:-1}"
 
 # OpenTelemetry: opt-in fleet observability. Claude Code reads OTEL_* + the
 # enable flag straight from the process environment (env > settings.json), and
@@ -1200,6 +1345,31 @@ if [[ "${CLAUDE_OTEL_ENABLED:-0}" =~ ^(1|true|yes|on)$ || -n "${OTEL_EXPORTER_OT
     [[ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]] && \
         log "OpenTelemetry        : WARNING, enabled but OTEL_EXPORTER_OTLP_ENDPOINT is empty; nothing will be exported"
 fi
+
+# --- 12-threads. Library thread pools --------------------------------------------------
+# OpenMP, OpenBLAS, MKL, numexpr and Accelerate size their pools to the HOST's CPU count:
+# nproc ignores the cgroup quota. On a 56-thread host `import numpy, build123d` alone starts
+# 111 threads, and threads count against pids.max. Parallel test workers multiplied that:
+# two pytest-xdist runs of 28 workers held ~8,000 threads, hit a pids.max of 8192, and every
+# Claude session that then needed a thread crashed. Cap each process's pools unless the
+# operator (or the image) already set a variable; CLAUDE_THREADS_PER_PROCESS=0 leaves them
+# alone. A repo's own .claude/settings.json env still overrides these for its session.
+# Written to /etc/profile.d as well, since an SSH login gets a fresh environment.
+THREADS_PROFILE_D="/etc/profile.d/claude-threads.sh"
+_tpp="${CLAUDE_THREADS_PER_PROCESS:-4}"
+if [[ "$_tpp" =~ ^[1-9][0-9]*$ ]]; then
+    : > "$THREADS_PROFILE_D.tmp" 2>/dev/null || true
+    for _v in OMP_NUM_THREADS OPENBLAS_NUM_THREADS MKL_NUM_THREADS NUMEXPR_NUM_THREADS VECLIB_MAXIMUM_THREADS; do
+        [[ -n "${!_v:-}" ]] || export "$_v=$_tpp"
+        printf 'export %s="${%s:-%s}"\n' "$_v" "$_v" "${!_v}" >> "$THREADS_PROFILE_D.tmp" 2>/dev/null || true
+    done
+    mv -f "$THREADS_PROFILE_D.tmp" "$THREADS_PROFILE_D" 2>/dev/null && chmod 644 "$THREADS_PROFILE_D" 2>/dev/null || true
+    log "Thread pools        : OMP/OpenBLAS/MKL/numexpr/vecLib ${OMP_NUM_THREADS} per process (CLAUDE_THREADS_PER_PROCESS; 0 = leave them alone)"
+else
+    rm -f "$THREADS_PROFILE_D" 2>/dev/null || true
+    log "Thread pools        : NOT capped (CLAUDE_THREADS_PER_PROCESS=${_tpp}); libraries size them to the host's $(nproc) CPUs"
+fi
+unset _tpp
 
 # Native Claude Code CLI tuning knobs (real upstream env vars the `claude`
 # binary reads directly, see .env.example). Nothing to translate here, just
@@ -1297,10 +1467,33 @@ elif [[ -n "${CLAUDE_EGRESS_LOCKDOWN:-}" ]] && [[ ! "${CLAUDE_EGRESS_LOCKDOWN}" 
     log "Egress lockdown      : IPv4 UNRESTRICTED, IPv6 UNRESTRICTED (CLAUDE_EGRESS_LOCKDOWN='${CLAUDE_EGRESS_LOCKDOWN}' is not a recognised value, so NO firewall was applied; recognised: 0/false/no/off = off, 1/true/yes/on = lockdown that fails OPEN, strict = lockdown that refuses to start the agent when it cannot be applied)"
 fi
 
+# Named sessions, step 1 of 2 (§12d is step 2): bring the registry in line with
+# CLAUDE_SESSIONS and pre-accept workspace trust for every session directory NOW, while no
+# Claude process is running to rewrite .claude.json under us. The trust seeded for
+# /workspace in §7 does not cover /workspace/<repo>: without this a named session would sit
+# on the trust dialog. Never fatal.
+# The kit's plugins (CLAUDE_EXTRA_MARKETPLACES / CLAUDE_EXTRA_PLUGINS, §8c-bis) are installed
+# here, before any Claude session exists, so every session loads them from its first start
+# (a plugin's SessionStart hook included). Bounded per CLI call, and never fatal: a kit that
+# cannot be fetched is a warning in this log, and the container boots without it.
+if [[ -n "${CLAUDE_EXTRA_MARKETPLACES:-}" ]] || [[ -n "${CLAUDE_EXTRA_PLUGINS:-}" ]]; then
+    asclaude /usr/local/bin/claude-kit install \
+        || log "WARNING: claude-kit install failed; declared plugins may be missing (claude-kit status)"
+fi
+
+asclaude /usr/local/bin/claude-sessions prepare \
+    || log "WARNING: claude-sessions prepare failed; named sessions may be missing (claude-sessions ls)"
+
 # tmux server runs as the claude user; the main pane command falls back to an
 # interactive shell if it exits, so SSH stays usable. The pane lives in window
 # 'main' (the RC watchdog respawns it by name in interactive mode).
 asclaude tmux new-session -d -s claude -n main -x 220 -y 50 "$MAIN_PANE_CMD"
+# A degraded GPU (§2b) stays visible to anyone attached, not only in the boot log.
+if [[ -n "$GPU_DEGRADED_REASON" ]]; then
+    asclaude tmux set-option -t claude status-right-length 120 >/dev/null 2>&1 || true
+    asclaude tmux set-option -t claude status-right \
+        "#[bg=red,fg=white,bold] GPU DEGRADED: ${GPU_DEGRADED_REASON//#/##} (claude-gpu status) " >/dev/null 2>&1 || true
+fi
 log "Claude Code session 'claude' started in tmux (mode: $CLAUDE_MODE)"
 
 # Optional dev server: runs $CLAUDE_DEV_CMD in its own 'dev' tmux window so it
@@ -1356,6 +1549,29 @@ else
     log "Usage-limit watchdog disabled (CLAUDE_USAGE_WATCHDOG=0)"
 fi
 
+# --- 12d. Named sessions ------------------------------------------------------
+# CLAUDE_SESSIONS (claude-launch --session, claude-compose-gen --session) declares more
+# Claude sessions beside main, each in its own tmux window with its own Remote Control
+# link, directory, model and optional first prompt / goal; `claude-sessions new` adds more
+# at runtime and those persist on the config volume. `prepare` (above, before main started)
+# reconciled the declaration; `boot` starts every registered session that was not stopped
+# by hand, resuming its last conversation. It never fails the boot: a bad entry is skipped
+# with a log line.
+#
+# The supervisor always runs (it is cheap): it records which conversation each window is
+# running, so a restart or an RC recovery resumes exactly that one, and keeps a Remote
+# Control watchdog beside every named session.
+asclaude /usr/local/bin/claude-sessions boot --no-reconcile \
+    || log "WARNING: claude-sessions boot failed; named sessions may be missing (claude-sessions ls)"
+asclaude /usr/local/bin/claude-sessions supervise &
+SESSIONS_PID=$!
+# The kit's optional start command (CLAUDE_EXTRA_START_CMD), once per container start, in the
+# background, after the sessions are up. Never fatal.
+if [[ -n "${CLAUDE_EXTRA_START_CMD:-}" ]]; then
+    asclaude /usr/local/bin/claude-kit start \
+        || log "WARNING: claude-kit start failed; CLAUDE_EXTRA_START_CMD did not run (claude-kit status)"
+fi
+
 echo
 if [[ "$CLAUDE_MODE" == "autopilot" ]]; then
     if [[ -n "${CLAUDE_AUTOPILOT_CMD:-}" ]]; then
@@ -1367,6 +1583,10 @@ else
     log "Remote Control name : $CLAUDE_PROJECT_NAME  (look for it in the Claude app Code tab)"
 fi
 log "SSH                 : connect, you'll attach to the live tmux session"
+_named="$(asclaude /usr/local/bin/claude-sessions names 2>/dev/null | grep -vx main | tr '\n' ' ' || true)"
+[[ -n "${_named// }" ]] && \
+    log "Named sessions      : ${_named% }  (claude-sessions ls; Remote Control ${CLAUDE_PROJECT_NAME}-<name>)"
+unset _named
 [[ -n "${CLAUDE_DEV_CMD:-}" ]] && \
     log "Dev window          : tmux select-window -t claude:dev  (after SSH attach)"
 echo
@@ -1374,33 +1594,17 @@ echo
 # --- 13. Stay alive + graceful shutdown --------------------------------------
 shutdown() {
     log "Shutting down"
+    # Note every window's current conversation first, so the next boot resumes exactly it
+    # (the supervisor only records every 15s). Bounded: a stop must never hang on this.
+    timeout 5 gosu "$CLAUDE_USER" env CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" \
+        /usr/local/bin/claude-sessions record >/dev/null 2>&1 || true
     asclaude tmux kill-server >/dev/null 2>&1 || true
     pkill -x sshd >/dev/null 2>&1 || true
     kill "$RECONCILE_PID" >/dev/null 2>&1 || true
     [[ -n "${ACCT_SWITCH_PID:-}" ]] && kill "$ACCT_SWITCH_PID" >/dev/null 2>&1 || true
     [[ -n "${RC_WATCHDOG_PID:-}" ]] && kill "$RC_WATCHDOG_PID" >/dev/null 2>&1 || true
     [[ -n "${USAGE_WATCHDOG_PID:-}" ]] && kill "$USAGE_WATCHDOG_PID" >/dev/null 2>&1 || true
-    # Tear the inner Docker down BEFORE PID 1 exits (docker mode only). Without this, the
-    # inner containers and their containerd-shims are still alive when the container dies;
-    # the runtime then SIGKILLs the tree and the exit event can arrive after Docker has
-    # stopped waiting for it: surfacing on the host as
-    #   "could not kill container: tried to kill container, but did not receive an exit event"
-    # which aborts `docker rm -f` (observed: claude-rm --purge died mid-way, leaking volumes).
-    # Stopping the children first makes the teardown orderly and the exit event prompt.
-    # Best-effort throughout: a shutdown path must never be the reason a container won't die.
-    if [[ "${CLAUDE_DOCKER:-0}" =~ ^(1|true|yes|on)$ ]] && command -v docker >/dev/null 2>&1; then
-        log "Inner dockerd       : stopping inner containers, then the daemon"
-        # Bound this hard. The whole trap must finish inside the OUTER stop timeout
-        # (CLAUDE_STOP_TIMEOUT, default 20s): overrun it and Docker SIGKILLs PID 1, which is
-        # the very failure this trap exists to prevent. `-t 5` caps each inner container
-        # (Docker's default is 10s, and a process that ignores SIGTERM burns all of it), and
-        # `timeout 15` caps the batch.
-        # shellcheck disable=SC2046
-        timeout 15 docker stop -t 5 $(docker ps -q 2>/dev/null) >/dev/null 2>&1 || true
-        pkill -TERM -x dockerd >/dev/null 2>&1 || true
-        for _ in $(seq 10); do pgrep -x dockerd >/dev/null 2>&1 || break; sleep 1; done
-        pkill -KILL -x dockerd >/dev/null 2>&1 || true
-    fi
+    [[ -n "${SESSIONS_PID:-}" ]] && kill "$SESSIONS_PID" >/dev/null 2>&1 || true
     exit 0
 }
 trap shutdown TERM INT
@@ -1410,8 +1614,7 @@ trap shutdown TERM INT
 #
 # Require several CONSECUTIVE failures, not one. This probe is not a pure read:
 # `asclaude` is gosu + env + tmux, so every check costs three forks. When the container
-# is out of PIDs: the cgroup pids.max counts THREADS, so a browser or inner-dockerd
-# session reaches it long before the process count suggests: fork returns EAGAIN and
+# is out of PIDs: the cgroup pids.max counts THREADS, so a browser session reaches it long before the process count suggests: fork returns EAGAIN and
 # the probe fails against a tmux that is perfectly alive. Treating that one failure as
 # "tmux died" tore a healthy container down, and the restart policy then brought it back
 # with an empty session, losing the user's work. Observed twice in 16h on a real host:

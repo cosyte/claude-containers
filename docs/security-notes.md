@@ -1,4 +1,4 @@
-## Security notes
+# Security notes
 
 - **`--dangerously-skip-permissions` is the default.** The container is
   isolated from the host (separate fs, non-root `claude` user, resource caps),
@@ -53,10 +53,6 @@
   shared `/cache` volume's re-fetchable download caches when it exceeds
   `CLAUDE_CACHE_MAX_MIB`. Docker-free logic tests: `test/disk-unit.sh`,
   `test/sizing-unit.sh` (CI); one-command sanity pass: `bin/claude-disk-verify`.
-  (A nested-Sysbox worker-broker substrate used to run alongside this, a
-  root-owned broker spawning autonomous nested workers with a K-aware resource
-  envelope and a per-launch disk-pressure refusal. It is retired; see
-  [docs/legacy-sysbox-broker.md](legacy-sysbox-broker.md).)
 - **Secret brokering (git key + credentials).** By default the SSH deploy key is
   loaded into a **root-owned `ssh-agent`** and only a signing socket is exposed
   to the agent (via a root `socat` relay): git still pushes, but the
@@ -137,11 +133,11 @@
   the supply-chain exfil path the container refuses. Nothing broadens unless the
   flag is explicitly set, and the fail-open-as-a-whole semantics are unchanged.
   Debian/apt **system** libraries are deliberately not here: no self-service path
-  currently provisions those (see docs/legacy-sysbox-broker.md). The threat model (the
+  provisions those. The threat model (the
   Nx-class weaponized-agent exfil) and the containment rules are in
   [docs/package-provisioning-security.md](package-provisioning-security.md).
   The baked `mise` toolchain provisioner (rootless language/CLI installs) rides on
-  this containment: see [Toolchains on demand](toolchains-on-demand.md#toolchains-on-demand-mise) and
+  this containment: see [Toolchains on demand](toolchains-on-demand.md) and
   [docs/toolchain-provisioning.md](toolchain-provisioning.md).
 - **`claude-auth` volume** holds your live OAuth credentials
   (`.credentials.json`): effectively your Claude session. Anyone who can read

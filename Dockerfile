@@ -12,23 +12,32 @@ ARG UV_VERSION=latest
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
 # --- Base image ---------------------------------------------------------------
-FROM node:${NODE_VERSION}-bookworm-slim
+#
+# trixie (Debian 13), not bookworm (12), and the reason is glibc. Bookworm ships
+# 2.36; trixie ships 2.41. Anything a session needs to run as a prebuilt Linux
+# binary sets a floor here, and the first one to bite was the OrcaSlicer
+# AppImage, whose binaries want GLIBC_2.38 -- on bookworm it will not load at
+# all, so the 3d repo could design a part in here and never slice it. Upstream
+# ships no older build, and an AppImage bundles its libraries but not its libc.
+#
+# Kept as a literal tag rather than an ARG: dependabot rewrites this FROM line
+# (see .github/dependabot.yml) and cannot do that through a variable.
+FROM node:${NODE_VERSION}-trixie-slim
 
 # --- Build-time configuration -------------------------------------------------
 # CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control.
 #
-# 2.1.258 (npm `latest` on 2026-09-01) is verified to support the exact launch this
+# 2.1.280 (npm `latest` on 2026-09-22) is verified to support the exact launch this
 # image makes: `claude --dangerously-skip-permissions --remote-control <name>`
 # (bin/claude-session): with both flags accepted TOGETHER and no interlock between
 # them. That combination is the reason this ARG is pinned at all; re-verify it on any
 # future bump (test/cli-version-unit.sh asserts the pin is consistent; the live
 # --remote-control handshake is the on-host check, CC-CLAUDE-CODE-UPGRADE-SMOKE).
 #
-# NO DEFAULT-MODEL CHANGE IN THIS BUMP. Opus 5 (`claude-opus-5`, 1M context) has been
-# the `opus` alias's target since CLI 2.1.219 (the 2.1.207 -> 2.1.220 bump) and stays so
-# through 2.1.258: no new Opus release landed in this range (Fable 5.1 landed in
-# 2.1.257, irrelevant unless CLAUDE_MODEL=fable). Pin CLAUDE_MODEL=claude-opus-4-8 on a
-# container that must stay off Opus 5.
+# DEFAULT-MODEL CHANGE IN THIS BUMP. 2.1.280 added Opus 5.5 (`claude-opus-5-5`, 1M
+# context) and made it the `opus` alias's target, so `--model opus` (this image's
+# default) moves the fleet from Opus 5 (the target since CLI 2.1.219) to Opus 5.5.
+# Pin CLAUDE_MODEL=claude-opus-5 on a container that must stay on Opus 5.
 #
 # WHY THE FLOOR EXISTS (CC-CLAUDE-CODE-UPGRADE): the `opus` alias resolves to the LATEST
 # Opus, and Opus 4.8 shipped in CLI 2.1.154, so the old 2.1.145 pin silently resolved
@@ -55,6 +64,19 @@ FROM node:${NODE_VERSION}-bookworm-slim
 #   - 2.1.257: fixed background sessions left running an older binary piling up
 #     across auto-updates instead of being retired.
 #
+# Landed between 2.1.258 and 2.1.280, and relevant to this image:
+#   - 2.1.271: fixed `--resume` dropping the 1M context window when the resumed
+#     session's model family differs from the configured default (hits the RC
+#     watchdog's `--continue` respawn across this bump's Opus 5 -> 5.5 change).
+#   - 2.1.271: Remote Control leaves fewer empty claude.ai sessions when setup fails
+#     on a flaky network.
+#   - 2.1.273: fixed a subshell hiding a dangerous `rm` from bypass mode's checks.
+#   - 2.1.277: fixed failed auto-updates leaving large staged downloads behind in
+#     `~/.cache/claude/staging`, and RC session bookkeeping failing on a malformed
+#     `~/.claude.json` placeholder record.
+#   - 2.1.280: Opus 5.5 becomes the default Opus (see above); fixed resuming a
+#     session with unfinished background agents starting a model turn on its own.
+#
 # Landed between 2.1.241 and 2.1.258, and relevant to this image:
 #   - 2.1.243: fixed cross-session messaging (SendMessage/ListAgents) silently
 #     disabling itself inside user namespaces and rootless containers after the
@@ -66,7 +88,7 @@ FROM node:${NODE_VERSION}-bookworm-slim
 #   - 2.1.246: fixed the background retention sweep deleting git worktrees under
 #     `.claude/worktrees/` that a user created themselves, when a stale
 #     background-session record pointed at them: this repo's primary parallelism
-#     path (worktree-isolated subagents, post Sysbox-broker retirement) creates
+#     path (worktree-isolated subagents, since the worker broker was retired) creates
 #     exactly those worktrees.
 #   - 2.1.248: fixed backgrounded worktree sessions losing their checkout; the
 #     background session now holds the worktree's lock for as long as it runs.
@@ -94,7 +116,7 @@ FROM node:${NODE_VERSION}-bookworm-slim
 # Landed between 2.1.220 and 2.1.241, still relevant:
 #   - 2.1.224: removed the 200-subagent spawn cap entirely (the concurrency-20 /
 #     nesting-depth-3 limits from 2.1.212-2.1.219 remain). Loosens a ceiling this
-#     repo's worktree-isolated-subagent parallelism path (post Sysbox-broker retirement)
+#     repo's worktree-isolated-subagent parallelism path (since the worker broker was retired)
 #     could otherwise hit on a large fan-out.
 #   - 2.1.232: fixed Remote Control sessions appearing as new claude.ai sessions on
 #     resume, and fixed RC sessions going unreachable to new clients while idle: both
@@ -123,15 +145,14 @@ FROM node:${NODE_VERSION}-bookworm-slim
 #     around in entrypoint.sh's reconcile guard + watchdog (PR #36). Keep the guard:
 #     it covers the OAuth-credential expiry, which is a different trigger.
 #   - 2.1.216: worktree-isolated subagents no longer redirect git at the shared
-#     checkout. This repo replaced the retired Sysbox broker with subagents in git
+#     checkout. This repo replaced the retired worker broker with subagents in git
 #     worktrees, so that bug hit our primary parallelism path directly.
 #   - 2.1.212/2.1.217/2.1.219: subagent limits moved repeatedly, a per-session spawn
 #     cap (200), then a concurrency cap (20) with nesting OFF by default, then nesting
 #     re-enabled to depth 3. Anything that fans out subagents should not assume the
 #     2.1.207 behavior.
-#   - 2.1.214: `docker` daemon-redirect flags now prompt for permission. Harmless here
-#     (sessions run bypassPermissions) but it is the kind of change that would bite a
-#     --docker container running a stricter permission mode.
+#   - 2.1.214: `docker` daemon-redirect flags now prompt for permission. Harmless here:
+#     sessions run bypassPermissions and have no Docker daemon to redirect.
 #
 # Carried forward from the 2.1.145 -> 2.1.207 bump, still accounted for here:
 #   - 2.1.197: Sonnet 5 became Claude Code's OWN default model. Harmless for us only
@@ -148,7 +169,7 @@ FROM node:${NODE_VERSION}-bookworm-slim
 #     tmux pane would die on an invalid-choice refusal.
 #   - 2.1.198: Remote Control is disabled when ANTHROPIC_BASE_URL points at a
 #     non-Anthropic host. This image never sets it (and §1 refuses API-key auth).
-ARG CLAUDE_CODE_VERSION=2.1.258
+ARG CLAUDE_CODE_VERSION=2.1.280
 # PNPM_VERSION: pnpm baked into the image. "latest" works but isn't
 # reproducible: pin a real version (e.g. 10.4.1), same as UV_VERSION.
 ARG PNPM_VERSION=latest
@@ -183,13 +204,56 @@ RUN set -eux; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
+# --- GL / EGL userspace (every variant) ---------------------------------------
+# A --gpu session gets the NVIDIA driver's own user libraries (libcuda, libEGL_nvidia,
+# libGLX_nvidia, OptiX, the Vulkan ICD, nvidia-smi) injected by CDI at container
+# creation, matched to the host driver. What CDI does NOT bring is the vendor-neutral
+# side those libraries plug into, so it is baked here, in EVERY variant: a GPU session
+# must be able to start on any image, and a CPU-only one still needs GL to render a
+# preview in software. Never add an NVIDIA driver library here: a copy in the image
+# would drift from the host driver and shadow the one CDI mounts.
+#   libglvnd0 libegl1 libgl1 libopengl0 libglx0
+#       glvnd, the GL/EGL dispatch layer. It reads /usr/share/glvnd/egl_vendor.d and picks
+#       NVIDIA (10_nvidia.json, mounted by CDI) when the GPU is attached, else Mesa. OCP
+#       (build123d) and VTK hard-link libGL.so.1, Blender links libGL and libOpenGL.
+#   libegl-mesa0 libgl1-mesa-dri libglx-mesa0 libosmesa6
+#       Mesa llvmpipe, the software renderer: the CPU fallback for EGL/GLX (EEVEE, VTK)
+#       and the only renderer a session without the GPU has. libosmesa6 serves VTK's
+#       OSMesa window. (glvnd's libegl1/libglx0 pull the Mesa vendor packages anyway.)
+#   libx11-6 libxext6 libxi6 libxrender1 libxfixes3 libxxf86vm1 libxkbcommon0 libsm6 libice6
+#       the X client libraries Blender's official Linux build links against even when it
+#       runs headless (`-b`; it then renders offscreen through EGL, with no X server).
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        libglvnd0 libegl1 libgl1 libopengl0 libglx0 \
+        libegl-mesa0 libgl1-mesa-dri libglx-mesa0 libosmesa6 \
+        libx11-6 libxext6 libxi6 libxrender1 libxfixes3 libxxf86vm1 libxkbcommon0 libsm6 libice6; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*; \
+    test -f /usr/share/glvnd/egl_vendor.d/50_mesa.json
+
 # --- uv / uvx (multi-arch via the official distroless image) ------------------
 COPY --from=uv /uv /uvx /usr/local/bin/
 
 # --- Claude Code (npm global, NOT the native installer) -----------------------
-# The native installer auto-updates and has historically done an aggressive
-# startup filesystem scan that OOM'd containers. The npm global package does
-# neither, so the pinned version stays pinned.
+# The native installer has historically done an aggressive startup filesystem scan
+# that OOM'd containers, so this stays on the npm package.
+#
+# SELF-UPDATABLE PREFIX: the CLI lives in its OWN npm prefix, /opt/claude-code, owned
+# by the claude user, not in root's /usr/local. Sessions run as `claude`, and the
+# auto-updater's "global" method runs `npm install -g` as that user: under root-owned
+# /usr/local every attempt died with "Insufficient permissions to install update".
+# /usr/local/etc/npmrc points npm's global prefix here (set at the END of this file,
+# after the root `npm install -g` layers for pnpm/chrome-devtools-mcp, which stay in
+# /usr/local), so the updater installs into a tree it can write.
+#
+# /usr/local/bin/claude is NOT npm's bin link but bin/claude-launcher (root-owned): the
+# claude user's ~/.npmrc has ignore-scripts=true, so a self-update skips the package's
+# postinstall and leaves bin/claude.exe as a 500-byte stub that only prints "claude
+# native binary not installed". The launcher re-runs that postinstall (under a lock)
+# when it finds the stub, then execs the real binary. It sits before
+# /opt/claude-code/bin on PATH, and every caller in this image resolves `claude` by name.
 RUN set -eu; \
     # --- GUARD 1: the effective version must clear the Opus-4.8 floor -------------
     # This is NOT hygiene. `--model opus` (this image's default) resolves to the LATEST
@@ -225,13 +289,14 @@ RUN set -eu; \
         echo "       Fix: update (or delete) CLAUDE_CODE_VERSION in your .env, then rebuild." >&2; \
         exit 1; \
     fi; \
-    npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}; \
+    npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} --prefix /opt/claude-code; \
     npm cache clean --force; \
+    chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-code; \
     # --- GUARD 2: the installed binary really IS the pinned version ---------------
     # Without this the pin is decorative: a RUN that resolved `@latest`, or an npm that
     # served something else, would go unnoticed (the old line ran `claude --version` but
     # compared it to nothing).
-    installed="$(claude --version | awk '{print $1}')"; \
+    installed="$(/opt/claude-code/bin/claude --version | awk '{print $1}')"; \
     if [ "$installed" != "${CLAUDE_CODE_VERSION}" ]; then \
         echo "ERROR: pinned CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} but the installed CLI reports '$installed'." >&2; \
         exit 1; \
@@ -262,9 +327,8 @@ ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
 #   mise use aqua:owner/tool | github:owner/tool         (arbitrary prebuilt CLIs)
 # `pipx:` CLIs reuse the baked `uv` automatically, mise's `pipx.uvx` defaults
 # true whenever `uv` is on PATH (it is, baked above). System `.so` libraries are
-# NOT in scope for mise (the curated worker-apt tier that used to close that gap,
-# the worker-tier apt provisioner, was retired along with the Sysbox substrate it was scoped to:
-# see docs/legacy-sysbox-broker.md).
+# NOT in scope for mise (the curated worker-apt tier that used to close that gap was
+# retired along with the worker broker it was scoped to).
 #
 # Pinned + checksummed IN-REPO: this repo's whole thesis is supply-chain
 # containment, so mise is NOT installed by piping a remotely-served `mise.run`
@@ -345,7 +409,7 @@ RUN set -eux; \
 # the installed toolchains are kept.
 RUN set -eux; \
     mkdir -p /cache/mise /cache/cargo /cache/go/pkg/mod /cache/go/bin \
-             /cache/npm /cache/uv /cache/pip; \
+             /cache/npm /cache/uv /cache/pip /cache/blender; \
     chown -R ${CLAUDE_UID}:${CLAUDE_GID} /cache
 
 # --- Optional: headless Chromium + chrome-devtools-mcp (frontend debugging) --
@@ -397,53 +461,6 @@ RUN set -eux; \
 # the variant by probing the baked binaries on PATH instead.)
 LABEL claude.browser="${WITH_BROWSER}"
 
-# --- Optional: Docker engine (the :docker image variant) -----------------------
-# Build with `--build-arg WITH_DOCKER=1` (or `make build-docker`) to bake the Docker
-# Engine into the image, so a session can BUILD IMAGES AND RUN CONTAINERS: Dockerfiles,
-# compose stacks, testcontainers: as part of its normal work. ~400 MB delta; default OFF.
-#
-# History, because this ARG existed twice before under a different name: it originally
-# hosted the Sysbox nested-worker-BROKER substrate (since retired), then a later prune deleted
-# it outright, correctly observing that nothing started dockerd and nothing *could*: the
-# launchers grant no --privileged and mount no docker socket, so the baked engine was
-# unreachable. This variant is NOT that comeback: there is no broker, no worker plane, no
-# spool. What changed is the missing piece that prune named. The container now runs under
-# `--runtime=sysbox-runc`, which puts the inner daemon in a USER NAMESPACE (container-root
-# → an unprivileged host uid), so nested Docker needs neither --privileged nor a host
-# socket mount: both remain FORBIDDEN, and both would hand a prompt-injectable agent the
-# host. entrypoint.sh §5a starts the daemon; bin/claude-launch --docker selects the runtime.
-#
-# The broker never needed to *compose* anything, so it installed neither plugin. A session
-# testing container workflows needs both, plus buildx for a modern `docker build`.
-ARG WITH_DOCKER=0
-RUN set -eux; \
-    if [ "$WITH_DOCKER" = "1" ]; then \
-        install -m 0755 -d /etc/apt/keyrings; \
-        curl -fsSL https://download.docker.com/linux/debian/gpg \
-            -o /etc/apt/keyrings/docker.asc; \
-        chmod a+r /etc/apt/keyrings/docker.asc; \
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-            > /etc/apt/sources.list.d/docker.list; \
-        apt-get update; \
-        apt-get install -y --no-install-recommends \
-            docker-ce docker-ce-cli containerd.io \
-            docker-buildx-plugin docker-compose-plugin; \
-        apt-get clean; \
-        rm -rf /var/lib/apt/lists/*; \
-        # Prove the whole surface a session actually uses is present; the entrypoint (§5a)
-        # starts dockerd. `docker compose`/`buildx` are plugins: a missing plugin is a
-        # silent "unknown command" at runtime, so assert them at BUILD time instead.
-        dockerd --version; docker --version; containerd --version; \
-        docker buildx version; docker compose version; \
-    else \
-        echo "WITH_DOCKER=0: skipping the Docker engine (lean session image)"; \
-    fi
-# Image-capability label: bin/claude-launch reads this to fail early (loud, actionable)
-# when --docker targets an image with no engine. Orthogonal to claude.browser: both ARGs
-# can be set in one build (make build-docker-browser) and each label is checked on its own.
-# (The in-container entrypoint can't read its own image labels, so §5a probes PATH instead.)
-LABEL claude.docker="${WITH_DOCKER}"
-
 # --- Non-root user ------------------------------------------------------------
 # The entrypoint starts as root (sshd, volume chown) then drops to this user
 # for the Claude Code process via gosu.
@@ -473,6 +490,7 @@ COPY sshd_config /etc/ssh/sshd_config
 # --- Baked-in Claude config + entrypoint --------------------------------------
 COPY claude-config/ /opt/claude-config/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY bin/claude-launcher /usr/local/bin/claude
 COPY bin/claude-session /usr/local/bin/claude-session
 COPY bin/claude-dev /usr/local/bin/claude-dev
 COPY bin/claude-autopilot /usr/local/bin/claude-autopilot
@@ -483,7 +501,24 @@ COPY bin/claude-secret-guard /usr/local/bin/claude-secret-guard
 COPY bin/claude-rc-watchdog /usr/local/bin/claude-rc-watchdog
 COPY bin/claude-usage-watchdog /usr/local/bin/claude-usage-watchdog
 COPY bin/claude-session-id /usr/local/bin/claude-session-id
+COPY bin/claude-sessions /usr/local/bin/claude-sessions
+# Installs a kit (a plugin marketplace from a git URL, its plugins, an optional start command)
+# declared by CLAUDE_EXTRA_MARKETPLACES / CLAUDE_EXTRA_PLUGINS / CLAUDE_EXTRA_START_CMD.
+COPY bin/claude-kit /usr/local/bin/claude-kit
 COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
+# The GPU guard (--gpu sessions; says "off" elsewhere) and the pinned Blender installer.
+# `blender` on PATH runs the build claude-blender-install put in the shared /cache, or says
+# how to install it. Wrapped rather than symlinked so the message names the fix.
+COPY bin/claude-gpu /usr/local/bin/claude-gpu
+COPY bin/claude-blender-install /usr/local/bin/claude-blender-install
+RUN printf '%s\n' \
+      '#!/usr/bin/env bash' \
+      '# blender: runs the pinned Blender that claude-blender-install put in the shared cache.' \
+      'bin="${CLAUDE_BLENDER_ROOT:-/cache/blender}/current/blender"' \
+      '[[ -x "$bin" ]] || { echo "blender: not installed yet. Run claude-blender-install (pinned, checksum-verified, into the shared /cache)." >&2; exit 127; }' \
+      'exec "$bin" "$@"' \
+      > /usr/local/bin/blender \
+    && chmod 755 /usr/local/bin/blender
 # _common.sh rides along because claude-disk-gc sources it.
 COPY bin/_common.sh /usr/local/bin/_common.sh
 # Storage/disk safety: claude-disk-gc is a standalone maintenance tool (docker system +
@@ -496,9 +531,9 @@ COPY bin/claude-disk-gc /usr/local/bin/claude-disk-gc
 COPY bin/claude-deps-check /usr/local/bin/claude-deps-check
 # claude-reaper and claude-controller were REMOVED: the reaper pruned a spool
 # only the retired broker ever wrote to, and the controller had collapsed to a
-# pass-through to claude-autopilot. See docs/legacy-sysbox-broker.md.
+# pass-through to claude-autopilot.
 COPY bash_profile /home/${CLAUDE_USER}/.bash_profile
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude /usr/local/bin/claude-session \
         /usr/local/bin/claude-dev /usr/local/bin/claude-autopilot \
         /usr/local/bin/claude-enqueue /usr/local/bin/claude-scm-observer \
         /usr/local/bin/claude-egress-firewall \
@@ -506,7 +541,11 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
         /usr/local/bin/claude-rc-watchdog \
         /usr/local/bin/claude-usage-watchdog \
         /usr/local/bin/claude-session-id \
+        /usr/local/bin/claude-sessions \
+        /usr/local/bin/claude-kit \
         /usr/local/bin/claude-healthcheck \
+        /usr/local/bin/claude-gpu \
+        /usr/local/bin/claude-blender-install \
         /usr/local/bin/claude-disk-gc \
         /usr/local/bin/claude-deps-check \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
@@ -598,7 +637,12 @@ RUN set -eux; \
 #    NOT a blanket "/", so the agent's own repo toolchain auto-applies while
 #    any config outside /workspace still refuses to auto-run. See
 #    docs/toolchain-provisioning.md and docs/shared-tool-cache.md.
+#  - VTK_DEFAULT_OPENGL_WINDOW: VTK (and PyVista, build123d previews) renders offscreen
+#    through EGL, which picks the NVIDIA driver on a --gpu session and Mesa llvmpipe
+#    otherwise. Without it VTK first tries X, warns that there is no display, and only
+#    then falls back to EGL.
 ENV CLAUDE_USER=${CLAUDE_USER} \
+    VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow \
     CLAUDE_CONFIG_DIR=/home/${CLAUDE_USER}/.claude \
     CLAUDE_RC_DEBUG_LOG=/tmp/claude-rc-debug.log \
     NODE_NO_WARNINGS=1 \
@@ -610,7 +654,13 @@ ENV CLAUDE_USER=${CLAUDE_USER} \
     npm_config_cache=/cache/npm \
     UV_CACHE_DIR=/cache/uv \
     PIP_CACHE_DIR=/cache/pip \
-    PATH=/cache/mise/shims:/cache/cargo/bin:/cache/go/bin:${PATH}
+    PATH=/cache/mise/shims:/cache/cargo/bin:/cache/go/bin:${PATH}:/opt/claude-code/bin
+
+# Global npm prefix -> the claude-owned /opt/claude-code (see the Claude Code install
+# section): what lets the auto-updater, and any agent `npm i -g`, write without root.
+# Set only here, after every root `npm install -g` layer. It goes in the global npmrc,
+# not ENV, so an SSH shell that did not inherit the Dockerfile ENV still resolves it.
+RUN printf 'prefix=/opt/claude-code\n' >> /usr/local/etc/npmrc
 
 EXPOSE 22
 
