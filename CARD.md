@@ -11,8 +11,8 @@ The Docker image, launchers and session tools that run isolated Claude Code sess
   `claude-account-login`, `claude-disk-gc`.
 - In-container tools in `bin/`: `claude-sessions` (several sessions per container),
   `claude-kit` (installs a plugin marketplace at boot), `claude-gpu` + `claude-blender-install`
-  (GPU guard), `claude-deps-check` (pin linter), `claude-enqueue` (autopilot queue),
-  `claude-egress-firewall`, `claude-secret-guard`.
+  (GPU guard), `claude-deps-check` (pin linter), `claude-autopilot` + `claude-enqueue`
+  (unattended mode, its queue), `claude-egress-firewall`, `claude-secret-guard`.
 - Baked-in config every session gets: `claude-config/` (global `CLAUDE.md`, `CLAUDE.gpu.md`,
   `settings.json`, `skills/`, `commands/`, `mcp/`, `plugins/`).
 - Operator docs: `README.md` (load-bearing) and `docs/*.md`.
@@ -39,8 +39,10 @@ Compat: <old containers / .env behaviour>
 
 ## Interfaces
 
-- Session spec `NAME [key=value ...]` (`CLAUDE_SESSIONS`, `--session`): `README.md`, Quick start.
-- Kit hook `CLAUDE_EXTRA_MARKETPLACES` / `_PLUGINS` / `_START_CMD`: `README.md`, Install a kit.
+- Session spec `NAME [key=value ...]` (`CLAUDE_SESSIONS`, `--session`): `README.md`,
+  Several sessions in one container.
+- Kit hook `CLAUDE_EXTRA_MARKETPLACES` / `_PLUGINS` / `_START_CMD`: `README.md`,
+  Install a kit at session start.
 - Environment variables: `README.md` table, full list in `.env.example`.
 - Scenario `.conf` format (one generator flag per line): `scenarios/example.conf.example`.
 - Claude Code version pin: `Makefile` `CLAUDE_CODE_VERSION` and its other declarations, kept equal
