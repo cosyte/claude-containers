@@ -21,6 +21,15 @@ WORKSPACE="/workspace"
 log()  { echo "[entrypoint] $*"; }
 die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
 asclaude() { gosu "$CLAUDE_USER" env CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" "$@"; }
+# Hand a tree to the agent user, touching only what is not already its own. `chown -R` writes
+# every inode (a chown with the same owner still updates ctime), so on maker's config volume
+# and ten-repo workspace on spinning disk it held every boot for minutes before any session
+# started (2026-10-07). find only reads a tree that is already right. -h: a symlink itself,
+# never its target, as chown -R did; find does not follow symlinks either.
+own_tree() {
+    find "$@" \( ! -uid "$CLAUDE_UID" -o ! -gid "$CLAUDE_GID" \) \
+        -exec chown -h "$CLAUDE_UID:$CLAUDE_GID" {} +
+}
 
 # --- 0. Refuse retired broker/Sysbox env -------------------------------
 # bin/claude-launch and bin/claude-compose-gen already REFUSE the removed --broker /
@@ -151,7 +160,7 @@ fi
 
 # --- 2. Fix ownership of mounted volumes -------------------------------------
 mkdir -p "$CLAUDE_CONFIG_DIR" "$AUTH_DIR" "$HOSTKEY_DIR" "$CLAUDE_HOME/.ssh" "$WORKSPACE"
-chown -R "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR" "$CLAUDE_HOME/.ssh"
+own_tree "$CLAUDE_CONFIG_DIR" "$CLAUDE_HOME/.ssh"
 chown "$CLAUDE_UID:$CLAUDE_GID" "$WORKSPACE" 2>/dev/null || true
 chmod 700 "$CLAUDE_HOME/.ssh"
 
@@ -1145,7 +1154,7 @@ else
     die "Empty workspace and no GIT_REPO_URL or GIT_REPOS. Set one, or bind-mount a
        checkout onto $WORKSPACE (use 'claude-launch --repo' or --workspace)."
 fi
-chown -R "$CLAUDE_UID:$CLAUDE_GID" "$WORKSPACE" 2>/dev/null || true
+own_tree "$WORKSPACE" 2>/dev/null || true
 
 # --- 10. Register baked-in MCP servers ---------------------------------------
 # Done via the CLI so the on-disk schema is always correct for this Claude

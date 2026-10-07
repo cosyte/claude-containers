@@ -2015,6 +2015,42 @@ MS_TMUX_LINE="$(grep -n '^asclaude tmux new-session' "$ENTRYPOINT" | head -1 | c
     && ok  "§7a runs before the tmux launch, so policy is in force before the agent exists" \
     || bad "§7a does not precede the agent launch (7a at line ${MS_7A_LINE:-none}, tmux at line ${MS_TMUX_LINE:-none})"
 
+echo "== volume ownership touches only what is not the agent's (own_tree) =="
+# A recursive chown wrote every inode of the config volume and the workspace on every boot,
+# minutes on maker's spinning disk before any session started (2026-10-07). own_tree runs here
+# against a real tree with a logging chown on PATH: no root needed.
+OT_DIR="$(mktemp -d)"
+OT_FN="$(sed -n '/^own_tree() {/,/^}/p' "$ENTRYPOINT")"
+mkdir -p "$OT_DIR/bin" "$OT_DIR/tree/sub"
+touch "$OT_DIR/tree/a" "$OT_DIR/tree/sub/b" "$OT_DIR/outside"
+ln -s "$OT_DIR/outside" "$OT_DIR/tree/link"
+printf '#!/bin/sh\necho "$@" >> "%s/calls"\n' "$OT_DIR" > "$OT_DIR/bin/chown"
+chmod +x "$OT_DIR/bin/chown"
+ot_run() {  # ot_run UID GID: own_tree over the tree, prints the paths chown was given
+    : > "$OT_DIR/calls"
+    ( PATH="$OT_DIR/bin:$PATH" CLAUDE_UID="$1" CLAUDE_GID="$2"; eval "$OT_FN"; own_tree "$OT_DIR/tree" ) \
+        || echo "own_tree failed"
+    tr ' ' '\n' < "$OT_DIR/calls" | grep "^$OT_DIR/" | sort
+}
+[[ -n "$OT_FN" ]] && ! grep -qE '^[^#]*chown -R "\$CLAUDE_UID:\$CLAUDE_GID" "\$(CLAUDE_CONFIG_DIR|WORKSPACE)"' "$ENTRYPOINT" \
+    && ok  "the config volume and the workspace go through own_tree, not chown -R" \
+    || bad "a recursive chown over the config volume or the workspace is back (or own_tree is gone)"
+[[ -z "$(ot_run "$(id -u)" "$(id -g)")" ]] \
+    && ok  "a tree already owned by the agent user gets no chown at all" \
+    || bad "own_tree chowned entries that were already the agent's"
+ot_all="$(printf '%s\n' "$OT_DIR/tree" "$OT_DIR/tree/a" "$OT_DIR/tree/link" "$OT_DIR/tree/sub" "$OT_DIR/tree/sub/b" | sort)"
+[[ "$(ot_run 4242 "$(id -g)")" == "$ot_all" ]] \
+    && ok  "a wrong owner is fixed on every entry, the root dir and the symlink included" \
+    || bad "own_tree missed entries with a wrong owner (got: $(ot_run 4242 "$(id -g)" | tr '\n' ' '))"
+[[ "$(ot_run "$(id -u)" 4242)" == "$ot_all" ]] \
+    && ok  "a wrong group alone is fixed too" \
+    || bad "own_tree ignored a wrong group"
+ot_run 4242 "$(id -g)" >/dev/null
+grep -q -- "-h 4242:" "$OT_DIR/calls" && ! grep -q "$OT_DIR/outside" "$OT_DIR/calls" \
+    && ok  "symlinks are chowned with -h and never followed to their target" \
+    || bad "own_tree would follow a symlink out of the tree, or chown it without -h"
+rm -rf "$OT_DIR"
+
 echo
 echo "== $PASS passed, $FAIL failed =="
 exit $(( FAIL > 0 ? 1 : 0 ))
