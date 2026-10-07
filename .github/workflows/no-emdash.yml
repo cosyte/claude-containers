@@ -1,7 +1,7 @@
 name: Em-dash gate
 
 # The brand rule (founder directive 2026-07-24) bans U+2014 outright across every
-# cosyte surface, and names commit messages explicitly. This repo violated it
+# Cosyte surface, and names commit messages explicitly. This repo violated it
 # wholesale until 2026-07-30: 1,026 occurrences across 45 tracked files, plus the
 # GitHub repo description. This gate exists so that cannot come back.
 #
