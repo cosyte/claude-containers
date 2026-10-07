@@ -25,6 +25,8 @@ jobs:
         run: test/sizing-unit.sh
       - name: disk unit tests (free-space parsing + gc plan safety + fail-safe)
         run: test/disk-unit.sh
+      - name: secret-guard unit tests (blocks a staged secret, chains to the repo's own pre-commit hook from a plain checkout and a git worktree, exit 0 with no hook)
+        run: test/secret-guard-unit.sh
       - name: compose-gen unit tests (scenario .conf expansion + env layering + cross-stack port reservation)
         run: test/compose-gen-unit.sh
       - name: launch unit tests (cap-drop ALL + no-new-privileges, no --privileged / no host socket, removed flags refuse, disk-backed scratch)
