@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# claude-container-facts: print the "This container" section a session reads at start.
+#
+#   claude-container-facts
+#
+# The entrypoint (§7b) runs it at every start and writes its output into the session's
+# managed memory (/etc/claude-code/CLAUDE.md), so a session knows what THIS container has
+# without guessing. Every line comes from a probe run now, never from a hand-written list:
+#   - the browser: chromium on PATH (its path and version), or "none"
+#   - the chrome-devtools MCP: on or off, as the entrypoint decided it this boot
+#     (CLAUDE_FACTS_BROWSER_MCP=on|off; anything else reads as off)
+#   - the GPU: the boot probe's line (CLAUDE_FACTS_GPU_STATE, the file §2b wrote), else
+#     `claude-gpu status --oneline` on a --gpu session, else "none"
+#   - toolchains with versions: git gh python3 uv node pnpm mise ("none" when absent)
+#   - /cache and /scratch with free space (CLAUDE_FACTS_DIRS overrides the list)
+#   - how to install more
+# Each probe is bounded (CLAUDE_FACTS_PROBE_TIMEOUT, 5s), so a wedged tool never hangs boot.
+set -uo pipefail
+
+PROBE_TIMEOUT="${CLAUDE_FACTS_PROBE_TIMEOUT:-5}"
+GPU_STATE="${CLAUDE_FACTS_GPU_STATE:-/run/claude-gpu/state}"
+DIRS="${CLAUDE_FACTS_DIRS:-/cache /scratch}"
+MARK="claude-containers: container facts"
+
+# The first version-shaped token of `<tool> --version`, or "" when the tool cannot say.
+version_of() {
+    timeout "$PROBE_TIMEOUT" "$1" --version 2>/dev/null | head -n 3 \
+        | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1
+}
+
+browser() {
+    local exe ver
+    exe="$(command -v chromium 2>/dev/null)" || { echo "none"; return; }
+    ver="$(version_of "$exe")"
+    echo "chromium ${ver:-(version unknown)} at \`$exe\`"
+}
+
+gpu() {
+    local line=""
+    if [[ -s "$GPU_STATE" ]]; then
+        line="$(head -n 1 "$GPU_STATE")"
+    elif [[ "${CLAUDE_GPU:-0}" =~ ^(1|true|yes|on)$ ]] && command -v claude-gpu >/dev/null 2>&1; then
+        line="$(timeout 20 claude-gpu status --oneline 2>/dev/null | head -n 1)"
+    fi
+    line="${line#gpu: }"
+    if [[ -z "$line" || "$line" == off ]]; then
+        echo "none (not a --gpu session)"
+    else
+        echo "$line at start; \`claude-gpu status\` for now"
+    fi
+}
+
+toolchains() {
+    local t v out=()
+    for t in git gh python3 uv node pnpm mise; do
+        if command -v "$t" >/dev/null 2>&1; then
+            v="$(version_of "$t")"
+            out+=("$t ${v:-(version unknown)}")
+        else
+            out+=("$t none")
+        fi
+    done
+    local IFS=','
+    echo "${out[*]}" | sed 's/,/, /g'
+}
+
+space() {
+    local d free out=()
+    for d in $DIRS; do
+        if [[ -d "$d" ]]; then
+            free="$(df -hP "$d" 2>/dev/null | awk 'NR==2{print $4}')"
+            out+=("\`$d\` ${free:-?} free")
+        else
+            out+=("\`$d\` absent")
+        fi
+    done
+    local IFS=','
+    echo "${out[*]}" | sed 's/,/; /g'
+}
+
+mcp="off"
+[[ "${CLAUDE_FACTS_BROWSER_MCP:-off}" == on ]] && mcp="on"
+
+cat <<EOF
+<!-- $MARK. Written by claude-container-facts at each start; do not edit, it is rewritten. -->
+## This container (probed at start, $(date -u +%Y-%m-%dT%H:%MZ))
+
+- Browser: $(browser)
+- chrome-devtools MCP: $mcp
+- GPU: $(gpu)
+- Toolchains: $(toolchains)
+- Space: $(space) (\`/scratch\` is TMPDIR when present)
+- Install more: \`mise use <tool>@<version>\` first, then that language's own manager:
+  \`uv\` for Python (\`uv run --with <pkg>\`, or \`pip\` on a mise Python), \`pnpm\` for Node,
+  \`cargo\` for Rust, \`go install\` for Go. No apt, no sudo: a system library needs an
+  image rebuild.
+EOF
