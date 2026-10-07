@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/check-no-emdash.sh
-# Brand rule (founder directive, 2026-07-24): cosyte never uses the em dash.
+# Brand rule (founder directive, 2026-07-24): Cosyte never uses the em dash.
 # The em dash (U+2014) reads as an AI tell, so it is banned outright across
-# every cosyte surface. Source of truth: the cosyte brand voice guide; this is a
+# every Cosyte surface. Source of truth: the Cosyte brand voice guide; this is a
 # verbatim port of the same gate that runs in the sibling repos.
 #
 # The fix is never to re-encode the character: rewrite the sentence with a
@@ -53,7 +53,7 @@ fail_with_hits() {
   echo "$hits" >&2
   echo "" >&2
   echo "ERROR: check-no-emdash - em dash (U+2014, or an encoded form) found in ${what}." >&2
-  echo "       cosyte never uses em dashes (founder directive; 06-brand/voice-and-tone.md)." >&2
+  echo "       Cosyte never uses em dashes (founder directive; 06-brand/voice-and-tone.md)." >&2
   echo "       Rewrite with a period, colon, comma, or parentheses." >&2
   exit 1
 }
