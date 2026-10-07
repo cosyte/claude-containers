@@ -991,8 +991,12 @@ if [[ -f "$BAKE_DIR/CLAUDE.md" ]]; then
     if awk -v p="$gmd" '$5 == p { f = 1 } END { exit !f }' "$MOUNTINFO" 2>/dev/null; then
         log "Global CLAUDE.md    : left alone, $gmd is mounted (the operator's own)"
     elif ! cmp -s "$BAKE_DIR/CLAUDE.md" "$gmd"; then
-        install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 644 "$BAKE_DIR/CLAUDE.md" "$gmd"
-        log "Global CLAUDE.md    : installed the image's copy"
+        # Never fatal: a full volume (or a directory at the path) must not stop the boot.
+        if install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 644 "$BAKE_DIR/CLAUDE.md" "$gmd" 2>/dev/null; then
+            log "Global CLAUDE.md    : installed the image's copy"
+        else
+            log "Global CLAUDE.md    : WARNING, could not install the image's copy at $gmd"
+        fi
     fi
     unset gmd
 fi
@@ -1288,6 +1292,20 @@ _register_chrome_devtools_mcp() {
         log "Registered MCP server 'chrome-devtools' (headless Chromium)"
     else
         log "WARNING: failed to register chrome-devtools MCP"
+        _browser_mcp_failed
+    fi
+}
+# §7c and §8e acted on BROWSER_MCP=on; a registration that failed makes both untrue, so
+# correct the session's facts line and take back an unmodified frontend-debugging skill.
+_browser_mcp_failed() {
+    BROWSER_MCP=off
+    if grep -qF "$FACTS_MARK" "$SESSION_MD" 2>/dev/null; then
+        sed -i 's/^- chrome-devtools MCP: on$/- chrome-devtools MCP: off (its registration failed at start)/' "$SESSION_MD" || true
+    fi
+    local t="$CLAUDE_CONFIG_DIR/skills/frontend-debugging"
+    if [[ -d "$t" ]] && diff -rq "$BAKE_DIR/skills/frontend-debugging" "$t" >/dev/null 2>&1; then
+        rm -rf "$t"
+        log "Skill frontend-debugging: removed, the chrome-devtools MCP is not registered"
     fi
 }
 case "$_cb" in
@@ -1305,7 +1323,17 @@ case "$_cb" in
         ;;
     0|false|no|off)
         # Explicit opt-out: honored even on a browser image.
-        _browser_baked && log "chrome-devtools MCP disabled (CLAUDE_BROWSER=off); skipping"
+        # A registration a past start made lives on in the config volume: drop it, or the
+        # session would have the tools while its facts say off.
+        if asclaude claude mcp get chrome-devtools >/dev/null 2>&1; then
+            if asclaude claude mcp remove --scope user chrome-devtools >/dev/null 2>&1; then
+                log "chrome-devtools MCP disabled (CLAUDE_BROWSER=off): removed the registration a past start made"
+            else
+                log "WARNING: CLAUDE_BROWSER=off, but the chrome-devtools MCP a past start registered could not be removed"
+            fi
+        elif _browser_baked; then
+            log "chrome-devtools MCP disabled (CLAUDE_BROWSER=off); skipping"
+        fi
         ;;
     *)
         # Auto: a browser image enables the MCP by itself; a lean image is silent.

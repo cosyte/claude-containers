@@ -14,7 +14,9 @@ The entrypoint detects the baked Chromium + `chrome-devtools-mcp` on startup and
 registers the MCP automatically. `--browser` (or `CLAUDE_BROWSER=1`) still works
 and now *forces* it: on a non-browser image it **fails loud** with a rebuild
 hint instead of silently doing nothing. To run the browser image but keep the
-MCP off, pass `--no-browser` (or `CLAUDE_BROWSER=0`).
+MCP off, pass `--no-browser` (or `CLAUDE_BROWSER=0`); that also removes a registration a
+past start made. The baked `frontend-debugging` skill is installed only when the MCP is
+on, and the session's "This container" facts say whether it is.
 
 Either way you get the official
 [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp)

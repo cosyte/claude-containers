@@ -40,6 +40,9 @@ WITH="$TMPD/with"
 fake "$WITH" chromium "Chromium 140.0.7339.80 built on Debian"
 fake "$WITH" node "v22.11.0"
 fake "$WITH" git "git version 2.47.3"
+fake "$WITH" python3 "Python 3.11.2"
+fake "$WITH" uv "uv 0.5.1 (abc 2024-10-01)"
+fake "$WITH" pnpm "9.12.0"
 mkdir -p "$TMPD/cache"
 out="$(PATH="$WITH:$BASE" CLAUDE_FACTS_BROWSER_MCP=on CLAUDE_FACTS_GPU_STATE="$TMPD/none" \
     CLAUDE_FACTS_DIRS="$TMPD/cache $TMPD/nope" CLAUDE_GPU=0 "$BASE/bash" "$FACTS")"; rc=$?
@@ -52,6 +55,7 @@ grep -qxF -- "- chrome-devtools MCP: on" <<<"$out" && ok "the MCP flag reads on"
 grep -qxF -- "- GPU: none (not a --gpu session)" <<<"$out" \
     && ok "no GPU state and not a --gpu session: none" || bad "GPU line: $(grep GPU <<<"$out")"
 grep -qF 'git 2.47.3' <<<"$out" && grep -qF 'node 22.11.0' <<<"$out" && grep -qF 'gh none' <<<"$out" \
+    && grep -qF 'python3 3.11.2' <<<"$out" && grep -qF 'uv 0.5.1' <<<"$out" && grep -qF 'pnpm 9.12.0' <<<"$out" \
     && grep -qF 'mise none' <<<"$out" \
     && ok "toolchains: versions for the present ones, none for the absent" || bad "toolchains: $(grep Toolchains <<<"$out")"
 grep -qF "\`$TMPD/cache\` " <<<"$out" && grep -qF "\`$TMPD/nope\` absent" <<<"$out" \
@@ -92,20 +96,20 @@ grep -qE '^SESSION_MD=' <<<"$B7C" && grep -qE '^SESSION_MD_OWNER=' <<<"$B7C" && 
     && ok "§7c names its root-only paths on their own lines (so this sandbox redirect is real)" \
     || bad "§7c must assign SESSION_MD, SESSION_MD_OWNER, FACTS_CMD, GPU_NOTE_SRC on their own lines"
 SMD="$TMPD/etc/claude-code/CLAUDE.md"
-run_7c() {  # run_7c <CLAUDE_GPU> [PATH]
+run_7c() {  # run_7c <CLAUDE_GPU> [PATH] (BROWSER_MCP from the caller, default off)
     local blk; blk="$(sed -e "s#^SESSION_MD=.*#SESSION_MD=\"$SMD\"#" \
         -e "s#^SESSION_MD_OWNER=.*#SESSION_MD_OWNER=\"$(id -u):$(id -g)\"#" \
         -e "s#^FACTS_CMD=.*#FACTS_CMD=\"$FACTS\"#" \
         -e "s#^GPU_NOTE_SRC=.*#GPU_NOTE_SRC=\"$REPO_ROOT/claude-config/CLAUDE.gpu.md\"#" <<<"$B7C")"
-    ( log() { echo "[entrypoint] $*"; }; set -euo pipefail; CLAUDE_GPU="$1"; BROWSER_MCP=off
+    ( log() { echo "[entrypoint] $*"; }; set -euo pipefail; CLAUDE_GPU="$1"; BROWSER_MCP="${BROWSER_MCP:-off}"
       GPU_STATE_FILE="$TMPD/gpu-state"; PATH="${2:-$WITHOUT:$BASE}"; eval "$blk" )
 }
 out="$(run_7c 0)"; rc=$?
 (( rc == 0 )) && grep -qxF -- "- Browser: none" "$SMD" && ! grep -qF 'GPU session note' "$SMD" \
     && ok "writes the facts (browser: none), no GPU note off a --gpu session" || bad "§7c plain (rc=$rc): $out"
-out="$(run_7c 0 "$WITH:$BASE")"
-grep -qF -- "- Browser: chromium 140.0.7339.80" "$SMD" \
-    && ok "the next start rewrites it (now chromium)" || bad "§7c did not rewrite: $(cat "$SMD")"
+out="$(BROWSER_MCP=on run_7c 0 "$WITH:$BASE")"
+grep -qF -- "- Browser: chromium 140.0.7339.80" "$SMD" && grep -qxF -- "- chrome-devtools MCP: on" "$SMD" \
+    && ok "the next start rewrites it (now chromium, MCP on)" || bad "§7c did not rewrite: $(cat "$SMD")"
 out="$(run_7c 1)"
 grep -qF 'container facts' "$SMD" && grep -qF 'GPU session note' "$SMD" && grep -qF -- '- GPU: ok (Fake GPU 2000' "$SMD" \
     && ok "a --gpu session gets the facts, its GPU line and the GPU note" || bad "§7c gpu: $(cat "$SMD")"
@@ -166,6 +170,17 @@ run_8e on >/dev/null; echo "my notes" >> "$SK/frontend-debugging/SKILL.md"
 run_8e off >/dev/null
 grep -qF 'my notes' "$SK/frontend-debugging/SKILL.md" 2>/dev/null \
     && ok "an edited copy is kept" || bad "§8e removed an edited skill"
+
+echo "== entrypoint.sh §10b: a failed registration corrects §7c and §8e =="
+FAILFN="$(awk '/^_browser_mcp_failed\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$ENTRY")"
+run_8e on >/dev/null; rm -rf "$SK/frontend-debugging"; run_8e on >/dev/null
+printf '<!-- claude-containers: container facts. -->\n- chrome-devtools MCP: on\n' > "$SMD"
+out="$( log() { echo "[entrypoint] $*"; }; set -euo pipefail; SESSION_MD="$SMD"
+    FACTS_MARK="claude-containers: container facts"; BAKE_DIR="$BAKE"; CLAUDE_CONFIG_DIR="$CFG"
+    eval "$FAILFN"; _browser_mcp_failed; echo "mcp=$BROWSER_MCP" )"
+grep -qxF -- "- chrome-devtools MCP: off (its registration failed at start)" "$SMD" && [[ ! -e "$SK/frontend-debugging" ]] \
+    && grep -qF 'mcp=off' <<<"$out" \
+    && ok "the facts line reads off and the unmodified skill is removed" || bad "_browser_mcp_failed: $out / $(cat "$SMD")"
 
 # ======================================================================================
 echo "== image wiring =="
