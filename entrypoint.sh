@@ -918,34 +918,83 @@ else
     log "Managed policy       : NOT ENFORCED ($managed_why). NO setting is managed: everything stays overridable from inside the container, exactly as it was before this image delivered any policy."
 fi
 
-# --- 7b. GPU note for the session (CLAUDE_GPU=1) -----------------------------------
-# The session has to discover the GPU tooling on its own, so a GPU session gets a short
-# note in Claude Code's MANAGED memory file (root-owned, read above the user's own
-# CLAUDE.md). Written only when CLAUDE_GPU=1, rewritten on every boot (it lives in the
-# container layer), and never over a file an operator put there: ours carries a marker.
-GPU_NOTE_SRC="/opt/claude-config/CLAUDE.gpu.md"
-GPU_NOTE_DST="/etc/claude-code/CLAUDE.md"
+# --- 7b. Browser decision (§10b acts on it) ----------------------------------
+# Made here, before the session memory below, so the facts can say whether this session
+# has the chrome-devtools MCP and §8e can install the frontend-debugging skill only when
+# it does. CLAUDE_BROWSER is TRI-STATE (the whole contract is at §10b):
+#   unset / empty / other -> auto (on iff the browser variant is baked),
+#   1|true|yes|on -> on (fails loud in §10b when nothing is baked), 0|false|no|off -> off.
+# Normalize: strip surrounding whitespace / a trailing CR (a CRLF-authored .env
+# yields `1\r`, which must still match "1", not silently fall through to auto)
+# and lowercase, so the tri-state match is robust to how the value was set.
+_browser_baked() {
+    command -v chrome-devtools-mcp >/dev/null 2>&1 && command -v chromium >/dev/null 2>&1
+}
+_cb="$(printf '%s' "${CLAUDE_BROWSER:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+BROWSER_MCP=off
+case "$_cb" in
+    0|false|no|off) ;;
+    *) if _browser_baked; then BROWSER_MCP=on; fi ;;
+esac
+
+# --- 7c. Session memory: what this container has (+ the GPU note) ------------------
+# Every session reads Claude Code's MANAGED memory file (root-owned, read above the
+# user's own CLAUDE.md). At every boot it gets a "This container" section that
+# claude-container-facts writes from probes run now (browser, chrome-devtools MCP, GPU,
+# toolchains, /cache and /scratch, how to install more), and on a --gpu session the GPU
+# note after it. It lives in the container layer and is rewritten on every boot, but
+# never over a file an operator put there: ours carries one of the two markers.
+# The paths are named on their own lines so test/container-facts-unit.sh can run this
+# exact block unprivileged against a sandbox.
+SESSION_MD=/etc/claude-code/CLAUDE.md
+SESSION_MD_OWNER=root:root
+FACTS_CMD=/usr/local/bin/claude-container-facts
+GPU_NOTE_SRC=/opt/claude-config/CLAUDE.gpu.md
+FACTS_MARK="claude-containers: container facts"
 GPU_NOTE_MARK="claude-containers: GPU session note"
-if [[ "${CLAUDE_GPU:-0}" =~ ^(1|true|yes|on)$ && -f "$GPU_NOTE_SRC" ]]; then
-    if [[ -e "$GPU_NOTE_DST" ]] && ! grep -qF "$GPU_NOTE_MARK" "$GPU_NOTE_DST" 2>/dev/null; then
-        log "GPU note            : NOT written, $GPU_NOTE_DST is an operator's own file"
-    elif mkdir -p "${GPU_NOTE_DST%/*}" && chmod 755 "${GPU_NOTE_DST%/*}" \
-            && install -o root -g root -m 644 "$GPU_NOTE_SRC" "$GPU_NOTE_DST"; then
-        log "GPU note            : $GPU_NOTE_DST (claude-gpu, claude-blender-install)"
-    else
-        log "GPU note            : WARNING, could not write $GPU_NOTE_DST"
+if [[ -e "$SESSION_MD" ]] && ! grep -qF -e "$FACTS_MARK" -e "$GPU_NOTE_MARK" "$SESSION_MD" 2>/dev/null; then
+    log "Session memory      : NOT written, $SESSION_MD is an operator's own file"
+else
+    smd_tmp="$(mktemp)"
+    # Bounded: each probe has its own 5s limit, this caps the whole run.
+    if ! CLAUDE_FACTS_BROWSER_MCP="$BROWSER_MCP" CLAUDE_FACTS_GPU_STATE="$GPU_STATE_FILE" \
+            timeout 60 "$FACTS_CMD" > "$smd_tmp" 2>/dev/null; then
+        printf '<!-- %s -->\n## This container\n\n- The probe (claude-container-facts) failed at this start: nothing is known about this container.\n' \
+            "$FACTS_MARK" > "$smd_tmp"
     fi
+    smd_what="container facts"
+    if [[ "${CLAUDE_GPU:-0}" =~ ^(1|true|yes|on)$ && -f "$GPU_NOTE_SRC" ]]; then
+        { echo; cat "$GPU_NOTE_SRC"; } >> "$smd_tmp"
+        smd_what="container facts + GPU note"
+    fi
+    if mkdir -p "${SESSION_MD%/*}" && chmod 755 "${SESSION_MD%/*}" \
+            && install -m 644 "$smd_tmp" "$SESSION_MD" && chown "$SESSION_MD_OWNER" "$SESSION_MD"; then
+        log "Session memory      : $SESSION_MD ($smd_what)"
+    else
+        log "Session memory      : WARNING, could not write $SESSION_MD"
+    fi
+    rm -f "$smd_tmp"
+    unset smd_tmp smd_what
 fi
 
 # --- 8. Merge baked-in config ------------------------------------------------
 # Everything baked into the image is overridable at runtime by mounting onto
 # the target path (we only fill what's absent).
 
-# 8a. Global CLAUDE.md
-if [[ -f "$BAKE_DIR/CLAUDE.md" && ! -e "$CLAUDE_CONFIG_DIR/CLAUDE.md" ]]; then
-    install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 644 \
-        "$BAKE_DIR/CLAUDE.md" "$CLAUDE_CONFIG_DIR/CLAUDE.md"
-    log "Installed global CLAUDE.md"
+# 8a. Global CLAUDE.md: the image's copy at EVERY start (not only the first), so a
+#     change to claude-config/CLAUDE.md reaches an existing container at its next start.
+#     The one exception is the override: a file the operator mounted over the path (a
+#     bind mount, so it has its own line in mountinfo) is left alone.
+MOUNTINFO=/proc/self/mountinfo
+if [[ -f "$BAKE_DIR/CLAUDE.md" ]]; then
+    gmd="$CLAUDE_CONFIG_DIR/CLAUDE.md"
+    if awk -v p="$gmd" '$5 == p { f = 1 } END { exit !f }' "$MOUNTINFO" 2>/dev/null; then
+        log "Global CLAUDE.md    : left alone, $gmd is mounted (the operator's own)"
+    elif ! cmp -s "$BAKE_DIR/CLAUDE.md" "$gmd"; then
+        install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 644 "$BAKE_DIR/CLAUDE.md" "$gmd"
+        log "Global CLAUDE.md    : installed the image's copy"
+    fi
+    unset gmd
 fi
 
 # 8b. settings.json: baked file is the base, existing user settings win on
@@ -1065,15 +1114,31 @@ if compgen -G "$BAKE_DIR/commands/*.md" > /dev/null; then
     log "Installed baked-in slash commands"
 fi
 
-# 8e. Skills (one directory per skill, must contain SKILL.md)
+# 8e. Skills (one directory per skill, must contain SKILL.md). A skill is installed only
+#     when what it needs is in this container (_skill_usable). One that is not is skipped,
+#     and an unmodified copy a past start installed is removed; an edited one is kept.
+_skill_usable() {  # _skill_usable <name>
+    case "$1" in
+        frontend-debugging) [[ "$BROWSER_MCP" == on ]] ;;  # chromium + the DevTools MCP (§7b)
+        *) return 0 ;;
+    esac
+}
 if [[ -d "$BAKE_DIR/skills" ]]; then
     install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/skills"
     for d in "$BAKE_DIR"/skills/*/; do
         [[ -f "$d/SKILL.md" ]] || continue
         name="$(basename "$d")"
-        if [[ ! -d "$CLAUDE_CONFIG_DIR/skills/$name" ]]; then
-            cp -a "$d" "$CLAUDE_CONFIG_DIR/skills/$name"
-            chown -R "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/skills/$name"
+        t="$CLAUDE_CONFIG_DIR/skills/$name"
+        if ! _skill_usable "$name"; then
+            if [[ -d "$t" ]] && diff -rq "$d" "$t" >/dev/null 2>&1; then
+                rm -rf "$t"
+                log "Skill $name: removed, this container lacks what it needs"
+            fi
+            continue
+        fi
+        if [[ ! -d "$t" ]]; then
+            cp -a "$d" "$t"
+            chown -R "$CLAUDE_UID:$CLAUDE_GID" "$t"
         fi
     done
     log "Installed baked-in skills"
@@ -1193,9 +1258,7 @@ fi
 # asserts this at build time). On 0.x they were silently dropped by yargs, Chrome
 # exited with "No usable sandbox!", and every tool call failed "Target closed".
 # --no-usage-statistics opts out of the telemetry 1.x sends to Google by default.
-_browser_baked() {
-    command -v chrome-devtools-mcp >/dev/null 2>&1 && command -v chromium >/dev/null 2>&1
-}
+# _browser_baked, _cb and BROWSER_MCP are set in §7b.
 _register_chrome_devtools_mcp() {
     if asclaude claude mcp get chrome-devtools >/dev/null 2>&1; then
         log "MCP 'chrome-devtools' already configured, skipping"
@@ -1227,10 +1290,6 @@ _register_chrome_devtools_mcp() {
         log "WARNING: failed to register chrome-devtools MCP"
     fi
 }
-# Normalize: strip surrounding whitespace / a trailing CR (a CRLF-authored .env
-# yields `1\r`, which must still match "1", not silently fall through to auto)
-# and lowercase, so the tri-state match is robust to how the value was set.
-_cb="$(printf '%s' "${CLAUDE_BROWSER:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
 case "$_cb" in
     1|true|yes|on)
         # Explicit request: must be satisfiable, else fail loud (never silent).

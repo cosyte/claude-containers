@@ -126,7 +126,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_EXTRA_ARGS` |: | Extra args to `claude` (or `--extra-args`) |
 | `CLAUDE_MCP_ENABLED` |: | CSV of baked MCP servers to load (empty = all) |
 | `WITH_BROWSER` | `0` | Build arg: 1 bakes Chromium + chrome-devtools-mcp (+~200 MB). `make build-browser` flips it. |
-| `CLAUDE_BROWSER` | auto | Tri-state for the chrome-devtools MCP: unset = auto (a browser image self-enables it), `1`/`--browser` = force on (fails loud on a lean image), `0`/`--no-browser` = opt out. |
+| `CLAUDE_BROWSER` | auto | Tri-state for the chrome-devtools MCP: unset = auto (a browser image self-enables it), `1`/`--browser` = force on (fails loud on a lean image), `0`/`--no-browser` = opt out. Also gates the `frontend-debugging` skill and the browser line of the session's container facts. |
 | `CLAUDE_GPU` | `0` | `1`/`--gpu` gives the session the host's NVIDIA GPU through CDI (see [GPU sessions](#gpu-sessions-optional)); `--no-gpu` opts out of an ambient `1`. Fixed at container creation. |
 | `CLAUDE_GPU_SCRATCH_TMPFS` | `4g` | Size of the RAM `/scratch` a GPU session gets instead of the disk volume. Charged to `CLAUDE_MEM_LIMIT`. |
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` |: | Clone source (or use `--repo`/`--branch`/`--depth`) |
@@ -161,8 +161,17 @@ Every path in the container, its source, its scope and what it holds:
 ## Customizing the baked-in config
 
 `claude-config/` is copied into the image and merged into `~/.claude` on start
-(only filling what's absent, so per-container state is never clobbered). It
-holds `CLAUDE.md`, `mcp/`, `plugins/`, `commands/`, `skills/`. MCP secrets are
+(only filling what's absent, so per-container state is never clobbered; `CLAUDE.md`
+is the exception, the image's copy at every start unless one is mounted over it). It
+holds `CLAUDE.md`, `mcp/`, `plugins/`, `commands/`, `skills/`. A skill that needs the
+browser (`frontend-debugging`) is installed only where the chrome-devtools MCP is on.
+
+**What a session sees.** Besides that global `CLAUDE.md`, every session reads the managed
+memory `/etc/claude-code/CLAUDE.md`, which the entrypoint rewrites at every start with a
+"This container" section probed by `claude-container-facts`: the browser (chromium path and
+version, or none), the chrome-devtools MCP (on/off), the GPU, toolchains with versions,
+`/cache` and `/scratch` free space, and how to install more. A `--gpu` session also gets
+the GPU note. An operator's own file at that path is left alone. MCP secrets are
 **never baked**: use `${VAR}` placeholders, supply values at runtime via
 `.env`. Full guide: [docs/customizing-bakeins.md](docs/customizing-bakeins.md).
 
@@ -438,8 +447,8 @@ with `--no-gpu` to opt one out). Removing it is the same in reverse.
   that is 5g of the 16g default `CLAUDE_MEM_LIMIT`, leaving 11g for the session and the
   render's own memory.
 - `CLAUDE_GPU=1`, which turns on the boot probe, the GPU line in `claude-healthcheck`, and
-  a short GPU note in the session's managed memory (`/etc/claude-code/CLAUDE.md`), so the
-  agent finds the tooling on its own.
+  a short GPU note in the session's managed memory (`/etc/claude-code/CLAUDE.md`, after the
+  container facts every session gets), so the agent finds the tooling on its own.
 
 Every image variant ships the vendor-neutral GL side (glvnd `libEGL`/`libGL`/`libOpenGL`,
 Mesa llvmpipe as the software fallback, and the X client libraries Blender links even

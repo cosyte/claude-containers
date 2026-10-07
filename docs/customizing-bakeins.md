@@ -1,7 +1,8 @@
 # Customizing the baked-in config
 
 `claude-config/` is copied into the image at build time and merged into
-`~/.claude` on container start. The merge **only fills what's absent**, so a
+`~/.claude` on container start. Apart from `CLAUDE.md` (the image's copy at every
+start) the merge **only fills what's absent**, so a
 container's own evolving state (sessions, history, settings you change inside)
 is never clobbered by a restart. Change a bake-in → `make build` → relaunch.
 
@@ -10,19 +11,29 @@ path inside the container (add a `-v` in a wrapper, or use the compose file).
 
 ```
 claude-config/
-├── CLAUDE.md            → ~/.claude/CLAUDE.md          (copied if absent)
+├── CLAUDE.md            → ~/.claude/CLAUDE.md          (copied at every start)
 ├── settings.json        → merged into ~/.claude/settings.json  (optional)
 ├── mcp/*.json           → registered via `claude mcp add-json --scope user`
 ├── plugins/plugins.json → unioned into settings.json (Claude auto-syncs)
 ├── commands/*.md        → ~/.claude/commands/          (copied if absent)
-└── skills/<name>/SKILL.md → ~/.claude/skills/<name>/   (copied if absent)
+└── skills/<name>/SKILL.md → ~/.claude/skills/<name>/   (copied if absent and usable)
 ```
 
 ## CLAUDE.md
 
 Global memory for every session in the container. Keep it short; per-repo
-guidance belongs in the repo's own `CLAUDE.md`. Override at runtime by mounting
-a file onto `/home/claude/.claude/CLAUDE.md`.
+guidance belongs in the repo's own `CLAUDE.md`. The entrypoint copies the image's
+file over `~/.claude/CLAUDE.md` at every start, so a change here reaches existing
+containers at their next start and an edit made inside a container does not last.
+Override at runtime by mounting a file onto `/home/claude/.claude/CLAUDE.md`: a
+mounted file (it has its own line in `/proc/self/mountinfo`) is left alone.
+
+What one container has is not written here: at every start the entrypoint runs
+`claude-container-facts` and writes its "This container" section (browser,
+chrome-devtools MCP, GPU, toolchains with versions, `/cache` and `/scratch` free
+space, how to install more) into the managed memory `/etc/claude-code/CLAUDE.md`,
+which every session reads. A `--gpu` session gets the GPU note after it. A file an
+operator put at that path (no `claude-containers:` marker) is left alone.
 
 ## settings.json
 
@@ -89,7 +100,10 @@ One directory per skill under `claude-config/skills/`, each with a `SKILL.md`
 (frontmatter `name:` + `description:`). `example-skill/` ships as a sanity
 check. Add directories and rebuild. A baked skill directory is copied only if
 that skill doesn't already exist in the container, so in-container edits
-survive restarts.
+survive restarts. A skill that needs something is copied only where it is there:
+`frontend-debugging` only when the chrome-devtools MCP is on (chromium and the MCP
+baked, `CLAUDE_BROWSER` not off). Where it is not, an unmodified copy a past start
+installed is removed; an edited one is kept.
 
 ## Quick proof everything loaded
 

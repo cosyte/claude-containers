@@ -3,7 +3,7 @@
 #
 #   claude-container-facts
 #
-# The entrypoint (§7b) runs it at every start and writes its output into the session's
+# The entrypoint (§7c) runs it at every start and writes its output into the session's
 # managed memory (/etc/claude-code/CLAUDE.md), so a session knows what THIS container has
 # without guessing. Every line comes from a probe run now, never from a hand-written list:
 #   - the browser: chromium on PATH (its path and version), or "none"
@@ -12,7 +12,7 @@
 #   - the GPU: the boot probe's line (CLAUDE_FACTS_GPU_STATE, the file §2b wrote), else
 #     `claude-gpu status --oneline` on a --gpu session, else "none"
 #   - toolchains with versions: git gh python3 uv node pnpm mise ("none" when absent)
-#   - /cache and /scratch with free space (CLAUDE_FACTS_DIRS overrides the list)
+#   - /cache and /scratch with free space (CLAUDE_FACTS_DIRS overrides the list), and TMPDIR
 #   - how to install more
 # Each probe is bounded (CLAUDE_FACTS_PROBE_TIMEOUT, 5s), so a wedged tool never hangs boot.
 set -uo pipefail
@@ -69,6 +69,7 @@ space() {
     for d in $DIRS; do
         if [[ -d "$d" ]]; then
             free="$(df -hP "$d" 2>/dev/null | awk 'NR==2{print $4}')"
+            [[ "$(stat -f -c %T "$d" 2>/dev/null)" == tmpfs ]] && free="$free RAM"
             out+=("\`$d\` ${free:-?} free")
         else
             out+=("\`$d\` absent")
@@ -89,7 +90,7 @@ cat <<EOF
 - chrome-devtools MCP: $mcp
 - GPU: $(gpu)
 - Toolchains: $(toolchains)
-- Space: $(space) (\`/scratch\` is TMPDIR when present)
+- Space: $(space); TMPDIR is \`${TMPDIR:-/tmp}\`
 - Install more: \`mise use <tool>@<version>\` first, then that language's own manager:
   \`uv\` for Python (\`uv run --with <pkg>\`, or \`pip\` on a mise Python), \`pnpm\` for Node,
   \`cargo\` for Rust, \`go install\` for Go. No apt, no sudo: a system library needs an

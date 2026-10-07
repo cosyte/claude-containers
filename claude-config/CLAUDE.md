@@ -1,9 +1,11 @@
 # Global operating notes (baked-in)
 
-This file is copied to `~/.claude/CLAUDE.md` inside every container on first
-start. It is the global memory for every Claude Code session here. Override it
-by mounting your own file onto `/home/claude/.claude/CLAUDE.md`, or just edit
-this file and rebuild.
+This file is copied to `~/.claude/CLAUDE.md` inside every container at every
+start, so an edit made there is replaced at the next one. It is the global memory
+for every Claude Code session here. Override it by mounting your own file onto
+`/home/claude/.claude/CLAUDE.md` (a mounted file is left alone), or edit this file
+and rebuild. What this particular container has (browser, GPU, toolchains, space)
+is in the "This container" section of the managed memory, probed at each start.
 
 Keep this short. Project-specific guidance belongs in the repo's own
 `CLAUDE.md`, not here.

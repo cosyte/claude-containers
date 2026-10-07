@@ -8,9 +8,8 @@
 # the /cache shared cache, and the explicit refusal of sudo /
 # --break-system-packages / edits to /etc,/opt,/usr.
 #
-# NO docker. §8a of entrypoint.sh already installs the baked
-# CLAUDE.md into the running container on first start (proven by
-# test/unit.sh); this unit test is a **content contract** on the baked file
+# NO docker. §8a of entrypoint.sh installs the baked CLAUDE.md into the
+# running container at every start (proven by test/container-facts-unit.sh); this unit test is a **content contract** on the baked file
 # itself: an in-repo regression guard that every mandatory phrase survives
 # future edits, so an in-container agent that reads the file gets actionable
 # guidance instead of flailing on a PEP-668 refusal, a sudo dead-end, or a
@@ -24,9 +23,8 @@
 #      is no self-service path for system libraries, points at the shared cache's
 #      `/cache` for the shared cache, and refuses `sudo` +
 #      `--break-system-packages` + edits to `/etc`/`/opt`/`/usr`.
-#   B. entrypoint.sh §8a: the baked CLAUDE.md install path is unchanged
-#      (this item ships GUIDANCE, not new mechanism); the section is
-#      surfaced through the same §8a "only fill what's absent" contract.
+#   B. entrypoint.sh §8a: the baked CLAUDE.md is what it installs, so the
+#      section reaches every container (this item ships GUIDANCE, not mechanism).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -203,18 +201,17 @@ else
 fi
 
 # ============================================================================================
-echo "== B. entrypoint.sh §8a: baked CLAUDE.md install path unchanged (no new mechanism) =="
+echo "== B. entrypoint.sh §8a: installs the baked CLAUDE.md =="
 # ============================================================================================
 bash -n "$ENTRY" && ok "entrypoint.sh parses (bash -n)" || bad "entrypoint.sh has a syntax error"
 
 # Extract §8a so the assertion is scoped and cannot be masked by a lookalike elsewhere.
 SEC8A="$(awk '/^# 8a\. Global CLAUDE.md/,/^# 8b\./' "$ENTRY")"
 if grep -qF 'BAKE_DIR/CLAUDE.md' <<<"$SEC8A" \
-   && grep -qF '! -e "$CLAUDE_CONFIG_DIR/CLAUDE.md"' <<<"$SEC8A" \
    && grep -qF 'install -o' <<<"$SEC8A"; then
-    ok "§8a still installs BAKE_DIR/CLAUDE.md when target is absent (no-clobber, install -o)"
+    ok "§8a installs BAKE_DIR/CLAUDE.md (install -o)"
 else
-    bad "§8a's baked-CLAUDE.md install ('only fill what's absent') MUST be intact: no entrypoint change was expected for the install guide"
+    bad "§8a must install BAKE_DIR/CLAUDE.md"
 fi
 
 # ============================================================================================
