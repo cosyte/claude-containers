@@ -27,17 +27,21 @@ FROM node:${NODE_VERSION}-trixie-slim
 # --- Build-time configuration -------------------------------------------------
 # CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control.
 #
-# 2.1.280 (npm `latest` on 2026-09-22) is verified to support the exact launch this
+# 2.1.293 (published to npm 2026-10-07) is verified to support the exact launch this
 # image makes: `claude --dangerously-skip-permissions --remote-control <name>`
 # (bin/claude-session): with both flags accepted TOGETHER and no interlock between
-# them. That combination is the reason this ARG is pinned at all; re-verify it on any
-# future bump (test/cli-version-unit.sh asserts the pin is consistent; the live
-# --remote-control handshake is the on-host check, CC-CLAUDE-CODE-UPGRADE-SMOKE).
+# them (checked on a TTY as the unprivileged user, with a signed-out config dir: it
+# parses and starts). That combination is the reason this ARG is pinned at all;
+# re-verify it on any future bump (test/cli-version-unit.sh asserts the pin is
+# consistent; the live --remote-control handshake is the on-host check,
+# CC-CLAUDE-CODE-UPGRADE-SMOKE).
 #
-# DEFAULT-MODEL CHANGE IN THIS BUMP. 2.1.280 added Opus 5.5 (`claude-opus-5-5`, 1M
-# context) and made it the `opus` alias's target, so `--model opus` (this image's
-# default) moves the fleet from Opus 5 (the target since CLI 2.1.219) to Opus 5.5.
-# Pin CLAUDE_MODEL=claude-opus-5 on a container that must stay on Opus 5.
+# NO DEFAULT-MODEL CHANGE IN THE 2.1.293 BUMP: `opus` still resolves to Opus 5.5
+# (`claude-opus-5-5`, 1M context), the target since 2.1.280, which moved the fleet off
+# Opus 5 (the target since CLI 2.1.219). Pin CLAUDE_MODEL=claude-opus-5 on a container
+# that must stay on Opus 5. The other aliases did move: `sonnet` means Sonnet 5.5 from
+# 2.1.284 and `haiku` means Haiku 5.5 from 2.1.293, so a container that sets either
+# alias changes model with this bump.
 #
 # WHY THE FLOOR EXISTS (CC-CLAUDE-CODE-UPGRADE): the `opus` alias resolves to the LATEST
 # Opus, and Opus 4.8 shipped in CLI 2.1.154, so the old 2.1.145 pin silently resolved
@@ -63,11 +67,44 @@ FROM node:${NODE_VERSION}-trixie-slim
 #     container can run more than one `claude` process (RC session + subagents).
 #   - 2.1.257: fixed background sessions left running an older binary piling up
 #     across auto-updates instead of being retired.
+#   - 2.1.288: fixed the npm auto-updater reporting success when only the placeholder
+#     `claude` stub was installed. This image's self-update always leaves that stub
+#     (ignore-scripts skips the postinstall) and bin/claude-launcher repairs it on the
+#     next launch; watch the first auto-update on this pin for an updater that now
+#     reports the stub as a failure.
+#
+# Landed between 2.1.280 and 2.1.293, and relevant to this image (from the upstream
+# CHANGELOG.md; none of them needs a script change here):
+#   - 2.1.293: fixed `claude logs`, `stop`, `kill`, `rm` and `claude daemon status`,
+#     `stop`, `uninstall` sometimes signing the login out when it had expired or was
+#     about to. On a shared credentials volume that is every container's login, so
+#     tooling that drives background sessions needs at least this version.
+#   - 2.1.281: `claude --bg` in a directory that has not passed the workspace trust
+#     prompt now asks for trust, or EXITS when not run interactively. Nothing in this
+#     image runs `--bg`; a tool that does must seed
+#     `projects["<dir>"].hasTrustDialogAccepted` in `$CLAUDE_CONFIG_DIR/.claude.json`
+#     first, as `claude-sessions prepare` does for interactive sessions.
+#   - 2.1.290 and 2.1.293: background sessions no longer run in bypass mode without the
+#     bypass consent, and consent kept only in `.claude/settings.local.json` or a
+#     `--settings` file is not read for them (`claude agents` now asks first). This image
+#     writes the consent (`skipDangerousModePermissionPrompt`) at user scope and in the
+#     managed file (entrypoint.sh §8b and §7a), neither of which is one of those.
+#   - 2.1.281: a recursive `rm` whose target is only command-substitution output (such as
+#     `rm -rf "$(pwd)"`) now asks even under --dangerously-skip-permissions, and the
+#     dangerous-`rm` prompt in that mode now waits 2 minutes and then denies the command,
+#     so an unattended session keeps going instead of blocking on it.
+#   - 2.1.285 and 2.1.288: background Bash commands in unattended runs (`-p`, so
+#     claude-autopilot) stop at their timeout (default 30 min, max 2 h); interactive
+#     sessions have no limit.
+#   - 2.1.290: fixed first launch asking to pick a login method again when a credentials
+#     file is already in the config directory (this image's entrypoint puts one there).
+#   - 2.1.284 and 2.1.293: Sonnet 5.5 and Haiku 5.5 become the `sonnet` and `haiku`
+#     targets (see above); `opus` is unchanged.
 #
 # Landed between 2.1.258 and 2.1.280, and relevant to this image:
 #   - 2.1.271: fixed `--resume` dropping the 1M context window when the resumed
 #     session's model family differs from the configured default (hits the RC
-#     watchdog's `--continue` respawn across this bump's Opus 5 -> 5.5 change).
+#     watchdog's `--continue` respawn across the 2.1.280 bump's Opus 5 -> 5.5 change).
 #   - 2.1.271: Remote Control leaves fewer empty claude.ai sessions when setup fails
 #     on a flaky network.
 #   - 2.1.273: fixed a subshell hiding a dangerous `rm` from bypass mode's checks.
@@ -169,7 +206,7 @@ FROM node:${NODE_VERSION}-trixie-slim
 #     tmux pane would die on an invalid-choice refusal.
 #   - 2.1.198: Remote Control is disabled when ANTHROPIC_BASE_URL points at a
 #     non-Anthropic host. This image never sets it (and §1 refuses API-key auth).
-ARG CLAUDE_CODE_VERSION=2.1.280
+ARG CLAUDE_CODE_VERSION=2.1.293
 # PNPM_VERSION: pnpm baked into the image. "latest" works but isn't
 # reproducible: pin a real version (e.g. 10.4.1), same as UV_VERSION.
 ARG PNPM_VERSION=latest

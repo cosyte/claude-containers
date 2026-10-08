@@ -27,14 +27,14 @@
   opened in Claude Code, it teaches the model the architecture, invariants,
   and operational playbook so it can drive build/login/launch/customize/debug.
 
-## Verified facts (Claude Code 2.1.280)
+## Verified facts (Claude Code 2.1.293)
 
 Everything below was checked against the installed binary, not just docs:
 
 - `--remote-control [name]` is a real top-level flag; `-n/--name` is a separate
   display-name flag. The **top-level** launch this image actually makes:
   `claude --dangerously-skip-permissions --remote-control "<project>"`: was
-  verified to parse and start on 2.1.280 (as the unprivileged `claude` user; the
+  verified to parse and start on 2.1.293 (as the unprivileged `claude` user; the
   CLI refuses skip-permissions when running as root, by design). Verify it on a
   TTY: with no tty the CLI falls into `--print` mode and exits on missing input
   *before* proving anything about the interactive launch.
@@ -297,7 +297,7 @@ no `-p`: those each disable features we need.
 ## Permission mode & Remote Control
 
 Launch is `claude --dangerously-skip-permissions --remote-control "<project>"`.
-On 2.1.280 these compose correctly. Belt-and-suspenders: `settings.json` also
+On 2.1.293 these compose correctly. Belt-and-suspenders: `settings.json` also
 sets `permissions.defaultMode = bypassPermissions` and
 `skipDangerousModePermissionPrompt: true` (a real settings key). If a future
 Claude Code regresses the interaction, set `CLAUDE_PERMISSION_MODE=acceptEdits`.

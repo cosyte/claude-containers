@@ -6,7 +6,7 @@ SHELL := /bin/bash
 export
 
 CLAUDE_IMAGE        ?= claude-code-box:latest
-CLAUDE_CODE_VERSION ?= 2.1.280
+CLAUDE_CODE_VERSION ?= 2.1.293
 NODE_VERSION        ?= 24
 UV_VERSION          ?= latest
 PNPM_VERSION        ?= latest
