@@ -268,6 +268,14 @@ grep -qxF '      - claude-state:/state' "$TPL" && grep -qxF '      CLAUDE_STATE_
 grep -q '/state/<app>' "$REPO_ROOT/claude-config/CLAUDE.md" && grep -q 'CLAUDE_STATE_DIR' "$REPO_ROOT/claude-config/CLAUDE.md" \
     && ok "the baked CLAUDE.md tells sessions where private state goes" \
     || bad "claude-config/CLAUDE.md must point private state at /state"
+grep -qF '/state/wt/<repo>/<branch>' "$REPO_ROOT/claude-config/CLAUDE.md" \
+    && grep -qF '`/scratch` (`$TMPDIR`' "$REPO_ROOT/claude-config/CLAUDE.md" \
+    && ok "the baked CLAUDE.md keeps worktrees, clones and working folders out of /cache too" \
+    || bad "claude-config/CLAUDE.md must send worktrees to /state/wt and throwaway work to /scratch"
+grep -qF 'Never private state, and never a worktree, a clone or a working folder' "$REPO_ROOT/docs/volume-reference.md" \
+    && grep -qF 'git -C /workspace/<repo> worktree repair /state/wt/<repo>/<branch>' "$REPO_ROOT/docs/volume-reference.md" \
+    && ok "docs/volume-reference.md says what else is private and how a worktree moves to /state" \
+    || bad "docs/volume-reference.md must keep worktrees out of /cache and show the worktree move"
 
 echo
 echo "state-unit: $PASS passed, $FAIL failed"

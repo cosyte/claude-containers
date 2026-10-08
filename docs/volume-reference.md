@@ -8,7 +8,7 @@
 | `/workspace` | `claude-ws-<proj>` volume *or* `--workspace` bind | per container | The git repo |
 | `/scratch` | `claude-scratch-<proj>` volume; a RAM tmpfs on `--browser` and `--gpu` services | per container | **`TMPDIR`**: disk-backed temp. Cleared on every boot; `claude-rm --purge` deletes it |
 | `/state` | `claude-state-<proj>` volume | per container, mounted in no other | **Private state** (`CLAUDE_STATE_DIR`): an app's databases, keys and tokens, under `/state/<app>`. Mode 700. `claude-rm --purge` and `compose down -v` delete it |
-| `/cache` | `claude-cache` volume | shared, readable from every container | Tool installs and package caches (mise, cargo, go, npm, uv, pip) and the pinned Blender (`/cache/blender`). Never private state |
+| `/cache` | `claude-cache` volume | shared, readable from every container | Tool installs and package caches (mise, cargo, go, npm, uv, pip) and the pinned Blender (`/cache/blender`). Never private state, and never a worktree, a clone or a working folder |
 | `/tmp` | tmpfs (**RAM**, 1 GB) | per container | Small temp only. Charged to the memory cgroup: big writes belong in `/scratch` |
 | `/etc/claude/authorized_keys` | host `SSH_AUTHORIZED_KEYS` | read-only, in root-only `/etc/claude` | Who may SSH in: the owner's login keys, never the git key |
 | `/etc/claude/git-key` | host `GIT_SSH_KEY` | read-only, in root-only `/etc/claude` | Git push key: brokered, and refused for SSH logins (`/etc/ssh/revoked_keys`) |
@@ -67,3 +67,30 @@ docker compose -f <stack>/docker-compose.yml start <svc>
 docker run --rm --user 0 --entrypoint bash -v claude-cache:/cache claude-code-box:latest \
   -c 'rm -rf /cache/<app>/<svc>'
 ```
+
+### Worktrees, clones and working folders
+
+A worktree or a clone of a private repository, a planning folder, a key a test generated, a
+term list kept out of git: each is as private as a database, and every container can read it
+in `/cache`. Keep the ones that must last under `/state` (`/state/wt/<repo>/<branch>` for
+worktrees, `/state/tmp` for working folders), and throwaway ones in `/scratch` (`TMPDIR`,
+cleared at every boot). A tool, a skill or a repository's notes that tell sessions to work in
+a folder under `/cache` is the leak: point it at `$CLAUDE_STATE_DIR` instead.
+
+`git worktree move` cannot move a worktree to another volume (`rename` fails with "Invalid
+cross-device link"). Copy it, then repair the link from the main repository:
+
+```bash
+# In the container, while no session works in that worktree.
+mkdir -p /state/wt/<repo>
+cp -a /cache/wt/<repo>/<branch> /state/wt/<repo>/
+git -C /workspace/<repo> worktree repair /state/wt/<repo>/<branch>
+git -C /state/wt/<repo>/<branch> status --short     # uncommitted changes came along
+rm -rf /cache/wt/<repo>/<branch>
+git -C /workspace/<repo> worktree prune
+```
+
+When the main repository moves too (a clone under `/cache` with worktrees), copy both, and
+run the repair where the old copies cannot be seen (in a helper container that mounts only
+the state volume): while the old main repository still exists, `repair` mends the old links
+instead of the new ones.
