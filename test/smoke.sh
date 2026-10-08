@@ -146,6 +146,9 @@ check "sshd is running" \
     'cexec "pgrep -x sshd" >/dev/null 2>&1'
 check "workspace bind mount visible (skipped clone)" \
     'cexec "cat /workspace/marker.txt" 2>/dev/null | grep -q smoke-marker'
+# The boot owns only the workspace's top level; the full pass runs after the sessions are up.
+check "the full workspace ownership pass ran in the background and logged its time" \
+    '( for _ in $(seq 1 30); do grep -q "Workspace ownership : checked in .*(background)" <<<"$(docker logs "$CN" 2>&1)" && exit 0; sleep 1; done; exit 1 )'
 # No CLAUDE_MODEL was passed, so the entrypoint must default to opus (best available).
 check "entrypoint defaults the model to opus (best available)" \
     'grep -qE "Model[[:space:]]*: opus" <<<"$(docker logs "$CN" 2>&1)"'
@@ -1035,7 +1038,7 @@ docker run -d --name "$SCRCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME
 wait_tmux "$SCRCN" || true
 
 check "the entrypoint reports preparing the disk-backed scratch dir" \
-    'docker logs "$SCRCN" 2>&1 | grep -qi "Scratch (TMPDIR)"'
+    'grep -qi "Scratch (TMPDIR)" <<<"$(docker logs "$SCRCN" 2>&1)"'
 check "the agent's TMPDIR points at /scratch, not the tmpfs" \
     '[ "$(docker exec "$SCRCN" gosu claude sh -c "echo \$TMPDIR")" = "/scratch" ]'
 # Guard against a vacuous pass: /scratch must EXIST and be a real mount, not resolve to /.
