@@ -73,6 +73,16 @@ What the stack does enforce, and therefore what a bypass of *is* a valid report:
   refresh failed to tighten an allowlist is therefore not a vulnerability;
   narrowing a live container's egress on a transient DNS failure would be the
   worse outcome and is the behaviour being deliberately avoided.
+- **Private state per container.** Each container gets its own
+  `claude-state-<name>` volume at `/state` (`CLAUDE_STATE_DIR`) for an app's
+  databases, keys and tokens; `claude-launch` and `claude-compose-gen` mount it
+  into that container only, and `claude-compose-gen --mount` refuses another
+  container's state or config volume. A generated or launched configuration that
+  gives one container another's `/state` is in scope. The shared `/cache` is the
+  opposite by design: every container mounts it and runs as the same UID, so
+  anything in it is readable from every container. Private state left there is
+  named in the boot log, not hidden; a report that `/cache` is readable across
+  containers is not a vulnerability.
 - **Secret guard** installs a git pre-commit hook blocking obvious secret
   material. It is a backstop against an agent committing a credential, not a
   DLP control; `--no-verify` bypasses it by design.

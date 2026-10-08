@@ -161,6 +161,13 @@ hole:
   during a fetch. The cache holds tool binaries and **public** package archives: **no repo
   content, no secrets, no PHI** (repos live in per-container `/workspace`, credentials in the
   per-container config volume, neither of which is `/cache`).
+- **Every container can read all of it.** One volume, mounted by every container, all
+  running as UID 1000: a file one container writes under `/cache` is readable from every
+  other, whatever its mode. So an app's **private state** (its database, a web key, a token)
+  never goes here: it goes in `/state/<app>`, the container's own `claude-state-<name>`
+  volume, which no other container mounts (`CLAUDE_STATE_DIR`;
+  [volume-reference.md](volume-reference.md#private-state)). The entrypoint names any
+  database or key it finds under `/cache/<app>/<its own name>/` at boot until it is moved.
 - The cache is **reconstructible**: nothing in it is authoritative. A trim, a `docker volume
   rm claude-cache`, or a `compose down -v` loses only speed, never correctness.
 

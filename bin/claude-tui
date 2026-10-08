@@ -264,7 +264,7 @@ remove_flow() {  # remove_flow <project>
         "Remove container 'claude-${project}'?\n\nWorkspace and config volumes are kept unless you also choose to purge them next." \
         12 70 || return 0
     if whiptail --title "Remove $project" --yesno \
-        "Also PURGE the workspace + config volumes?\n\nThis deletes the repo checkout and conversation history for this session. Cannot be undone." \
+        "Also PURGE the workspace, config and private state volumes?\n\nThis deletes the repo checkout, conversation history and private state (/state) for this session. Cannot be undone." \
         12 70; then
         purge=1
     fi

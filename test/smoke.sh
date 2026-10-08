@@ -1058,6 +1058,48 @@ check "scratch is cleared on boot (a volume does not self-empty like a tmpfs)" \
 docker rm -f "$SCRCN" >/dev/null 2>&1 || true
 docker volume rm "$SCRVOL" >/dev/null 2>&1 || true
 
+# --- 16g. Private state (/state) ----------------------------------------------
+# /cache is shared by every container (one volume, one UID), so a database or a key kept
+# there is readable from all of them. /state is each container's own volume. Reproduce the
+# launcher's flags (its own state volume, CLAUDE_STATE_DIR, a throwaway cache volume holding
+# a database under this container's name) and assert the image does its half: /state is
+# owned by the agent and mode 700, login shells find it, the database left in the cache is
+# named in the boot log, and what is written to /state survives a recreate.
+STCN="claude-smoke-state-$$"
+STVOL="claude-smoke-state-vol-$$"
+STCACHE="claude-smoke-state-cache-$$"
+docker volume create "$STVOL" >/dev/null 2>&1 || true
+docker volume create "$STCACHE" >/dev/null 2>&1 || true
+docker run --rm --user 0 --entrypoint sh -v "$STCACHE:/cache" "$IMAGE" \
+    -c 'mkdir -p /cache/app/statesmoke && : > /cache/app/statesmoke/app.db' >/dev/null 2>&1 || true
+st_run() {
+    docker run -d --name "$STCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=statesmoke \
+        -e CLAUDE_STATE_DIR=/state -v "$STVOL:/state" -v "$STCACHE:/cache" \
+        --tmpfs /tmp:rw,nosuid,nodev,exec,size=1g \
+        -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+    wait_tmux "$STCN" || true
+}
+st_run
+check "the entrypoint reports /state as this container's own volume" \
+    'docker logs "$STCN" 2>&1 | grep -q "Private state       : /state"'
+check "/state is owned by the agent user, mode 700" \
+    '[ "$(docker exec "$STCN" stat -c "%U %a" /state)" = "claude 700" ]'
+check "the agent's CLAUDE_STATE_DIR is /state" \
+    '[ "$(docker exec "$STCN" gosu claude sh -c "echo \$CLAUDE_STATE_DIR")" = "/state" ]'
+check "an SSH-style login shell (cleared env) also gets CLAUDE_STATE_DIR" \
+    '[ "$(docker exec "$STCN" gosu claude env -i /bin/bash -lc "echo \$CLAUDE_STATE_DIR")" = "/state" ]'
+check "a database this container left in the shared cache is named in the boot log" \
+    'docker logs "$STCN" 2>&1 | grep -q "PRIVATE STATE IN THE SHARED CACHE: 1 file" && docker logs "$STCN" 2>&1 | grep -q "/cache/app/statesmoke/app.db"'
+docker exec "$STCN" gosu claude sh -c 'mkdir -p /state/app && echo kept > /state/app/marker' >/dev/null 2>&1 || true
+docker rm -f "$STCN" >/dev/null 2>&1 || true
+st_run
+check "what the agent wrote to /state survives a recreate" \
+    '[ "$(docker exec "$STCN" cat /state/app/marker 2>/dev/null)" = "kept" ]'
+check "a container without the state volume sees nothing of it (another container's view)" \
+    '[ -z "$(docker run --rm --entrypoint sh -v "$STCACHE:/cache" "$IMAGE" -c "ls -A /state")" ]'
+docker rm -f "$STCN" >/dev/null 2>&1 || true
+docker volume rm "$STVOL" "$STCACHE" >/dev/null 2>&1 || true
+
 # --- 17. The per-session Docker engine stays removed -----------------------------
 # The image must not carry a daemon: nothing can start one without extra privilege, and a
 # baked engine nobody can reach is dead weight that invites someone to "fix" it by adding a

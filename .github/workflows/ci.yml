@@ -49,3 +49,5 @@ jobs:
         run: test/sessions-unit.sh
       - name: kit unit tests (the kit hook, a plugin marketplace from a git URL with an optional pin, its plugins installed once, the start command, never a failed boot, against a fake claude CLI)
         run: test/kit-unit.sh
+      - name: state unit tests (private per-container /state, one claude-state-<name> per service and never another's, --mount refuses another container's state or config, claude-launch and claude-rm, entrypoint 2c run in a sandbox names private state left in the shared /cache)
+        run: test/state-unit.sh

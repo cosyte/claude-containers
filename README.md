@@ -82,10 +82,17 @@ the `./bin/` prefix.
  volumes:
    claude-auth          (shared)  OAuth credentials   → /auth
    claude-sshkeys       (shared)  SSH host keys        → /etc/ssh/host-keys
-   claude-config-<proj> (per ctr) sessions + state     → /home/claude/.claude
+   claude-config-<proj> (per ctr) sessions + config    → /home/claude/.claude
    claude-ws-<proj>     (per ctr) the git repo         → /workspace
    claude-scratch-<proj>(per ctr) disk-backed TMPDIR   → /scratch
+   claude-state-<proj>  (per ctr) app dbs and keys     → /state  (CLAUDE_STATE_DIR)
+   claude-cache         (shared)  tool caches only     → /cache
 ```
+
+`/cache` is shared by every container on the host, all as one user, so anything in it is
+readable from every container. An app's private state (a database, a key, a token) goes
+in `/state/<app>`, the container's own volume, which no other container mounts:
+[docs/volume-reference.md](docs/volume-reference.md#private-state).
 
 Why credentials and config are split: a single shared `~/.claude` across
 containers would corrupt concurrent sessions and collide on the `/workspace`

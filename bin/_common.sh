@@ -250,6 +250,15 @@ account_auth_volume() { echo "claude-auth-$1"; }
 # is visible in `docker system df` and reclaimable by `claude-rm --purge`. This repo already
 # keeps everything that grows in a volume for exactly that reason.
 scratch_volume() { echo "claude-scratch-$1"; }
+# Per-container private state, mounted at /state (CLAUDE_STATE_DIR) in this container ONLY.
+#
+# Why this exists: /cache is one volume shared by every container on the host, and every
+# container runs as the same UID, so a database, a key or a token an app keeps there is
+# readable from every other container. Tool caches belong in /cache; private state belongs
+# here, under /state/<app>. claude-launch and claude-compose-gen mount it, and
+# claude-compose-gen refuses to --mount one into a second service.
+state_volume() { echo "claude-state-$1"; }
+STATE_MOUNT="/state"
 
 # --- Shared tool cache -----------------------------------------------
 # cache_name: the shared cache volume name, or "" when disabled. A launcher may

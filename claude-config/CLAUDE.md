@@ -27,6 +27,10 @@ Keep this short. Project-specific guidance belongs in the repo's own
   legitimately needs them (e.g. a native build), commit a `/workspace/.npmrc` with
   `ignore-scripts=false` to opt that repo back in. Prefer pinned, lockfiled manifests
   (`mise.lock` is honored); `claude-deps-check` flags `latest`/unpinned specs.
+- `/cache` is ONE volume shared by every container on this host, all as the same
+  user, so anything kept there is readable from every other container: tool caches
+  only. Keep a database, a key or a token in `/state/<app>` (`$CLAUDE_STATE_DIR`),
+  this container's own volume, which no other container mounts.
 - Permissions are bypassed (`--dangerously-skip-permissions`). There is no
   human to approve tool calls in real time: be deliberate with destructive
   commands, and never run anything that targets paths outside `/workspace`.
