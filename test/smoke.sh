@@ -789,10 +789,13 @@ check "sshd's RevokedKeys file (root-owned) lists the git key" \
      && [ "$(docker exec "$BRKCN" stat -c %U /etc/ssh/revoked_keys)" = root ]'
 # THE DONE PROPERTY, in one container: the key loaded in the session's agent opens no sshd,
 # though authorized_keys lists it, and though the agent adds it there again itself.
+# A refusal, not any failure: sshd answers and says no ("Permission denied (publickey)").
+ssh_self() { brk "ssh -o BatchMode=yes -o ConnectTimeout=5 claude@localhost true 2>&1; echo rc=\$?" 2>/dev/null || true; }
 check "SSH with the key in the session's agent is REFUSED (the git key is not a login key)" \
-    '! brk "ssh -o BatchMode=yes -o ConnectTimeout=5 claude@localhost true" >/dev/null 2>&1'
+    'o="$(ssh_self)"; grep -q "Permission denied (publickey)" <<<"$o" && ! grep -q "rc=0" <<<"$o"'
 check "still refused after the agent re-adds the key to its own authorized_keys" \
-    'brk "ssh-add -L >> ~/.ssh/authorized_keys" && ! brk "ssh -o BatchMode=yes -o ConnectTimeout=5 claude@localhost true" >/dev/null 2>&1'
+    'brk "ssh-add -L >> ~/.ssh/authorized_keys" && o="$(ssh_self)" \
+     && grep -q "Permission denied (publickey)" <<<"$o" && ! grep -q "rc=0" <<<"$o"'
 # The stand-in git host: a second sshd, run by root, that accepts the git key as GitHub does.
 docker exec -i "$BRKCN" sh -c 'cat > /etc/ssh/standin_keys && chmod 644 /etc/ssh/standin_keys' < "$TMP/gitkey.pub"
 docker exec "$BRKCN" /usr/sbin/sshd -p 2222 -o RevokedKeys=none \
