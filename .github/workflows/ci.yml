@@ -51,3 +51,5 @@ jobs:
         run: test/kit-unit.sh
       - name: state unit tests (private per-container /state, one claude-state-<name> per service and never another's, --mount refuses another container's state or config, claude-launch and claude-rm, entrypoint 2c run in a sandbox names private state left in the shared /cache)
         run: test/state-unit.sh
+      - name: keys unit tests (the git key is never an SSH login key - compose-gen and claude-launch refuse it, other containers on the host that would accept it are named, entrypoint 4 run in a sandbox leaves it out of authorized_keys and stops a boot whose brokered key the agent could read; /etc/claude baked root-only)
+        run: test/keys-unit.sh

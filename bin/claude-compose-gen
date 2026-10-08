@@ -460,7 +460,7 @@ for tok in "${MOUNTS_RAW[@]:-}"; do
     # Refuse to shadow a mount the service already owns: silently masking the
     # workspace or config volume would be near-impossible to debug from inside.
     case "$mpath" in
-        /workspace|/home/claude/.claude|/auth|/cache|/state|/etc/ssh/host-keys|/etc/claude/*)
+        /workspace|/home/claude/.claude|/auth|/cache|/state|/etc/ssh/host-keys|/etc/claude|/etc/claude/*)
             die "--mount path '$mpath' would shadow a mount the service already has (in '$tok')" ;;
     esac
     # A container's private state (/state) and its config (sessions, its copy of the
@@ -560,6 +560,8 @@ SHARED_VOL_LIST="${SSHKEYS_VOLUME}${CACHE_NAME:+ $CACHE_NAME}"
 # Compose has no ~ expansion: resolve host SSH paths to absolute now.
 AK="${SSH_AUTHORIZED_KEYS/#\~/$HOME}"
 GK="${GIT_SSH_KEY/#\~/$HOME}"
+# The git key is never a login key (bin/_common.sh): refused here, before anything is written.
+refuse_git_key_as_login_key "$GK" "$AK"
 # Optional: bind every SSH port to one host interface (CLAUDE_SSH_BIND).
 BIND_PREFIX="${CLAUDE_SSH_BIND:+${CLAUDE_SSH_BIND}:}"
 GH_NAME="$(git config --global user.name  2>/dev/null || true)"
@@ -751,9 +753,9 @@ cat <<EOF
 #      These are declared external because EVERY stack and standalone container
 #      mounts the same ones: a 'down -v' on one stack would otherwise rotate the
 #      whole fleet's SSH host keys and wipe the shared tool cache.
-#   4. Authorized SSH pubkey:   ${AK}
-#   5. Git deploy key w/ ${ORG} read:  ${GK}
-#      (its .pub added to the ${ORG} org / each repo as a read/write deploy key)
+#   4. SSH login keys (your own public keys only): ${AK}
+#   5. Git key (for git alone, never in the file above): ${GK}
+#      (its .pub added to GitHub: a deploy key per repo, or to the account that pushes)
 #
 # Private state: each service keeps its databases, keys and tokens in its own
 # claude-state-<service> volume at ${STATE_MOUNT} (CLAUDE_STATE_DIR), which no other service
@@ -1176,6 +1178,8 @@ done
 echo
 [[ -f "$AK" ]] || warn "authorized_keys not found at $AK: create it (your SSH pubkey) before 'up'"
 [[ -f "$GK" ]] || warn "git deploy key not found at $GK: create it and add the .pub to ${ORG} before 'up'"
+# The same rule across stacks: another container on this host that would let these sessions in.
+warn_fleet_key_overlap "$GK" "$AK"
 docker image inspect "$CLAUDE_IMAGE" >/dev/null 2>&1 || warn "image $CLAUDE_IMAGE not built yet: run 'make build'"
 # Warn if --browser was used but the browser image isn't built/labeled.
 if (( ${#BROWSER[@]} > 0 )); then

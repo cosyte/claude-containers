@@ -58,7 +58,11 @@
   to the agent (via a root `socat` relay): git still pushes, but the
   unprivileged, prompt-injectable agent can never read the key bytes, not from a
   file, the agent protocol, the socket, or root's `/proc/<pid>/mem`. You do not
-  have to know a flag exists to get that. `CLAUDE_BROKER_GIT_KEY=0` is the
+  have to know a flag exists to get that. The mounted key file itself sits in
+  `/etc/claude`, a root-owned mode-700 directory (baked in the image and set again
+  at boot), so the agent cannot open it off the mount either, even when the host
+  file's owner is the agent's own UID (1000, on a single-user host); a brokered key
+  the agent could still read stops the boot. `CLAUDE_BROKER_GIT_KEY=0` is the
   explicit opt-out back to a `claude`-readable `~/.ssh/id_ed25519`, and it is the
   only value that produces one: unset brokers, `1`/`true`/`yes`/`on` brokers, and
   an unrecognised value brokers too, so a typo cannot silently downgrade
@@ -143,12 +147,26 @@
   (`.credentials.json`): effectively your Claude session. Anyone who can read
   this Docker volume can act as you. Rotate by `docker volume rm claude-auth`
   then `make login` again (or `claude auth logout` then re-login).
-- **SSH keys.** The git key and authorized_keys are mounted read-only and never
-  baked into the image. The git key is copied to a 0600 file owned by `claude`
-  (read-only bind mounts can't satisfy SSH's permission check directly). Host
-  keys persist in `claude-sshkeys` so the fingerprint is stable; all containers
-  share it (acceptable for a single-owner homelab, note it and use distinct
-  keys if that matters to you).
+- **SSH keys.** Two inputs, mounted read-only into the root-only `/etc/claude`
+  and never baked into the image: `GIT_SSH_KEY`, the private key git pushes with
+  (brokered, above), and `SSH_AUTHORIZED_KEYS`, the public keys allowed to log in
+  over SSH. **Keep them apart.** Every session can sign with the git key through
+  its agent, so if a container accepted it for SSH logins, every session in every
+  container holding it could log in there. Put only your own login keys (one per
+  device you connect from) in `SSH_AUTHORIZED_KEYS`, and use a key for git alone
+  as `GIT_SSH_KEY`. `claude-launch` and `claude-compose-gen` refuse a git key whose
+  public half is in `SSH_AUTHORIZED_KEYS` (compared by fingerprint, as sshd reads
+  the file), and warn about any other container on the host that accepts this git
+  key, or pushes with a key this file accepts. In the container, sshd refuses the
+  git key whatever any `authorized_keys` file says: the entrypoint writes its
+  public half to the root-owned `/etc/ssh/revoked_keys` (`RevokedKeys`) at every
+  boot, and the boot log carries a `Git key for SSH :` line, plus a loud banner
+  when the git key is also in `SSH_AUTHORIZED_KEYS`. With `CLAUDE_BROKER_GIT_KEY=0`
+  the git key is copied to a 0600 file owned by `claude` instead (read-only bind
+  mounts can't satisfy SSH's permission check directly). Host keys persist in
+  `claude-sshkeys` so the fingerprint is stable; all containers share it
+  (acceptable for a single-owner homelab: the private host keys are root-only in
+  every container; use distinct keys if that matters to you).
 - **The SSH port is published on all host interfaces** (`0.0.0.0`) by default,
   so it is reachable from the whole LAN. Auth is pubkey-only, but to limit the
   exposure set `CLAUDE_SSH_BIND=127.0.0.1` (host-only) or another interface:

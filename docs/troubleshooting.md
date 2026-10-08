@@ -196,9 +196,16 @@ prompt. If a future Claude Code version prompts anyway:
   authorized on the remote. `claude-launch` warns if the file is missing.
   Generate one (`ssh-keygen -t ed25519 -f ~/.ssh/claude-git-key`) and add the
   `.pub` as a deploy key / to your git account.
-- Inside the container the key is copied to `~/.ssh/id_ed25519` (0600, owned by
-  `claude`) because SSH rejects keys readable via a shared mount. Confirm:
-  `ssh -p <port> claude@host 'ssh -T git@github.com'`.
+- By default the key is held in a root ssh-agent and the agent signs through the
+  relay socket (`SSH_AUTH_SOCK`); only `CLAUDE_BROKER_GIT_KEY=0` copies it to
+  `~/.ssh/id_ed25519` (0600, owned by `claude`). Confirm the key is loaded with
+  `ssh-add -l` in the container, and that GitHub accepts it with
+  `ssh -T git@github.com`.
+- The boot stopped with `the git key at /etc/claude/git-key is readable by claude`:
+  `/etc/claude` is not the image's root-only directory, usually because a whole
+  host directory is mounted on it. Mount the key file itself at
+  `/etc/claude/git-key` (as `claude-launch` and `claude-compose-gen` do), or rebuild
+  the image.
 - Public/https repos clone fine with no key.
 - Wrong commit author: set `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` in `.env`
   (otherwise the host's `git config --global` is used).
@@ -208,6 +215,12 @@ prompt. If a future Claude Code version prompts anyway:
 - `claude-launch` warns and disables SSH if no `authorized_keys` was found at
   `SSH_AUTHORIZED_KEYS`. Point it at a file containing your public key and
   relaunch. (Remote Control still works without SSH.)
+- `Permission denied (publickey)` with the key you also push with: the git key is
+  never a login key, so sshd refuses it (`RevokedKeys`), and the boot log shows
+  `GIT KEY IN AUTHORIZED_KEYS`. Log in with a key of your own: put its `.pub` in
+  `SSH_AUTHORIZED_KEYS` (one line per device), regenerate or relaunch, and
+  recreate the container. `claude-compose-gen` and `claude-launch` refuse the
+  overlap up front, naming both files: `the git key is also an SSH login key`.
 - Wrong port: `claude-list` shows the assigned port; `claude-launch <name>`
   reprints the connect line. Ports are auto-assigned in 2200-2299.
 - Host key changed after `docker volume rm claude-sshkeys`: clear the stale

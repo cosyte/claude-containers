@@ -37,6 +37,7 @@ BRKCN="claude-smoke-broker-$$"
 BRKOFFCN="claude-smoke-broker-off-$$"
 BRKFAILCN="claude-smoke-broker-fail-$$"
 NOKEYCN="claude-smoke-nokey-$$"
+KEYDIRCN="claude-smoke-keydir-$$"
 BRWACN="claude-smoke-browser-auto-$$"
 BRWOCN="claude-smoke-browser-off-$$"
 BRWFCN="claude-smoke-browser-force-$$"
@@ -46,7 +47,7 @@ WSVOL="claude-smoke-ws-$$"
 PASS=0 FAIL=0
 
 cleanup() {
-    docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" "$BRKOFFCN" "$BRKFAILCN" "$NOKEYCN" \
+    docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" "$BRKOFFCN" "$BRKFAILCN" "$NOKEYCN" "$KEYDIRCN" \
                  "$BRWACN" "$BRWOCN" "$BRWFCN" "$BRWLCN" \
                  "$EG6CN" "$EG6ALLOW" "$EG6DENY" "$EGSFCN" "$EGSOKCN" "$EGRFCN" >/dev/null 2>&1 || true
     # The network only goes after its containers do, or Docker refuses to remove it.
@@ -733,19 +734,22 @@ echo "== 15. git-key handling: brokered BY DEFAULT, usable by the agent, not rea
 # the operator recorded. §15a passes NO CLAUDE_BROKER_GIT_KEY at all: that is the case
 # that used to hand the agent a readable deploy key.
 #
-# The deploy key's own PUBLIC half is mounted as authorized_keys, so the container's own
-# sshd is a real ssh remote that only this key can open. That makes "git push actually
-# works through the relay" provable with no network and no external host.
+# The git key's own PUBLIC half is ALSO mounted as authorized_keys: the misconfiguration a
+# session must not be able to use. The entrypoint (§4) lists the git key in sshd's RevokedKeys,
+# so the container's own sshd must REFUSE the key the agent signs with even so: "ssh with the
+# loaded key is refused". To still prove that git push works through the relay with no network
+# and no external host, a second sshd in the same container stands in for the git host
+# (GitHub): it accepts the git key, and the push goes to it.
 ssh-keygen -q -t ed25519 -f "$TMP/gitkey" -N ''
 printf 'not-a-private-key\n' > "$TMP/badkey"      # non-empty, so §5 engages; unloadable, so the broker fails
 GKPRIV="$(sed -n '2p' "$TMP/gitkey")"             # a base64 line of the PRIVATE key body
-# Make the fixture root-only for the agent WHATEVER uid runs this smoke. A key file the
-# runner owns at 0600 is readable by the agent whenever the runner's uid is the agent's
-# (1000, the common single-user host), because bind mounts keep host ownership: the check
-# below would then fail on the host's file mode, not on anything the image does. Mode 000
-# is what a root-owned 0600 key looks like to the agent (unreadable), while container root
-# still reads it through CAP_DAC_OVERRIDE, which the minimal capability set keeps.
-chmod 000 "$TMP/gitkey"
+# The fixture is readable by the agent's UID on its OWN mode, whatever uid runs this smoke:
+# bind mounts keep host ownership, so a real owner's 0600 key is the agent's to read whenever
+# the owner's UID is the agent's (1000, the common single-user host). Only the root-only
+# /etc/claude (Dockerfile, §4) stands between them, which is what these checks must prove.
+# Mode 644 makes that case hold for any runner. A root runner keeps 600: ssh-add and
+# ssh-keygen refuse a key their own uid owns with group or other bits set.
+if [ "$(id -u)" = 0 ]; then chmod 600 "$TMP/gitkey"; else chmod 644 "$TMP/gitkey"; fi
 # Every assertion in this section reads its container's log through a HERE-STRING, never
 # through `docker logs … | grep -q`. This file runs under `pipefail`, where `grep -q`
 # exits on the first match, `docker logs` then takes SIGPIPE (141), and the PIPELINE fails
@@ -776,11 +780,28 @@ check "no file ANYWHERE under the agent's home holds private key material" \
     '! brksh "grep -rq -- \"PRIVATE KEY\" /home/claude 2>/dev/null"'
 check "the mounted key itself is root-only (the agent cannot read it off the mount)" \
     '! brksh "cat /etc/claude/git-key >/dev/null 2>&1"'
+check "the key directory is root-owned, mode 700, and the agent cannot list it" \
+    '[ "$(docker exec "$BRKCN" stat -c "%U %a" /etc/claude)" = "root 700" ] && ! brksh "ls /etc/claude >/dev/null 2>&1"'
+check "the boot log names the git key found in authorized_keys" \
+    'loggrep "$BRKCN" -q "GIT KEY IN AUTHORIZED_KEYS"'
+check "sshd's RevokedKeys file (root-owned) lists the git key" \
+    'docker exec "$BRKCN" grep -qF "$(cut -d" " -f2 "$TMP/gitkey.pub")" /etc/ssh/revoked_keys \
+     && [ "$(docker exec "$BRKCN" stat -c %U /etc/ssh/revoked_keys)" = root ]'
+# THE DONE PROPERTY, in one container: the key loaded in the session's agent opens no sshd,
+# though authorized_keys lists it, and though the agent adds it there again itself.
+check "SSH with the key in the session's agent is REFUSED (the git key is not a login key)" \
+    '! brk "ssh -o BatchMode=yes -o ConnectTimeout=5 claude@localhost true" >/dev/null 2>&1'
+check "still refused after the agent re-adds the key to its own authorized_keys" \
+    'brk "ssh-add -L >> ~/.ssh/authorized_keys" && ! brk "ssh -o BatchMode=yes -o ConnectTimeout=5 claude@localhost true" >/dev/null 2>&1'
+# The stand-in git host: a second sshd, run by root, that accepts the git key as GitHub does.
+docker exec -i "$BRKCN" sh -c 'cat > /etc/ssh/standin_keys && chmod 644 /etc/ssh/standin_keys' < "$TMP/gitkey.pub"
+docker exec "$BRKCN" /usr/sbin/sshd -p 2222 -o RevokedKeys=none \
+    -o AuthorizedKeysFile=/etc/ssh/standin_keys -o PidFile=/run/standin-sshd.pid >/dev/null 2>&1 || true
 
 # THE POINT OF THE DEFAULT: containment that breaks git is containment nobody keeps.
 # A real push, over ssh, signed by the brokered key, into a bare repo in the container.
 check "git push over the mounted key SUCCEEDS on the default path (signed through the relay)" \
-    'brk "git init -q --bare /home/claude/bare.git && git init -q /home/claude/src && cd /home/claude/src && GIT_AUTHOR_NAME=smoke GIT_AUTHOR_EMAIL=smoke@test GIT_COMMITTER_NAME=smoke GIT_COMMITTER_EMAIL=smoke@test git commit -q --allow-empty -m brokered && git remote add self claude@localhost:/home/claude/bare.git && git push -q self HEAD:refs/heads/smoke" >/dev/null 2>&1'
+    'brk "git init -q --bare /home/claude/bare.git && git init -q /home/claude/src && cd /home/claude/src && GIT_AUTHOR_NAME=smoke GIT_AUTHOR_EMAIL=smoke@test GIT_COMMITTER_NAME=smoke GIT_COMMITTER_EMAIL=smoke@test git commit -q --allow-empty -m brokered && git remote add self ssh://claude@localhost:2222/home/claude/bare.git && git push -q self HEAD:refs/heads/smoke" >/dev/null 2>&1'
 check "the pushed ref really landed (the relay signed a real authentication)" \
     'brk "git --git-dir=/home/claude/bare.git rev-parse --verify -q refs/heads/smoke" >/dev/null 2>&1'
 check "the push used the relay socket, not a key file (SSH_AUTH_SOCK is the relay)" \
@@ -875,6 +896,23 @@ check "no key mounted -> HTTPS git is unchanged: GH_TOKEN still wires gh in as t
 check "no key mounted -> the github.com HTTPS credential helper is really configured" \
     'grep -q "gh auth git-credential" <<<"$(docker exec "$NOKEYCN" gosu claude env HOME=/home/claude git config --global --get-all credential.https://github.com.helper 2>/dev/null || true)"'
 docker rm -f "$NOKEYCN" >/dev/null 2>&1 || true
+
+# --- 15e. FAIL CLOSED: a brokered key the agent could still read stops the boot ----------
+# A whole host directory mounted on /etc/claude replaces the root-only directory, so the
+# agent could read the key straight off it and brokering would keep nothing from it. The
+# entrypoint (§4) must stop before any agent process exists, and say why.
+mkdir -p "$TMP/keydir"; chmod 755 "$TMP/keydir"
+cp "$TMP/gitkey" "$TMP/keydir/git-key"; cp "$TMP/key.pub" "$TMP/keydir/authorized_keys"
+docker run -d --name "$KEYDIRCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=keydir \
+    -v "$TMP/repo:/workspace" -v "$TMP/keydir:/etc/claude:ro" "$IMAGE" >/dev/null 2>&1 || true
+for _ in $(seq 1 30); do
+    [ "$(docker inspect -f '{{.State.Running}}' "$KEYDIRCN" 2>/dev/null)" = "false" ] && break; sleep 1
+done
+check "an agent-readable key on the default (brokered) path stops the boot" \
+    '[ "$(docker inspect -f "{{.State.Running}}" "$KEYDIRCN" 2>/dev/null)" = "false" ] \
+     && loggrep "$KEYDIRCN" -q "is readable by claude, so brokering it would not keep it from the agent"'
+check "and no session was started" '! loggrep "$KEYDIRCN" -q "started in tmux"'
+docker rm -f "$KEYDIRCN" >/dev/null 2>&1 || true
 
 echo
 echo "== 16. browser variant: MCP auto-enables, opt-out honored, loud on lean =="
