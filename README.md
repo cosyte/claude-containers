@@ -91,7 +91,8 @@ the `./bin/` prefix.
 
 `/cache` is shared by every container on the host, all as one user, so anything in it is
 readable from every container. An app's private state (a database, a key, a token) goes
-in `/state/<app>`, the container's own volume, which no other container mounts:
+in `/state/<app>`, the container's own volume, which no other container mounts, and so do
+worktrees, clones and working folders that must last (`/state/wt`, `/state/tmp`):
 [docs/volume-reference.md](docs/volume-reference.md#private-state).
 
 Why credentials and config are split: a single shared `~/.claude` across
