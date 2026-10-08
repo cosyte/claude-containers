@@ -103,6 +103,8 @@ services:
       # Private per-container state (databases, keys, tokens): mounted in this container only.
       - claude-state:/state
       # - ${CLAUDE_WORKSPACE_HOST_DIR:-./workspace}:/workspace
+      # Two key inputs, kept apart: your own SSH login keys, and the key git pushes with. The
+      # git key's public half never goes in authorized_keys (docs/security-notes.md, SSH keys).
       - ${SSH_AUTHORIZED_KEYS:-~/.ssh/authorized_keys}:/etc/claude/authorized_keys:ro
       - ${GIT_SSH_KEY:-~/.ssh/claude-git-key}:/etc/claude/git-key:ro
     # Same labels the bin/claude-* launchers set, so a container started via

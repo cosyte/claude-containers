@@ -529,8 +529,18 @@ RUN set -eux; \
     chown -R ${CLAUDE_UID}:${CLAUDE_GID} /home/${CLAUDE_USER} /workspace; \
     chmod 700 /home/${CLAUDE_USER}/.ssh
 
+# --- Key inputs ---------------------------------------------------------------
+# The host bind-mounts authorized_keys and the git key into /etc/claude. A bind mount keeps
+# the host file's owner, which on a single-user host is the agent's own UID, so the file's mode
+# protects nothing: this directory does. Root-owned and mode 700 from the image on, so the
+# agent can open neither file even before the entrypoint (§4) re-asserts it; root reads both.
+RUN install -d -o root -g root -m 700 /etc/claude
+
 # --- sshd config --------------------------------------------------------------
 COPY sshd_config /etc/ssh/sshd_config
+# RevokedKeys (sshd_config): the entrypoint writes the git key's public half here at every boot.
+# Baked empty so sshd never starts without it: an unreadable RevokedKeys refuses every key.
+RUN install -o root -g root -m 644 /dev/null /etc/ssh/revoked_keys
 
 # --- Baked-in Claude config + entrypoint --------------------------------------
 COPY claude-config/ /opt/claude-config/

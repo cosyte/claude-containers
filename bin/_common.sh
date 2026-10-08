@@ -320,6 +320,96 @@ host_port_free() {  # 1 if free, 0 if taken
     return 0
 }
 
+# --- SSH key inputs: the git key is never a login key ------------------------
+# GIT_SSH_KEY is the private key sessions push with; the entrypoint (§5) holds it in a root
+# ssh-agent, so every session can SIGN with it. SSH_AUTHORIZED_KEYS is who may log in over SSH.
+# A key in both lets every session log in to every container that accepts it. claude-launch and
+# claude-compose-gen refuse that pair; in the container, sshd refuses the git key whatever
+# authorized_keys says (entrypoint.sh §4, RevokedKeys in sshd_config).
+
+# ssh_public_of <private key file>: its public half ("type key") on stdout, derived from the key
+# itself (unencrypted, as the broker needs it) or read from <file>.pub beside it. Status 1, and
+# nothing printed, when neither works. -P '' never prompts: a passphrase-protected key fails.
+ssh_public_of() {
+    local k="$1" pub=""
+    if command -v ssh-keygen >/dev/null 2>&1; then
+        pub="$(ssh-keygen -y -P '' -f "$k" 2>/dev/null </dev/null)" || pub=""
+    fi
+    if [[ -z "$pub" && -r "$k.pub" ]]; then pub="$(head -n 1 "$k.pub")"; fi
+    pub="$(awk 'NR == 1 && $2 ~ /^AAAA/ { print $1, $2 }' <<<"$pub")"
+    [[ -n "$pub" ]] || return 1
+    printf '%s\n' "$pub"
+}
+
+# ssh_fingerprint <"type key">: its SHA256 fingerprint, or nothing (public data, safe to print).
+ssh_fingerprint() { ssh-keygen -lf - <<<"$1" 2>/dev/null | awk '{ print $2; exit }' || true; }
+
+# key_in_authorized_keys <"type key"> <authorized_keys file>: status 0 when the file lists that
+# key. Compared by fingerprint, because ssh-keygen reads the file as sshd does (options,
+# cert-authority, every key-type name, CRLF, comments); a text match misses some of those.
+key_in_authorized_keys() {
+    local fp fps
+    fp="$(ssh_fingerprint "$1")"
+    [[ -n "$fp" && -r "$2" ]] || return 1
+    fps="$(ssh-keygen -lf "$2" 2>/dev/null | awk '{ print $2 }' || true)"
+    grep -qxF -- "$fp" <<<"$fps"
+}
+
+# refuse_git_key_as_login_key <git key file> <authorized_keys file>: die when the git key's public
+# half is one of the authorized login keys; warn when that cannot be told. A missing file is not
+# judged here (the callers already say so).
+refuse_git_key_as_login_key() {
+    local gk="$1" ak="$2" pub fp
+    [[ -f "$gk" && -f "$ak" ]] || return 0
+    if ! command -v ssh-keygen >/dev/null 2>&1; then
+        warn "ssh-keygen not found, so the git key $gk was not checked against $ak"
+        return 0
+    fi
+    if ! pub="$(ssh_public_of "$gk")"; then
+        warn "could not read the public half of the git key $gk (passphrase-protected, or no ssh-keygen and no $gk.pub), so it was not checked against $ak"
+        return 0
+    fi
+    key_in_authorized_keys "$pub" "$ak" || return 0
+    fp="$(ssh_fingerprint "$pub")"
+    die "the git key is also an SSH login key: GIT_SSH_KEY ($gk${fp:+, $fp}) is in SSH_AUTHORIZED_KEYS ($ak).
+       Every session signs with the git key through its ssh-agent, so it could log in over SSH
+       to every container that accepts that key. Keep the two apart: SSH_AUTHORIZED_KEYS holds
+       only your own login keys, and GIT_SSH_KEY a key used for git alone.
+       See docs/security-notes.md, SSH keys."
+}
+
+# fleet_key_mounts: "<container>\tg:<git-key source>\ta:<authorized_keys source>" for every
+# claude-managed container on this host, nothing after g: or a: where it mounts none. (The
+# prefixes keep an empty field from vanishing: read with IFS=tab folds adjacent tabs.)
+fleet_key_mounts() {
+    local ids
+    ids="$(docker ps -aq --filter 'label=claude.managed=1' 2>/dev/null)" || return 0
+    [[ -n "$ids" ]] || return 0
+    # shellcheck disable=SC2086
+    docker inspect -f '{{.Name}}{{"\t"}}g:{{range .Mounts}}{{if eq .Destination "/etc/claude/git-key"}}{{.Source}}{{end}}{{end}}{{"\t"}}a:{{range .Mounts}}{{if eq .Destination "/etc/claude/authorized_keys"}}{{.Source}}{{end}}{{end}}' \
+        $ids 2>/dev/null | sed 's#^/##' || true
+}
+
+# warn_fleet_key_overlap <git key file> <authorized_keys file>: the same rule across stacks.
+# Another container on this host that accepts this git key for SSH logins, or that pushes with
+# a key this authorized_keys accepts, is named. A warning, not a refusal: that container belongs
+# to another stack or launch, and is fixed there.
+warn_fleet_key_overlap() {
+    local gk="$1" ak="$2" pub="" name ogk oak opub
+    [[ -f "$gk" ]] && pub="$(ssh_public_of "$gk" 2>/dev/null)" || pub=""
+    while IFS=$'\t' read -r name ogk oak; do
+        [[ -n "$name" ]] || continue
+        ogk="${ogk#g:}"; oak="${oak#a:}"
+        if [[ -n "$pub" && -n "$oak" && "$oak" != "$ak" ]] && key_in_authorized_keys "$pub" "$oak"; then
+            warn "container $name accepts this git key ($gk) for SSH logins (its SSH_AUTHORIZED_KEYS: $oak): a session here could log in there. Recreate it without that key."
+        fi
+        if [[ -n "$ogk" && "$ogk" != "$gk" && -f "$ak" ]] && opub="$(ssh_public_of "$ogk" 2>/dev/null)" \
+           && key_in_authorized_keys "$opub" "$ak"; then
+            warn "container $name pushes with a git key ($ogk) that $ak accepts for SSH logins: its sessions could log in here. Give it another git key, or take that key out of $ak."
+        fi
+    done < <(fleet_key_mounts)
+}
+
 ports_used_by_claude() {
     # Test seam: UNIT TESTS ONLY: CLAUDE_PORTS_USED_OVERRIDE forces the list
     # (space/newline-separated; may be empty = "none in use") so cross-stack

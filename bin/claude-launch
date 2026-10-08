@@ -380,6 +380,10 @@ if [[ -f "$GIT_SSH_KEY" ]]; then
 else
     warn "no git SSH key at $GIT_SSH_KEY: only public/https repos will clone"
 fi
+# The git key is never a login key (bin/_common.sh): refused before the container exists, and
+# named when another container on this host would let this one's sessions in, or the reverse.
+refuse_git_key_as_login_key "$GIT_SSH_KEY" "$SSH_AUTHORIZED_KEYS"
+warn_fleet_key_overlap "$GIT_SSH_KEY" "$SSH_AUTHORIZED_KEYS"
 
 # Git identity defaults from the host's git config.
 GH_NAME="$(git config --global user.name  2>/dev/null || true)"

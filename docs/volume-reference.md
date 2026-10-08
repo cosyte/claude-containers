@@ -10,8 +10,8 @@
 | `/state` | `claude-state-<proj>` volume | per container, mounted in no other | **Private state** (`CLAUDE_STATE_DIR`): an app's databases, keys and tokens, under `/state/<app>`. Mode 700. `claude-rm --purge` and `compose down -v` delete it |
 | `/cache` | `claude-cache` volume | shared, readable from every container | Tool installs and package caches (mise, cargo, go, npm, uv, pip) and the pinned Blender (`/cache/blender`). Never private state |
 | `/tmp` | tmpfs (**RAM**, 1 GB) | per container | Small temp only. Charged to the memory cgroup: big writes belong in `/scratch` |
-| `/etc/claude/authorized_keys` | host `SSH_AUTHORIZED_KEYS` | read-only | Who may SSH in |
-| `/etc/claude/git-key` | host `GIT_SSH_KEY` | read-only | Git push key |
+| `/etc/claude/authorized_keys` | host `SSH_AUTHORIZED_KEYS` | read-only, in root-only `/etc/claude` | Who may SSH in: the owner's login keys, never the git key |
+| `/etc/claude/git-key` | host `GIT_SSH_KEY` | read-only, in root-only `/etc/claude` | Git push key: brokered, and refused for SSH logins (`/etc/ssh/revoked_keys`) |
 | `/opt/claude-config` | baked into image | image | Bake-in template merged on start |
 
 Anything baked in is overridable by mounting onto the target path (e.g. mount

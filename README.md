@@ -139,8 +139,8 @@ vars override `.env`. Full reference: `.env.example`.
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` |: | Clone source (or use `--repo`/`--branch`/`--depth`) |
 | `GIT_REPOS` |: | Several repos in one container: whitespace-separated `URL[#BRANCH]`, each cloned into `/workspace/<repo>` (set by `claude-compose-gen --group` or several `--repo`). Not together with `GIT_REPO_URL` |
 | `GIT_AUTHOR_NAME`/`_EMAIL` (+`COMMITTER`) | host git config | Commit identity |
-| `GIT_SSH_KEY` | `~/.ssh/claude-git-key` | Host SSH key for git, mounted read-only |
-| `SSH_AUTHORIZED_KEYS` | `~/.ssh/authorized_keys` | Host pubkeys allowed to SSH in (read-only) |
+| `GIT_SSH_KEY` | `~/.ssh/claude-git-key` | Host SSH key for git, mounted read-only and brokered. For git alone: never in `SSH_AUTHORIZED_KEYS` (the launch tools refuse that, and sshd in the container refuses it for logins) |
+| `SSH_AUTHORIZED_KEYS` | `~/.ssh/authorized_keys` | Your own public keys allowed to SSH in (read-only), never the git key's |
 | `SSH_PORT_RANGE_START`/`_END` | `2200`/`2299` | Auto-assigned host SSH port range |
 | `CLAUDE_SSH_HOST` | this host's name | Hostname shown in the connect line |
 | `CLAUDE_SSH_BIND` |: | Bind the SSH port to one host interface (e.g. `127.0.0.1`); empty = all |
@@ -519,7 +519,8 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   prompts): see troubleshooting for the verification steps.
 - **SSH connection refused**: no `authorized_keys` was mounted, or wrong port.
   `claude-list` shows the port; the connect line is reprinted by
-  `claude-launch <name>`.
+  `claude-launch <name>`. The git key never logs in: use a key of your own in
+  `SSH_AUTHORIZED_KEYS` (see [docs/security-notes.md](docs/security-notes.md), SSH keys).
 - **Git push fails**: `GIT_SSH_KEY` not mounted or not authorized on the
   remote. Public/https clones still work without it.
 - **Workspace trust prompt**: pre-accepted by the entrypoint; if you see it,

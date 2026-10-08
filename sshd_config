@@ -10,6 +10,11 @@ AddressFamily any
 # Key-based auth only. Authorized keys are mounted read-only from the host
 # and installed by the entrypoint.
 PubkeyAuthentication yes
+# The git key is never a login key: the entrypoint (§4) writes its public half here on every
+# boot (an empty file without one), and sshd refuses every key listed whatever any
+# authorized_keys file says. Root-owned: the agent cannot edit it. sshd refuses ALL public-key
+# logins when it cannot read this file, so the image also bakes an empty one.
+RevokedKeys /etc/ssh/revoked_keys
 PasswordAuthentication no
 PermitEmptyPasswords no
 # Required: the `claude` user inherits a locked password from the base image
