@@ -133,7 +133,7 @@ if command -v rg >/dev/null 2>&1; then GREP=(rg -n); else GREP=(grep -nE); fi
 
 # ======================================================================================
 echo "== entrypoint.sh §12e =="
-B12E="$(awk '/^# --- 12e\. GitHub token check/{f=1} /^echo$/{if(f)exit} f' "$ENTRY")"
+B12E="$(awk '/^# --- 12e\. GitHub token check/{f=1; print; next} /^echo$|^# --- /{if(f)exit} f' "$ENTRY")"
 grep -qE '^GH_CHECK_FILE=' <<<"$B12E" && grep -qE '^GH_CHECK_CMD=' <<<"$B12E" \
     && ok "§12e names GH_CHECK_FILE and GH_CHECK_CMD on their own lines" \
     || bad "§12e must assign GH_CHECK_FILE and GH_CHECK_CMD on their own lines"
