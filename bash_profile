@@ -10,6 +10,9 @@
 # Re-export it here so both paths behave the same. Guarded on the dir existing, so this
 # stays correct on a container launched without the scratch volume.
 [ -d /scratch ] && export TMPDIR=/scratch
+# This container's private state (entrypoint.sh 2c): the same fresh-environment gap, so an
+# app run from an SSH login finds its database in /state, not an empty one somewhere else.
+[ -d /state ] && export CLAUDE_STATE_DIR=/state
 
 if [[ $- == *i* && -z "${TMUX:-}" && -z "${CLAUDE_NO_TMUX:-}" ]]; then
     if tmux has-session -t claude 2>/dev/null; then

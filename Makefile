@@ -100,5 +100,5 @@ smoke: build ## Build the image, then run the automated smoke test against it
 clean: ## Remove the image and the buildx builder (volumes are kept)
 	-docker image rm $(CLAUDE_IMAGE) 2>/dev/null
 	-docker buildx rm $(BUILDX_BUILDER) 2>/dev/null
-	@echo "Volumes ($(AUTH_VOLUME), claude-ws-*, claude-config-*) left intact."
+	@echo "Volumes ($(AUTH_VOLUME), claude-ws-*, claude-config-*, claude-state-*) left intact."
 	@echo "Remove auth/login with: docker volume rm $(AUTH_VOLUME)"

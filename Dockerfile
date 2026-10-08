@@ -449,6 +449,14 @@ RUN set -eux; \
              /cache/npm /cache/uv /cache/pip /cache/blender; \
     chown -R ${CLAUDE_UID}:${CLAUDE_GID} /cache
 
+# --- Private per-container state -------------------------------------
+# /cache above is SHARED by every container on the host (same UID), so it holds tool caches
+# only. A database, a key or a token goes in /state: each container's own claude-state-<name>
+# volume, mounted by claude-launch / claude-compose-gen into that container alone
+# (CLAUDE_STATE_DIR). Baked owned by the agent user, mode 700, so Docker seeds a fresh volume
+# with that owner and mode; entrypoint.sh 2c re-asserts both on every boot.
+RUN install -d -o ${CLAUDE_UID} -g ${CLAUDE_GID} -m 700 /state
+
 # --- Optional: headless Chromium + chrome-devtools-mcp (frontend debugging) --
 # Build with `--build-arg WITH_BROWSER=1` (or `make build-browser`) to bake a
 # headless Chromium and the official Chrome DevTools MCP server. A session on

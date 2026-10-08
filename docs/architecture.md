@@ -64,6 +64,10 @@ purpose:
 - `claude-auth` (shared) → `/auth`, credentials only.
 - `claude-config-<project>` (per container) → `/home/claude/.claude`
   (`CLAUDE_CONFIG_DIR`), all session/history/state.
+- `claude-state-<project>` (per container, mounted in no other) → `/state`
+  (`CLAUDE_STATE_DIR`): an app's own databases, keys and tokens. The shared `/cache` is
+  readable from every container (one volume, one UID), so it holds tool caches only
+  ([volume-reference.md](volume-reference.md#private-state)).
 
 Reason: Claude rewrites `.claude.json`, `history.jsonl` and `sessions/`
 constantly. With one shared config dir, parallel containers race those files,

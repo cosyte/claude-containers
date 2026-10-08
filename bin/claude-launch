@@ -43,6 +43,9 @@
 #                              (default: claude-cache). Reused across restarts
 #                              for mise/cargo/go/npm/uv installs.
 #   --no-cache                 disable the shared cache (per-container installs)
+#                              Private state is separate: every container gets its own
+#                              claude-state-<name> volume at /state (CLAUDE_STATE_DIR) for
+#                              databases, keys and tokens, mounted in no other container.
 #   --session <spec>           another Claude session in this container, started at boot
 #                              in its own tmux window with its own Remote Control link
 #                              (<name>-<session>). Repeatable. SPEC is NAME [key=value ...]
@@ -416,6 +419,8 @@ docker run -d \
     "${GPU_ARGS[@]}" \
     "${SCRATCH_ARGS[@]}" \
     -e TMPDIR=/scratch \
+    -v "$(state_volume "$PROJECT"):$STATE_MOUNT" \
+    -e CLAUDE_STATE_DIR="$STATE_MOUNT" \
     -e CLAUDE_PROJECT_NAME="$PROJECT" \
     -e CLAUDE_MODEL="$MODEL" \
     -e CLAUDE_EXTRA_ARGS="$EXTRA" \
