@@ -1278,7 +1278,9 @@ else
     die "Empty workspace and no GIT_REPO_URL or GIT_REPOS. Set one, or bind-mount a
        checkout onto $WORKSPACE (use 'claude-launch --repo' or --workspace)."
 fi
-own_tree "$WORKSPACE" 2>/dev/null || true
+# Only the root and its top level here, so the sessions can write to /workspace; the rest
+# of the tree is checked in the background once they are up (§12e).
+own_tree "$WORKSPACE" -maxdepth 1 2>/dev/null || true
 
 # --- 10. Register baked-in MCP servers ---------------------------------------
 # Done via the CLI so the on-disk schema is always correct for this Claude
@@ -1706,6 +1708,18 @@ if [[ -n "${CLAUDE_EXTRA_START_CMD:-}" ]]; then
     asclaude /usr/local/bin/claude-kit start \
         || log "WARNING: claude-kit start failed; CLAUDE_EXTRA_START_CMD did not run (claude-kit status)"
 fi
+
+# --- 12e. Workspace ownership, the deep pass (background) ---------------------
+# §9 owned the workspace root and its top level; the rest is checked here, after sshd and the
+# sessions are up. Even a pass that changes nothing reads every inode, and on one spinning disk
+# a monorepo with per-project node_modules held the boot for over 25 minutes with no sshd and
+# no session (a real host, 2026-10-07). Until the pass reaches it, a deeper file with a foreign
+# owner (a bind mount from another uid) is read-only to the agent.
+(
+    ws_own_start=$SECONDS
+    own_tree "$WORKSPACE" 2>/dev/null || true
+    log "Workspace ownership : checked in $(( SECONDS - ws_own_start ))s (background)"
+) &
 
 echo
 if [[ "$CLAUDE_MODE" == "autopilot" ]]; then
