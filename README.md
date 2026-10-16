@@ -189,6 +189,8 @@ the GPU note. An operator's own file at that path is left alone. MCP secrets are
 
 Every `claude-*` command, the flags they take, and `claude-compose-gen` for many
 repos at once: [docs/launcher-commands.md](docs/launcher-commands.md).
+`claude-image-rebuild --check` says whether the image is behind `main`; without
+`--check` it pulls `main` and rebuilds the image (never a container).
 
 ## Frontend debugging (optional)
 

@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# claude-image-rebuild: rebuild the session image from main, or say how far behind it is.
+#
+#   claude-image-rebuild --check [--image TAG]    one JSON line: is the image behind main?
+#   claude-image-rebuild [--image TAG] [--dry-run] pull main, then build the image again
+#
+# Runs on the host, in the claude-containers checkout it lives in (its bin/..).
+#
+# --check fetches origin (at most 30 s; a failed fetch warns and uses the last one) and
+# prints, from the image's provenance labels (the end of the Dockerfile):
+#   {"image":"<tag>","revision":"<sha>|unknown","dirty":true|false|null,
+#    "cli_version":"<ver>|unknown","main":"<sha>","behind":N|null,"checkout_clean":bool}
+# behind is how many commits origin/main has past the image's revision, null when the image
+# has no revision label or the commit is not in this checkout; dirty is null when unlabelled.
+# Exit 0, or 2 when the image does not exist.
+#
+# The default rebuilds: it refuses a checkout with changes or not on main (exit 3), runs
+# `git pull --ff-only`, then `make build`, or `make build-browser` when the existing image is
+# labelled claude.browser=1, for the same tag. It prints the old and new revision and CLI
+# version. --dry-run prints those commands instead of running them.
+#
+# It only ever builds an image: running containers keep the old one until something
+# recreates them (the deployment's host step, on the owner's yes). It never touches a
+# container and never removes an image.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FETCH_TIMEOUT="${CLAUDE_IMAGE_REBUILD_FETCH_TIMEOUT:-30}"
+
+die() { echo "claude-image-rebuild: $*" >&2; exit "${2:-1}"; }
+usage() { sed -n '2,5p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+# The image tag the Makefile would build: the environment, else .env, else its default.
+default_image() {
+    local v=""
+    [[ -n "${CLAUDE_IMAGE:-}" ]] && { echo "$CLAUDE_IMAGE"; return; }
+    [[ -f "$ROOT/.env" ]] && v="$(sed -n 's/^[[:space:]]*CLAUDE_IMAGE[[:space:]]*[:?]\{0,1\}=[[:space:]]*//p' "$ROOT/.env" | tail -n 1)"
+    [[ -z "$v" ]] && v="$(sed -n 's/^CLAUDE_IMAGE[[:space:]]*?=[[:space:]]*//p' "$ROOT/Makefile" | head -n 1)"
+    echo "${v:-claude-code-box:latest}"
+}
+
+MODE=rebuild DRY=0 IMAGE=""
+while (( $# )); do
+    case "$1" in
+        --check)   MODE=check ;;
+        --dry-run) DRY=1 ;;
+        --image)   [[ $# -ge 2 ]] || die "--image needs a tag"; IMAGE="$2"; shift ;;
+        --image=*) IMAGE="${1#--image=}" ;;
+        -h|--help) usage; exit 0 ;;
+        *)         usage >&2; die "unknown argument: $1" ;;
+    esac
+    shift
+done
+[[ -n "$IMAGE" ]] || IMAGE="$(default_image)"
+
+# LABELS: revision, dirty, cli-version and browser of $1, "unknown" for each one missing.
+# Returns 1 when the image does not exist.
+read_labels() {
+    local out
+    out="$(docker image inspect -f \
+        '{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "claude.dirty"}}|{{index .Config.Labels "claude.cli-version"}}|{{index .Config.Labels "claude.browser"}}' \
+        "$1" 2>/dev/null)" || return 1
+    IFS='|' read -r REVISION DIRTY CLI BROWSER <<<"$out"
+    local v
+    for v in REVISION DIRTY CLI BROWSER; do
+        [[ -z "${!v}" || "${!v}" == "<no value>" ]] && printf -v "$v" unknown
+    done
+    return 0
+}
+
+is_clean()   { [[ -z "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]]; }
+on_branch()  { git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null; }
+json_str()   { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$s"; }
+
+if [[ "$MODE" == check ]]; then
+    read_labels "$IMAGE" || die "no image $IMAGE (build it with make build)" 2
+    timeout "$FETCH_TIMEOUT" git -C "$ROOT" fetch -q origin \
+        || echo "claude-image-rebuild: git fetch failed; using the last fetched origin/main" >&2
+    main="$(git -C "$ROOT" rev-parse origin/main 2>/dev/null)" || main=""
+    behind=null
+    if [[ "$REVISION" =~ ^[0-9a-f]{7,40}$ && -n "$main" ]] \
+        && git -C "$ROOT" cat-file -e "$REVISION^{commit}" 2>/dev/null; then
+        n="$(git -C "$ROOT" rev-list --count "$REVISION..origin/main" 2>/dev/null)" \
+            && [[ "$n" =~ ^[0-9]+$ ]] && behind="$n"
+    fi
+    case "$DIRTY" in true|false) dirty="$DIRTY" ;; *) dirty=null ;; esac
+    is_clean && clean=true || clean=false
+    printf '{"image":%s,"revision":%s,"dirty":%s,"cli_version":%s,"main":%s,"behind":%s,"checkout_clean":%s}\n' \
+        "$(json_str "$IMAGE")" "$(json_str "$REVISION")" "$dirty" "$(json_str "$CLI")" \
+        "$(json_str "${main:-unknown}")" "$behind" "$clean"
+    exit 0
+fi
+
+# --- rebuild ---------------------------------------------------------------------------
+branch="$(on_branch)"
+[[ "$branch" == main ]] || die "refusing: the checkout at $ROOT is on '${branch:-?}', not main" 3
+is_clean || die "refusing: the checkout at $ROOT has changes (git status --porcelain is not empty)" 3
+
+if read_labels "$IMAGE"; then
+    OLD_REV="$REVISION" OLD_CLI="$CLI"
+else
+    OLD_REV=none OLD_CLI=none BROWSER=0
+    echo "claude-image-rebuild: no image $IMAGE yet; building the lean variant" >&2
+fi
+if [[ "$BROWSER" == 1 ]]; then
+    build=(make -C "$ROOT" build-browser "CLAUDE_IMAGE_BROWSER=$IMAGE")
+else
+    build=(make -C "$ROOT" build "CLAUDE_IMAGE=$IMAGE")
+fi
+pull=(git -C "$ROOT" pull --ff-only)
+
+if (( DRY )); then
+    printf '%q ' "${pull[@]}"; echo
+    printf '%q ' "${build[@]}"; echo
+    exit 0
+fi
+
+"${pull[@]}" || die "git pull --ff-only failed; nothing was built"
+"${build[@]}" || die "the build failed; $IMAGE is unchanged"
+read_labels "$IMAGE" || die "the build finished but $IMAGE is not there"
+echo "image:    $IMAGE"
+echo "revision: $OLD_REV -> $REVISION"
+echo "cli:      $OLD_CLI -> $CLI"
+echo "Running containers keep the old image until they are recreated."

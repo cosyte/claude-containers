@@ -24,7 +24,22 @@ claude-rm    <name> [--yes] [--purge]   remove (+volumes with --purge)
 claude-logs  <name> [-n LINES]    tail the entrypoint/sshd log
 claude-disk-gc [--loop]           GC docker image/build-cache layers + trim the shared cache
 claude-disk-verify                prove disk-hygiene logic (docker-free, safe anywhere)
+claude-image-rebuild --check      JSON: the image's revision and CLI, and how far behind main
+claude-image-rebuild [--dry-run]  pull main (clean checkout on main only), rebuild the image
 ```
+
+`claude-image-rebuild` runs on the host in the checkout it lives in. `--check [--image TAG]`
+fetches origin (30 s at most) and prints one line,
+`{"image","revision","dirty","cli_version","main","behind","checkout_clean"}`, from the
+image's provenance labels: `behind` is the commits on `origin/main` past the image's
+revision, `null` when the image has no revision label (an older build) or the commit is not
+in the checkout. Exit 2 when the image does not exist. The default refuses a checkout that
+has changes or is not on `main` (exit 3), runs `git pull --ff-only`, then `make build`, or
+`make build-browser` when the image is labelled `claude.browser=1`, for the same tag
+(`--image`, default the Makefile's `CLAUDE_IMAGE`), and prints the old and new revision and
+CLI version. It only builds: it never recreates or touches a container and never cleans up
+images, so running sessions keep the old image until something recreates them. Run it when
+you choose to; nothing schedules it.
 
 Inside an autopilot container (over SSH), `claude-enqueue "<prompt>"` adds a task
 to the durable queue (`CLAUDE_AUTOPILOT_QUEUE=1`); `--priority N` orders it
