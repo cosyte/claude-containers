@@ -1142,6 +1142,9 @@ docker volume create "$STVOL" >/dev/null 2>&1 || true
 docker volume create "$STCACHE" >/dev/null 2>&1 || true
 docker run --rm --user 0 --entrypoint sh -v "$STCACHE:/cache" "$IMAGE" \
     -c 'mkdir -p /cache/app/statesmoke && : > /cache/app/statesmoke/app.db' >/dev/null 2>&1 || true
+# Another container's pytest shim in the shared cache (mise makes each one a link to itself).
+docker run --rm --user 1000 --entrypoint sh -v "$STCACHE:/cache" "$IMAGE" \
+    -c 'mkdir -p /cache/mise/shims && ln -sf /usr/local/bin/mise /cache/mise/shims/pytest' >/dev/null 2>&1 || true
 st_run() {
     docker run -d --name "$STCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=statesmoke \
         -e CLAUDE_STATE_DIR=/state -v "$STVOL:/state" -v "$STCACHE:/cache" \
@@ -1158,6 +1161,10 @@ check "the agent's CLAUDE_STATE_DIR is /state" \
     '[ "$(docker exec "$STCN" gosu claude sh -c "echo \$CLAUDE_STATE_DIR")" = "/state" ]'
 check "an SSH-style login shell (cleared env) also gets CLAUDE_STATE_DIR" \
     '[ "$(docker exec "$STCN" gosu claude env -i /bin/bash -lc "echo \$CLAUDE_STATE_DIR")" = "/state" ]'
+check "the entrypoint builds this container's mise shims view and logs the count" \
+    'docker logs "$STCN" 2>&1 | grep -q "mise shims          : 0 of 1 shared shims linked into /state/mise-shims"'
+check "command -v pytest fails with no pytest version, although the shared cache has its shim" \
+    '! docker exec "$STCN" gosu claude sh -c "command -v pytest" && docker exec "$STCN" test -L /cache/mise/shims/pytest'
 check "a database this container left in the shared cache is named in the boot log" \
     'docker logs "$STCN" 2>&1 | grep -q "PRIVATE STATE IN THE SHARED CACHE: 1 file" && docker logs "$STCN" 2>&1 | grep -q "/cache/app/statesmoke/app.db"'
 docker exec "$STCN" gosu claude sh -c 'mkdir -p /state/app && echo kept > /state/app/marker' >/dev/null 2>&1 || true

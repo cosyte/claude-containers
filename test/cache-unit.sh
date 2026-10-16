@@ -62,10 +62,11 @@ for kv in \
   if grep -Fq "$kv" "$DOCKERFILE"; then ok "ENV $kv → shared cache"; else bad "ENV $kv missing, that cache would not be shared"; fi
 done
 
-# shims (now under /cache) prepended to PATH for the non-interactive agent; PATH preserved.
-grep -Fq 'PATH=/cache/mise/shims:' "$DOCKERFILE" && grep -Fq ':${PATH}' "$DOCKERFILE" \
-  && ok "the /cache/mise/shims dir is prepended to PATH (agent resolves cached tools), PATH preserved" \
-  || bad "/cache/mise/shims is not prepended to PATH: the agent would not find cached tools"
+# the agent resolves cached tools through this container's view of the shared shims (under
+# /cache), not the shared dir itself (test/mise-unit.sh checks the order); PATH preserved.
+grep -Eq '^ +PATH=/state/mise-shims:.*:\$\{PATH\}' "$DOCKERFILE" \
+  && ok "this container's view of /cache/mise/shims leads PATH (agent resolves cached tools), PATH preserved" \
+  || bad "the per-container mise shims view does not lead PATH: the agent would not find cached tools"
 
 # interactive consistency: a fresh SSH shell that did NOT inherit the Dockerfile ENV must
 # still activate mise against the SHARED store (bashrc re-exports before `mise activate`).

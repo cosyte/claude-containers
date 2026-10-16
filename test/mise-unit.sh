@@ -57,15 +57,32 @@ grep -Eq 'sha256sum -c' "$DOCKERFILE" \
   && ok "the downloaded binary's SHA256 is verified (sha256sum -c) before install" \
   || bad "no 'sha256sum -c': the hardcoded digest is declared but never enforced"
 
-# ---- non-interactive / agent shells resolve tools via the SHIMS dir on PATH ------------------------
+# ---- non-interactive / agent shells resolve tools via THIS container's view of the shims ----------
 # The Claude Code process + its `bash -c "…"` tool calls never source ~/.bashrc, so tool resolution
-# for the AGENT depends entirely on the shims dir being baked onto PATH. The shared cache relocated the mise
-# data dir (and so the shims) into the shared /cache tree, so the baked PATH must point there.
-if grep -Fq 'PATH=/cache/mise/shims:' "$DOCKERFILE" && grep -Fq ':${PATH}' "$DOCKERFILE"; then
-  ok "mise shims dir (/cache/mise/shims) is PREPENDED to PATH preserving the existing PATH (non-interactive tool resolution)"
+# for the AGENT depends entirely on PATH. The shared /cache/mise/shims holds a shim for every tool
+# any container installed, so PATH leads with the per-container view claude-mise-shims builds, then
+# the system dirs, and leaves the shared dir off: a tool with no version reads "command not found".
+ENV_PATH="$(grep -E '^ +PATH=' "$DOCKERFILE" | head -1 | sed -E 's/^ +PATH=//')"
+IFS=: read -ra PE <<<"$ENV_PATH"
+sys_i=-1
+for i in "${!PE[@]}"; do [[ "${PE[$i]}" == '${PATH}' ]] && sys_i=$i; done
+if [[ "${PE[0]:-}" == /state/mise-shims && "${PE[1]:-}" == '/home/${CLAUDE_USER}/.local/share/claude-mise-shims' ]] \
+    && (( sys_i > 1 )); then
+  ok "PATH leads with the per-container shims view (/state/mise-shims, then the no-state fallback), then the system dirs"
 else
-  bad "mise shims dir not prepended to PATH as '/cache/mise/shims:…:\${PATH}', agent shells would not find mise tools"
+  bad "PATH must start /state/mise-shims:/home/\${CLAUDE_USER}/.local/share/claude-mise-shims:… before \${PATH} (got $ENV_PATH)"
 fi
+if [[ ":$ENV_PATH:" == *:/cache/mise/shims:* ]]; then
+  bad "the shared /cache/mise/shims is on PATH: a versionless tool's shim would pass command -v"
+else
+  ok "the shared /cache/mise/shims is not on PATH (a versionless tool reads 'command not found')"
+fi
+grep -Fq 'COPY bin/claude-mise-shims /usr/local/bin/claude-mise-shims' "$DOCKERFILE" \
+  && ok "claude-mise-shims is baked into the image" || bad "claude-mise-shims is not COPYed into the image"
+grep -Eq 'asclaude .*"\$MISE_SHIMS_CMD"' "$REPO_ROOT/entrypoint.sh" \
+  && grep -Fq 'MISE_SHIMS_CMD=/usr/local/bin/claude-mise-shims' "$REPO_ROOT/entrypoint.sh" \
+  && ok "the entrypoint rebuilds the view at every start, as the claude user" \
+  || bad "the entrypoint does not run claude-mise-shims as the claude user"
 
 # ---- config trust is scoped to /workspace ONLY: the load-bearing supply-chain guard ---------------
 grep -Eq '^\s*MISE_TRUSTED_CONFIG_PATHS=/workspace(\s|\\|$)' "$DOCKERFILE" \
@@ -107,6 +124,60 @@ grep -Eq '\[\[ \$- == \*i\* \]\] \|\| return' "$DOCKERFILE" \
 grep -Eq 'chown[^\n]*/home/\$\{CLAUDE_USER\}/\.bashrc' "$DOCKERFILE" \
   && ok "~/.bashrc is chowned to the claude user" \
   || bad "no chown of ~/.bashrc to the claude user (would stay root-owned)"
+
+# ---- claude-mise-shims against a fake mise ------------------------------------------------------
+echo
+echo "claude-mise-shims (fake mise)"
+SHIMS="$REPO_ROOT/bin/claude-mise-shims"
+T="$(mktemp -d)"
+trap 'rm -rf "$T"' EXIT
+mkdir -p "$T/bin" "$T/home" "$T/ws/repo" "$T/data/shims" "$T/inst/node/bin" "$T/inst/sc"
+# The fake answers `mise bin-paths` from the dir it is asked in: $PWD/.fake-bins, one dir per line.
+printf '#!/bin/sh\n[ "$1" = bin-paths ] || exit 1\n[ -f .fake-bins ] && cat .fake-bins\nexit 0\n' > "$T/bin/mise"
+chmod +x "$T/bin/mise"
+for t in node pytest shellcheck; do ln -s "$T/bin/mise" "$T/data/shims/$t"; done
+for x in "$T/inst/node/bin/node" "$T/inst/sc/shellcheck"; do printf '#!/bin/sh\necho real\n' > "$x"; chmod +x "$x"; done
+echo "$T/inst/node/bin" > "$T/home/.fake-bins"
+: > "$T/ws/repo/mise.toml"
+run_shims() {
+  env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/home" MISE_DATA_DIR="$T/data" \
+      CLAUDE_MISE_WORKSPACE="$T/ws" "$@" "$SHIMS"
+}
+shared_state() { (cd "$T/data/shims" && find . -printf '%p %y %l %T@\n' | sort); }
+BEFORE="$(shared_state)"
+out="$(run_shims CLAUDE_STATE_DIR="$T/state")"
+V="$T/state/mise-shims"
+[[ "$(readlink "$V/node" 2>/dev/null)" == "$T/data/shims/node" ]] \
+  && ok "a tool with a version (node, global config) is linked to its shared shim" \
+  || bad "node was not linked into $V (out: $out)"
+[[ ! -e "$V/pytest" && ! -L "$V/pytest" ]] \
+  && ok "a versionless tool (pytest) is not linked" || bad "pytest was linked although no config sets a version"
+[[ "$out" == "claude-mise-shims: 1 of 3 shared shims linked into $V" ]] \
+  && ok "it logs the count linked" || bad "unexpected summary: $out"
+# a fake `mise use` in a workspace repo: the rerun links the new tool
+echo "$T/inst/sc" > "$T/ws/repo/.fake-bins"
+run_shims CLAUDE_STATE_DIR="$T/state" >/dev/null
+[[ -L "$V/shellcheck" && -L "$V/node" ]] \
+  && ok "a rerun after a 'mise use' in a /workspace repo links the new tool" \
+  || bad "the rerun did not link shellcheck from the workspace config"
+# a tool whose version went away is unlinked
+: > "$T/home/.fake-bins"
+run_shims CLAUDE_STATE_DIR="$T/state" >/dev/null
+[[ ! -e "$V/node" && ! -L "$V/node" && -L "$V/shellcheck" ]] \
+  && ok "a rerun unlinks a tool that no longer has a version" || bad "node stayed linked after its version went away"
+[[ "$(shared_state)" == "$BEFORE" ]] \
+  && ok "the shared shims dir's file list and mtimes are unchanged after the runs" \
+  || bad "the shared shims dir changed: $(diff <(echo "$BEFORE") <(shared_state))"
+# with a PATH of view, then system dirs (and no shared dir), the versionless tool is not found
+PATH="$V:/usr/bin:/bin" command -v shellcheck >/dev/null \
+  && ! PATH="$V:/usr/bin:/bin" command -v pytest >/dev/null 2>&1 \
+  && ok "on that PATH a linked tool is found and a versionless one reads 'command not found'" \
+  || bad "PATH resolution through the view is wrong"
+# without CLAUDE_STATE_DIR the view falls back under HOME
+run_shims >/dev/null
+[[ -L "$T/home/.local/share/claude-mise-shims/shellcheck" ]] \
+  && ok "without CLAUDE_STATE_DIR the view is ~/.local/share/claude-mise-shims" \
+  || bad "no fallback view under HOME"
 
 echo
 echo "mise-unit: $PASS passed, $FAIL failed"
