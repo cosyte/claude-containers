@@ -586,6 +586,8 @@ COPY bin/claude-disk-gc /usr/local/bin/claude-disk-gc
 COPY bin/claude-deps-check /usr/local/bin/claude-deps-check
 # Writes the "This container" section of the session's managed memory at every start (§7c).
 COPY bin/claude-container-facts /usr/local/bin/claude-container-facts
+# Read-only probes of what GH_TOKEN can do on each repo (§12e, /run/claude/gh-check.txt).
+COPY bin/claude-gh-check /usr/local/bin/claude-gh-check
 # claude-reaper and claude-controller were REMOVED: the reaper pruned a spool
 # only the retired broker ever wrote to, and the controller had collapsed to a
 # pass-through to claude-autopilot.
@@ -606,6 +608,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude /usr/local/bin/c
         /usr/local/bin/claude-disk-gc \
         /usr/local/bin/claude-deps-check \
         /usr/local/bin/claude-container-facts \
+        /usr/local/bin/claude-gh-check \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
 

@@ -54,6 +54,14 @@ container, and the RC watchdog (below) restarts each session to reload it: no
 manual per-container action needed. Confirm the token landed:
 `docker exec <name> node -e 'const o=require("/home/claude/.claude/.credentials.json").claudeAiOauth; console.log(!!o.accessToken, new Date(o.expiresAt))'`.
 
+## GitHub
+
+**`gh pr create` (or `gh pr checks`, a merge) fails with 403 "Resource not accessible by
+personal access token" while `git push` works.** The push uses the SSH deploy key; `gh` uses
+`GH_TOKEN`, which lacks the permission, often a fine-grained token whose resource owner is not
+the repo's. `cat /run/claude/gh-check.txt` (or run `claude-gh-check`) names what the token can
+do on each repo; [github-token.md](github-token.md) lists what it needs and the fix.
+
 ## Remote Control session not in the mobile app
 
 ### "Remote Control is not yet enabled for your account" (most common)

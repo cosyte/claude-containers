@@ -53,3 +53,5 @@ jobs:
         run: test/state-unit.sh
       - name: keys unit tests (the git key is never an SSH login key - compose-gen and claude-launch refuse it, other containers on the host that would accept it are named, entrypoint 4 run in a sandbox lists it in sshd's RevokedKeys and stops a boot whose brokered key the agent could read; /etc/claude baked root-only)
         run: test/keys-unit.sh
+      - name: gh-check unit tests (the GH_TOKEN permission probes against a fake curl - all held, each missing, offline, no token; never a merge endpoint or a body; entrypoint 12e writes the result and warns)
+        run: test/gh-check-unit.sh
