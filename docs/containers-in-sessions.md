@@ -34,9 +34,9 @@ on PRs touching it or `test/containers-proto/`) runs on `ubuntu-24.04`:
    `Privileged=false`, `CapDrop=ALL` and no capability beyond production's set; the `claude`
    user's `CapEff` is 0.
 
-Run: [actions/runs/38970936952](https://github.com/cosyte/claude-containers/actions/runs/38970936952)
-on commit `1d9596e`, kernel 6.17 (Azure), 2026-10-16. The run's logs (one per step) are its
-`containers-proto-results` artifact. The job took 6 min 14 s, of which the three modes 5 min 17 s.
+Run: [actions/runs/38972393766](https://github.com/cosyte/claude-containers/actions/runs/38972393766)
+on commit `dc3e419`, kernel 6.17 (Azure), 2026-10-16. The run's logs (one per step) are its
+`containers-proto-results` artifact. The job took 6 min 15 s, of which the three modes 5 min 26 s.
 
 ## The options
 
@@ -76,10 +76,10 @@ The modes all keep `--cap-drop ALL` and production's cap set:
 | `unshare -U` | PASS | PASS | PASS |
 | helper refuses to map host uid 0 | | PASS | |
 | `podman info` (uid map) | PASS (1 uid) | PASS (0 to 1000, 1 to 100000 x 65536) | PASS (same) |
-| `podman build`, `RUN apt-get install curl` | **FAIL** (2 s): apt's `setgroups`/`seteuid` to `_apt` | PASS (5 s) | PASS (4 s) |
-| `podman run` postgres 17, ready | **FAIL** (97 s): `chown /var/lib/postgresql/data` | PASS (5 s) | PASS (5 s) |
-| `podman run` nginx, page over a published port | **FAIL** (62 s): `chown(..., 101)` | PASS (3 s) | PASS (3 s) |
-| `docker compose up` via `podman system service` (podman API 5.4.2), service DNS | **FAIL** (106 s): db's `chown` | PASS (6 s) | PASS (6 s) |
+| `podman build`, `RUN apt-get install curl` | **FAIL** (2 s): apt's `setgroups`/`seteuid` to `_apt` | PASS (5 s) | PASS (6 s) |
+| `podman run` postgres 17, ready | **FAIL** (98 s): `chown /var/lib/postgresql/data` | PASS (7 s) | PASS (7 s) |
+| `podman run` nginx, page over a published port | **FAIL** (63 s): `chown(..., 101)` | PASS (3 s) | PASS (4 s) |
+| `docker compose up` via `podman system service` (podman API 5.4.2), service DNS | **FAIL** (110 s): db's `chown` | PASS (4 s) | PASS (4 s) |
 
 Baseline (production hardening only, no options): `unshare -U` as `claude` fails with
 `Operation not permitted`, not privileged, `CapDrop=ALL`, no extra capability, `CapEff` 0. All PASS.
