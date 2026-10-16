@@ -25,10 +25,13 @@ asclaude() { gosu "$CLAUDE_USER" env CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME
 # every inode (a chown with the same owner still updates ctime), so on maker's config volume
 # and ten-repo workspace on spinning disk it held every boot for minutes before any session
 # started (2026-10-07). find only reads a tree that is already right. -h: a symlink itself,
-# never its target, as chown -R did; find does not follow symlinks either.
+# never its target, as chown -R did; find does not follow symlinks either. -execdir, not -exec:
+# the workspace pass runs while the agent is up (§12f), and -h guards only the last component,
+# so a parent directory swapped for a symlink between find and chown would hand the agent a
+# root file. -execdir chowns ./name from inside the directory find already holds.
 own_tree() {
     find "$@" \( ! -uid "$CLAUDE_UID" -o ! -gid "$CLAUDE_GID" \) \
-        -exec chown -h "$CLAUDE_UID:$CLAUDE_GID" {} +
+        -execdir chown -h "$CLAUDE_UID:$CLAUDE_GID" {} +
 }
 
 # --- 0. Refuse retired broker/Sysbox env -------------------------------
@@ -1348,7 +1351,7 @@ else
        checkout onto $WORKSPACE (use 'claude-launch --repo' or --workspace)."
 fi
 # Only the root and its top level here, so the sessions can write to /workspace; the rest
-# of the tree is checked in the background once they are up (§12e).
+# of the tree is checked in the background once they are up (§12f).
 own_tree "$WORKSPACE" -maxdepth 1 2>/dev/null || true
 
 # --- 10. Register baked-in MCP servers ---------------------------------------

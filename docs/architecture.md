@@ -11,7 +11,9 @@
   Claude Code inside a detached tmux session. Stays PID 1 for clean signals.
   Only the workspace's top level is owned before the sessions start; the rest of
   the tree is checked in the background once they are up, because even a pass
-  that changes nothing reads every inode (minutes on a spinning disk).
+  that changes nothing reads every inode (minutes on a spinning disk). Until the
+  pass reaches it, a deeper file with a foreign owner (a bind mount from another
+  uid) is read-only to the agent; the boot log says when the pass is done.
 - **claude-session**: the tmux pane command: `cd /workspace`, exec
   `claude --dangerously-skip-permissions --remote-control "<project>"`, and
   fall back to a shell if Claude exits so SSH stays usable. With `--session NAME`

@@ -2023,7 +2023,8 @@ OT_FN="$(sed -n '/^own_tree() {/,/^}/p' "$ENTRYPOINT")"
 mkdir -p "$OT_DIR/bin" "$OT_DIR/tree/sub"
 touch "$OT_DIR/tree/a" "$OT_DIR/tree/sub/b" "$OT_DIR/outside"
 ln -s "$OT_DIR/outside" "$OT_DIR/tree/link"
-printf '#!/bin/sh\necho "$@" >> "%s/calls"\n' "$OT_DIR" > "$OT_DIR/bin/chown"
+# -execdir hands chown ./name inside each directory: log those as absolute paths.
+printf '#!/bin/sh\nfor a; do case "$a" in ./*) a="$PWD/${a#./}";; esac; printf "%%s " "$a"; done >> "%s/calls"\necho >> "%s/calls"\n' "$OT_DIR" "$OT_DIR" > "$OT_DIR/bin/chown"
 chmod +x "$OT_DIR/bin/chown"
 ot_run() {  # ot_run UID GID [FIND_ARG...]: own_tree over the tree, prints the paths chown was given
     : > "$OT_DIR/calls"
@@ -2048,6 +2049,9 @@ ot_run 4242 "$(id -g)" >/dev/null
 grep -q -- "-h 4242:" "$OT_DIR/calls" && ! grep -q "$OT_DIR/outside" "$OT_DIR/calls" \
     && ok  "symlinks are chowned with -h and never followed to their target" \
     || bad "own_tree would follow a symlink out of the tree, or chown it without -h"
+grep -q -- '-execdir chown -h ' <<<"$OT_FN" && ! grep -q -- '-exec chown' <<<"$OT_FN" \
+    && ok  "chown runs through -execdir (a parent swapped for a symlink mid-pass cannot redirect it)" \
+    || bad "own_tree must chown with -execdir: the workspace pass runs while the agent is up"
 ot_top="$(printf '%s\n' "$OT_DIR/tree" "$OT_DIR/tree/a" "$OT_DIR/tree/link" "$OT_DIR/tree/sub" | sort)"
 [[ "$(ot_run 4242 "$(id -g)" -maxdepth 1)" == "$ot_top" ]] \
     && ok  "the boot pass (-maxdepth 1) owns the root and its top level, nothing deeper" \
