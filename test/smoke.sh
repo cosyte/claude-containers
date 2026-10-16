@@ -1402,8 +1402,10 @@ else
     check "docker compose up: postgres and a client that reaches it by service name" \
         'ctr 600 "mkdir -p c && printf \"services:\n  db:\n    image: postgres:17\n    environment: { POSTGRES_PASSWORD: smoke }\n  app:\n    image: postgres:17\n    command: [sh, -c, \\\"until pg_isready -h db -U postgres; do sleep 1; done; echo reached-db; sleep infinity\\\"]\n    depends_on: [db]\n\" > c/compose.yaml && cd c
              docker compose -p smoke up -d
-             for _ in \$(seq 90); do docker compose -p smoke logs app > logs 2>/dev/null || true; grep -q reached-db logs && { docker compose -p smoke down -t 1 || echo compose-down-failed; exit 0; }; sleep 1; done
-             docker compose -p smoke logs; exit 1" || { tail -5 "$TMP/ctr.log"; false; }'
+             r=1; for _ in \$(seq 90); do docker compose -p smoke logs app > logs 2>/dev/null || true; if grep -q reached-db logs; then r=0; break; fi; sleep 1; done
+             (( r == 0 )) || docker compose -p smoke logs
+             docker compose -p smoke down -t 1 || echo compose-down-failed
+             echo compose-result=\$r; exit \$r" || { echo "  rc=$?"; tail -20 "$TMP/ctr.log"; false; }'
     check "the session memory carries the containers note" \
         'docker exec "$CTRCN" grep -q "claude-containers: containers session note" /etc/claude-code/CLAUDE.md'
     docker rm -f "$CTRCN" >/dev/null 2>&1 || true
