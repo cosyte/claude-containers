@@ -174,7 +174,7 @@ so a repo keeps its port whether active or dormant.
   pids, so a service running several sessions and parallel test suites needs more.
 - `--limit N`: how many repos `gh repo list` returns for `--org` (default 500).
 - `--all-dormant`: put every service behind the dormant profile, so a plain `up -d` starts
-  nothing. It cannot be combined with `--active`.
+  nothing. Do not combine it with `--active`: the named repos would still start.
 - `--network NAME`: attach every service to an existing external network (create it first with
   `docker network create NAME`) instead of the stack's own `<project>_default`, so several
   stacks share one network.

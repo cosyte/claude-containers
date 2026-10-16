@@ -5,7 +5,8 @@
 #   - every CLAUDE_*/GIT_* variable entrypoint.sh or bin/* reads appears in .env.example, or in
 #     ALLOWED below with the reason it is not an operator setting;
 #   - every docs/*.md is linked from README.md;
-#   - every "ADR <number>" names a file under docs/adr/.
+#   - every "ADR <number>" names a file under docs/adr/<number>* (none exist yet, so any citation
+#     fails until its record is added).
 # shellcheck source=test/lib/prelude.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
@@ -26,7 +27,7 @@ for bin in bin/claude-launch bin/claude-compose-gen; do
     missing=()
     while IFS= read -r f; do
         grep -qE -- "(^|[^a-z0-9-])${f}([^a-z0-9-]|$)" <<<"$flag_docs" || missing+=("$f")
-    done < <(grep -oE '^[[:space:]]+--[a-z][a-z0-9-]*(\|-{1,2}[a-z][a-z0-9-]*)*\)' "$bin" \
+    done < <(grep -oE '^[[:space:]]+-{1,2}[a-z][a-z0-9-]*(\|-{1,2}[a-z][a-z0-9-]*)*\)' "$bin" \
                  | tr -d ' \t)' | tr '|' '\n' | grep -E '^--' | sort -u)
     if (( ${#missing[@]} )); then
         bad "$bin: flags in no doc: ${missing[*]}"
@@ -92,7 +93,7 @@ echo "ADR references resolve"
 missing=()
 while IFS= read -r n; do
     compgen -G "docs/adr/${n}*" >/dev/null || missing+=("ADR $n")
-done < <(git ls-files -z | xargs -0 grep -ohIE '\bADR [0-9]+\b' 2>/dev/null | awk '{print $2}' | sort -u)
+done < <(git ls-files -z -co --exclude-standard | xargs -0 grep -ohIE '\bADR [0-9]+\b' 2>/dev/null | awk '{print $2}' | sort -u)
 if (( ${#missing[@]} )); then bad "cited with no file under docs/adr/: ${missing[*]}"
 else ok "every 'ADR <number>' has its file"; fi
 

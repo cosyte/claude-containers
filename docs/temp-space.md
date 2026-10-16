@@ -37,5 +37,5 @@ The reason is the disk: on a spinning pool, that much small-file churn starved I
 processes wedged in uninterruptible sleep and the container could not be killed. RAM avoids it,
 at the cost described above: every page written is charged to the service's memory cgroup
 (`CLAUDE_MEM_LIMIT`, default `4g`) alongside `/tmp`. The sizes are ceilings, not reservations,
-but a session that fills its scratch can reach the limit, so raise `--mem` for a GPU or browser
-service that renders or builds big. The tmpfs is empty on every start, like the volume.
+but a session that fills its scratch can reach the limit, so raise its limit (`--mem REPO=SIZE` in
+`claude-compose-gen`, `CLAUDE_MEM_LIMIT` for `claude-launch`) when it renders or builds big. The tmpfs is empty on every start, like the volume.

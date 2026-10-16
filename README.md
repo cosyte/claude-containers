@@ -458,7 +458,7 @@ with `--no-gpu` to opt one out). Removing it is the same in reverse.
   volume, so render temp and kernel caches stay off a spinning pool. With the 1g `/tmp`
   that can reach 5g, more than the 4g default `CLAUDE_MEM_LIMIT`: a tmpfs is charged only as
   it fills, but raise `--mem` for a service that renders, so the session and the render's
-  own memory fit beside it.
+  own memory fit beside it (`--mem` in compose-gen, `CLAUDE_MEM_LIMIT` for `claude-launch`).
 - `CLAUDE_GPU=1`, which turns on the boot probe, the GPU line in `claude-healthcheck`, and
   a short GPU note in the session's managed memory (`/etc/claude-code/CLAUDE.md`, after the
   container facts every session gets), so the agent finds the tooling on its own.
