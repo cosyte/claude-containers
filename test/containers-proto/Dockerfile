@@ -9,7 +9,7 @@ FROM ${BASE}
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        podman crun conmon netavark aardvark-dns passt uidmap catatonit \
+        podman crun conmon netavark aardvark-dns nftables passt uidmap catatonit \
         libcap2-bin docker-cli docker-compose; \
     apt-get clean; rm -rf /var/lib/apt/lists/*; \
     # Mode "fcaps": file capabilities on newuidmap/newgidmap, not setuid root.
@@ -24,4 +24,7 @@ COPY --chown=claude:claude containers.conf /home/claude/.config/containers/conta
 COPY uidmap-helper.py /usr/local/lib/containers-proto/uidmap-helper.py
 COPY newidmap-client.py /usr/local/lib/containers-proto/helper-bin/newuidmap
 COPY newidmap-client.py /usr/local/lib/containers-proto/helper-bin/newgidmap
-RUN chmod 755 /usr/local/lib/containers-proto/helper-bin/* /usr/local/lib/containers-proto/uidmap-helper.py
+# podman refuses a newuidmap with neither the setuid bit nor a setuid file capability. The
+# client is a script, and the kernel ignores setuid on scripts: the bit only passes the check.
+RUN chmod 4755 /usr/local/lib/containers-proto/helper-bin/*; \
+    chmod 755 /usr/local/lib/containers-proto/uidmap-helper.py

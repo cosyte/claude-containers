@@ -37,7 +37,19 @@ printf 'mode\tstep\tresult\tseconds\tnote\n' > "$OUT/results.tsv"
 # shellcheck disable=SC1091
 HARDEN="$(source "$ROOT/bin/_common.sh"; harden_run_args)"
 MIN_CAPS="$(source "$ROOT/bin/_common.sh"; echo "$CLAUDE_MIN_CAPS")"
-PROTO_OPTS=(--security-opt "seccomp=$DIR/seccomp.json" --security-opt apparmor=unconfined
+# The vendored profile is containers/common's verbatim. Docker resolves a profile's
+# `includes.caps` once, against the container's own cap set, and a session has no
+# CAP_SYS_ADMIN, so sethostname, setdomainname and setns (gated on it there) would stay
+# refused (by the rule for sessions without it) even inside the namespaces podman creates. They are moved to the unconditional
+# allow list, as moby's default profile already does for the first two: the kernel still
+# checks CAP_SYS_ADMIN in the namespace's owning user namespace, so in the session's own
+# namespaces they still fail.
+SECCOMP="$OUT/seccomp-session.json"
+jq '(.syscalls[] | select(.includes.caps == ["CAP_SYS_ADMIN"] or .excludes.caps == ["CAP_SYS_ADMIN"])
+        | .names) -= ["sethostname", "setdomainname", "setns"]
+    | .syscalls += [{"names": ["sethostname", "setdomainname", "setns"], "action": "SCMP_ACT_ALLOW"}]' \
+    "$DIR/seccomp.json" > "$SECCOMP" || exit 2
+PROTO_OPTS=(--security-opt "seccomp=$SECCOMP" --security-opt apparmor=unconfined
             --security-opt systempaths=unconfined --device /dev/net/tun)
 
 record() { # mode step PASS|FAIL seconds note
