@@ -429,6 +429,18 @@ out="$("$CS" health)"
     && ok "the supervisor warns and names the heaviest processes by threads" || bad "capacity warning: $out"
 echo 100 > "$TMPD/cg/pids.current"
 check "below the threshold, nothing is added" bash -c "! '$CS' health | grep -q pids"
+echo 7000 > "$TMPD/cg/pids.current"; echo max > "$TMPD/cg/memory.max"   # a pids limit, no memory limit
+out="$("$CS" health 2>&1)"
+[[ "$out" == *"pids 85% (7000/8192)"* && "$out" != *unbound* ]] \
+    && ok "a pids limit with memory.max 'max' still reports pids" || bad "health, memory.max max: $out"
+"$CS" supervise --once > "$TMPD/sup.out" 2>&1; out="$(cat "$TMPD/sup.out")"
+[[ "$out" == *"memory 0/max MiB (0%)"* && "$out" != *unbound* ]] \
+    && ok "the supervisor prints memory.max 'max' as max" || bad "capacity warning, memory.max max: $out"
+echo max > "$TMPD/cg/pids.max"; echo 8589934592 > "$TMPD/cg/memory.max"   # a memory limit, no pids limit
+echo 8000000000 > "$TMPD/cg/memory.current"
+out="$("$CS" health 2>&1)"
+[[ "$out" == *"memory 93%"* && "$out" != *pids* && "$out" != *unbound* ]] \
+    && ok "a memory limit with pids.max 'max' still reports memory" || bad "health, pids.max max: $out"
 rm -f "$TMPD/cg/pids.current" "$TMPD/cg/memory.current"; echo 2048 > "$TMPD/cg/pids.max"
 
 echo "== stop / start / restart / reset / rm / send =="

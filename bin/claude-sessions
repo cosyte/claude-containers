@@ -694,7 +694,12 @@ capacity() {  # prints "<pids%> <pids> <pids.max> <mem%> <mem MiB> <mem.max MiB>
     [[ "$pc" =~ ^[0-9]+$ && "$pm" =~ ^[0-9]+$ ]] && (( pm > 0 )) && pp=$(( pc * 100 / pm ))
     [[ "$mc" =~ ^[0-9]+$ && "$mm" =~ ^[0-9]+$ ]] && (( mm > 0 )) && mp=$(( mc * 100 / mm ))
     [[ "$pm" =~ ^[0-9]+$ || "$mm" =~ ^[0-9]+$ ]] || return 0
-    echo "$pp ${pc:-0} ${pm:-max} $mp $(( ${mc:-0} / 1048576 )) $(( ${mm:-0} / 1048576 ))"
+    # Only a number goes through arithmetic: "max" there is an unset variable under set -u.
+    [[ "$pc" =~ ^[0-9]+$ ]] || pc=0
+    [[ "$pm" =~ ^[0-9]+$ ]] || pm=max
+    if [[ "$mc" =~ ^[0-9]+$ ]]; then mc=$(( mc / 1048576 )); else mc=0; fi
+    if [[ "$mm" =~ ^[0-9]+$ ]]; then mm=$(( mm / 1048576 )); else mm=max; fi
+    echo "$pp $pc $pm $mp $mc $mm"
 }
 # The heaviest command lines by thread count (threads are what exhaust pids), summed per command.
 heaviest() {
