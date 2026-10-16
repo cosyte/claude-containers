@@ -37,8 +37,9 @@ mkdir -p "$VIEW" || { echo "claude-mise-shims: cannot create $VIEW" >&2; exit 1;
 
 # The files mise reads a config from. mise walks up from where it is asked, so the dir holding
 # one (even .mise/ or .config/mise/) is a place to ask from.
-CONFIG_MATCH=(-name mise.toml -o -name .mise.toml -o -name mise.local.toml -o -name .mise.local.toml
-              -o -name .tool-versions -o -path '*/.mise/config.toml' -o -path '*/mise/config.toml')
+CONFIG_MATCH=(-name mise.toml -o -name .mise.toml -o -name 'mise.*.toml' -o -name '.mise.*.toml'
+              -o -name .tool-versions -o -path '*/.mise/config.toml' -o -path '*/mise/config.toml'
+              -o -path '*/mise/conf.d/*.toml')
 
 # The bin dirs of every tool with a version in this container: the global config (asked from
 # $HOME), then each dir under the workspace that holds a mise config. One `mise bin-paths` per

@@ -12,7 +12,8 @@ mise use github:cli/cli            # …or straight from a GitHub release
 ```
 
 Installed tools land in the shared **`/cache`** tree (see below). Run
-`claude-mise-shims` after a `mise use` to put the new tool on `PATH` for the agent
+`mise reshim && claude-mise-shims` after a `mise use`, or after a `pip install` /
+`npm i -g` that adds a CLI to a mise toolchain, to put the new tool on `PATH` for the agent
 (interactive SSH/tmux shells get full `mise activate` and see it at once).
 mise is **pinned + SHA256-verified in the Dockerfile** at build: the release
 binary is downloaded from GitHub and checked against a hardcoded digest, no
@@ -30,7 +31,9 @@ config under `/workspace`. The shared dir is not on `PATH`, so a tool with no ve
 shims it linked), and `claude-mise-shims` rebuilds it on demand. Neither ever changes the
 shared dir: other containers resolve other versions from it. A tool `mise` resolves only
 inside one repo is linked for the whole container; outside that repo its shim falls through
-to the next one on `PATH` (a system `python3`, say), as before.
+to the next one on `PATH` (a system `python3`, say), as before. A version a config pins but
+that is not installed yet is not linked either (mise reports no bin dir for it): run
+`mise install`, then `claude-mise-shims`.
 
 **Shared, persistent tool cache.** mise's install store **and** the
 `cargo`/`go`/`npm`/`uv`/`pip` caches live on **one shared docker volume**

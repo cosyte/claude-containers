@@ -16,7 +16,8 @@ Keep this short. Project-specific guidance belongs in the repo's own
   you; the repo under `/workspace` is the thing that matters and is persisted.
 - `git`, `gh`, `rg`, `fzf`, `jq`, `python3`, `uv`, and `node` are available.
 - A tool with no version set in this container reads "command not found": install it
-  with `mise use`, then run `claude-mise-shims` so it is on `PATH`.
+  with `mise use` (or `pip install` / `npm i -g` a CLI into a mise toolchain), then run
+  `mise reshim && claude-mise-shims` so it is on `PATH`.
 - Need a different toolchain version or a CLI that isn't baked in? Use `mise`,
   rootless, no `sudo`: `mise use node@22` / `python@3.12` / `go@1.23` / `rust`
   for languages, or `mise use aqua:owner/tool` / `github:owner/tool` for prebuilt
