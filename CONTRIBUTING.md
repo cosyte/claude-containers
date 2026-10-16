@@ -28,7 +28,7 @@ vulnerabilities go through private reporting rather than an issue.
 2. **Run the gates locally before pushing:**
    ```bash
    npm run lint   # make lint (bash -n over every shell entrypoint) plus the no-em-dash check
-   npm test       # the unit suites (no Docker required)
+   npm test       # every unit suite, in parallel (no Docker required); TEST_JOBS caps it
    ```
    Both must be clean. CI runs exactly these (the required checks `ci` and `no-emdash`).
 3. `make smoke` builds the image and exercises a real container. It is **not** in
@@ -50,7 +50,9 @@ task runner. Do not add a dependency without a strong reason.
   `claude-autopilot`, `claude-disk-gc`, …), sharing `bin/_common.sh`.
 - `entrypoint.sh`: the container boot path, in numbered sections. Most behaviour
   lives here.
-- `test/*.sh`: Docker-free unit suites, one per area, driven by `npm test`.
+- `test/*.sh`: Docker-free unit suites, one per area. `npm test` is `test/run-all.sh`: it runs
+  `test/unit.sh` and every `test/*-unit.sh` (a glob, so a new suite needs no list edited) in
+  parallel and prints a PASS/FAIL summary with seconds. CI runs the same `npm test`.
 - `docs/`: architecture, provisioning, security, troubleshooting.
 
 ## Conventions that bite

@@ -17,41 +17,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: lint (bash -n over all shell entrypoints)
         run: make lint
-      - name: unit tests (version-floor helper + warn-only runc posture)
-        run: test/unit.sh
-      - name: CLI-version unit tests (pin consistent across all 6 declarations, Opus 4.8 + Remote Control floors)
-        run: test/cli-version-unit.sh
-      - name: sizing unit tests (size/reservation math)
-        run: test/sizing-unit.sh
-      - name: disk unit tests (free-space parsing + gc plan safety + fail-safe)
-        run: test/disk-unit.sh
-      - name: secret-guard unit tests (blocks a staged secret, chains to the repo's own pre-commit hook from a plain checkout and a git worktree, exit 0 with no hook)
-        run: test/secret-guard-unit.sh
-      - name: compose-gen unit tests (scenario .conf expansion + env layering + cross-stack port reservation)
-        run: test/compose-gen-unit.sh
-      - name: launch unit tests (cap-drop ALL + no-new-privileges, no --privileged / no host socket, removed flags refuse, disk-backed scratch)
-        run: test/launch-unit.sh
-      - name: gpu unit tests (--gpu emission on runc with cap_drop kept, claude-launch --gpu, the claude-gpu guard against a fake nvidia-smi, the fail-closed Blender installer, degrade-not-fail boot + healthcheck)
-        run: test/gpu-unit.sh
-      - name: workspace unit tests (one repo at /workspace or several at /workspace/<repo>; entrypoint clone run for real on local repos, compose-gen --group, claude-launch with several --repo)
-        run: test/workspace-unit.sh
-      - name: egress-packages unit tests (opt-in package-registry allowlist, additive, opt-in, leak-free)
-        run: test/egress-packages-unit.sh
-      - name: mise unit tests (baked toolchain provisioner, pinned install, shims on PATH, /workspace-only trust)
-        run: test/mise-unit.sh
-      - name: cache unit tests (shared tool cache, /cache relocation, fail-safe, idle-only re-fetchable trim, launch/compose mounts)
-        run: test/cache-unit.sh
-      - name: manifest hardening unit tests (user-scoped ignore-scripts + mise lockfile baked into build; claude-deps-check pin linter)
-        run: test/manifest-hardening-unit.sh
-      - name: pkg-install-guide unit tests (content contract on the baked global CLAUDE.md, mise-first per ecosystem, PEP-668 dead-ends, the shared /cache, no-sudo/no-break-system-packages refusal)
-        run: test/pkg-install-guide-unit.sh
-      - name: sessions unit tests (several sessions per container, the CLAUDE_SESSIONS spec, boot and reconcile, supervise, stop/start/restart/rm, the account switch, compose-gen --session and --env, an old `chain` setting only warns, against a fake tmux)
-        run: test/sessions-unit.sh
-      - name: kit unit tests (the kit hook, a plugin marketplace from a git URL with an optional pin, its plugins installed once, the start command, never a failed boot, against a fake claude CLI)
-        run: test/kit-unit.sh
-      - name: state unit tests (private per-container /state, one claude-state-<name> per service and never another's, --mount refuses another container's state or config, claude-launch and claude-rm, entrypoint 2c run in a sandbox names private state left in the shared /cache)
-        run: test/state-unit.sh
-      - name: keys unit tests (the git key is never an SSH login key - compose-gen and claude-launch refuse it, other containers on the host that would accept it are named, entrypoint 4 run in a sandbox lists it in sshd's RevokedKeys and stops a boot whose brokered key the agent could read; /etc/claude baked root-only)
-        run: test/keys-unit.sh
-      - name: gh-check unit tests (the GH_TOKEN permission probes against a fake curl - all held, each missing, offline, no token; never a merge endpoint or a body; entrypoint 12e writes the result and warns)
-        run: test/gh-check-unit.sh
+      # One step: test/run-all.sh finds every suite by glob and runs them in parallel, so there
+      # is no list here to drift from package.json. Its summary names each suite.
+      - name: unit tests (npm test, every test/unit.sh and test/*-unit.sh in parallel)
+        run: npm test
