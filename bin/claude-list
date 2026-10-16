@@ -1,16 +1,37 @@
 #!/usr/bin/env bash
 # claude-list: table of all claude-* containers.
+#
+#   claude-list [--json]
+#
+# IMAGE is the short source commit the container's image was built from (its
+# org.opencontainers.image.revision label, "-dirty" when claude.dirty=true, "unknown"
+# unlabelled). BEHIND is how many commits origin/main of this checkout has past it, as last
+# fetched (it never fetches): "?" when the image is unlabelled or the commit is not here.
+# --json prints one array of objects instead, with image_revision, image_dirty,
+# image_cli_version and behind_main (null where the table shows "?"); it needs jq.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+JSON=0
+case "${1:-}" in
+    --json)    JSON=1 ;;
+    -h|--help) sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    "")        ;;
+    *)         die "unknown argument: $1 (usage: claude-list [--json])" ;;
+esac
+(( JSON )) && { command -v jq >/dev/null 2>&1 || die "--json needs jq"; }
 need_docker
 
 # `{{.Status}}` carries both uptime and the healthcheck verdict, e.g.
 # "Up 2 hours (healthy)" / "Up 5 minutes (unhealthy)": (unhealthy) means the
 # Claude session or its Remote Control link is down (see docs/troubleshooting.md).
+# A container carries its image's labels too, so the provenance labels read the same here.
 fmt='{{.Names}}\t{{.State}}\t{{.Label "claude.ssh_port"}}\t{{.Label "claude.repo"}}\t{{.Status}}'
+fmt+='\t{{.Label "org.opencontainers.image.revision"}}\t{{.Label "claude.dirty"}}\t{{.Label "claude.cli-version"}}'
 rows="$(docker ps -a --filter 'label=claude.managed=1' --format "$fmt" 2>/dev/null || true)"
 
 if [[ -z "$rows" ]]; then
+    (( JSON )) && { echo '[]'; exit 0; }
     info "No claude-* containers. Create one with: claude-launch <name> --repo <url>"
     exit 0
 fi
@@ -28,11 +49,52 @@ if command -v jq >/dev/null 2>&1; then
             (((.State.Health.Log // []) | last // {} | .Output // "")
              | capture("sessions: (?<s>[0-9]+/[0-9]+ up)(?<p> \\([^)]*\\))?").s // "-") ] | @tsv' 2>/dev/null || true)
 fi
-rows="$(while IFS=$'\t' read -r n st port repo status; do
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$st" "$port" "${SESS[$n]:--}" "$repo" "$status"
-done <<<"$rows")"
 
-table="$(printf 'NAME\tSTATE\tSSH PORT\tSESSIONS\tREPO\tSTATUS\n%s\n' "$rows")"
+# BEHIND_OF[rev]: commits origin/main has past rev in this checkout, "?" when rev is not a
+# commit here (or there is no origin/main). One rev-list per distinct revision; behind_of sets
+# BEHIND rather than printing it, so the cache outlives each call.
+declare -A BEHIND_OF=()
+behind_of() {
+    local rev="$1" n
+    if [[ -z "${BEHIND_OF[$rev]:-}" ]]; then
+        BEHIND_OF[$rev]="?"
+        if [[ "$rev" =~ ^[0-9a-f]{7,40}$ ]] \
+            && git -C "$CLAUDE_DOCKER_ROOT" cat-file -e "$rev^{commit}" 2>/dev/null \
+            && n="$(git -C "$CLAUDE_DOCKER_ROOT" rev-list --count "$rev..origin/main" 2>/dev/null)" \
+            && [[ "$n" =~ ^[0-9]+$ ]]; then
+            BEHIND_OF[$rev]="$n"
+        fi
+    fi
+    BEHIND="${BEHIND_OF[$rev]}"
+}
+unlabelled() { [[ -z "$1" || "$1" == "<no value>" ]]; }
+
+# Read on \x1f, not a tab: tab is IFS whitespace, so an empty field (no label) would collapse
+# and shift every field after it.
+rows="$(while IFS=$'\x1f' read -r n st port repo status rev dirty cli; do
+    if unlabelled "$rev"; then
+        rev=unknown img=unknown BEHIND="?"
+    else
+        img="${rev:0:7}"; [[ "$dirty" == true ]] && img+="-dirty"
+        behind_of "$rev"
+    fi
+    unlabelled "$dirty" && dirty=unknown
+    unlabelled "$cli" && cli=unknown
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$st" "$port" "${SESS[$n]:--}" \
+        "$repo" "$status" "$img" "$BEHIND" "$rev" "$dirty" "$cli"
+done < <(tr '\t' '\037' <<<"$rows"))"
+
+if (( JSON )); then
+    jq -R -s -c 'split("\n") | map(select(length > 0) | split("\t") | {
+        name: .[0], state: .[1], ssh_port: .[2], sessions: .[3], repo: .[4], status: .[5],
+        image_revision: .[8],
+        image_dirty: (if .[9] == "true" then true elif .[9] == "false" then false else null end),
+        image_cli_version: .[10],
+        behind_main: (if .[7] == "?" then null else (.[7] | tonumber) end) })' <<<"$rows"
+    exit 0
+fi
+
+table="$(printf 'NAME\tSTATE\tSSH PORT\tSESSIONS\tREPO\tSTATUS\tIMAGE\tBEHIND\n%s\n' "$(cut -f1-8 <<<"$rows")")"
 # `column` is in util-linux/bsdmainutils and not always present; fall back to
 # an awk pass that measures each column so it always renders aligned (kept
 # mawk-compatible: single-dim arrays + split, no gawk-only features).

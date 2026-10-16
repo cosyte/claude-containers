@@ -15,6 +15,7 @@ claude-tui                        interactive whiptail menu over the whole fleet
                                    labels; set CLAUDE_TUI_STACKS to pre-seed one with no
                                    containers created yet. Wraps the commands below; no new logic.
 claude-list                       table of all containers (SESSIONS = named sessions up, from the healthcheck)
+claude-list --json                the same as one JSON array (needs jq)
 claude-attach <name> [session]    attach to its live tmux session (local host), on a named
                                    session's window if given
 claude-sessions -C <name> CMD     manage the sessions inside a container from the host
@@ -40,6 +41,16 @@ has changes or is not on `main` (exit 3), runs `git pull --ff-only`, then `make 
 CLI version. It only builds: it never recreates or touches a container and never cleans up
 images, so running sessions keep the old image until something recreates them. Run it when
 you choose to; nothing schedules it.
+
+`claude-list` ends with two columns on each container's image: IMAGE, the short
+commit it was built from (`-dirty` when built from a checkout with changes,
+`unknown` for an image without the labels), and BEHIND, how many commits
+`origin/main` of the checkout `claude-list` runs from has past it, as last fetched
+(it never fetches; `claude-image-rebuild --check` does). BEHIND is `?` for an
+unlabelled image or a commit that checkout does not have. `--json` carries the
+same as `image_revision`, `image_dirty`, `image_cli_version` and `behind_main`
+(`null` where the table shows `?`; `"unknown"` for an unlabelled revision or CLI
+version, as `claude-image-rebuild --check` prints them).
 
 Inside an autopilot container (over SSH), `claude-enqueue "<prompt>"` adds a task
 to the durable queue (`CLAUDE_AUTOPILOT_QUEUE=1`); `--priority N` orders it
