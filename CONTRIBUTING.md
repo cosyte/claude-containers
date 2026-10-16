@@ -36,7 +36,7 @@ vulnerabilities go through private reporting rather than an issue.
    `entrypoint.sh`, `sshd_config`, `bash_profile`, `bin/`, `claude-config/`,
    `scripts/`, `test/smoke.sh`, the Makefile, `docker-compose.yml` or `ci.yml`,
    and on every push to `main`; on any other PR it is skipped and reports success.
-   It takes 10 to 20 minutes, and the parts that need a GPU, routable IPv6 or a
+   It takes about 3 minutes with a warm layer cache, 8 cold, and the parts that need a GPU, routable IPv6 or a
    firewall report SKIP on a hosted runner. `make smoke` locally stays optional.
 4. Keep PRs focused: one logical change. Large reworks should start as an issue.
 5. Imperative commit subjects (`fix(entrypoint): …`, `feat(launch): …`) are
