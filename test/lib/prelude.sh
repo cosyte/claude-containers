@@ -17,9 +17,8 @@ umask 022
 if [[ -z "${CC_TEST_PRELUDE_TMP:-}" ]]; then
     CC_TEST_PRELUDE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/$(basename "${BASH_SOURCE[1]}" .sh).XXXXXX")" || exit 1
     export CC_TEST_PRELUDE_TMP
+    trap 'rm -rf "$CC_TEST_PRELUDE_TMP"' EXIT   # also on Ctrl-C
     TMPDIR="$CC_TEST_PRELUDE_TMP" bash "${BASH_SOURCE[1]}" "$@"
-    _rc=$?
-    rm -rf "$CC_TEST_PRELUDE_TMP"
-    exit "$_rc"
+    exit
 fi
 export TMPDIR="$CC_TEST_PRELUDE_TMP"
