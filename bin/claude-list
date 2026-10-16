@@ -15,7 +15,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 JSON=0
 case "${1:-}" in
     --json)    JSON=1 ;;
-    -h|--help) sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     "")        ;;
     *)         die "unknown argument: $1 (usage: claude-list [--json])" ;;
 esac

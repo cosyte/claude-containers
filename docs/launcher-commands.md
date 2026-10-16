@@ -49,7 +49,8 @@ commit it was built from (`-dirty` when built from a checkout with changes,
 (it never fetches; `claude-image-rebuild --check` does). BEHIND is `?` for an
 unlabelled image or a commit that checkout does not have. `--json` carries the
 same as `image_revision`, `image_dirty`, `image_cli_version` and `behind_main`
-(`null` where the table shows `?`).
+(`null` where the table shows `?`; `"unknown"` for an unlabelled revision or CLI
+version, as `claude-image-rebuild --check` prints them).
 
 Inside an autopilot container (over SSH), `claude-enqueue "<prompt>"` adds a task
 to the durable queue (`CLAUDE_AUTOPILOT_QUEUE=1`); `--priority N` orders it
