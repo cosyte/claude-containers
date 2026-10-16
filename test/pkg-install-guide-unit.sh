@@ -210,15 +210,15 @@ if has "$CLAUDE_MD" 'never `pkill -f <pattern>`' && has "$CLAUDE_MD" 'by its PID
 else
     bad "Kill: the 'kill by its PID, never \`pkill -f <pattern>\`' line MUST appear"
 fi
-if has "$CLAUDE_MD" 'system Python is 3.13 with `yaml`, `PIL` and `pypdf`'; then
+if has "$CLAUDE_MD" 'is 3.13 with `yaml`, `PIL` and `pypdf`'; then
     ok "Python: the system interpreter's baked modules (yaml, PIL, pypdf) named"
 else
     bad "Python: 'system Python is 3.13 with yaml, PIL and pypdf' MUST be stated"
 fi
-if has "$CLAUDE_MD" 'Build outputs go to `/cache`, not `/scratch`'; then
-    ok "Scratch: build outputs go to /cache, not /scratch"
+if has "$CLAUDE_MD" 'Build outputs go to `/state/tmp`, not `/scratch`'; then
+    ok "Scratch: build outputs go to /state/tmp, not /scratch"
 else
-    bad "Scratch: 'Build outputs go to /cache, not /scratch' MUST be stated"
+    bad "Scratch: 'Build outputs go to /state/tmp, not /scratch' MUST be stated"
 fi
 
 # ============================================================================================

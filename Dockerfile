@@ -240,8 +240,7 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # --- Everyday CLIs and Python modules -----------------------------------------
-# What sessions reached for and did not find: a scan of 3,656 session transcripts
-# counted 405 failed calls to these CLIs and 143 failed imports in the system Python.
+# What sessions reached for most and did not find (a scan of session transcripts):
 #   file bc unzip zip xxd sqlite3 rsync      the tools themselves
 #   poppler-utils                            pdftotext, pdfinfo
 #   bsdextrautils                            column (and hexdump)
