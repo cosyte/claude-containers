@@ -58,6 +58,7 @@ cat > "$FAKE/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 T="$FAKE/tm"
 cmd="$1"; shift
+[[ "$cmd" == send-keys ]] && printf '%s\n' "$*" >> "$FAKE/tm/send-keys.argv"
 target="" name="" dir="" fmt="" buf="" lit=0 args=()
 while (( $# )); do
     case "$1" in
@@ -69,6 +70,7 @@ while (( $# )); do
         -S) shift 2 ;;
         -l) lit=1; shift ;;
         -d|-p|-g|-k|-r) shift ;;
+        --) shift; args+=("$@"); break ;;
         *) args+=("$1"); shift ;;
     esac
 done
@@ -488,6 +490,13 @@ check "send types a line and submits it" test "$(cat "$FAKE/tm/w/home/sent")" = 
 : > "$FAKE/tm/w/home/sent"
 "$CS" send home $'a\nb' >/dev/null
 check "send pastes several lines as one prompt" test "$(cat "$FAKE/tm/w/home/sent")" = $'a\nb\n<ENTER>'
+for txt in -R '- a bullet'; do
+    : > "$FAKE/tm/w/home/sent"; : > "$FAKE/tm/send-keys.argv"
+    "$CS" send home "$txt" >/dev/null
+    check "send types '$txt' literally and submits it" test "$(cat "$FAKE/tm/w/home/sent")" = "$txt"$'\n<ENTER>'
+    check "send puts -- before '$txt', so tmux never reads it as a flag" \
+        grep -qxF -- "-t claude:home -l -- $txt" "$FAKE/tm/send-keys.argv"
+done
 
 # ======================================================================================
 echo "== claude-session-id: by window =="
