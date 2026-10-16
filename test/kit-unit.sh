@@ -20,6 +20,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=test/lib/entrypoint.sh
+source "$REPO_ROOT/test/lib/entrypoint.sh"
 TMPD="$(mktemp -d)"
 trap 'rm -rf "$TMPD"' EXIT
 
@@ -229,7 +231,7 @@ check "the entrypoint merges settings, installs before any session exists, start
 check "install and start run as the agent user and can never fail the boot" \
     bash -c "grep -q 'asclaude /usr/local/bin/claude-kit install \\\\$' '$EP' && grep -q 'asclaude /usr/local/bin/claude-kit start \\\\$' '$EP' && [[ \$(grep -c 'WARNING: claude-kit' '$EP') -ge 3 ]]"
 check "the entrypoint keeps one mechanism: no second jq merge of the two variables" \
-    bash -c "! grep -q '_MKT_ENTRIES' '$EP'"
+    bash -c "! grep -q '_MKT_ENTRIES' '$EP' '$EP_D'/*.sh"
 check "the image bakes claude-kit and makes it executable" \
     bash -c "grep -q '^COPY bin/claude-kit /usr/local/bin/claude-kit' '$REPO_ROOT/Dockerfile' && grep -q '/usr/local/bin/claude-kit' <(sed -n '/^RUN chmod +x/,/[^\\\\]\$/p' '$REPO_ROOT/Dockerfile')"
 

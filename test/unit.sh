@@ -279,6 +279,9 @@ engine_gone() {  # engine_gone <file> <ere> <what>
 engine_gone Dockerfile          'WITH_DOCKER|docker-ce|containerd\.io'   "Docker engine build step"
 engine_gone Makefile            'WITH_DOCKER|build-docker'                "Docker engine build target"
 engine_gone entrypoint.sh       '(^|[[:space:]])dockerd'                  "inner dockerd start"
+for f in "$EP_D"/*.sh; do
+    engine_gone "entrypoint.d/${f##*/}" '(^|[[:space:]])dockerd'          "inner dockerd start"
+done
 engine_gone bin/claude-launch   'runtime=|DOCKER_RUNTIME|docker_volume'   "runtime selection or image-store volume"
 engine_gone bin/claude-compose-gen 'runtime:|WITH_DOCKER|claude\.docker'  "runtime, engine build arg or docker label"
 engine_gone bin/_common.sh      'preflight_sysbox|docker_volume'          "runtime preflight or image-store volume helper"
@@ -287,7 +290,7 @@ engine_gone bin/_common.sh      'preflight_sysbox|docker_volume'          "runti
     || bad "test/docker-unit.sh still exists"
 # The two shortcuts that would hand a prompt-injectable agent the host. If one appears, the
 # isolation story is gone.
-for f in bin/claude-launch bin/claude-compose-gen entrypoint.sh docker-compose.yml; do
+for f in bin/claude-launch bin/claude-compose-gen entrypoint.sh $(cd "$REPO_ROOT" && echo entrypoint.d/*.sh) docker-compose.yml; do
     [[ -e "$REPO_ROOT/$f" ]] || continue
     if has "$(code_of "$REPO_ROOT/$f")" '--privileged|privileged:[[:space:]]*true|/var/run/docker\.sock'; then
         bad "$f grants --privileged or mounts the host docker socket: either hands the agent the host"

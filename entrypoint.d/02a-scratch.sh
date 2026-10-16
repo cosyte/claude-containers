@@ -4,8 +4,9 @@
 # large lands there: pip/uv wheel builds, big archives, compiler temp files, and dies at
 # the cap with an ENOSPC that reads like a bug, while the host has terabytes free. So point
 # TMPDIR at a disk-backed volume. TMPDIR is exported by the launcher/compose (so every
-# child inherits it); this block just makes the directory usable, and tolerates its absence so an older container (or a
-# plain `docker run` of this image) still boots with the historical /tmp behaviour.
+# child inherits it); this block just makes the directory usable, and tolerates its
+# absence so an older container (or a plain `docker run` of this image) still boots with
+# the historical /tmp behaviour.
 SCRATCH_DIR="${TMPDIR:-}"
 if [[ -n "$SCRATCH_DIR" && "$SCRATCH_DIR" != "/tmp" ]]; then
     if mkdir -p "$SCRATCH_DIR" 2>/dev/null; then

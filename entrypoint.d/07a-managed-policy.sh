@@ -30,8 +30,9 @@
 # env.DISABLE_AUTOUPDATER is deliberately NOT here either: auto-update is the image's
 # default posture (see the note above ARG CLAUDE_CODE_VERSION in the Dockerfile), and
 # root-enforcing it here would remove the one lever (env, or a mounted settings/managed
-# file) an operator has to opt back INTO staying pinned. An operator who wants that posture fleet-wide and non-overridable should set
-# DISABLE_AUTOUPDATER=1 in their own file at $MANAGED_FILE below (never overwritten).
+# file) an operator has to opt back INTO staying pinned. An operator who wants that
+# posture fleet-wide and non-overridable should set DISABLE_AUTOUPDATER=1 in their own
+# file at $MANAGED_FILE below (never overwritten).
 #
 # NOT SET, DELIBERATELY: permissions.disableBypassPermissionsMode. This path is
 # where an operator turns --dangerously-skip-permissions off outright, and the

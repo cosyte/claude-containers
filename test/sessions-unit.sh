@@ -732,7 +732,7 @@ check "main starts with --boot" grep -qF 'MAIN_PANE_CMD="/usr/local/bin/claude-s
 check "CLAUDE_SESSIONS / CLAUDE_MAIN_RESUME reach tmux's environment" \
     bash -c "grep -q 'export CLAUDE_SESSIONS=' '$EP' && grep -q 'CLAUDE_MAIN_RESUME=' '$EP'"
 check "the goal runner is gone from the image: no script, no COPY, no env export" \
-    bash -c "[[ ! -e '$REPO_ROOT/bin/claude-goal-chain' ]] && ! grep -q 'claude-goal-chain' '$REPO_ROOT/Dockerfile' && ! grep -q 'CLAUDE_GOAL_CHAIN' '$EP'"
+    bash -c "[[ ! -e '$REPO_ROOT/bin/claude-goal-chain' ]] && ! grep -q 'claude-goal-chain' '$REPO_ROOT/Dockerfile' && ! grep -q 'CLAUDE_GOAL_CHAIN' '$EP' '$EP_D'/*.sh"
 check "the supervisor is stopped on shutdown" grep -q 'kill "$SESSIONS_PID"' "$EP"
 check "shutdown records every window's conversation before tmux goes" \
     bash -c "awk '/^shutdown\\(\\) \\{/{f=1} f&&/claude-sessions record/{r=NR} f&&/tmux kill-server/{k=NR; exit} END{exit !(r && k && r < k)}' '$EP'"
