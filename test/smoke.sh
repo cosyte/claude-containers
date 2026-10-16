@@ -73,6 +73,7 @@ check(){ local r=0; set +o pipefail; eval "$2" || r=1; set -o pipefail; if (( r 
 
 echo "== image: $IMAGE =="
 docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "image missing: build first"; exit 1; }
+echo "  image size: $(( $(docker image inspect -f '{{.Size}}' "$IMAGE") / 1000000 )) MB"
 
 # --- fixtures ---------------------------------------------------------------
 ssh-keygen -q -t ed25519 -f "$TMP/key" -N ''
