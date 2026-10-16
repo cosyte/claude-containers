@@ -8,6 +8,8 @@
 #   - removed flags refuse, naming the removal (never a silent no-op)
 #   - claude-compose-gen emission: every service on plain runc, cap_drop kept
 #   - the disk-backed scratch (TMPDIR) that keeps big installs off the 1g /tmp tmpfs
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

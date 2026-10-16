@@ -19,6 +19,8 @@
 #     sshd_config names it
 # Real keys come from ssh-keygen (throwaway, in a temp dir). The one fake is gosu: the sandbox
 # cannot switch users, so a stub answers "can the agent user read this file", per case.
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

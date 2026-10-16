@@ -13,6 +13,8 @@
 #     pinned build-time `npm install -g` layers are untouched)
 #   - claude-deps-check flags the right specs, is advisory by default / refuses under --strict,
 #     and is fail-safe on missing/malformed manifests
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

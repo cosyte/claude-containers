@@ -15,6 +15,8 @@
 #     boot log says whether it is a volume, and private-looking files the container still
 #     keeps in the shared cache are named (never moved)
 #   - the image, the compose template and SSH logins carry /state and CLAUDE_STATE_DIR
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

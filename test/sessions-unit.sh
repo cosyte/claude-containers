@@ -20,6 +20,8 @@
 #     exits when its window is gone; the usage watchdog resumes every limited session
 #   - claude-launch --session / --env, claude-compose-gen --session / --env
 #   - the entrypoint and the image wire it all in
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

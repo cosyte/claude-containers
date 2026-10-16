@@ -11,6 +11,8 @@
 #   - entrypoint.sh §8e: frontend-debugging only with the browser MCP on; an unmodified
 #     copy is removed when it is off, an edited one kept
 # Each entrypoint block is the real one, extracted and run against a sandbox.
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

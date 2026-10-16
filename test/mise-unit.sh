@@ -11,6 +11,8 @@
 # config trust is scoped to /workspace and NOT a blanket "/", and that non-interactive
 # agent shells resolve tools via shims on PATH. A regression in any of these is a
 # supply-chain or usability break, so it gates in CI rather than waiting for a build.
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

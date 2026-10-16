@@ -36,6 +36,8 @@
 #   - test/smoke.sh: asserts the RUNNING IMAGE reports the pinned version and clears the
 #     floor.
 # The live Remote Control handshake stays on the on-host item CC-CLAUDE-CODE-UPGRADE-SMOKE.
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
