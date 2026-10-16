@@ -178,6 +178,16 @@ check "image ships the pinned Claude Code CLI ($PINNED_VER)" \
     '[[ "$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")" == "$PINNED_VER" ]]'
 check "the CLI in the image clears the Opus-4.8 floor ($OPUS48_FLOOR, else '--model opus' means 4.7)" \
     'v="$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")"; [[ "$(printf "%s\n%s\n" "$OPUS48_FLOOR" "$v" | sort -V | head -1)" == "$OPUS48_FLOOR" ]]'
+# uv and pnpm: the versions the Dockerfile pins (uv on its FROM line, pnpm in its ARG), printed
+# so a run's log shows what the image ships.
+PINNED_UV="$(sed -n 's/^FROM ghcr\.io\/astral-sh\/uv:\([0-9.]*\)@.*/\1/p' "$REPO_ROOT/Dockerfile")"
+PINNED_PNPM="$(sed -n 's/^ARG PNPM_VERSION=\(.*\)$/\1/p' "$REPO_ROOT/Dockerfile")"
+echo "  uv --version: $(cexec "uv --version" 2>&1)"
+echo "  pnpm --version: $(cexec "pnpm --version" 2>&1)"
+check "image ships the pinned uv ($PINNED_UV)" \
+    '[[ "$(cexec "uv --version" 2>/dev/null | awk "{print \$2}")" == "$PINNED_UV" ]]'
+check "image ships the pinned pnpm ($PINNED_PNPM)" \
+    '[[ "$(cexec "pnpm --version" 2>/dev/null)" == "$PINNED_PNPM" ]]'
 # Provenance labels (the end of the Dockerfile), set from the Makefile's BUILD_ARGS: the
 # commit a reader compares with main, and the CLI the label claims it ships.
 check "image is labelled with its source commit (40-hex org.opencontainers.image.revision)" \

@@ -17,10 +17,8 @@ services:
     build:
       context: .
       args:
-        NODE_VERSION: ${NODE_VERSION:-24}
         CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-2.1.293}
-        UV_VERSION: ${UV_VERSION:-latest}
-        PNPM_VERSION: ${PNPM_VERSION:-latest}
+        PNPM_VERSION: ${PNPM_VERSION:-12.14.0}
         CLAUDE_UID: ${CLAUDE_UID:-1000}
         CLAUDE_GID: ${CLAUDE_GID:-1000}
         CLAUDE_USER: ${CLAUDE_USER:-claude}

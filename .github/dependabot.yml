@@ -22,14 +22,17 @@ updates:
     commit-message:
       prefix: ci
 
-  # The base images only, and today this entry finds nothing to bump: both FROM
-  # lines build their tag from an ARG (node:${NODE_VERSION}-trixie-slim,
-  # uv:${UV_VERSION}), which Dependabot cannot resolve or rewrite. Bump
-  # NODE_VERSION and UV_VERSION by hand. It never touches what is installed
-  # inside the image.
+  # The Dockerfile's two FROM lines, both a literal tag pinned by digest
+  # (node:24-trixie-slim@sha256:..., ghcr.io/astral-sh/uv:X.Y.Z@sha256:...):
+  # Dependabot bumps uv's version and both digests. Node majors are ignored, a
+  # new LTS is a deliberate move made by hand. It never touches what is
+  # installed inside the image (pnpm, mise, the Claude Code CLI).
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: node
+        update-types: ['version-update:semver-major']
     commit-message:
       prefix: build
