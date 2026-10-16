@@ -105,7 +105,7 @@ fi
 if [[ "$BROWSER" == 1 ]]; then
     build=(make -C "$ROOT" build-browser "CLAUDE_IMAGE_BROWSER=$IMAGE")
 else
-    build=(make -C "$ROOT" build "CLAUDE_IMAGE=$IMAGE")
+    build=(make -C "$ROOT" build WITH_BROWSER=0 "CLAUDE_IMAGE=$IMAGE")
 fi
 pull=(git -C "$ROOT" pull --ff-only)
 

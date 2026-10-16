@@ -128,7 +128,7 @@ grep -qF "revision: $OLD -> $MAIN" <<<"$out" && grep -qF 'cli:      2.1.200 -> 2
 
 reset; echo "$OLD|false|2.1.200|0" > "$F/labels"; echo "$MAIN|false|2.1.293|0" > "$F/labels.after"
 run --image t:l >/dev/null
-grep -qE '^make .* build CLAUDE_IMAGE=t:l$' "$F/log" && ok "a lean image builds with build" || bad "lean: $(grep make "$F/log")"
+grep -qE '^make .* build WITH_BROWSER=0 CLAUDE_IMAGE=t:l$' "$F/log" && ok "a lean image builds with build, WITH_BROWSER=0 pinned" || bad "lean: $(grep make "$F/log")"
 
 reset; echo "$OLD|false|2.1.200|1" > "$F/labels"
 out="$(run --image t:b --dry-run)"; rc=$?
