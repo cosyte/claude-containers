@@ -14,6 +14,8 @@
 #   - the _common.sh cache helpers (name normalization, mount args, size measurement)
 #   - the claude-disk-gc cache trim (fixed re-fetchable-only plan; idle-only; fail-safe)
 #   - claude-launch / claude-compose-gen mount the shared cache and honor --no-cache
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

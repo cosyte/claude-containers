@@ -12,6 +12,8 @@
 #     and idempotent
 #   - entrypoint.sh §2b: a broken GPU degrades loudly and never stops the boot
 #   - claude-healthcheck: a degraded GPU is reported and never fails health
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

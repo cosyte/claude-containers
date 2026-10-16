@@ -11,6 +11,8 @@
 # The generator's docker calls are all warn-only / `|| true`, so it runs fully
 # on a hosted runner. CLAUDE_PORTS_USED_OVERRIDE is set (often empty) in every
 # generating test so a live docker on a dev box can't skew port assignment.
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -152,12 +154,10 @@ echo "== --network: shared external default network =="
 OUTN="$TMPD/n/dc.yml"
 if env CLAUDE_PORTS_USED_OVERRIDE= "$GEN" --env-file "$ENVF" --out "$OUTN" \
     --port-base 3900 --network claude z/one >/dev/null 2>&1; then
-    if python3 - "$OUTN" <<'PY'
-import yaml,sys
-d=yaml.safe_load(open(sys.argv[1]))
-n=d.get("networks",{}).get("default",{})
-sys.exit(0 if (n.get("name")=="claude" and n.get("external") is True) else 1)
-PY
+    # The top-level networks: block, as text (no YAML parser in the image): up to the next
+    # top-level key.
+    NETS="$(awk '/^networks:/{p=1; print; next} p && /^[^ ]/{p=0} p' "$OUTN")"
+    if [[ "$NETS" == $'networks:\n  default:\n    name: claude\n    external: true' ]]
     then ok "--network emits an external default network (name: claude)"
     else bad "--network should emit networks.default {name: claude, external: true}"; fi
     # Absent --network → no networks: block (backward compatible).

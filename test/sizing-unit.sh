@@ -6,6 +6,8 @@
 #   - the flat-session CLAUDE_MEM_RESERVATION derivation at source time
 #   - claude-compose-gen's per-service mem_reservation/pids_limit emission
 #   - the static docker-compose.yml's opt-in reservation default
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

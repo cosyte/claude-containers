@@ -4,11 +4,10 @@
 # Covers the pure-logic checks in bin/_common.sh, plus the prune gates:
 #   - version_ge: the generic dotted-numeric comparator (fail-closed on garbage)
 #   - preflight_runc: the warn-only posture is preserved (never exits non-zero)
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
-# The entrypoint runs as root with umask 022, and the managed-policy checks (§7a) judge the
-# modes of directories these tests create. Under a developer's umask 002 those come out
-# group-writable, and eight §7a checks failed for a reason that is not in the code.
-umask 022
+# umask 022 comes from the prelude: the §7a checks judge the modes of what these tests make.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PASS=0 FAIL=0

@@ -9,6 +9,8 @@
 #   4. the chained hook's failure blocks the commit
 #   5. a repo with no hook of its own commits (exit 0)
 #   6. a repo hook that IS the guard (symlink) does not loop
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 # Run from inside a git hook, these would point every git call at the outer repo.
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE

@@ -7,6 +7,8 @@
 #      prunes (never -a/--volumes), and disk_gc_once is fail-safe on a docker error
 #
 # The one-command sanity re-run of this same logic is bin/claude-disk-verify.
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

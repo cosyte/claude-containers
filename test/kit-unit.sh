@@ -15,6 +15,8 @@
 #   - the wiring: the entrypoint calls settings -> install (before sessions) -> start (after
 #     them), each non-fatal; the image bakes the script; the generator and the launcher emit
 #     and validate the values (--marketplace with #ref, --plugin, --start-cmd, --pids)
+# shellcheck source=test/lib/prelude.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
