@@ -216,7 +216,9 @@ grep -Eq 'cache_mount_args' "$LAUNCH" \
 grep -Eq '"\$\{CACHE_MOUNT_ARGS\[@\]\}"' "$LAUNCH" \
   && ok "claude-launch passes CACHE_MOUNT_ARGS into docker run" \
   || bad "CACHE_MOUNT_ARGS is not passed into docker run"
-grep -Eq -- '--no-cache\)' "$LAUNCH" && grep -Eq -- '--cache\)' "$LAUNCH" \
+# The flags themselves live in the parser both launchers share (bin/_common.sh).
+grep -Eq -- '--no-cache\)' "$REPO_ROOT/bin/_common.sh" && grep -Eq -- '--cache\)' "$REPO_ROOT/bin/_common.sh" \
+  && grep -q 'take_shared_flag single' "$LAUNCH" \
   && ok "claude-launch accepts --cache <vol> and --no-cache" \
   || bad "claude-launch is missing the --cache / --no-cache flags"
 

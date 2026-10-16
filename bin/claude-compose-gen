@@ -235,18 +235,18 @@ PORT_BASE="$SSH_PORT_RANGE_START"
 LIMIT=500
 WANT_FORKS=0 WANT_ARCHIVED=0 ALL_DORMANT=0
 NETWORK=""
-# Shared tool cache: ONE volume shared by every service, mounted at /cache.
-# Default = the CACHE_VOLUME name (claude-cache); --no-cache / --cache off disables it.
-CACHE_VOL="$CACHE_VOLUME"
 BUILD_CONTEXT=""
 DORMANT_PROFILE="dormant"
-INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() STARTCMD_RAW=() PIDS_RAW=() CPU_RAW=() MEM_RAW=() BROWSER_RAW=() GPU_RAW=() GROUP_RAW=() MKTS_RAW=() PLUGINS_RAW=() MODEL_RAW=() MOUNTS_RAW=() ACCOUNTS_RAW=() SESSION_RAW=() ENV_RAW=()
+INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() PIDS_RAW=() CPU_RAW=() MEM_RAW=() GROUP_RAW=() MOUNTS_RAW=()
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
 # follow so they override scalars (--out/--org/--port-base) and append to
 # repeatables (--active/--expose/…). --scenario/--env-file were consumed in the
 # pre-scan but stay in the stream; the loop treats them as no-ops.
 if ((${#SCENARIO_ARGS[@]})); then set -- "${SCENARIO_ARGS[@]}" "$@"; fi
 while [[ $# -gt 0 ]]; do
+    # The flags claude-launch takes too (--model, --env, --session, ...): bin/_common.sh. Here
+    # each is per service (REPO=VALUE), except --cache / --no-cache, which are stack-wide.
+    if take_shared_flag per-service "$@"; then shift "$FLAG_SHIFT"; continue; fi
     case "$1" in
         --org)             ORG="$2"; shift 2 ;;
         --out)             OUT="$2"; shift 2 ;;
@@ -254,42 +254,20 @@ while [[ $# -gt 0 ]]; do
         --include)         INCLUDE+=("$2"); shift 2 ;;
         --exclude)         EXCLUDE+=("$2"); shift 2 ;;
         --active)          ACTIVE_RAW+=("$2"); shift 2 ;;
-        --expose)          EXPOSE_RAW+=("$2"); shift 2 ;;
-        --dev-cmd)         DEVCMD_RAW+=("$2"); shift 2 ;;
-        --start-cmd)       STARTCMD_RAW+=("$2"); shift 2 ;;
         --pids)            PIDS_RAW+=("$2"); shift 2 ;;
         --cpu)             CPU_RAW+=("$2"); shift 2 ;;
         --mem)             MEM_RAW+=("$2"); shift 2 ;;
-        --model)           MODEL_RAW+=("$2"); shift 2 ;;
-        --browser)         BROWSER_RAW+=("$2"); shift 2 ;;
-        --gpu)             GPU_RAW+=("$2"); shift 2 ;;
         --group)           GROUP_RAW+=("$2"); shift 2 ;;
-        # Removed flags refuse, naming the removal, rather than silently dropping a repo's
-        # request on the next regen of a .conf that still carries them.
-        --docker|--no-docker|--sysbox)
-            die "claude-compose-gen: $1 was removed along with the per-session Docker engine and the
-       Sysbox runtime it needed. Delete the line from the scenario .conf; build and run
-       containers on the host or in CI. (History: docs/legacy-sysbox-broker.md.)" ;;
-        --broker|--worker-tarball)
-            die "claude-compose-gen: $1 was removed (the legacy Sysbox worker-broker substrate is retired; see docs/legacy-sysbox-broker.md)" ;;
-        --marketplace)     MKTS_RAW+=("$2"); shift 2 ;;
-        --plugin)          PLUGINS_RAW+=("$2"); shift 2 ;;
         --mount)           MOUNTS_RAW+=("$2"); shift 2 ;;
-        --accounts)        ACCOUNTS_RAW+=("$2"); shift 2 ;;
-        --session)         SESSION_RAW+=("$2"); shift 2 ;;
-        --env)             ENV_RAW+=("$2"); shift 2 ;;
         --build-context)   BUILD_CONTEXT="$2"; shift 2 ;;
         --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
         --forks)           WANT_FORKS=1; shift ;;
         --archived)        WANT_ARCHIVED=1; shift ;;
         --all-dormant)     ALL_DORMANT=1; shift ;;
         --network)         NETWORK="$2"; shift 2 ;;
-        --cache)           CACHE_VOL="$2"; shift 2 ;;
-        --no-cache)        CACHE_VOL=""; shift ;;
         --limit)           LIMIT="$2"; shift 2 ;;
         --scenario)        shift 2 ;;   # consumed in the pre-scan above
         --env-file)        shift 2 ;;   # consumed in the pre-scan above
-        -h|--help)         usage 0 ;;
         -*)                die "unknown option: $1 (try --help)" ;;
         *)                 REPO_ARGS+=("$1"); shift ;;
     esac
@@ -298,7 +276,8 @@ done
 # Shared tool cache: normalize the requested volume to its effective name
 # ("" / off / none disable it). One shared volume across all services = the
 # cross-worker cache hit; disabled = per-container installs.
-CACHE_NAME="$(cache_name "$CACHE_VOL")"
+# Default = the CACHE_VOLUME name (claude-cache); --no-cache / --cache off disables it.
+CACHE_NAME="$(cache_name "$(flag_last "$CACHE_VOLUME" "${CACHE_RAW[@]}")")"
 
 # No host- or org-specific defaults: this is a shared tool. Caller must say
 # where to write and (for gh enumeration) which org.
@@ -328,8 +307,6 @@ declare -A EXPOSE=()
 for tok in "${EXPOSE_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
     IFS=: read -r er eh ec <<<"$tok"
-    [[ -n "$er" && "$eh" =~ ^[0-9]+$ && "$ec" =~ ^[0-9]+$ ]] \
-        || die "--expose must be REPO:HOSTPORT:CONTAINERPORT (got '$tok')"
     es="$(sanitize "$er")"
     EXPOSE[$es]="${EXPOSE[$es]:-}${EXPOSE[$es]:+$'\n'}${eh}:${ec}"
 done
@@ -338,7 +315,6 @@ done
 declare -A DEVCMD=()
 for tok in "${DEVCMD_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
-    [[ "$tok" == *=* ]] || die "--dev-cmd must be REPO=COMMAND (got '$tok')"
     DEVCMD["$(sanitize "${tok%%=*}")"]="${tok#*=}"
 done
 
@@ -346,8 +322,6 @@ done
 declare -A STARTCMD=()
 for tok in "${STARTCMD_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
-    [[ "$tok" == ?*=* && -n "${tok#*=}" ]] || die "--start-cmd must be SVC=COMMAND (got '$tok')"
-    [[ "${tok#*=}" != *$'\n'* ]] || die "--start-cmd for ${tok%%=*} holds a newline: give one command line (join steps with && or ;)"
     STARTCMD["$(sanitize "${tok%%=*}")"]="${tok#*=}"
 done
 # Per-service pids limit: svc -> N.
@@ -381,10 +355,7 @@ done
 declare -A MODEL=()
 for tok in "${MODEL_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
-    [[ "$tok" == *=* ]] || die "--model must be REPO=MODEL (got '$tok')"
-    mdv="${tok#*=}"
-    [[ -n "$mdv" ]] || die "--model '$tok' has no model after '='"
-    MODEL["$(sanitize "${tok%%=*}")"]="$mdv"
+    MODEL["$(sanitize "${tok%%=*}")"]="${tok#*=}"
 done
 # Frontend debugging: services with chrome-devtools MCP enabled (CLAUDE_BROWSER=1).
 # Image must be built with WITH_BROWSER=1 (`make build-browser`).
@@ -411,7 +382,6 @@ done
 declare -A MKTS=()
 for tok in "${MKTS_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
-    [[ "$tok" == *=*=* ]] || die "--marketplace must be REPO=NAME=URL (got '$tok')"
     ms="$(sanitize "${tok%%=*}")"
     mv="${tok#*=}"
     MKTS[$ms]="${MKTS[$ms]:-}${MKTS[$ms]:+,}${mv}"
@@ -422,10 +392,8 @@ done
 declare -A PLUGINS=()
 for tok in "${PLUGINS_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
-    [[ "$tok" == *=* ]] || die "--plugin must be REPO=PLUGIN[,PLUGIN...] (got '$tok')"
     ps="$(sanitize "${tok%%=*}")"
     pv="${tok#*=}"
-    [[ -n "$pv" ]] || die "--plugin '$tok' has no plugins after '='"
     PLUGINS[$ps]="${PLUGINS[$ps]:-}${PLUGINS[$ps]:+,}${pv}"
 done
 # Validate each service's kit declaration with the container's own parser, so a typo fails
@@ -479,10 +447,8 @@ done
 declare -A SESSIONS=()
 for tok in "${SESSION_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
-    [[ "$tok" == *=* ]] || die "--session must be SVC=SPEC (got '$tok')"
     ss="$(sanitize "${tok%%=*}")"
     sv="${tok#*=}"
-    [[ -n "${sv//[[:space:];]/}" ]] || die "--session '$tok' has no session after '='"
     SESSIONS[$ss]="${SESSIONS[$ss]:-}${SESSIONS[$ss]:+; }${sv}"
 done
 for ss in "${!SESSIONS[@]}"; do
@@ -499,14 +465,10 @@ GENERATED_ENV_RE='^(CLAUDE_PROJECT_NAME|CLAUDE_MODEL|CLAUDE_PERMISSION_MODE|CLAU
 declare -A ENVS=()
 for tok in "${ENV_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
-    [[ "$tok" == *=*=* ]] || die "--env must be SVC=KEY=VALUE (got '$tok')"
     es="$(sanitize "${tok%%=*}")"
     ekv="${tok#*=}"
     ek="${ekv%%=*}"
-    [[ "$ek" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "--env key '$ek' is not a variable name (in '$tok')"
-    [[ "$ek" != ANTHROPIC_API_KEY ]] || die "--env ANTHROPIC_API_KEY: this stack is OAuth-subscription only"
     [[ ! "$ek" =~ $GENERATED_ENV_RE ]] || die "--env $ek: the generator already sets it; use its own flag (--model, --session, --dev-cmd, --start-cmd, ...) or the stack's .env"
-    [[ "$ekv" != *$'\n'* ]] || die "--env $ek: the value must be one line"
     ENVS[$es]="${ENVS[$es]:-}${ENVS[$es]:+$'\n'}${ekv}"
 done
 
@@ -520,10 +482,8 @@ declare -A ACCOUNTS=()
 declare -A ACCOUNT_VOLS=()
 for tok in "${ACCOUNTS_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
-    [[ "$tok" == *=* ]] || die "--accounts must be REPO=name1,name2,... (got '$tok')"
     as="$(sanitize "${tok%%=*}")"
     av="${tok#*=}"
-    [[ -n "$av" ]] || die "--accounts '$tok' has no account names after '='"
     for one in $(echo "$av" | tr ',' ' '); do
         one="$(sanitize "$one")"
         ACCOUNTS[$as]="${ACCOUNTS[$as]:-}${ACCOUNTS[$as]:+,}${one}"

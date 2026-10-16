@@ -82,7 +82,7 @@ PROJECT="" REPO="" BRANCH="" DEPTH="" WS_PATH="" PORT="" REPOS=()
 EXTRA="${CLAUDE_EXTRA_ARGS:-}" MCP_LIST="${CLAUDE_MCP_ENABLED:-}" DEVCMD="${CLAUDE_DEV_CMD:-}"
 MKTS="${CLAUDE_EXTRA_MARKETPLACES:-}" PLUGINS="${CLAUDE_EXTRA_PLUGINS:-}" STARTCMD="${CLAUDE_EXTRA_START_CMD:-}"
 ACCOUNTS="${CLAUDE_ACCOUNTS:-}"
-SESSIONS="${CLAUDE_SESSIONS:-}" EXTRA_ENV=()
+SESSIONS="${CLAUDE_SESSIONS:-}"
 # Empty here means "unset": the container's entrypoint then defaults it to opus
 # (best available). A value from .env/env seeds the default; --model overrides.
 MODEL="${CLAUDE_MODEL:-}"
@@ -104,10 +104,12 @@ CLAUDE_BROKER_GIT_KEY="${CLAUDE_BROKER_GIT_KEY:-1}"
 # CACHE_ARG: the shared tool cache. Empty = the CACHE_VOLUME default
 # (claude-cache) is mounted at /cache; --cache <vol> overrides the name;
 # --cache off / --no-cache disables it (per-container installs).
-EXPOSE_RAW=() OPTS_GIVEN=0 BROWSER="" BROWSER_EXPLICIT=0 IMAGE_EXPLICIT=0 CACHE_ARG=""
+OPTS_GIVEN=0 BROWSER="" BROWSER_EXPLICIT=0 IMAGE_EXPLICIT=0 CACHE_ARG=""
 # GPU: "" = follow CLAUDE_GPU from .env/env (off when unset), 1 = on, 0 = explicit opt-out.
 GPU=""
 while [[ $# -gt 0 ]]; do
+    # The flags claude-compose-gen takes too (--model, --env, --session, ...): bin/_common.sh.
+    if take_shared_flag single "$@"; then OPTS_GIVEN=1; shift "$FLAG_SHIFT"; continue; fi
     case "$1" in
         --repo)        REPOS+=("$2"); OPTS_GIVEN=1; shift 2 ;;
         --branch)      BRANCH="$2"; OPTS_GIVEN=1; shift 2 ;;
@@ -115,34 +117,28 @@ while [[ $# -gt 0 ]]; do
         --workspace)   WS_PATH="$2"; OPTS_GIVEN=1; shift 2 ;;
         --image)       CLAUDE_IMAGE="$2"; IMAGE_EXPLICIT=1; OPTS_GIVEN=1; shift 2 ;;
         --port)        PORT="$2"; OPTS_GIVEN=1; shift 2 ;;
-        --model)       MODEL="$2"; OPTS_GIVEN=1; shift 2 ;;
         --mcp)         MCP_LIST="${MCP_LIST:+$MCP_LIST,}$2"; OPTS_GIVEN=1; shift 2 ;;
-        --browser)     BROWSER=1; BROWSER_EXPLICIT=1; OPTS_GIVEN=1; shift ;;
-        --no-browser)  BROWSER=0; BROWSER_EXPLICIT=1; OPTS_GIVEN=1; shift ;;
-        --gpu)         GPU=1; OPTS_GIVEN=1; shift ;;
-        --no-gpu)      GPU=0; OPTS_GIVEN=1; shift ;;
+        --no-browser)  BROWSER_RAW+=(0); OPTS_GIVEN=1; shift ;;
+        --no-gpu)      GPU_RAW+=(0); OPTS_GIVEN=1; shift ;;
         --extra-args)  EXTRA="$2"; OPTS_GIVEN=1; shift 2 ;;
-        --expose)      EXPOSE_RAW+=("$2"); OPTS_GIVEN=1; shift 2 ;;
-        --dev-cmd)     DEVCMD="$2"; OPTS_GIVEN=1; shift 2 ;;
-        --marketplace) MKTS="${MKTS:+$MKTS,}$2"; OPTS_GIVEN=1; shift 2 ;;
-        --plugin)      PLUGINS="${PLUGINS:+$PLUGINS,}$2"; OPTS_GIVEN=1; shift 2 ;;
-        --start-cmd)   STARTCMD="$2"; OPTS_GIVEN=1; shift 2 ;;
-        --cache)       CACHE_ARG="$2"; OPTS_GIVEN=1; shift 2 ;;
-        --no-cache)    CACHE_ARG="off"; OPTS_GIVEN=1; shift ;;
-        --accounts)    ACCOUNTS="${ACCOUNTS:+$ACCOUNTS,}$2"; OPTS_GIVEN=1; shift 2 ;;
-        --session)     SESSIONS="${SESSIONS:+$SESSIONS; }$2"; OPTS_GIVEN=1; shift 2 ;;
-        --env)         EXTRA_ENV+=("$2"); OPTS_GIVEN=1; shift 2 ;;
-        --docker|--no-docker|--sysbox)
-            die "claude-launch: $1 was removed along with the per-session Docker engine and the
-       Sysbox runtime it needed. A session can no longer build images or run containers
-       itself: do that on the host or in CI. (History: docs/legacy-sysbox-broker.md.)" ;;
-        --broker|--worker-tarball)
-            die "claude-launch: $1 was removed (the legacy Sysbox worker-broker substrate is retired; see docs/legacy-sysbox-broker.md)" ;;
-        -h|--help)     usage 0 ;;
         -*)            die "unknown option: $1 (try --help)" ;;
         *)             [[ -z "$PROJECT" ]] && PROJECT="$1" || die "unexpected arg: $1"; shift ;;
     esac
 done
+# Fold the shared flags: a setting takes the last value given, a list joins them, and either
+# starts from its .env default.
+MODEL="$(flag_last "$MODEL" "${MODEL_RAW[@]}")"
+DEVCMD="$(flag_last "$DEVCMD" "${DEVCMD_RAW[@]}")"
+STARTCMD="$(flag_last "$STARTCMD" "${STARTCMD_RAW[@]}")"
+CACHE_ARG="$(flag_last "" "${CACHE_RAW[@]}")"
+MKTS="$(flag_join , "$MKTS" "${MKTS_RAW[@]}")"
+PLUGINS="$(flag_join , "$PLUGINS" "${PLUGINS_RAW[@]}")"
+ACCOUNTS="$(flag_join , "$ACCOUNTS" "${ACCOUNTS_RAW[@]}")"
+SESSIONS="$(flag_join '; ' "$SESSIONS" "${SESSION_RAW[@]}")"
+# --browser / --no-browser and --gpu / --no-gpu: the last one given wins.
+BROWSER="$(flag_last "" "${BROWSER_RAW[@]}")"
+[[ -n "$BROWSER" ]] && BROWSER_EXPLICIT=1
+GPU="$(flag_last "" "${GPU_RAW[@]}")"
 
 # --browser / --no-browser can also be set via CLAUDE_BROWSER in .env / the host
 # env: a CLI flag wins; env is the fallback; unset leaves auto-detect to the
@@ -206,23 +202,10 @@ if [[ -n "$MKTS$PLUGINS" ]]; then
         || die "--marketplace / --plugin is not valid:
 $(sed 's/^/       /' <<<"$kit_errs")"
 fi
-ENV_ARGS=()
-for kv in "${EXTRA_ENV[@]:-}"; do
-    [[ -n "$kv" ]] || continue
-    [[ "$kv" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "--env must be KEY=VALUE (got '$kv')"
-    [[ "${kv%%=*}" != ANTHROPIC_API_KEY ]] || die "--env ANTHROPIC_API_KEY: this stack is OAuth-subscription only"
-    ENV_ARGS+=(-e "$kv")
-done
-
-# Validate --expose maps (HOSTPORT:CONTAINERPORT) and build the docker -p args.
-EXPOSE_ARGS=()
-for e in "${EXPOSE_RAW[@]:-}"; do
-    [[ -n "$e" ]] || continue
-    IFS=: read -r eh ec <<<"$e"
-    [[ "$eh" =~ ^[0-9]+$ && "$ec" =~ ^[0-9]+$ ]] \
-        || die "--expose must be HOSTPORT:CONTAINERPORT (got '$e')"
-    EXPOSE_ARGS+=(-p "$eh:$ec")
-done
+# --env and --expose values were validated as they were parsed.
+ENV_ARGS=() EXPOSE_ARGS=()
+for kv in "${ENV_RAW[@]}"; do ENV_ARGS+=(-e "$kv"); done
+for e in "${EXPOSE_RAW[@]}"; do EXPOSE_ARGS+=(-p "$e"); done
 
 need_docker
 [[ -z "${ANTHROPIC_API_KEY:-}" ]] || die "ANTHROPIC_API_KEY is set (env or .env).

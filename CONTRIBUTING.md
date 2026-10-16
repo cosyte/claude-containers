@@ -53,6 +53,9 @@ task runner. Do not add a dependency without a strong reason.
 
 - `bin/`: the operator CLIs (`claude-launch`, `claude-compose-gen`,
   `claude-autopilot`, `claude-disk-gc`, …), sharing `bin/_common.sh`.
+  A flag both `claude-launch` and `claude-compose-gen` take is one row of
+  `shared_flag_row` there (parsed and validated once, the same message in both tools);
+  `test/flags-unit.sh` holds them to it.
 - `entrypoint.sh`: the container boot path, in numbered sections. Most behaviour
   lives here.
 - `test/*.sh`: Docker-free unit suites, one per area. `npm test` is `test/run-all.sh`: it runs

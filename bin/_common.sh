@@ -454,3 +454,124 @@ print_connect() {
     echo -e "      ${C_B}${proj}${C_0}   (green dot = online)"
     echo
 }
+
+# --- Shared launcher flags ---------------------------------------------------
+# claude-launch (one container) and claude-compose-gen (one service per repo) take the same
+# flags, parsed and validated HERE, once: a fix lands in both. Each tool's own flags stay in
+# its own loop, which calls `take_shared_flag <mode> "$@"` first and, when it returns 0,
+# shifts FLAG_SHIFT arguments. <mode> is `single` (claude-launch: the value is the setting)
+# or `per-service` (claude-compose-gen: the value is REPO<sep>SETTING, one service's setting).
+# Every value is appended, validated, to the target array <TARGET>_RAW; the tool then folds
+# it (last one wins, or a joined list, or a per-service map). Messages are the same in both
+# tools: a per-service value is checked after its REPO<sep> is peeled off.
+#
+# The table: one row per flag, in the one `case` arm that names it.
+#   arg     value = takes a value; const:<v> = takes none, stores <v>; list = takes none in
+#           single mode (stores 1), the services it applies to in per-service mode
+#   sep     the REPO separator in per-service mode; - = the setting is stack-wide
+#   check   flag_check_<check> validates the setting (- = none); it dies with the message
+#   target  the array the value lands in (<target>_RAW); - = stored nowhere
+#   format  the setting's shape, for messages
+# shellcheck disable=SC2034  # read by the scripts that source this file
+MODEL_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() STARTCMD_RAW=() BROWSER_RAW=() GPU_RAW=() MKTS_RAW=()
+# shellcheck disable=SC2034
+PLUGINS_RAW=() ACCOUNTS_RAW=() SESSION_RAW=() ENV_RAW=() CACHE_RAW=()
+shared_flag_row() {   # shared_flag_row <flag>: "arg sep check target format", or status 1
+    case "$1" in
+        --model)       echo "value = nonempty MODEL MODEL" ;;
+        --expose)      echo "value : expose EXPOSE HOSTPORT:CONTAINERPORT" ;;
+        --dev-cmd)     echo "value = - DEVCMD COMMAND" ;;
+        --start-cmd)   echo "value = start_cmd STARTCMD COMMAND" ;;
+        --browser)     echo "list - - BROWSER -" ;;
+        --gpu)         echo "list - - GPU -" ;;
+        --marketplace) echo "value = marketplace MKTS NAME=URL[#REF]" ;;
+        --plugin)      echo "value = nonempty PLUGINS PLUGIN@MKT[,PLUGIN@MKT...]" ;;
+        --accounts)    echo "value = accounts ACCOUNTS NAME[,NAME...]" ;;
+        --session)     echo "value = session SESSION SPEC" ;;
+        --env)         echo "value = env ENV KEY=VALUE" ;;
+        --cache)       echo "value - - CACHE VOLUME" ;;
+        --no-cache)    echo "const:off - - CACHE -" ;;
+        # Removed flags refuse, naming the removal: never a silent no-op, and never a repo's
+        # request silently dropped on the next regen of a .conf that still carries them.
+        --docker|--no-docker|--sysbox) echo "const:- - removed_engine - -" ;;
+        --broker|--worker-tarball)     echo "const:- - removed_broker - -" ;;
+        -h|--help)     echo "const:- - help - -" ;;
+        *)             return 1 ;;
+    esac
+}
+
+# take_shared_flag <single|per-service> <args...>: parse the shared flag at $2, if it is one.
+# Status 0 and FLAG_SHIFT set when it was (the value stored); status 1 when it is not shared.
+# shellcheck disable=SC2034  # FLAG_SHIFT is read by the caller
+FLAG_SHIFT=0
+# shellcheck disable=SC2034
+take_shared_flag() {
+    local mode="$1" flag="$2" row arg sep check target format val setting
+    row="$(shared_flag_row "$flag")" || return 1
+    read -r arg sep check target format <<<"$row"
+    FLAG_SHIFT=1
+    if [[ "$arg" == value || ( "$arg" == list && "$mode" == per-service ) ]]; then
+        [[ $# -ge 3 ]] || die "$flag needs a value (try --help)"
+        val="$3"; FLAG_SHIFT=2
+    elif [[ "$arg" == list ]]; then
+        val=1
+    else
+        val="${arg#const:}"
+    fi
+    setting="$val"
+    if [[ "$mode" == per-service && "$sep" != - ]]; then
+        [[ "$val" == ?*"$sep"* ]] || die "$flag must be REPO$sep$format (got '$val')"
+        setting="${val#*"$sep"}"
+    fi
+    [[ "$check" == - ]] || "flag_check_$check" "$flag" "$setting"
+    if [[ "$target" != - ]]; then local -n _dst="${target}_RAW"; _dst+=("$val"); fi
+    return 0
+}
+
+# flag_last <default> <value>...: the last value given, or <default> when there is none.
+flag_last() { local v="$1"; shift; (( $# )) && v="${!#}"; printf '%s' "$v"; }
+# flag_join <sep> <seed> <value>...: the seed and the values joined by <sep>, empty ones dropped.
+flag_join() {
+    local sep="$1" out="$2" v; shift 2
+    for v in "$@"; do out="${out:+$out$sep}$v"; done
+    printf '%s' "$out"
+}
+
+# The validators: flag_check_<name> <flag> <setting>, dying with the message.
+flag_check_nonempty() { [[ -n "$2" ]] || die "$1 must be $(shared_flag_row "$1" | awk '{print $5}') (got '')"; }
+flag_check_expose() { [[ "$2" =~ ^[0-9]+:[0-9]+$ ]] || die "$1 must be HOSTPORT:CONTAINERPORT (got '$2')"; }
+flag_check_start_cmd() {
+    [[ -n "$2" ]] || die "$1 must be COMMAND (got '')"
+    [[ "$2" != *$'\n'* ]] || die "$1 holds a newline: give one command line (join steps with && or ;)"
+}
+flag_check_marketplace() {   # with the container's own parser, so a typo fails here, not at boot
+    local errs
+    errs="$(CLAUDE_EXTRA_MARKETPLACES="$2" CLAUDE_EXTRA_PLUGINS="" CLAUDE_EXTRA_START_CMD="" \
+        "$CLAUDE_DOCKER_ROOT/bin/claude-kit" check 2>&1 >/dev/null)" \
+        || die "$1 is not valid:
+$(sed 's/^/       /' <<<"$errs")"
+}
+flag_check_accounts() {
+    [[ "$2" =~ ^[^,[:space:]]+(,[^,[:space:]]+)*$ ]] || die "$1 must be NAME[,NAME...] (got '$2')"
+}
+flag_check_session() {   # one value; the whole declaration is checked again once it is joined
+    local errs
+    [[ -n "${2//[[:space:];]/}" ]] || die "$1 must be SPEC (got '$2')"
+    errs="$("$CLAUDE_DOCKER_ROOT/bin/claude-sessions" check "$2" 2>&1 >/dev/null)" \
+        || die "$1 is not valid:
+$(sed 's/^/       /' <<<"$errs")"
+}
+flag_check_env() {
+    [[ "$2" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "$1 must be KEY=VALUE (got '$2')"
+    [[ "${2%%=*}" != ANTHROPIC_API_KEY ]] || die "$1 ANTHROPIC_API_KEY: this stack is OAuth-subscription only"
+    [[ "$2" != *$'\n'* ]] || die "$1 ${2%%=*}: the value must be one line"
+}
+flag_check_removed_engine() {
+    die "$1 was removed along with the per-session Docker engine and the Sysbox runtime it
+       needed. Drop it from the command line or the scenario .conf; build and run containers
+       on the host or in CI. (History: docs/legacy-sysbox-broker.md.)"
+}
+flag_check_removed_broker() {
+    die "$1 was removed (the legacy Sysbox worker-broker substrate is retired; see docs/legacy-sysbox-broker.md)"
+}
+flag_check_help() { usage 0; }
