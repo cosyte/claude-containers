@@ -177,6 +177,12 @@ check "image ships the pinned Claude Code CLI ($PINNED_VER)" \
     '[[ "$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")" == "$PINNED_VER" ]]'
 check "the CLI in the image clears the Opus-4.8 floor ($OPUS48_FLOOR, else '--model opus' means 4.7)" \
     'v="$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")"; [[ "$(printf "%s\n%s\n" "$OPUS48_FLOOR" "$v" | sort -V | head -1)" == "$OPUS48_FLOOR" ]]'
+# Provenance labels (the end of the Dockerfile), set from the Makefile's BUILD_ARGS: the
+# commit a reader compares with main, and the CLI the label claims it ships.
+check "image is labelled with its source commit (40-hex org.opencontainers.image.revision)" \
+    '[[ "$(docker image inspect -f "{{ index .Config.Labels \"org.opencontainers.image.revision\" }}" "$IMAGE")" =~ ^[0-9a-f]{40}$ ]]'
+check "image is labelled with the pinned CLI version (claude.cli-version=$PINNED_VER)" \
+    '[[ "$(docker image inspect -f "{{ index .Config.Labels \"claude.cli-version\" }}" "$IMAGE")" == "$PINNED_VER" ]]'
 check "claude binary is at /usr/local/bin/claude" \
     'cexec "test -e /usr/local/bin/claude"'
 # The reason the CLI version is pinned at all: these two flags must combine.

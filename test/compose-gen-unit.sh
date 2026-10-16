@@ -85,6 +85,14 @@ if gen --scenario "$CONF"; then
         || bad "inline # was mangled"
     grep -q 'claude.ssh_port: "3900"' "$OUT" && ok "--port-base honored (alpha=3900)" \
         || bad "port-base not honored"
+    # Provenance build args: interpolations whoever builds sets, never a commit baked in.
+    for a in GIT_COMMIT GIT_DIRTY BUILD_DATE; do
+        n="$(grep -cF "$a: \"\${$a:-unknown}\"" "$OUT")"
+        [[ "$n" -eq 2 ]] && ok "build arg $a emitted as \${$a:-unknown} on every service" \
+            || bad "build arg $a should be \${$a:-unknown} on both services (got $n)"
+    done
+    ! grep -qE '\b[0-9a-f]{40}\b' "$OUT" && ok "no 40-hex commit in the generated YAML" \
+        || bad "a literal 40-hex commit leaked into the generated YAML"
 else
     bad "generation from a scenario failed"
 fi

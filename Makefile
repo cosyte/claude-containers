@@ -20,6 +20,22 @@ BUILDX_BUILDER      ?= claude-box
 # Off by default (the lean image is unchanged). `make build-browser` flips it.
 WITH_BROWSER        ?= 0
 
+# Provenance labels (the end of the Dockerfile): the commit, whether the tree had
+# changes git would show, and the build time in UTC. `unknown` outside a git checkout.
+# Expanded once (`:=` under ifndef), not per reference: `export` above would otherwise
+# rerun git for every recipe line, and BUILD_DATE could differ between two uses.
+ifndef GIT_COMMIT
+GIT_COMMIT := $(or $(shell git rev-parse HEAD 2>/dev/null),unknown)
+endif
+ifndef GIT_DIRTY
+GIT_DIRTY := $(shell git rev-parse --git-dir >/dev/null 2>&1 \
+               && { [[ -n "$$(git status --porcelain 2>/dev/null)" ]] && echo true || echo false; } \
+               || echo unknown)
+endif
+ifndef BUILD_DATE
+BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+endif
+
 BUILD_ARGS = \
   --build-arg NODE_VERSION=$(NODE_VERSION) \
   --build-arg CLAUDE_CODE_VERSION=$(CLAUDE_CODE_VERSION) \
@@ -28,7 +44,10 @@ BUILD_ARGS = \
   --build-arg CLAUDE_UID=$(CLAUDE_UID) \
   --build-arg CLAUDE_GID=$(CLAUDE_GID) \
   --build-arg CLAUDE_USER=$(CLAUDE_USER) \
-  --build-arg WITH_BROWSER=$(WITH_BROWSER)
+  --build-arg WITH_BROWSER=$(WITH_BROWSER) \
+  --build-arg GIT_COMMIT=$(GIT_COMMIT) \
+  --build-arg GIT_DIRTY=$(GIT_DIRTY) \
+  --build-arg BUILD_DATE=$(BUILD_DATE)
 
 .DEFAULT_GOAL := help
 .PHONY: help builder build build-all build-browser push login accounts-login accounts-list launch list attach stop rm logs clean lint smoke
