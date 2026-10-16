@@ -77,8 +77,8 @@ a git source may still need installing once (`claude plugin install
 Replace the shipped example marketplace with your own. Verify with `/plugin`.
 
 To add a marketplace and plugins to one container without rebuilding the image, declare
-them at creation time instead (`--marketplace`, `--plugin`, `--start-cmd`): see "Install a
-kit at session start" in the README. Those are also installed by the CLI at boot.
+them at creation time instead (`--marketplace`, `--plugin`, `--start-cmd`): see [Install a
+kit at session start](kits.md). Those are also installed by the CLI at boot.
 
 ## Slash commands
 

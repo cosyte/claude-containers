@@ -5,6 +5,7 @@
 #   - every CLAUDE_*/GIT_* variable entrypoint.sh or bin/* reads appears in .env.example, or in
 #     ALLOWED below with the reason it is not an operator setting;
 #   - every docs/*.md is linked from README.md;
+#   - every relative link in README.md and docs/*.md names a file;
 #   - every "ADR <number>" names a file under docs/adr/<number>* (none exist yet, so any citation
 #     fails until its record is added).
 # shellcheck source=test/lib/prelude.sh
@@ -96,6 +97,20 @@ while IFS= read -r n; do
 done < <(git ls-files -z -co --exclude-standard | xargs -0 grep -ohIE '\bADR [0-9]+\b' 2>/dev/null | awk '{print $2}' | sort -u)
 if (( ${#missing[@]} )); then bad "cited with no file under docs/adr/: ${missing[*]}"
 else ok "every 'ADR <number>' has its file"; fi
+
+# --- 5. Relative links resolve -----------------------------------------------------------------
+# Every `](target)` in README.md and docs/*.md that is not a URL names a file or directory,
+# relative to the file that links it (the anchor part is not checked).
+echo "relative links resolve"
+missing=()
+for f in README.md docs/*.md; do
+    while IFS= read -r t; do
+        [[ "$t" =~ ^[a-z]+: ]] && continue
+        [[ -e "$(dirname "$f")/$t" ]] || missing+=("$f -> $t")
+    done < <(grep -oE '\]\([^)#]+' "$f" | sed 's/^](//; s/ .*//')
+done
+if (( ${#missing[@]} )); then bad "links to no file: ${missing[*]}"
+else ok "every relative link in README.md and docs/*.md resolves"; fi
 
 echo
 echo "docs-unit: $PASS passed, $FAIL failed"

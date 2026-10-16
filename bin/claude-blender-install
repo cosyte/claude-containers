@@ -16,7 +16,7 @@
 #
 # Pin: the newest LTS whose Cycles renders on a Pascal card (compute capability 6.1)
 # via BOTH CUDA and OptiX. PIN_EVIDENCE below records how that was verified; re-verify
-# on any bump (README, "GPU sessions").
+# on any bump (docs/gpu-sessions.md).
 set -euo pipefail
 
 BLENDER_VERSION="5.2.2"

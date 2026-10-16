@@ -39,11 +39,10 @@ Compat: <old containers / .env behaviour>
 
 ## Interfaces
 
-- Session spec `NAME [key=value ...]` (`CLAUDE_SESSIONS`, `--session`): `README.md`,
-  Several sessions in one container.
-- Kit hook `CLAUDE_EXTRA_MARKETPLACES` / `_PLUGINS` / `_START_CMD`: `README.md`,
-  Install a kit at session start.
-- Environment variables: `README.md` table, full list in `.env.example`.
+- Session spec `NAME [key=value ...]` (`CLAUDE_SESSIONS`, `--session`): `docs/sessions.md`.
+- Kit hook `CLAUDE_EXTRA_MARKETPLACES` / `_PLUGINS` / `_START_CMD`: `docs/kits.md`.
+- Environment variables: `docs/environment-variables.md`, the most-used in `README.md`, every one in
+  `.env.example`.
 - Scenario `.conf` format (one generator flag per line): `scenarios/example.conf.example`.
 - Claude Code version pin: `Makefile` `CLAUDE_CODE_VERSION` and its other declarations, kept equal
   by `test/cli-version-unit.sh`.

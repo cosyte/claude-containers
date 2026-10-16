@@ -1,5 +1,30 @@
 # Troubleshooting
 
+## Summary
+
+- **App session missing / no green dot**: needs Claude Code ≥ 2.1.52 and
+  outbound HTTPS. `claude-logs <name>` should show the session started; check
+  egress isn't firewalled. The name in the app is the project name.
+- **`--dangerously-skip-permissions` vs Remote Control**: there were earlier
+  reports that skip-permissions didn't fully apply under Remote Control. On the
+  pinned **2.1.293** both flags are accepted together with no interlock, and the
+  launch (`claude --dangerously-skip-permissions --remote-control <name>`) combines
+  them, so it works. This is the reason the CLI version is pinned at all: re-verify
+  it on any bump. If a future version regresses, set
+  `CLAUDE_PERMISSION_MODE=acceptEdits` (edits auto-approved, shell still
+  prompts): see troubleshooting for the verification steps.
+- **SSH connection refused**: no `authorized_keys` was mounted, or wrong port.
+  `claude-list` shows the port; the connect line is reprinted by
+  `claude-launch <name>`. The git key never logs in: use a key of your own in
+  `SSH_AUTHORIZED_KEYS` (see [docs/security-notes.md](security-notes.md), SSH keys).
+- **Git push fails**: `GIT_SSH_KEY` not mounted or not authorized on the
+  remote. Public/https clones still work without it.
+- **Workspace trust prompt**: pre-accepted by the entrypoint; if you see it,
+  the config volume didn't mount. See troubleshooting.
+- **GPU session**: `claude-gpu status` inside says `ok` or `degraded (<reason>)`; a
+  service that will not start at all usually means the host's CDI spec is missing.
+  See troubleshooting, GPU sessions.
+
 `claude-logs <name>` shows the entrypoint/sshd log (startup, clone, MCP
 registration). For the live Claude session, SSH in and you attach to tmux.
 

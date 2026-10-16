@@ -124,7 +124,7 @@ replaces the `settings.json` entry of that name; for `enabledPlugins` an
 existing value wins (a plugin you switched off stays off). Same syntax as the
 single-container `claude-launch --marketplace` / `--plugin`, with a `REPO=`
 prefix to say which service. With `--start-cmd` this is the kit hook: see
-[Install a kit at session start](../README.md#install-a-kit-at-session-start).
+[Install a kit at session start](kits.md).
 
 ```
 ./bin/claude-compose-gen --org ORG --out FILE --active site \
