@@ -825,9 +825,11 @@ check "agent can USE the key (ssh-agent lists it via the relay)" \
 check "agent CANNOT read the private key (no readable key file)" \
     '! brk "test -e ~/.ssh/id_ed25519"'
 # Name the file on a failure, so the log says what holds it.
-brksh 'grep -rl -- "PRIVATE KEY" /home/claude 2>/dev/null' | sed 's/^/  holds "PRIVATE KEY": /' || true
-check "no file ANYWHERE under the agent's home holds private key material" \
-    '! brksh "grep -rq -- \"PRIVATE KEY\" /home/claude 2>/dev/null"'
+# The key's own body, not the "PRIVATE KEY" marker: a plugin marketplace clone under
+# ~/.claude/plugins is third-party content, and one ships a test file holding the marker.
+brksh "grep -rlF -- '$GKPRIV' /home/claude 2>/dev/null" | sed 's/^/  holds the git key: /' || true
+check "no file ANYWHERE under the agent's home holds the git key's private material" \
+    '! brksh "grep -rqF -- \"$GKPRIV\" /home/claude 2>/dev/null"'
 check "the mounted key itself is root-only (the agent cannot read it off the mount)" \
     '! brksh "cat /etc/claude/git-key >/dev/null 2>&1"'
 check "the key directory is root-owned, mode 700, and the agent cannot list it" \
@@ -1405,7 +1407,7 @@ else
              r=1; for _ in \$(seq 90); do docker compose -p smoke logs app > logs 2>/dev/null || true; if grep -q reached-db logs; then r=0; break; fi; sleep 1; done
              (( r == 0 )) || docker compose -p smoke logs
              docker compose -p smoke down -t 1 || echo compose-down-failed
-             echo compose-result=\$r; exit \$r" || { echo "  rc=$?"; tail -20 "$TMP/ctr.log"; false; }'
+             echo compose-result=\$r; (( r == 0 ))" || { echo "  rc=$?"; tail -20 "$TMP/ctr.log"; false; }'
     check "the session memory carries the containers note" \
         'docker exec "$CTRCN" grep -q "claude-containers: containers session note" /etc/claude-code/CLAUDE.md'
     docker rm -f "$CTRCN" >/dev/null 2>&1 || true
