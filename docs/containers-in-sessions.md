@@ -18,9 +18,11 @@ on PRs touching it or `test/containers-proto/`) runs on `ubuntu-24.04`:
    passt, uidmap, the docker CLI 26.1 and docker-compose 2.26 in a throwaway stage
    ([`test/containers-proto/Dockerfile`](../test/containers-proto/Dockerfile)).
 3. [`test/containers-proto/run.sh`](../test/containers-proto/run.sh) starts the image with
-   `docker run` and production's flags exactly as `claude-launch` builds them
+   `docker run` and production's hardening exactly as `claude-launch` builds it
    (`harden_run_args` from `bin/_common.sh`: `--cap-drop ALL`, the minimal cap set the entrypoint's
-   `gosu` needs, `no-new-privileges`), plus the options below, with podman's storage on a volume.
+   `gosu` needs, `no-new-privileges`) and its other run flags at their defaults (`--init`,
+   `--cpus 2`, `--memory 4g`, `--pids-limit 2048`, `--shm-size 2g`, a 1 GiB `/tmp` tmpfs), plus
+   the options below, with podman's storage on a volume.
    The entrypoint is replaced by `sleep` (a prototype needs no login); root-side setup a real
    entrypoint would do runs as `docker exec -u 0`, and every test runs as `docker exec -u claude`.
 4. Per mode, as `claude`: `podman build` of a Dockerfile whose `RUN` does

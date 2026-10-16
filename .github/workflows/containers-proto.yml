@@ -29,6 +29,7 @@ jobs:
       # owner's own host needs if it is Ubuntu 23.10 or later).
       - name: host allows unprivileged user namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # The next three steps repeat ci.yml's smoke build (minus cache-to): change both together.
       - id: args
         name: build args (the Makefile's BUILD_ARGS)
         run: |

@@ -33,9 +33,15 @@ SEC_FAIL=0
 mkdir -p "$OUT/logs"
 printf 'mode\tstep\tresult\tseconds\tnote\n' > "$OUT/results.tsv"
 
-# Production's hardening, exactly as claude-launch and compose-gen apply it today.
+# Production's hardening, exactly as claude-launch and compose-gen apply it today, and
+# claude-launch's other run flags that could bite a nested engine (init, limits, /tmp tmpfs).
 # shellcheck disable=SC1091
 HARDEN="$(source "$ROOT/bin/_common.sh"; harden_run_args)"
+# shellcheck disable=SC1091,SC2016
+read -r -a LAUNCH_ARGS <<<"$(source "$ROOT/bin/_common.sh"; echo --init --shm-size "$CLAUDE_SHM_SIZE" \
+    --cpus "$CLAUDE_CPU_LIMIT" --memory "$CLAUDE_MEM_LIMIT" \
+    --memory-reservation "$CLAUDE_MEM_RESERVATION" --pids-limit "$CLAUDE_PIDS_LIMIT")"
+LAUNCH_ARGS+=(--tmpfs "/tmp:rw,nosuid,nodev,exec,size=1g")
 MIN_CAPS="$(source "$ROOT/bin/_common.sh"; echo "$CLAUDE_MIN_CAPS")"
 # The vendored profile is containers/common's verbatim. Docker resolves a profile's
 # `includes.caps` once, against the container's own cap set, and a session has no
@@ -116,6 +122,7 @@ start() { # name nnp(1|0) proto-opts(1|0)
         args=("${a[@]}")
     fi
     [[ "$proto" == 1 ]] && args+=("${PROTO_OPTS[@]}")
+    args+=("${LAUNCH_ARGS[@]}")
     docker rm -f "$name" >/dev/null 2>&1
     docker volume rm "$name-store" >/dev/null 2>&1
     echo "+ docker run ${args[*]} $IMAGE  ($name)"
@@ -181,6 +188,9 @@ for mode in "${MODES[@]}"; do
         if docker exec -u "$U" -e PATH="$HELPER_BIN:/usr/bin:/bin" "$cn" bash -c \
                 'unshare -U sleep 10 & p=$!; sleep 1; newuidmap $p 0 0 1' > "$OUT/logs/helper-helper-root.log" 2>&1; then
             sec "$mode" helper-refuses 0 "the helper mapped uid 0"
+        elif ! grep -q "is not uid" "$OUT/logs/helper-helper-root.log"; then
+            # A refusal for any other reason (no daemon, no socket) proves nothing.
+            sec "$mode" helper-refuses 0 "failed without the helper's refusal: $(tail -1 "$OUT/logs/helper-helper-root.log" | tr '\t|' '  ')"
         else
             sec "$mode" helper-refuses 1 "$(tail -1 "$OUT/logs/helper-helper-root.log" | tr '\t|' '  ')"
         fi

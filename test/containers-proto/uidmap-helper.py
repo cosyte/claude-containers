@@ -50,6 +50,9 @@ def write_as(uid, path, text):
             os.close(r)
             if LIBC.prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) != 0:
                 raise OSError(ctypes.get_errno(), "prctl")
+            gid = pwd.getpwuid(uid).pw_gid
+            os.setgroups([])
+            os.setresgid(gid, gid, gid)
             os.setresuid(uid, uid, uid)
             caps = (1 << CAP_SETGID) | (1 << CAP_SETUID)
             hdr = (ctypes.c_uint32 * 2)(0x20080522, 0)
