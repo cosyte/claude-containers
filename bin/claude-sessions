@@ -73,6 +73,7 @@ REG="${CLAUDE_SESSIONS_REGISTRY:-$CONFIG_DIR/session-registry}"
 WORKSPACE="${CLAUDE_WORKSPACE:-/workspace}"
 SESSION_CMD="${CLAUDE_SESSION_CMD:-/usr/local/bin/claude-session}"
 WATCHDOG_BIN="${CLAUDE_RC_WATCHDOG_BIN:-/usr/local/bin/claude-rc-watchdog}"
+REAP_BIN="${CLAUDE_SCRATCH_REAP_BIN:-/usr/local/bin/claude-scratch-reap}"
 RUN_DIR="${CLAUDE_SESSIONS_RUN_DIR:-/tmp/claude-sessions}"
 TICK="${CLAUDE_SESSIONS_TICK:-15}"
 CGROUP_DIR="${CLAUDE_SESSIONS_CGROUP:-/sys/fs/cgroup}"
@@ -713,12 +714,25 @@ capacity_watch() {  # log, at most every 10 minutes, while pids or memory is nea
     say "WARNING: capacity: pids $pc/$pm (${pp}%), memory ${mc}/${mm} MiB (${mp}%). At the pid limit no process can start a thread and Claude sessions crash. Heaviest: $(heaviest 3)"
 }
 
+# Free the /scratch folders of gone sessions every CLAUDE_SCRATCH_REAP_MIN minutes (claude-scratch-reap;
+# CLAUDE_SCRATCH_REAP=report, the default, only logs what it would remove).
+LAST_REAP=0
+scratch_reap() {
+    local every="${CLAUDE_SCRATCH_REAP_MIN:-15}" now
+    [[ "$every" =~ ^[0-9]+$ ]] && (( every > 0 )) || every=15
+    now="$(date +%s)"; (( now - LAST_REAP >= every * 60 )) || return 0
+    LAST_REAP="$now"
+    timeout 300 nice "$REAP_BIN" 2>&1
+    return 0
+}
+
 cmd_supervise() {
     [[ "${1:-}" == --once ]] && { supervise_once; capacity_watch; return 0; }
     while :; do
         tmux has-session -t "$TMUX_SESSION" 2>/dev/null || { say "tmux session gone: supervisor exiting"; return 0; }
         supervise_once
         capacity_watch
+        scratch_reap
         sleep "$TICK"
     done
 }

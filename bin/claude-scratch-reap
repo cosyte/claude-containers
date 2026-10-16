@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# claude-scratch-reap: free the /scratch folders of Claude Code sessions that are gone.
+#
+# /scratch (TMPDIR) is per container but shared by all its sessions, and Claude Code gives each
+# session a folder there: /scratch/claude-<uid>/<project>/<session-id>/. The only other cleanup
+# is the wipe at boot, so a long-lived container collects hundreds of them until the volume (or
+# the RAM tmpfs of a GPU or browser service) is full and every temp write fails.
+#
+# A session folder is removed only when ALL of these hold:
+#   - the session is not live: no live Claude process names it in $CLAUDE_CONFIG_DIR/sessions/
+#     <pid>.json (an idle session's id is only there: Claude Code sets CLAUDE_CODE_SESSION_ID on
+#     the commands it runs, not on itself), and no process has it in /proc/*/environ (those
+#     commands and what they start) or /proc/*/cmdline (`claude --resume <id>`);
+#   - no process has its cwd or an open file under the folder (/proc/*/cwd, /proc/*/fd/*);
+#   - nothing in it was modified in the last 6 hours;
+#   - it is not the caller's own session (CLAUDE_CODE_SESSION_ID).
+# A process whose /proc entries this user cannot read (another user's) is not looked at: the
+# sessions run as this user. A folder reached through a symlink is never removed. Then, when /scratch is above CLAUDE_SCRATCH_WARN_PCT used, it logs
+# a warning naming the 5 largest top-level folders.
+#
+# Usage: claude-scratch-reap [--dry-run]   (--dry-run: report only, whatever the mode)
+# claude-sessions' supervise loop runs it every CLAUDE_SCRATCH_REAP_MIN minutes.
+#
+# Env:
+#   CLAUDE_SCRATCH_REAP       report (default): log what would be removed, remove nothing;
+#                             on: remove; off: do nothing at all
+#   CLAUDE_SCRATCH_WARN_PCT   warn above this percent used (default 85)
+# Test seams (unit tests only):
+#   CLAUDE_SCRATCH_ROOT       the scratch root (default /scratch)
+#   CLAUDE_SCRATCH_PROC       the proc root (default /proc)
+#   CLAUDE_CONFIG_DIR         where Claude Code keeps sessions/<pid>.json (default ~/.claude)
+#   CLAUDE_SCRATCH_USE_PCT_OVERRIDE  forces the measured percent used (loudly warned)
+set -uo pipefail
+
+ROOT="$(realpath -m -- "${CLAUDE_SCRATCH_ROOT:-/scratch}")"
+PROC="${CLAUDE_SCRATCH_PROC:-/proc}"
+SESSIONS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
+MODE="${CLAUDE_SCRATCH_REAP:-report}"
+WARN_PCT="${CLAUDE_SCRATCH_WARN_PCT:-85}"
+IDLE_MIN=360
+UUID_RE='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+
+say() { echo "[scratch-reap] $*"; }
+
+case "${1:-}" in
+    "") ;;
+    --dry-run) [[ "$MODE" == off ]] || MODE=report ;;
+    *) echo "usage: claude-scratch-reap [--dry-run]" >&2; exit 2 ;;
+esac
+case "$MODE" in
+    off) exit 0 ;;
+    on|report) ;;
+    *) say "WARNING: CLAUDE_SCRATCH_REAP='$MODE' is not on, report or off: reporting only"; MODE=report ;;
+esac
+[[ -d "$ROOT" ]] || exit 0
+
+# Every live session id: in a live Claude process's sessions/<pid>.json, or in a readable
+# environment or command line. A pid reused since only keeps a folder longer.
+live_ids() {
+    { jq -r '"\(.pid) \(.sessionId // "")"' "$SESSIONS"/*.json 2>/dev/null \
+        | while read -r pid sid; do [[ "$pid" =~ ^[0-9]+$ && -d "$PROC/$pid" ]] && echo "$sid"; done
+      cat "$PROC"/[0-9]*/environ "$PROC"/[0-9]*/cmdline 2>/dev/null | tr '\0' '\n'
+    } | grep -aoE "$UUID_RE" | sort -u
+}
+live="$(live_ids)"
+held="$(find "$PROC"/[0-9]*/cwd "$PROC"/[0-9]*/fd -maxdepth 1 -type l -printf '%l\n' 2>/dev/null | sort -u)"
+own="${CLAUDE_CODE_SESSION_ID:-}"
+
+holds() {  # holds <dir>: a process has its cwd or an open file at or under dir
+    awk -v d="$1" 'index($0, d) == 1 && (length($0) == length(d) || substr($0, length(d) + 1, 1) == "/") { f = 1; exit }
+        END { exit !f }' <<<"$held"
+}
+
+freed=0 n=0
+for d in "$ROOT"/claude-*/*/*/; do
+    d="${d%/}"; id="${d##*/}"
+    [[ -d "$d" && "$(realpath -e -- "$d" 2>/dev/null)" == "$d" ]] || continue   # no symlink on the way
+    [[ "$id" =~ ^$UUID_RE$ ]] || continue
+    [[ "$id" == "$own" ]] && continue
+    grep -qxF "$id" <<<"$live" && continue
+    holds "$d" && continue
+    [[ -n "$(find "$d" -mmin -"$IDLE_MIN" -print -quit 2>/dev/null)" ]] && continue
+    kib="$(du -sk "$d" 2>/dev/null | cut -f1)"
+    if [[ "$MODE" == on ]]; then
+        grep -qxF "$id" < <(live_ids) && continue   # resumed since the first look
+        rm -rf -- "$d" && { say "removed $d (${kib:-?} KiB)"; freed=$(( freed + ${kib:-0} )); n=$((n + 1)); }
+    else
+        say "would remove $d (${kib:-?} KiB)"; freed=$(( freed + ${kib:-0} )); n=$((n + 1))
+    fi
+done
+if (( n )); then
+    if [[ "$MODE" == on ]]; then say "freed $n gone session folder(s), $(( freed / 1024 )) MiB"
+    else say "report only: $n gone session folder(s), $(( freed / 1024 )) MiB (CLAUDE_SCRATCH_REAP=on removes them)"; fi
+fi
+
+# The warning near full.
+if [[ -n "${CLAUDE_SCRATCH_USE_PCT_OVERRIDE:-}" ]]; then
+    say "TEST SEAM ACTIVE: CLAUDE_SCRATCH_USE_PCT_OVERRIDE=$CLAUDE_SCRATCH_USE_PCT_OVERRIDE"
+    pct="$CLAUDE_SCRATCH_USE_PCT_OVERRIDE"
+else
+    pct="$(df -P "$ROOT" 2>/dev/null | awk 'NR == 2 { sub("%", "", $5); print $5 }')"
+fi
+if [[ "$pct" =~ ^[0-9]+$ && "$WARN_PCT" =~ ^[0-9]+$ ]] && (( pct > WARN_PCT )); then
+    top="$(du -sk "$ROOT"/* "$ROOT"/.[!.]* 2>/dev/null | sort -rn | head -n 5 \
+        | awk -F'\t' '{ printf "%s%s (%d MiB)", (NR > 1 ? ", " : ""), $2, $1 / 1024 }')"
+    say "WARNING: $ROOT is ${pct}% full (over ${WARN_PCT}%). Largest: ${top:-none}"
+fi
+exit 0
