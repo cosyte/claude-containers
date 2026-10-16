@@ -108,10 +108,17 @@ rm:    ## make rm ARGS="myproj --purge"
 logs:  ## make logs ARGS="myproj"
 	@./bin/claude-logs $(ARGS)
 
-lint: ## Shell-syntax check the scripts (any failure fails the target, not just the last file)
-	@fail=0; for f in entrypoint.sh bin/_common.sh bin/claude-* test/*.sh; do \
+LINT_SH := entrypoint.sh bin/_common.sh $(wildcard bin/claude-*) $(wildcard scripts/*.sh) $(wildcard test/*.sh) $(wildcard test/lib/*.sh) bash_profile
+
+lint: ## bash -n, then shellcheck -S warning over the scripts, then hadolint the Dockerfile (pinned in mise.toml)
+	@fail=0; for f in $(LINT_SH); do \
 	  if bash -n $$f; then echo "ok $$f"; else echo "SYNTAX ERROR $$f"; fail=1; fi; \
 	done; exit $$fail
+	@for t in shellcheck hadolint; do \
+	  $$t --version >/dev/null 2>&1 || { echo "lint: $$t is missing; run 'mise install' in this repo (mise.toml pins it)" >&2; exit 1; }; \
+	done
+	shellcheck -S warning $(LINT_SH)
+	hadolint Dockerfile
 
 smoke: build ## Build the image, then run the automated smoke test against it
 	IMAGE=$(CLAUDE_IMAGE) test/smoke.sh

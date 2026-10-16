@@ -467,6 +467,7 @@ EOF
             chmod 600 "$AGENT_SOCK" 2>/dev/null || true     # keep the real agent root-only
             export SSH_AUTH_SOCK="$CLAUDE_SOCK"
             printf 'export SSH_AUTH_SOCK=%s\n' "$CLAUDE_SOCK" > "$BROKER_PROFILE_D"
+            # shellcheck disable=SC2034  # outcome flag, read by test/unit.sh
             git_brokered=1
             log "Git SSH key broker  : key held in a root ssh-agent (claude signs via relay, cannot read it)"
             log "Deploy key readable : NO. The agent user cannot read this deploy key's private bytes: the mounted key is in a root-only directory (§4), no key file exists under $CLAUDE_HOME, and signing happens inside a root-owned ssh-agent."

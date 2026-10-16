@@ -350,7 +350,7 @@ LP="$TMPD/prefix"; mkdir -p "$LP/lib/node_modules/@anthropic-ai/claude-code/bin"
 out="$(CLAUDE_CODE_PREFIX="$LP" "$REPO_ROOT/bin/claude-launcher" --version 2>&1)"; rc=$?
 [[ $rc -eq 0 && "$out" == *"being updated; waiting"* && "$out" == *"launched --version"* ]] \
     && ok "a missing binary (an update in progress) is waited for, then run" || bad "launcher wait (rc=$rc): $out"
-rm -rf "$LP/bin"
+rm -rf "${LP:?}/bin"
 out="$(CLAUDE_CODE_PREFIX="$LP" CLAUDE_UPDATE_WAIT=2 "$REPO_ROOT/bin/claude-launcher" 2>&1)"; rc=$?
 check "the wait is bounded (CLAUDE_UPDATE_WAIT), then it fails as before" test "$rc" -ne 0
 
@@ -486,8 +486,8 @@ check "a window with no live session is exit 1 (never a sibling's id)" bash -c "
 # ======================================================================================
 echo "== RC watchdog: only its own pane, and only while its window exists =="
 WD="$REPO_ROOT/bin/claude-rc-watchdog"
-bash -c 'bash -c "exec -a claude-fake sleep 1800" & bash -c "sleep 300" & wait' & root=$!; KILL+=($root)
-sleep 300 & other=$!; KILL+=($other)
+bash -c 'bash -c "exec -a claude-fake sleep 1800" & bash -c "sleep 300" & wait' & root=$!; KILL+=("$root")
+sleep 300 & other=$!; KILL+=("$other")
 sleep 0.5
 echo "$root" > "$FAKE/tm/w/home/pid"
 kids="$(pgrep -P "$root" | tr '\n' ' ')"

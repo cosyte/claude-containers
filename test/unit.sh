@@ -571,7 +571,7 @@ EOF
 # Queue a task, run the real autopilot against <stub>, report where the task landed.
 task_lands_in() {  # task_lands_in <stubdir> <homedir>
     local stub="$1" home="$2"
-    rm -rf "$APD/$home"; mkdir -p "$APD/$home/.claude/autopilot-queue/pending"
+    rm -rf "${APD:?}/$home"; mkdir -p "$APD/$home/.claude/autopilot-queue/pending"
     printf 'do real work' > "$APD/$home/.claude/autopilot-queue/pending/001-task"
     ( : > "$APD/claude-invocations"
       timeout 6 env PATH="$APD/$stub:$PATH" HOME="$APD/$home" \
@@ -581,7 +581,7 @@ task_lands_in() {  # task_lands_in <stubdir> <homedir>
     if [[ -n "$(ls -A "$q/failed" 2>/dev/null)" && -z "$(ls -A "$q/done" 2>/dev/null)" ]]; then
         echo failed
     elif [[ -n "$(ls -A "$q/done" 2>/dev/null)" ]]; then
-        echo done
+        echo "done"
     else
         echo neither
     fi
@@ -842,10 +842,12 @@ run_gitkey() {
       export PATH="$GKD/bin:$PATH" CLAUDE_HOME="$sb/home" GITKEY_SRC="$sb/git-key" \
              CLAUDE_USER="$GK_USER" CLAUDE_UID="$GK_UID" CLAUDE_GID="$GK_GID" \
              GK_ADDLOG="$sb/ssh-add.log"
+      # shellcheck disable=SC2163  # "$@" is VAR=VAL pairs, exported as given
       if [[ $# -gt 0 ]]; then export "$@"; fi
       log() { echo "[entrypoint] $*"; }
       set -euo pipefail
       eval "$blk"
+      # shellcheck disable=SC2154  # set by the entrypoint block run with eval
       echo "git_brokered=$git_brokered" ) 2>&1
 }
 gk_readable_lines() { grep -c "Deploy key readable :" <<<"$1" || true; }
@@ -1555,7 +1557,7 @@ s7_run() {
     fi
     (
         export CLAUDE_CONFIG_DIR="$sb/config" AUTH_DIR="$sb/auth" WORKSPACE="/workspace"
-        export CLAUDE_UID="$(id -u)" CLAUDE_GID="$(id -g)"
+        CLAUDE_UID="$(id -u)"; CLAUDE_GID="$(id -g)"; export CLAUDE_UID CLAUDE_GID
         log() { : ; }  # section 7's own log line is asserted separately, via ms_run-style capture below
         set -euo pipefail
         eval "$S7_BLOCK"
@@ -1632,7 +1634,7 @@ fi
 MS_AGENT_UID=$(( $(id -u) + 1 ))
 MS_FILE="managed/managed-settings.json"
 
-ms_fresh() { rm -rf "$MSD/$1"; mkdir -p "$MSD/$1"; }
+ms_fresh() { rm -rf "${MSD:?}/$1"; mkdir -p "$MSD/$1"; }
 # ms_run <sandbox> [VAR=VAL ...]
 # Executes the shipped §7a block under the entrypoint's REAL shell options against the
 # named sandbox, and prints the boot log plus a final block_continued=1 line. That last
@@ -1646,7 +1648,8 @@ ms_run() {
       # which exports CLAUDE_PERMISSION_MODE, so inheriting it would make the built-in
       # default untestable and make these cases pass or fail by ambient posture.
       unset CLAUDE_PERMISSION_MODE CLAUDE_MANAGED_POLICY
-      export CLAUDE_UID="$MS_AGENT_UID" CLAUDE_GID="$(id -g)" CLAUDE_USER=claude
+      CLAUDE_GID="$(id -g)"; export CLAUDE_UID="$MS_AGENT_UID" CLAUDE_GID CLAUDE_USER=claude
+      # shellcheck disable=SC2163  # "$@" is VAR=VAL pairs, exported as given
       if [[ $# -gt 0 ]]; then export "$@"; fi
       log() { echo "[entrypoint] $*"; }
       set -euo pipefail

@@ -31,7 +31,7 @@ if [[ -n "${CLAUDE_ENV_FILE:-}" ]]; then
         exit 1
     }
     set -a
-    # shellcheck disable=SC1091
+    # shellcheck disable=SC1090,SC1091  # the env file is chosen at run time
     source "$CLAUDE_ENV_FILE"
     set +a
 fi
@@ -258,6 +258,7 @@ scratch_volume() { echo "claude-scratch-$1"; }
 # here, under /state/<app>. claude-launch and claude-compose-gen mount it, and
 # claude-compose-gen refuses to --mount one into a second service.
 state_volume() { echo "claude-state-$1"; }
+# shellcheck disable=SC2034  # read by the scripts that source this file
 STATE_MOUNT="/state"
 
 # --- Shared tool cache -----------------------------------------------

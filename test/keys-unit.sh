@@ -179,7 +179,7 @@ mkdir -p "$TMPD/ws"
 launch() {  # launch <git key> <authorized_keys>
     rm -f "$TMPD/run-args" "$TMPD/created"
     GIT_SSH_KEY="$1" SSH_AUTHORIZED_KEYS="$2" STUB_STATE="$TMPD" PATH="$STUBD:$PATH" \
-        CLAUDE_PORTS_USED_OVERRIDE="" CLAUDE_GPU= \
+        CLAUDE_PORTS_USED_OVERRIDE="" CLAUDE_GPU="" \
         "$LAUNCH" keytest --workspace "$TMPD/ws" --port 2298 2>&1
 }
 out="$(launch "$K/git" "$TMPD/ak-both")"; rc=$?
@@ -229,8 +229,10 @@ run4() {
     [[ "$ak" == - ]] || printf '%s\n' "$ak" > "$sb/etc-claude/authorized_keys"
     local blk; blk="$(b4 "$sb")"
     ( unset CLAUDE_BROKER_GIT_KEY AGENT_READS
-      export PATH="$TMPD/bin:$PATH" CLAUDE_USER="$(id -un)" CLAUDE_UID="$(id -u)" CLAUDE_GID="$(id -g)" \
+      CLAUDE_USER="$(id -un)"; CLAUDE_UID="$(id -u)"; CLAUDE_GID="$(id -g)"
+      export PATH="$TMPD/bin:$PATH" CLAUDE_USER CLAUDE_UID CLAUDE_GID \
              CLAUDE_HOME="$sb/home" GITKEY_SRC="$sb/etc-claude/git-key" AUTHKEYS_SRC="$sb/etc-claude/authorized_keys"
+      # shellcheck disable=SC2163  # "$@" is VAR=VAL pairs, exported as given
       if [[ $# -gt 0 ]]; then export "$@"; fi
       log() { echo "[entrypoint] $*"; }
       eval "$REAL_DIE"
