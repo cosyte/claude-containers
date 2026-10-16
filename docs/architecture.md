@@ -1,5 +1,51 @@
 # Architecture & design decisions
 
+## Overview
+
+```
+ host                                   container: claude-<project>
+ ┌────────────────────────┐             ┌──────────────────────────────────┐
+ │ ./bin/claude-launch ───┼── docker ──▶│ entrypoint.sh (root)             │
+ │                        │   run -d    │   ├─ refuse ANTHROPIC_API_KEY     │
+ │ ssh -p 22NN ───────────┼────────────▶│   ├─ sshd  (port 22 ⇄ host 22NN) │
+ │                        │             │   ├─ merge baked-in config       │
+ │                        │             │   ├─ clone / use /workspace      │
+ │                        │             │   └─ gosu claude ▶ tmux "claude" │
+ │                        │             │            ├─ main: claude \     │
+ │                        │             │            │   --dangerously-    │
+ │                        │             │            │   skip-permissions  │
+ │                        │             │            │   --remote-control  │
+ │                        │             │            │   "<project>"       │
+ │                        │             │            └─ <name>: claude …   │
+ │                        │             │                --remote-control  │
+ │                        │             │                "<project>-<name>"│
+ └────────────────────────┘             └───────┬──────────────────────────┘
+                                                 │ outbound HTTPS only
+ Claude mobile app  ◀───── Remote Control ───────┘  (no inbound port)
+
+ volumes:
+   claude-auth          (shared)  OAuth credentials   → /auth
+   claude-sshkeys       (shared)  SSH host keys        → /etc/ssh/host-keys
+   claude-config-<proj> (per ctr) sessions + config    → /home/claude/.claude
+   claude-ws-<proj>     (per ctr) the git repo         → /workspace
+   claude-scratch-<proj>(per ctr) disk-backed TMPDIR   → /scratch
+   claude-state-<proj>  (per ctr) app dbs and keys     → /state  (CLAUDE_STATE_DIR)
+   claude-cache         (shared)  tool caches only     → /cache
+```
+
+`/cache` is shared by every container on the host, all as one user, so anything in it is
+readable from every container. An app's private state (a database, a key, a token) goes
+in `/state/<app>`, the container's own volume, which no other container mounts, and so do
+worktrees, clones and working folders that must last (`/state/wt`, `/state/tmp`):
+[docs/volume-reference.md](volume-reference.md#private-state).
+
+Why credentials and config are split: a single shared `~/.claude` across
+containers would corrupt concurrent sessions and collide on the `/workspace`
+project key. Credentials are shared (one login, all containers); per-container
+config keeps sessions independent and resumable. The entrypoint keeps the
+credentials file converged across containers. Details and the deviation
+rationale: the sections below.
+
 ## Component map
 
 - **Dockerfile**: `node:24-trixie-slim`, system packages, `gh`, `uv`,

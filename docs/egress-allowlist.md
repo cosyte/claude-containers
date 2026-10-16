@@ -137,6 +137,6 @@ ruleset.
 A pinned address is a snapshot. `CLAUDE_EGRESS_REFRESH_INTERVAL=<seconds>` makes the
 firewall re-resolve this list on an interval and commit the refreshed ruleset, as
 root, for as long as the container lives; unset (the default) it is resolved exactly
-once, at boot. See the `CLAUDE_EGRESS_REFRESH_INTERVAL` row in the README's
-environment table. The refresh never narrows the allowlist on a failed lookup: a host
+once, at boot. See the `CLAUDE_EGRESS_REFRESH_INTERVAL` row in
+[environment-variables.md](environment-variables.md). The refresh never narrows the allowlist on a failed lookup: a host
 that comes back empty retains the ruleset in force and is logged by name.
