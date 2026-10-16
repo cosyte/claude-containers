@@ -85,7 +85,7 @@ if [[ -n "$SESSION" ]]; then
     [[ -n "$S_MODE" ]] && PERM_MODE="$S_MODE"
     RC_DEBUG_LOG="$S_DEBUG_LOG"
 else
-    cd /workspace || cd "$HOME" || exit 1
+    cd /workspace || cd "$HOME" || true
     if envs="$("$SESSIONS_BIN" env main 2>/dev/null)"; then
         eval "$envs"
         S_RC=on; RC_DEBUG_LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"

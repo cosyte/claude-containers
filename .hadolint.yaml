@@ -6,7 +6,7 @@ ignored:
   # Every pipe ends in the command whose status counts (sha256sum -c, grep -q, cut, sort | head);
   # pipefail would fail `--help | grep -q` on the SIGPIPE grep -q causes by exiting early.
   - DL4006
-  # CLAUDE_UID is 1000 by default; an operator's own UID is never large enough to bloat lastlog.
+  # CLAUDE_UID is 1000 by default, small enough that useradd without -l does not bloat lastlog.
   - DL3046
   # `mkdir -p -m 755 /etc/apt/keyrings`: /etc/apt always exists, so -m applies to the one new dir.
   - SC2174

@@ -40,7 +40,7 @@
 #   CLAUDE_EXTRA_ARGS             extra args appended to `claude`
 set -uo pipefail
 
-cd /workspace 2>/dev/null || cd "$HOME" || exit 1
+cd /workspace 2>/dev/null || cd "$HOME" || true
 
 PROMPT="${CLAUDE_AUTOPILOT_CMD:-}"
 INTERVAL="${CLAUDE_AUTOPILOT_INTERVAL:-3600}"
