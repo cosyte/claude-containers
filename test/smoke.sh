@@ -157,7 +157,7 @@ check "entrypoint reached tmux launch" \
     'grep -q "started in tmux" <<<"$(docker logs "$CN" 2>&1)"'
 # The loader announces each section of entrypoint.d/ as it sources it: all of them, once, in the
 # order the sections ran in when they were one file.
-EP_ORDER="0 0b 1 1b 2 2a 2b 2c 3 4 5 6 6a 7 7a 7b 7c 8a 8b 8c 8d 8e 9 9b 10 10b 11 12 12a 12b 12c 12d 12e 12f 12g 13"
+EP_ORDER="0 0b 1 1b 2 2a 2b 2c 2d 3 4 5 6 6a 7 7a 7b 7c 8a 8b 8c 8d 8e 9 9b 10 10b 11 12 12a 12b 12c 12d 12e 12f 12g 13"
 check "the boot log announces the sections in their order ($EP_ORDER)" \
     '[[ "$(docker logs "$CN" 2>&1 | sed -n "s/^\[entrypoint\] §\([0-9][0-9a-z]*\) .*/\1/p" | tr "\n" " ")" == "$EP_ORDER " ]]'
 check "the session launch ran from its own file (§12b session-launch, then its tmux line)" \
@@ -1402,7 +1402,7 @@ else
     check "docker compose up: postgres and a client that reaches it by service name" \
         'ctr 600 "mkdir -p c && printf \"services:\n  db:\n    image: postgres:17\n    environment: { POSTGRES_PASSWORD: smoke }\n  app:\n    image: postgres:17\n    command: [sh, -c, \\\"until pg_isready -h db -U postgres; do sleep 1; done; echo reached-db; sleep infinity\\\"]\n    depends_on: [db]\n\" > c/compose.yaml && cd c
              docker compose -p smoke up -d
-             for _ in \$(seq 90); do docker compose -p smoke logs app > logs 2>/dev/null || true; grep -q reached-db logs && { docker compose -p smoke down -t 1; exit 0; }; sleep 1; done
+             for _ in \$(seq 90); do docker compose -p smoke logs app > logs 2>/dev/null || true; grep -q reached-db logs && { docker compose -p smoke down -t 1 || echo "compose down failed ($?)"; exit 0; }; sleep 1; done
              docker compose -p smoke logs; exit 1" || { tail -5 "$TMP/ctr.log"; false; }'
     check "the session memory carries the containers note" \
         'docker exec "$CTRCN" grep -q "claude-containers: containers session note" /etc/claude-code/CLAUDE.md'
