@@ -41,7 +41,9 @@ mkdir -p "$TMPD/bare"
 mkbare home; mkbare 3d; mkbare keys dev
 
 # --- entrypoint section 9, extracted and run -------------------------------------------
-BLOCK="$(awk '/^# --- 9\. Workspace/{f=1} f&&/^# --- 10\./{exit} f{print}' "$REPO_ROOT/entrypoint.sh")"
+# shellcheck source=test/lib/entrypoint.sh
+source "$REPO_ROOT/test/lib/entrypoint.sh"
+BLOCK="$(awk '/^# --- 9\. Workspace/{f=1} f{print}' "$(ep_section 9)")"
 run9() {  # run9 <workspace> <env...>: section 9 as the entrypoint runs it, sandboxed
     local ws="$1"; shift
     # shellcheck disable=SC2163  # "$@" is VAR=VAL pairs, exported as given

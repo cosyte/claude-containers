@@ -60,7 +60,7 @@ rationale: the sections below.
   that changes nothing reads every inode (minutes on a spinning disk). Until the
   pass reaches it, a deeper file with a foreign owner (a bind mount from another
   uid) is read-only to the agent; the boot log says when the pass is done.
-  It is a loader: the numbered sections are moving into `entrypoint.d/` (installed
+  It is a loader: the numbered sections live in `entrypoint.d/` (installed
   at `/usr/local/lib/claude/entrypoint.d/`), one file each, which it sources in
   order into its own shell (so a section's variables, functions and background jobs
   reach every later one) and announces in the boot log as `§<n> <name>`:
@@ -82,8 +82,27 @@ rationale: the sections below.
   | `06a-account-switch.sh` | §6a: the account-switch listener |
   | `07-claude-json.sh` | §7: seed `.claude.json` |
   | `07a-managed-policy.sh` | §7a: managed settings |
-
-  §7b to §13 are still inline in `entrypoint.sh`, below the loop.
+  | `07b-browser.sh` | §7b: the browser decision (`CLAUDE_BROWSER`) |
+  | `07c-session-memory.sh` | §7c: the managed CLAUDE.md: container facts, the GPU note |
+  | `08a-global-claude-md.sh` | §8a: the image's global CLAUDE.md |
+  | `08b-settings.sh` | §8b: merge `settings.json`, its self-heals |
+  | `08c-plugins.sh` | §8c: baked plugins and the runtime kit's |
+  | `08d-commands.sh` | §8d: baked slash commands |
+  | `08e-skills.sh` | §8e: baked skills, each where it can work |
+  | `09-workspace.sh` | §9: the workspace: a mount, `GIT_REPO_URL` or `GIT_REPOS` |
+  | `09b-mise-shims.sh` | §9b: this container's mise shims |
+  | `10-mcp.sh` | §10: baked MCP servers |
+  | `10b-chrome-devtools.sh` | §10b: the chrome-devtools MCP |
+  | `11-sshd.sh` | §11: start sshd |
+  | `12-session-env.sh` | §12: the session's environment: model, mode, OpenTelemetry, thread pools |
+  | `12a-egress.sh` | §12a: egress lockdown and its refresh |
+  | `12b-session-launch.sh` | §12b: the kit's plugins, the tmux session, dev and SCM windows |
+  | `12c-rc-watchdog.sh` | §12c: the Remote Control watchdog |
+  | `12d-usage-watchdog.sh` | §12d: the usage-limit watchdog |
+  | `12e-named-sessions.sh` | §12e: named sessions and their supervisor |
+  | `12f-gh-check.sh` | §12f: the `GH_TOKEN` permission check |
+  | `12g-workspace-owner.sh` | §12g: workspace ownership, the deep pass |
+  | `13-stay-alive.sh` | §13: the boot summary, the liveness loop, shutdown |
 - **claude-session**: the tmux pane command: `cd /workspace`, exec
   `claude --dangerously-skip-permissions --remote-control "<project>"`, and
   fall back to a shell if Claude exits so SSH stays usable. With `--session NAME`

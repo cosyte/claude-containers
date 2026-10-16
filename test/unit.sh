@@ -74,7 +74,7 @@ echo "== entrypoint.sh §8b: the self-heal drops the stale claude-md-fragments S
 #
 # The jq program is EXTRACTED FROM entrypoint.sh rather than mirrored here, so this test
 # exercises the real filter and cannot silently drift away from it.
-ENTRYPOINT="$REPO_ROOT/entrypoint.sh"
+ENTRYPOINT="$(ep_section 8b)"
 # Extract the command string from entrypoint.sh too, NOT hardcoded here. If someone
 # typos STALE_HOOK_CMD, the self-heal silently becomes a production no-op that resurrects
 # the ENOENT defect; a test carrying its own copy of the string would still pass and the
@@ -324,7 +324,7 @@ echo "== entrypoint REFUSES CLAUDE_CONTROLLER=1 (never silently boots interactiv
 CTRL_GUARD="$(awk '/^case "\$\{CLAUDE_CONTROLLER/,/^esac/' "$(ep_section 0b)")"
 # Handles die() written as a one-liner (as it is today) or reformatted across lines: start at
 # its definition, stop at the first line closing a brace.
-REAL_DIE="$(awk '/^die\(\)/{f=1} f{print; if (/\}[[:space:]]*$/) exit}' "$ENTRYPOINT")"
+REAL_DIE="$(awk '/^die\(\)/{f=1} f{print; if (/\}[[:space:]]*$/) exit}' "$EP_LOADER")"
 ctrl_run() { ( eval "$REAL_DIE"; set -euo pipefail; eval "$CTRL_GUARD" ) 2>&1; }
 ctrl_rc()  { ( eval "$REAL_DIE"; set -euo pipefail; eval "$CTRL_GUARD" ) >/dev/null 2>&1; echo $?; }
 
@@ -712,7 +712,7 @@ echo "== credential reconcile guard: creds_have_token refuses a tokenless (logge
 # "Login expired" blackout. The guard (creds_have_token) is EXTRACTED from
 # entrypoint.sh here, not mirrored, so this test cannot silently drift from the
 # shipped predicate.
-ENTRYPOINT="$REPO_ROOT/entrypoint.sh"
+ENTRYPOINT="$EP_BOOT"   # the whole boot path, in run order
 CREDS_FN="$(awk '/^creds_have_token\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$(ep_section 6)")"
 if [[ -n "$CREDS_FN" ]] && eval "$CREDS_FN" 2>/dev/null; then
     CD="$(mktemp -d)"
@@ -1079,7 +1079,7 @@ echo "== entrypoint.sh §12a: the boot log states the posture of EACH address fa
 # Only its firewall path constant is redirected at a stub, and that redirect is
 # asserted below so this cannot degrade into a test that shells out to the real
 # /usr/local/bin/claude-egress-firewall (which is not even present on a CI host).
-EG_BLOCK="$(awk '/^# --- 12a\. Egress lockdown/{f=1} f{print} f&&/^fi$/{exit}' "$ENTRYPOINT")"
+EG_BLOCK="$(awk '/^# --- 12a\. Egress lockdown/{f=1} f{print} f&&/^fi$/{exit}' "$(ep_section 12a)")"
 EGD="$(mktemp -d)"; trap 'rm -rf "$STUB" "$APD" "$GKD" "$EGD"' EXIT
 
 eg_block() { printf '%s\n' "$EG_BLOCK" \
@@ -1969,7 +1969,7 @@ echo "== entrypoint.sh: managed policy is ADDITIVE, and lands before the agent s
 # structural tripwires on that promise: if a later change "simplifies" §8b by deleting
 # what §7a now also delivers, a container whose managed file is missing or unparseable
 # stops behaving as it does today, and these go red.
-MS_8B="$(awk '/^# 8b\. settings.json/{f=1} f && /^# 8c\./{exit} f{print}' "$ENTRYPOINT")"
+MS_8B="$(awk '/^# --- 8b\. settings.json/{f=1} f{print}' "$(ep_section 8b)")"
 [[ -n "$MS_8B" ]] && ok "§8b extracted from entrypoint.sh for the additive checks" \
                   || bad "could not extract §8b: the additive checks below would be vacuous"
 ms_8b_missing=()
@@ -1987,7 +1987,7 @@ grep -qF 'chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"' "$
     || bad "settings.json is no longer chowned to the agent user"
 grep -qF 'Merged baked-in plugin marketplaces/plugins into settings.json' "$ENTRYPOINT" \
     && grep -qF 'Merged runtime plugin marketplaces/plugins into settings.json' "$ENTRYPOINT" \
-    && ok  "§8c and §8c-bis still merge the baked and runtime plugin sets" \
+    && ok  "§8c still merges the baked and runtime plugin sets" \
     || bad "a plugin merge was lost: managed policy is additive and must not have touched them"
 
 # The two blocks must not drift apart on what the built-in default IS. Both defaults are

@@ -4,7 +4,10 @@
 # entrypoint.sh is a loader: its numbered sections live in entrypoint.d/, one file each,
 # sourced in order. These pin that:
 #   - each file is one section: named NN[x]-name.sh, its first header is that section's own
-#     "# --- <n>." line, and no section is also still in entrypoint.sh
+#     "# --- <n>." line, no section is also still in entrypoint.sh, and docs/architecture.md
+#     lists each
+#   - each file ends in a command whose status is its own (it is source's status)
+#   - entrypoint.sh is the loader alone: under 80 lines, nothing after the loop
 #   - the loader, run for real against a sandbox, sources them in number order whatever the
 #     locale (00- before 00b-), announces each as "§<n> <name>", and refuses an empty directory
 #   - the image installs entrypoint.d/ where the loader reads it
@@ -37,7 +40,20 @@ for f in "$EP_D"/*; do
     grep -q "^# --- $n\\. " "$EP_LOADER" \
         && bad "§$n is in $b AND still in entrypoint.sh" \
         || ok "§$n is no longer in entrypoint.sh"
+    grep -qF "| \`$b\` | §$n: " "$REPO_ROOT/docs/architecture.md" \
+        && ok "docs/architecture.md lists $b" || bad "docs/architecture.md does not list $b as §$n"
 done
+# A file is sourced, so its last command's status is source's: under `set -e` a file that
+# ends in `[[ ... ]] && x` (or a loop whose body does) would stop the boot when x is skipped.
+for f in "$EP_D"/*.sh; do
+    last="$(grep -v '^[[:space:]]*$' "$f" | tail -1)"
+    [[ "$last" == "done" || ( "$last" == *'&&'* && "$last" != *'||'* ) ]] \
+        && bad "${f##*/} ends in '$last': its status could be a skipped test's, and stop the boot" \
+        || ok "${f##*/} ends in a command whose status is its own"
+done
+(( $(wc -l < "$EP_LOADER") < 80 )) && [[ "$(tail -1 "$EP_LOADER")" == "unset _sections _section _name _n" ]] \
+    && ok "entrypoint.sh is the loader alone ($(wc -l < "$EP_LOADER") lines, nothing after the loop)" \
+    || bad "entrypoint.sh must be the loader alone: under 80 lines, ending at the loop"
 (( n_files > 0 )) && ok "entrypoint.d/ holds $n_files sections" || bad "entrypoint.d/ is empty"
 
 echo "== the loader, run in a sandbox =="

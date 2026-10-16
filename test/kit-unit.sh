@@ -31,7 +31,7 @@ bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d"; fi; }
 
 KIT="$REPO_ROOT/bin/claude-kit"
-EP="$REPO_ROOT/entrypoint.sh"
+EP="$TMPD/boot.sh"; ep_boot > "$EP"   # the whole boot path, in run order
 GEN="$REPO_ROOT/bin/claude-compose-gen"
 LAUNCH="$REPO_ROOT/bin/claude-launch"
 unset CLAUDE_EXTRA_MARKETPLACES CLAUDE_EXTRA_PLUGINS CLAUDE_EXTRA_START_CMD

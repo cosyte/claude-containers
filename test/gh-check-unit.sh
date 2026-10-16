@@ -7,13 +7,15 @@
 #     the repos it finds (ssh and https remotes, a non-GitHub one skipped, duplicates once)
 #   - by source: it never names a merge endpoint, never sends a body, never puts the token
 #     in argv, never calls gh
-#   - entrypoint.sh §12e: writes the result world-readable, warns per missing permission,
+#   - entrypoint.sh §12f: writes the result world-readable, warns per missing permission,
 #     removes a stale result without GH_TOKEN
 # shellcheck source=test/lib/prelude.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=test/lib/entrypoint.sh
+source "$REPO_ROOT/test/lib/entrypoint.sh"
 ENTRY="$REPO_ROOT/entrypoint.sh"
 CHECK="$REPO_ROOT/bin/claude-gh-check"
 TMPD="$(mktemp -d)"
@@ -133,28 +135,28 @@ if command -v rg >/dev/null 2>&1; then GREP=(rg -n); else GREP=(grep -nE); fi
     && bad "calls gh" || ok "never calls gh (curl only)"
 
 # ======================================================================================
-echo "== entrypoint.sh §12e =="
-B12E="$(awk '/^# --- 12e\. GitHub token check/{f=1; print; next} /^echo$|^# --- /{if(f)exit} f' "$ENTRY")"
-grep -qE '^GH_CHECK_FILE=' <<<"$B12E" && grep -qE '^GH_CHECK_CMD=' <<<"$B12E" \
-    && ok "§12e names GH_CHECK_FILE and GH_CHECK_CMD on their own lines" \
-    || bad "§12e must assign GH_CHECK_FILE and GH_CHECK_CMD on their own lines"
+echo "== entrypoint.sh §12f =="
+B12F="$(awk '/^# --- 12f\. GitHub token check/{f=1; print; next} f' "$(ep_section 12f)")"
+grep -qE '^GH_CHECK_FILE=' <<<"$B12F" && grep -qE '^GH_CHECK_CMD=' <<<"$B12F" \
+    && ok "§12f names GH_CHECK_FILE and GH_CHECK_CMD on their own lines" \
+    || bad "§12f must assign GH_CHECK_FILE and GH_CHECK_CMD on their own lines"
 GHF="$TMPD/run/claude/gh-check.txt"
-run_12e() {  # run_12e <GH_TOKEN> <fake check output>
+run_12f() {  # run_12f <GH_TOKEN> <fake check output>
     printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$2" > "$TMPD/fake-check"; chmod +x "$TMPD/fake-check"
     local blk; blk="$(sed -e "s#^GH_CHECK_FILE=.*#GH_CHECK_FILE=\"$GHF\"#" \
-        -e "s#^GH_CHECK_CMD=.*#GH_CHECK_CMD=\"$TMPD/fake-check\"#" <<<"$B12E")"
+        -e "s#^GH_CHECK_CMD=.*#GH_CHECK_CMD=\"$TMPD/fake-check\"#" <<<"$B12F")"
     ( log() { echo "[entrypoint] $*"; }; asclaude() { "$@"; }; set -euo pipefail
       GH_TOKEN="$1"; eval "$blk"; wait )
 }
-out="$(run_12e tok 'github me/alpha: read ok, contents-write ok, pr ok, checks ok')"; rc=$?
+out="$(run_12f tok 'github me/alpha: read ok, contents-write ok, pr ok, checks ok')"; rc=$?
 (( rc == 0 )) && grep -qxF 'github me/alpha: read ok, contents-write ok, pr ok, checks ok' "$GHF" \
     && [[ "$(stat -c %a "$GHF")" == 644 ]] && ! grep -q WARNING <<<"$out" \
-    && ok "all held: result written 644, no warning" || bad "§12e held (rc=$rc): $out"
-out="$(run_12e tok 'github me/alpha: read ok, contents-write NO, pr NO, checks ok')"
+    && ok "all held: result written 644, no warning" || bad "§12f held (rc=$rc): $out"
+out="$(run_12f tok 'github me/alpha: read ok, contents-write NO, pr NO, checks ok')"
 [[ "$(grep -c 'WARNING: GH_TOKEN is missing a permission: github me/alpha' <<<"$out")" == 1 ]] \
-    && ok "a missing permission: one WARNING line for the repo" || bad "§12e warn: $out"
-out="$(run_12e "" 'unused')"; rc=$?
-(( rc == 0 )) && [[ ! -e "$GHF" ]] && ok "no GH_TOKEN: stale result removed, nothing runs" || bad "§12e no token: $out"
+    && ok "a missing permission: one WARNING line for the repo" || bad "§12f warn: $out"
+out="$(run_12f "" 'unused')"; rc=$?
+(( rc == 0 )) && [[ ! -e "$GHF" ]] && ok "no GH_TOKEN: stale result removed, nothing runs" || bad "§12f no token: $out"
 
 # ======================================================================================
 echo "== image wiring =="

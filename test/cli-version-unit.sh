@@ -148,7 +148,7 @@ echo "== the launch flags the pin exists to protect are still passed =="
 
 # CLI 2.1.197 made Sonnet 5 Claude Code's OWN default. We are only insulated from that
 # because the entrypoint always exports a model and both launchers pass --model.
-grep -q 'export CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"' "$REPO_ROOT/entrypoint.sh" \
+grep -q 'export CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"' "$REPO_ROOT/entrypoint.d/12-session-env.sh" \
     && ok  "entrypoint defaults CLAUDE_MODEL=opus (without this, CLI >=2.1.197 would silently run Sonnet 5)" \
     || bad "entrypoint no longer defaults CLAUDE_MODEL=opus: CLI >=2.1.197 defaults to Sonnet 5, so the fleet would silently switch models"
 

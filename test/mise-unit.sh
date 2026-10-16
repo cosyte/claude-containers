@@ -79,8 +79,8 @@ else
 fi
 grep -Fq 'COPY bin/claude-mise-shims /usr/local/bin/claude-mise-shims' "$DOCKERFILE" \
   && ok "claude-mise-shims is baked into the image" || bad "claude-mise-shims is not COPYed into the image"
-grep -Eq 'asclaude .*"\$MISE_SHIMS_CMD"' "$REPO_ROOT/entrypoint.sh" \
-  && grep -Fq 'MISE_SHIMS_CMD=/usr/local/bin/claude-mise-shims' "$REPO_ROOT/entrypoint.sh" \
+grep -Eq 'asclaude .*"\$MISE_SHIMS_CMD"' "$REPO_ROOT/entrypoint.d/09b-mise-shims.sh" \
+  && grep -Fq 'MISE_SHIMS_CMD=/usr/local/bin/claude-mise-shims' "$REPO_ROOT/entrypoint.d/09b-mise-shims.sh" \
   && ok "the entrypoint rebuilds the view at every start, as the claude user" \
   || bad "the entrypoint does not run claude-mise-shims as the claude user"
 
