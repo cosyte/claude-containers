@@ -325,10 +325,10 @@ grep -qxF 'RUN install -d -o root -g root -m 700 /etc/claude' "$REPO_ROOT/Docker
     || bad "the Dockerfile must create /etc/claude root-owned, mode 700"
 n4="$(grep -n '^# --- 4\. Key inputs' "$EP_BOOT" | cut -d: -f1)"
 n5="$(grep -n '^# --- 5\. Git SSH key' "$EP_BOOT" | cut -d: -f1)"
-n12="$(grep -n '^# --- 12\. Launch Claude Code' "$EP_BOOT" | cut -d: -f1)"
+n12="$(grep -n '^# --- 12b\. Launch Claude Code' "$EP_BOOT" | cut -d: -f1)"
 [[ -n "$n4" && -n "$n5" && -n "$n12" ]] && (( n4 < n5 && n5 < n12 )) \
-    && ok "§4 runs before the broker (§5) and before any session starts (§12)" \
-    || bad "§4 must come before §5 and §12 (lines: $n4 $n5 $n12)"
+    && ok "§4 runs before the broker (§5) and before any session starts (§12b)" \
+    || bad "§4 must come before §5 and §12b (lines: $n4 $n5 $n12)"
 grep -qxF 'RUN install -o root -g root -m 644 /dev/null /etc/ssh/revoked_keys' "$REPO_ROOT/Dockerfile" \
     && grep -qxF 'RevokedKeys /etc/ssh/revoked_keys' "$REPO_ROOT/sshd_config" \
     && ok "sshd_config names the RevokedKeys file, and the image bakes it empty (sshd never starts without it)" \

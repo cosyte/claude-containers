@@ -17,6 +17,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=test/lib/entrypoint.sh
+source "$REPO_ROOT/test/lib/entrypoint.sh"
 ENTRY="$REPO_ROOT/entrypoint.sh"
 FACTS="$REPO_ROOT/bin/claude-container-facts"
 TMPD="$(mktemp -d)"
@@ -78,7 +80,7 @@ grep -qF -- '- GPU: ok (Fake GPU 2000, driver 580.00.00' <<<"$out" \
 
 # ======================================================================================
 echo "== entrypoint.sh §7b: the browser decision =="
-B7="$(awk '/^# --- 7b\. Browser decision/{f=1} /^# --- 7c\./{exit} f' "$ENTRY")"
+B7="$(awk '/^# --- 7b\. Browser decision/{f=1} f' "$(ep_section 7b)")"
 [[ -n "$B7" ]] || bad "could not extract §7b"
 decide() {  # decide <PATH> <CLAUDE_BROWSER>
     ( PATH="$1"; CLAUDE_BROWSER="$2"; set -euo pipefail; eval "$B7"; echo "$BROWSER_MCP" )
@@ -93,7 +95,7 @@ done
 
 # ======================================================================================
 echo "== entrypoint.sh §7c: the session's managed memory =="
-B7C="$(awk '/^# --- 7c\. Session memory/{f=1} /^# --- 8\./{exit} f' "$ENTRY")"
+B7C="$(awk '/^# --- 7c\. Session memory/{f=1} f' "$(ep_section 7c)")"
 grep -qE '^SESSION_MD=' <<<"$B7C" && grep -qE '^SESSION_MD_OWNER=' <<<"$B7C" && grep -qE '^FACTS_CMD=' <<<"$B7C" \
     && grep -qE '^GPU_NOTE_SRC=' <<<"$B7C" \
     && ok "§7c names its root-only paths on their own lines (so this sandbox redirect is real)" \
@@ -127,7 +129,7 @@ out="$(FACTS="$TMPD/fail-facts" run_7c 0)"; rc=$?
 
 # ======================================================================================
 echo "== entrypoint.sh §8a: the global CLAUDE.md at every start =="
-B8A="$(awk '/^# 8a\. Global CLAUDE.md/{f=1} /^# 8b\./{exit} f' "$ENTRY")"
+B8A="$(awk '/^# --- 8a\. Global CLAUDE.md/{f=1} f' "$(ep_section 8a)")"
 grep -qE '^MOUNTINFO=' <<<"$B8A" && ok "§8a names MOUNTINFO on its own line" || bad "§8a must assign MOUNTINFO on its own line"
 BAKE="$TMPD/bake"; CFG="$TMPD/home/.claude"; mkdir -p "$BAKE" "$CFG"
 MI="$TMPD/mountinfo"; echo "1 0 0:1 / / rw - overlay overlay rw" > "$MI"
@@ -153,7 +155,7 @@ out="$(run_8a)"
 
 # ======================================================================================
 echo "== entrypoint.sh §8e: a skill only where it can work =="
-B8E="$(awk '/^# 8e\. Skills/{f=1} /^# --- 9\./{exit} f' "$ENTRY")"
+B8E="$(awk '/^# --- 8e\. Skills/{f=1} f' "$(ep_section 8e)")"
 mkdir -p "$BAKE/skills/frontend-debugging" "$BAKE/skills/example-skill"
 echo "fd" > "$BAKE/skills/frontend-debugging/SKILL.md"; echo "ex" > "$BAKE/skills/example-skill/SKILL.md"
 run_8e() {  # run_8e <BROWSER_MCP>
@@ -175,7 +177,7 @@ grep -qF 'my notes' "$SK/frontend-debugging/SKILL.md" 2>/dev/null \
     && ok "an edited copy is kept" || bad "§8e removed an edited skill"
 
 echo "== entrypoint.sh §10b: a failed registration corrects §7c and §8e =="
-FAILFN="$(awk '/^_browser_mcp_failed\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$ENTRY")"
+FAILFN="$(awk '/^_browser_mcp_failed\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$(ep_section 10b)")"
 run_8e on >/dev/null; rm -rf "$SK/frontend-debugging"; run_8e on >/dev/null
 printf '<!-- claude-containers: container facts. -->\n- chrome-devtools MCP: on\n' > "$SMD"
 out="$( log() { echo "[entrypoint] $*"; }; set -euo pipefail; SESSION_MD="$SMD"

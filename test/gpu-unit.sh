@@ -366,7 +366,7 @@ else
         && ok "the state file is world-readable (0644) for the agent, the guard and SSH users" \
         || bad "the state file must be 0644"
 fi
-grep -q 'GPU DEGRADED: ${GPU_DEGRADED_REASON' "$(ep_section 2b)" && grep -q 'status-right' "$REPO_ROOT/entrypoint.sh" \
+grep -q 'GPU DEGRADED: ${GPU_DEGRADED_REASON' "$(ep_section 2b)" && grep -q 'status-right' "$(ep_section 12b)" \
     && ok "a degraded GPU is also put on the tmux status line" || bad "the tmux status banner is missing"
 
 # ======================================================================================
@@ -409,9 +409,9 @@ grep -q 'COPY bin/claude-gpu /usr/local/bin/claude-gpu' "$DF" && grep -q 'COPY b
 NOTE="$REPO_ROOT/claude-config/CLAUDE.gpu.md"
 [[ -f "$NOTE" ]] && grep -q 'claude-gpu status' "$NOTE" && grep -q 'claude-gpu run' "$NOTE" && grep -q 'claude-blender-install' "$NOTE" \
     && ok "the GPU note teaches claude-gpu status/run and claude-blender-install" || bad "the GPU note is missing its essentials"
-grep -q 'claude-containers: GPU session note' "$NOTE" && grep -q 'GPU_NOTE_MARK="claude-containers: GPU session note"' "$REPO_ROOT/entrypoint.sh" \
+grep -q 'claude-containers: GPU session note' "$NOTE" && grep -q 'GPU_NOTE_MARK="claude-containers: GPU session note"' "$(ep_section 7c)" \
     && ok "the note carries the marker the entrypoint uses to never overwrite an operator's file" || bad "the note's marker must match the entrypoint's"
-awk '/^# --- 7c\. Session memory/,/^# --- 8\./' "$REPO_ROOT/entrypoint.sh" | grep -q 'CLAUDE_GPU:-0' \
+cat "$(ep_section 7c)" | grep -q 'CLAUDE_GPU:-0' \
     && ok "the note is written only when CLAUDE_GPU=1" || bad "the GPU note must be gated on CLAUDE_GPU"
 
 echo

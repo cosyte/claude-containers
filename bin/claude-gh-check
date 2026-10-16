@@ -3,7 +3,7 @@
 #
 #   claude-gh-check
 #
-# The entrypoint (§12e) runs it in the background at every start when GH_TOKEN is set and
+# The entrypoint (§12f) runs it in the background at every start when GH_TOKEN is set and
 # writes its output to /run/claude/gh-check.txt; run it by hand any time. One line per repo
 # under /workspace (its own repo, or each /workspace/<dir>) whose origin is on github.com,
 # at most 30:

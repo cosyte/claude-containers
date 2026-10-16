@@ -589,7 +589,7 @@ COPY bin/claude-container-facts /usr/local/bin/claude-container-facts
 # This container's view of the shared mise shims, rebuilt at every start (§9b) and after a
 # `mise use`: see the PATH note in the ENV block.
 COPY bin/claude-mise-shims /usr/local/bin/claude-mise-shims
-# Read-only probes of what GH_TOKEN can do on each repo (§12e, /run/claude/gh-check.txt).
+# Read-only probes of what GH_TOKEN can do on each repo (§12f, /run/claude/gh-check.txt).
 COPY bin/claude-gh-check /usr/local/bin/claude-gh-check
 # claude-reaper and claude-controller were REMOVED: the reaper pruned a spool
 # only the retired broker ever wrote to, and the controller had collapsed to a

@@ -137,10 +137,10 @@ docker run -d --name "$CN" \
     -v "$TMP/plugins.json:/opt/claude-config/plugins/plugins.json:ro" \
     "$IMAGE" >/dev/null
 
-# wait for the entrypoint to reach the tmux launch (or die)
+# wait for the entrypoint to reach its last section, past the tmux launch (or die)
 for _ in $(seq 1 60); do
     log="$(docker logs "$CN" 2>&1 || true)"
-    grep -q "Claude Code session 'claude' started in tmux" <<<"$log" && break
+    grep -q '^\[entrypoint\] §13 stay-alive$' <<<"$log" && break
     [[ "$(docker inspect -f '{{.State.Running}}' "$CN" 2>/dev/null)" == "true" ]] \
         || { echo "container exited early:"; echo "$log" | tail -20; break; }
     sleep 2
@@ -153,9 +153,11 @@ check "entrypoint reached tmux launch" \
     'grep -q "started in tmux" <<<"$(docker logs "$CN" 2>&1)"'
 # The loader announces each section of entrypoint.d/ as it sources it: all of them, once, in the
 # order the sections ran in when they were one file.
-EP_ORDER="0 0b 1 1b 2 2a 2b 2c 3 4 5 6 6a 7 7a"
+EP_ORDER="0 0b 1 1b 2 2a 2b 2c 3 4 5 6 6a 7 7a 7b 7c 8a 8b 8c 8d 8e 9 9b 10 10b 11 12 12a 12b 12c 12d 12e 12f 12g 13"
 check "the boot log announces the sections in their order ($EP_ORDER)" \
     '[[ "$(docker logs "$CN" 2>&1 | sed -n "s/^\[entrypoint\] §\([0-9][0-9a-z]*\) .*/\1/p" | tr "\n" " ")" == "$EP_ORDER " ]]'
+check "the session launch ran from its own file (§12b session-launch, then its tmux line)" \
+    'docker logs "$CN" 2>&1 | grep -A50 -m1 "^\[entrypoint\] §12b session-launch$" | grep -q "started in tmux"'
 check "tmux session 'claude' is alive" \
     'asclaude_x "tmux has-session -t claude" >/dev/null 2>&1'
 check "sshd is running" \

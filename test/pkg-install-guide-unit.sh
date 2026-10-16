@@ -31,6 +31,8 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLAUDE_MD="$REPO_ROOT/claude-config/CLAUDE.md"
+# shellcheck source=test/lib/entrypoint.sh
+source "$REPO_ROOT/test/lib/entrypoint.sh"
 ENTRY="$REPO_ROOT/entrypoint.sh"
 
 PASS=0 FAIL=0
@@ -208,7 +210,7 @@ echo "== B. entrypoint.sh §8a: installs the baked CLAUDE.md =="
 bash -n "$ENTRY" && ok "entrypoint.sh parses (bash -n)" || bad "entrypoint.sh has a syntax error"
 
 # Extract §8a so the assertion is scoped and cannot be masked by a lookalike elsewhere.
-SEC8A="$(awk '/^# 8a\. Global CLAUDE.md/,/^# 8b\./' "$ENTRY")"
+SEC8A="$(cat "$(ep_section 8a)")"
 if grep -qF 'BAKE_DIR/CLAUDE.md' <<<"$SEC8A" \
    && grep -qF 'install -o' <<<"$SEC8A"; then
     ok "§8a installs BAKE_DIR/CLAUDE.md (install -o)"

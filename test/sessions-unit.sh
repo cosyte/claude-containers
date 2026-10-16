@@ -700,7 +700,7 @@ jq --arg ps "$(sed -E 's/^[0-9]+ \(.*\) //' "/proc/$pid/stat" | awk '{print $20}
 check "the same file with the right procStart is used" grep -qx 'sid=s-home' "$REG/home.state"
 
 echo "== the entrypoint caps library thread pools =="
-TB="$(awk '/^# --- 12-threads\. Library thread pools/{f=1} f{print} f&&/^unset _tpp$/{exit}' "$REPO_ROOT/entrypoint.sh")"
+TB="$(awk '/^# Library thread pools/{f=1} f{print} f&&/^unset _tpp$/{exit}' "$(ep_section 12)")"
 tp() {  # tp <env...>: run the extracted block, print the resulting values and the profile file
     env -i PATH="$PATH" "$@" bash -c "log() { echo \"[entrypoint] \$*\"; }
         $(printf '%s\n' "$TB" | sed "s#^THREADS_PROFILE_D=.*#THREADS_PROFILE_D=$TMPD/threads.sh#")
@@ -716,11 +716,11 @@ out="$(tp CLAUDE_THREADS_PER_PROCESS=0)"
 [[ "$out" == *"vals=unset,unset,unset,unset"* && "$out" == *"NOT capped"* ]] && ok "CLAUDE_THREADS_PER_PROCESS=0 leaves them alone, and says so" || bad "disabled: $out"
 
 echo "== the entrypoint and the image wire it in =="
-EP="$REPO_ROOT/entrypoint.sh"
+EP="$TMPD/boot.sh"; ep_boot > "$EP"   # the whole boot path, in run order
 main_line="$(grep -n 'tmux new-session -d -s claude' "$EP" | head -1 | cut -d: -f1)"
 boot_line="$(grep -n '/usr/local/bin/claude-sessions boot' "$EP" | head -1 | cut -d: -f1)"
 sup_line="$(grep -n '/usr/local/bin/claude-sessions supervise &' "$EP" | head -1 | cut -d: -f1)"
-alive_line="$(grep -n '^# --- 13\. Stay alive' "$EP" | cut -d: -f1)"
+alive_line="$(grep -n '^# --- 13\. ' "$EP" | cut -d: -f1)"
 check "named sessions boot after main's window and before the liveness loop" \
     bash -c "(( ${main_line:-0} > 0 && ${boot_line:-0} > ${main_line:-0} && ${sup_line:-0} > ${boot_line:-0} && ${alive_line:-0} > ${sup_line:-0} ))"
 prep_line="$(grep -n '/usr/local/bin/claude-sessions prepare' "$EP" | head -1 | cut -d: -f1)"
