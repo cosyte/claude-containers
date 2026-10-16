@@ -33,6 +33,10 @@ Two kinds of session get a **RAM tmpfs at `/scratch`** instead of the disk volum
   default `3g`, with a harder pids cap (`CLAUDE_BROWSER_PIDS_LIMIT`, default `1024`). Chromium,
   Lighthouse and ffmpeg temp churn here. A service that is both gets the larger size.
 
+One service's size: `claude-compose-gen --scratch-size REPO=SIZE` (e.g. `render=8g`) overrides
+both stack-wide sizes for that service alone. It is refused for a service whose `/scratch` is the
+disk volume, which has no size to set.
+
 The reason is the disk: on a spinning pool, that much small-file churn starved I/O until
 processes wedged in uninterruptible sleep and the container could not be killed. RAM avoids it,
 at the cost described above: every page written is charged to the service's memory cgroup
@@ -45,7 +49,7 @@ but a session that fills its scratch can reach the limit, so raise its limit (`-
 | Kind | Who gets it | Size | Cleared |
 |---|---|---|---|
 | Disk volume `claude-scratch-<name>` | every session by default | the volume's pool | on every boot |
-| RAM tmpfs | GPU and browser services | set by the stack: `CLAUDE_GPU_SCRATCH_TMPFS`, `CLAUDE_BROWSER_SCRATCH_TMPFS` | on every start |
+| RAM tmpfs | GPU and browser services | set by the stack: `CLAUDE_GPU_SCRATCH_TMPFS`, `CLAUDE_BROWSER_SCRATCH_TMPFS`; one service: `--scratch-size REPO=SIZE` | on every start |
 
 Either way it is per container but **shared by every session in it**, and Claude Code gives each
 session its own folder there, `/scratch/claude-<uid>/<project>/<session-id>/`. A container that

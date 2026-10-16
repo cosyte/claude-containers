@@ -49,6 +49,13 @@
 --cpu web=4
 --dev-cmd web=if [ -f pnpm-lock.yaml ]; then PM=pnpm;SEP=; elif [ -f yarn.lock ]; then PM=yarn;SEP=; else PM=npm;SEP=--; fi; [ -d node_modules ] || $PM install; exec $PM run dev $SEP --host 0.0.0.0 --port 4321
 
+# A GPU service with more RAM /scratch than the stack-wide CLAUDE_GPU_SCRATCH_TMPFS
+# (only a --gpu or --browser service has a tmpfs /scratch to size), and one service
+# that also joins an existing external network (docker network create telemetry).
+--gpu worker
+--scratch-size worker=8g
+--extra-network api=telemetry
+
 # Runtime plugins on one repo (no rebuild). --marketplace REPO=NAME=URL then
 # --plugin REPO=PLUGIN@NAME[,…].
 --marketplace api=my-skills=git@github.com:acme/claude-marketplace.git
