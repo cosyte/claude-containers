@@ -1209,7 +1209,7 @@ check "no session is parked on the trust dialog" \
 check "alpha: its own Remote Control name, and its goal as the first prompt" \
     'docker exec "$SESSCN" ps -eo args | grep -F -- "--remote-control multi-alpha" | grep -qF "/goal alpha program, GOAL 1 of 2"'
 check "review: plan mode, sonnet, and no Remote Control" \
-    'docker exec "$SESSCN" ps -eo args | grep -E "bin/claude .*--permission-mode plan --model sonnet" | grep -vq -- "--remote-control"'
+    'docker exec "$SESSCN" ps -eo args | grep -E "bin/claude .*--permission-mode plan .*--model sonnet" | grep -vq -- "--remote-control"'
 for _ in $(seq 1 40); do [ "$(docker exec "$SESSCN" pgrep -fc claude-rc-watchdog)" = 3 ] && break; sleep 1; done
 check "one RC watchdog per session with a link (main, alpha, beta), none for review" \
     '[ "$(docker exec "$SESSCN" pgrep -fc claude-rc-watchdog)" = 3 ]'
