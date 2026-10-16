@@ -22,8 +22,11 @@ updates:
     commit-message:
       prefix: ci
 
-  # The base image (node:*-trixie-slim) only. Dependabot rewrites the FROM tag;
-  # it does not touch anything installed inside the image.
+  # The base images only, and today this entry finds nothing to bump: both FROM
+  # lines build their tag from an ARG (node:${NODE_VERSION}-trixie-slim,
+  # uv:${UV_VERSION}), which Dependabot cannot resolve or rewrite. Bump
+  # NODE_VERSION and UV_VERSION by hand. It never touches what is installed
+  # inside the image.
   - package-ecosystem: docker
     directory: /
     schedule:

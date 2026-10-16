@@ -3,7 +3,7 @@
 # section of the baked global `claude-config/CLAUDE.md` that teaches an
 # in-container Claude Code session the mise-first package-install pattern per
 # ecosystem (Python / Node / Rust / Go), the PEP-668 dead-ends for the system
-# Python 3.11 interpreter, the no-sudo/no-apt reality of a container (system
+# Python 3.13 interpreter, the no-sudo/no-apt reality of a container (system
 # libraries have no self-service path),
 # the /cache shared cache, and the explicit refusal of sudo /
 # --break-system-packages / edits to /etc,/opt,/usr.

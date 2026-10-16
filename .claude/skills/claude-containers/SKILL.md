@@ -47,6 +47,14 @@ small descriptive commits as you change things.
     into an OOM kill instead. Cleared on every boot (it is scratch, not state);
     `claude-rm --purge` deletes it. `bash_profile` re-exports TMPDIR for SSH
     logins, which get a fresh env from sshd.
+  - `claude-cache`: **shared** across a stack (or every `claude-launch`
+    container), mounted `/cache`. mise toolchains and pip/uv/npm/pnpm/cargo/go
+    downloads land here, so one install is a cache hit for every other
+    container. Re-fetchable only: `claude-disk-gc` trims it above
+    `CLAUDE_CACHE_MAX_MIB`. `--cache VOLUME` picks another, `--no-cache` none.
+  - `claude-state-<project>`: **per container**, mounted `/state`
+    (`CLAUDE_STATE_DIR`). Private state an app must not share (databases,
+    keys, tokens, worktrees): never in `/cache`, mounted in no other container.
   - Rationale: a single shared `~/.claude` would corrupt concurrent sessions
     and collide on the `/workspace` project key. A background loop in the
     entrypoint keeps `.credentials.json` converged between `/auth` and each
@@ -97,10 +105,10 @@ small descriptive commits as you change things.
 | `bin/claude-sessions` | Baked: several sessions per container. `prepare` (entrypoint, before main: reconcile `CLAUDE_SESSIONS` into `~/.claude/session-registry/`, pre-accept workspace trust per session dir + every repo), `boot --no-reconcile` (one tmux window each, a capacity line; an old `chain` setting only warns), `supervise` (records each window's conversation id from `sessions/<pid>.json`; one RC watchdog per linked session). Operator: `ls [--json]`, `new`, `start`, `stop` (remembered), `restart [--fresh]`, `reset`, `rm` (runtime ones only), `attach`, `send`, `check SPEC`; `-C PROJECT` forwards from the host via docker exec. |
 | `bin/claude-dev` | tmux `dev`-window cmd: runs `$CLAUDE_DEV_CMD` (a dev server) in `/workspace` on boot, shell fallback. Started by the entrypoint only when `CLAUDE_DEV_CMD` is set. |
 | `bin/_common.sh` | Shared lib: `.env` load, defaults, `sanitize`, volume names, `alloc_port` (2200-2299, skips used), state checks, `print_connect`. |
-| `bin/claude-launch` | Create/start a container; auto port; labels carry metadata; surfaces a fast-failing entrypoint. `--expose H:C` / `--dev-cmd` publish + auto-start a dev server; `--browser` enables the chrome-devtools MCP for frontend debugging (needs a WITH_BROWSER=1 image). |
+| `bin/claude-launch` | Create/start a container; auto port; labels carry metadata; surfaces a fast-failing entrypoint. `--expose H:C` / `--dev-cmd` publish + auto-start a dev server; `--browser` enables the chrome-devtools MCP for frontend debugging (needs a WITH_BROWSER=1 image); `--image REF` runs another local image; `--cache VOLUME` / `--no-cache`; `--accounts` for usage rotation. Full list: `docs/launcher-commands.md`. |
 | `bin/claude-list/attach/stop/rm/logs` | Manage containers. `claude-attach <name> [session]` opens the live tmux session via `docker exec` (local, no SSH key), on a named session's window if given. `claude-rm --purge` also deletes the per-project volumes. |
 | `bin/claude-tui` | `whiptail` menu over the whole fleet, grouped by compose stack (discovered live from `com.docker.compose.project*` labels, no hardcoded paths; pre-seed a stack with zero containers via `CLAUDE_TUI_STACKS`). Per-session: attach/start/stop/restart/logs/remove/connect-info. Per-stack: bring up a dormant (never-created) repo, switch which auth account it uses (edits its `.env`'s `AUTH_VOLUME`, regenerates via its sibling `*.conf`, recreates only the containers actually running, by service name, so an already-running dormant-profile container is never silently skipped by a bare `up -d`), regenerate its compose. Accounts screen wraps `claude-account-list`/`claude-account-login`. Disk screen wraps `claude-disk-gc`/`-verify`. Pure navigation: shells out to the scripts here, no duplicated logic. Needs `whiptail` (the `newt` package). |
-| `bin/claude-compose-gen` | Generate a multi-service `docker-compose.yml` (one session per repo in a GitHub org via `gh`, or explicit `repo[:branch]` args). Stable ports (reserves ports used by any `claude.managed` container host-wide), shared+per-repo volumes, `claude.managed` labels so `claude-list` sees them. `--scenario <file>` reads a persisted `.conf` of flags; `--env-file <file>` layers a per-stack env for multi-stack hosts. |
+| `bin/claude-compose-gen` | Generate a multi-service `docker-compose.yml` (one session per repo in a GitHub org via `gh`, or explicit `repo[:branch]` args). Stable ports (reserves ports used by any `claude.managed` container host-wide), shared+per-repo volumes, `claude.managed` labels so `claude-list` sees them. `--scenario <file>` reads a persisted `.conf` of flags; `--env-file <file>` layers a per-stack env for multi-stack hosts; `--network NAME` shares one external network across stacks; `--all-dormant` starts nothing by default; `--mount REPO=VOL:/PATH[:ro]` mounts another stack's volume; `--build-context DIR` pins the build clone. Full list: `docs/launcher-commands.md`. |
 | `scenarios/example.conf.example` | Documented template for a `--scenario` `.conf` (persisted generator flags). Real scenario files live with the compose, outside this repo. |
 | `bash_profile` | Interactive SSH → `exec tmux attach -t claude`; non-interactive SSH untouched. |
 | `sshd_config` | Pubkey-only, no root, `AllowUsers claude`, persistent host keys. |
@@ -121,7 +129,23 @@ small descriptive commits as you change things.
 | `test/disk-unit.sh` | Docker-free disk tests (`disk_free_mib` parse/fail-closed, `claude-disk-gc`'s plan safety): CI. |
 | `bin/claude-disk-gc` | Standalone maintenance tool: `docker system prune -f` + `docker builder prune -f` (a fixed plan, never `-a`/`--volumes`), plus the shared-cache trim; one-shot or `--loop`; fail-safe. No entrypoint path auto-starts it. |
 | `bin/claude-disk-verify` | Docker-free sanity pass re-running the disk-hygiene logic (free-space parsing, gc-plan safety, cache-trim safety): safe anywhere, no docker needed. |
-| `docs/` | `architecture.md` (decisions + acceptance map), `legacy-sysbox-broker.md` (the retired nested-Sysbox worker-broker substrate, frozen implementation + rationale), `customizing-bakeins.md`, `troubleshooting.md`. |
+| `bin/claude-autopilot` | tmux main-window command for unattended mode (`CLAUDE_AUTOPILOT=1`): runs `CLAUDE_AUTOPILOT_CMD` headless on an interval, or drains the durable queue (`CLAUDE_AUTOPILOT_QUEUE=1`). |
+| `bin/claude-enqueue` | Adds a task (args or stdin) to the autopilot queue; `--priority N` orders it. |
+| `bin/claude-scm-observer` | Polls the workspace repo's PRs and enqueues CI, review and conflict events for the autopilot (`CLAUDE_SCM_OBSERVER=1`). |
+| `bin/claude-rc-watchdog` | Relaunches a session with `--continue` once its Remote Control bridge gives up for good (`CLAUDE_RC_WATCHDOG=1`); one per linked session. |
+| `bin/claude-usage-watchdog` | Rotates a session to another logged-in account when the active one hits its usage limit, resuming the conversation (`CLAUDE_ACCOUNTS`, `--accounts`). |
+| `bin/claude-session-id` | Prints the conversation id running in a tmux window (default `claude:main`). |
+| `bin/claude-healthcheck` | The image's Docker HEALTHCHECK: unhealthy when the session is down (tmux gone or `claude` exited); adds a GPU line under `CLAUDE_GPU=1`. |
+| `bin/claude-egress-firewall` | Default-deny egress firewall, run as root at boot under `CLAUDE_EGRESS_LOCKDOWN` (`strict` fails closed); `CLAUDE_EGRESS_EXTRA_HOSTS`, `CLAUDE_EGRESS_PACKAGES`, `CLAUDE_EGRESS_REFRESH_INTERVAL`. |
+| `bin/claude-secret-guard` | Global git pre-commit hook refusing obvious secrets in every repo (`CLAUDE_SECRET_GUARD=1`, `CLAUDE_SECRET_GUARD_EXTRA`). |
+| `bin/claude-deps-check` | Advisory linter: flags unpinned or `latest` specs in `mise.toml` and `package.json`. |
+| `bin/claude-container-facts` | Prints the "This container" section (browser, chrome-devtools MCP, GPU, toolchain versions, `/cache` and `/scratch` free space) the entrypoint writes into each session's managed memory. |
+| `bin/claude-gh-check` | At boot, when `GH_TOKEN` is set: what the token can do on each repo, written to `/run/claude/gh-check.txt`. |
+| `bin/claude-image-rebuild` | Host: `--check` prints how far the image is behind main (JSON); otherwise pulls main on a clean checkout and rebuilds. |
+| `bin/claude-launcher` | Installed as `/usr/local/bin/claude`: runs the npm-installed CLI from `/opt/claude-code`, repairing it first if a self-update broke it. |
+| `bin/claude-account-list` / `claude-account-login` | Host: list the credential volumes and who uses each; log a named account in. |
+| `docs/` | Every file is linked from `README.md` (`test/docs-unit.sh` checks): `architecture.md` (decisions + acceptance map), `launcher-commands.md` (every launcher flag), `volume-reference.md`, `temp-space.md`, `troubleshooting.md`, `customizing-bakeins.md`, `security-notes.md`, `managed-settings.md`, `egress-allowlist.md`, `github-token.md`, `unattended-autopilot.md`, the toolchain and cache design records, and `legacy-sysbox-broker.md` (the retired Sysbox worker broker). |
+| `test/docs-unit.sh` | Docs match the code: every launcher long flag is in README or `docs/launcher-commands.md`, every `CLAUDE_*`/`GIT_*` variable the code reads is in `.env.example` or allow-listed with a reason, every doc is linked, no ADR cited without its file. Add the doc with the flag or variable. |
 
 ## Operational playbook
 

@@ -44,7 +44,7 @@ Keep this short. Project-specific guidance belongs in the repo's own
 `mise` provisions **interpreters/toolchains**, not language packages. The chain is
 always **mise first, then the language's own package manager**: pick the right first
 invocation per ecosystem below and you get a rootless install that lands in the shared
-`/cache` volume for the next launch and every parallel worker. The system Python 3.11
+`/cache` volume for the next launch and every parallel worker. The system Python 3.13
 in the image is a Debian **PEP 668 externally-managed** interpreter and installing into
 it will refuse; the fixes below never touch it.
 

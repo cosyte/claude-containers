@@ -15,7 +15,7 @@
 #      (entrypoint exports CLAUDE_MODEL=opus by default), and the `opus` alias resolves
 #      to the LATEST Opus. Opus 4.8 arrived in CLI 2.1.154, so any pin BELOW that
 #      silently resolves `opus` to Opus 4.7, quietly downgrading every gate agent below
-#      what ADR 0009 requires. A version floor is therefore a correctness gate, not
+#      the Opus 4.8 floor they need. A version floor is therefore a correctness gate, not
 #      hygiene: a downgrade must FAIL here, loudly, not degrade in production.
 #
 #   3. TWO UPSTREAM CHANGES MAKE THE LAUNCH FLAGS LOAD-BEARING. CLI 2.1.197 made Sonnet 5
@@ -136,9 +136,9 @@ else
 fi
 
 if version_ge "$PINNED" "$OPUS48_FLOOR"; then
-    ok "$PINNED >= $OPUS48_FLOOR: '--model opus' resolves to Opus 4.8 (ADR 0009)"
+    ok "$PINNED >= $OPUS48_FLOOR: '--model opus' resolves to Opus 4.8"
 else
-    bad "$PINNED < $OPUS48_FLOOR: '--model opus' would SILENTLY resolve to Opus 4.7, downgrading every gate agent below what ADR 0009 requires. This is exactly the defect CC-CLAUDE-CODE-UPGRADE fixed; do not re-introduce it."
+    bad "$PINNED < $OPUS48_FLOOR: '--model opus' would SILENTLY resolve to Opus 4.7, downgrading every gate agent below the Opus 4.8 floor they need. This is exactly the defect CC-CLAUDE-CODE-UPGRADE fixed; do not re-introduce it."
 fi
 
 echo

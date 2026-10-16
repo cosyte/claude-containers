@@ -47,7 +47,7 @@
 #     --no-cache        do not mount a shared cache (per-container installs).
 #     --expose <map>    publish an extra container port for a repo, e.g. a dev
 #                       server. Format REPO:HOSTPORT:CONTAINERPORT (repeatable).
-#                       e.g. --expose bridgelink-website:4321:4321
+#                       e.g. --expose site:4321:4321
 #     --dev-cmd <map>   auto-start a dev server on container boot, in its own
 #                       tmux 'dev' window. Format REPO=COMMAND (repeatable).
 #                       Bind to 0.0.0.0 so the published port reaches it, e.g.
@@ -55,7 +55,7 @@
 #     --cpu <map>       per-repo CPU limit override. Format REPO=N (repeatable);
 #                       repos without one keep the global CLAUDE_CPU_LIMIT.
 #     --mem <map>       per-repo memory limit override. Format REPO=SIZE, e.g.
-#                       bridgelink-website=4g (repeatable). Default: CLAUDE_MEM_LIMIT.
+#                       site=4g (repeatable). Default: CLAUDE_MEM_LIMIT.
 #     --model <map>     per-repo model override. Format REPO=MODEL (repeatable);
 #                       MODEL is any Claude Code alias (opus, sonnet, haiku,
 #                       opusplan, default) or a full id. Repos without one fall
@@ -578,17 +578,18 @@ BROWSER_IMAGE="${CLAUDE_IMAGE_BROWSER:-claude-code-box:browser}"
 # ENOSPC (see the TMPDIR note below). Override sizes via the env vars.
 #
 # 3g: chromium/lighthouse/ffmpeg temp churn needs little headroom, and the tmpfs is
-# charged to the service's CLAUDE_MEM_LIMIT cgroup (default 16g) alongside the 1g /tmp,
-# so 3g + 1g leaves 12g for the session, chromium and the dev server. Raise it via
+# charged to the service's CLAUDE_MEM_LIMIT cgroup (default 4g) alongside the 1g /tmp, as
+# it fills: the sizes are ceilings, so a browser service that fills its scratch needs --mem
+# raised to leave room for the session, chromium and the dev server. Raise the size via
 # CLAUDE_BROWSER_SCRATCH_TMPFS if a build genuinely needs more scratch space.
 BROWSER_SCRATCH_TMPFS="${CLAUDE_BROWSER_SCRATCH_TMPFS:-3g}"
 BROWSER_PIDS_LIMIT="${CLAUDE_BROWSER_PIDS_LIMIT:-1024}"
 # GPU services put /scratch (TMPDIR) on RAM for the same reason: Blender's render temp,
 # its shader/kernel caches and throwaway venvs churn there, and that churn must stay off a
 # spinning pool. Charged to the service's memory cgroup like every tmpfs, so size it
-# against CLAUDE_MEM_LIMIT (default 16g): 4g here + the 1g /tmp leaves 11g for the session
-# itself plus the render's own RAM (scene, BVH, textures), which a modest scene keeps to a
-# few GiB. 4g holds a render's temp files plus one throwaway CUDA or VTK venv (about 1 to
+# against CLAUDE_MEM_LIMIT (default 4g): 4g here + the 1g /tmp can exceed it when full, so a
+# rendering service raises --mem to fit the session itself plus the render's own RAM (scene,
+# BVH, textures), which a modest scene keeps to a few GiB. 4g holds a render's temp files plus one throwaway CUDA or VTK venv (about 1 to
 # 1.5g each). A service that is also --browser gets the larger of the two sizes.
 GPU_SCRATCH_TMPFS="${CLAUDE_GPU_SCRATCH_TMPFS:-4g}"
 size_to_mib "$GPU_SCRATCH_TMPFS" >/dev/null || die "CLAUDE_GPU_SCRATCH_TMPFS '$GPU_SCRATCH_TMPFS' is not a size like 4g"

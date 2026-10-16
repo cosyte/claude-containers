@@ -20,3 +20,22 @@ half-written tarballs until the pool filled. `claude-rm --purge` deletes it.
 
 Raising the `/tmp` tmpfs instead would have been the wrong fix: it is RAM, so a 10 GB `/tmp`
 would simply move the failure from `ENOSPC` to an OOM kill inside the session's own cgroup.
+
+## The exception: GPU and browser services put `/scratch` on RAM
+
+Two kinds of session get a **RAM tmpfs at `/scratch`** instead of the disk volume, with
+`TMPDIR` still pointing at it:
+
+- **GPU** (`claude-launch --gpu`, `claude-compose-gen --gpu REPO`): `CLAUDE_GPU_SCRATCH_TMPFS`,
+  default `4g`. Blender's render temp, its kernel caches and throwaway CUDA or VTK venvs
+  churn here.
+- **Browser** services from `claude-compose-gen --browser REPO`: `CLAUDE_BROWSER_SCRATCH_TMPFS`,
+  default `3g`, with a harder pids cap (`CLAUDE_BROWSER_PIDS_LIMIT`, default `1024`). Chromium,
+  Lighthouse and ffmpeg temp churn here. A service that is both gets the larger size.
+
+The reason is the disk: on a spinning pool, that much small-file churn starved I/O until
+processes wedged in uninterruptible sleep and the container could not be killed. RAM avoids it,
+at the cost described above: every page written is charged to the service's memory cgroup
+(`CLAUDE_MEM_LIMIT`, default `4g`) alongside `/tmp`. The sizes are ceilings, not reservations,
+but a session that fills its scratch can reach the limit, so raise `--mem` for a GPU or browser
+service that renders or builds big. The tmpfs is empty on every start, like the volume.
