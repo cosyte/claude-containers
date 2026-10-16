@@ -6,7 +6,7 @@ SHELL := /bin/bash
 export
 
 CLAUDE_IMAGE        ?= claude-code-box:latest
-CLAUDE_CODE_VERSION ?= 2.1.280
+CLAUDE_CODE_VERSION ?= 2.1.293
 NODE_VERSION        ?= 24
 UV_VERSION          ?= latest
 PNPM_VERSION        ?= latest
@@ -100,5 +100,5 @@ smoke: build ## Build the image, then run the automated smoke test against it
 clean: ## Remove the image and the buildx builder (volumes are kept)
 	-docker image rm $(CLAUDE_IMAGE) 2>/dev/null
 	-docker buildx rm $(BUILDX_BUILDER) 2>/dev/null
-	@echo "Volumes ($(AUTH_VOLUME), claude-ws-*, claude-config-*) left intact."
+	@echo "Volumes ($(AUTH_VOLUME), claude-ws-*, claude-config-*, claude-state-*) left intact."
 	@echo "Remove auth/login with: docker volume rm $(AUTH_VOLUME)"

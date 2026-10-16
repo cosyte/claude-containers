@@ -82,10 +82,18 @@ the `./bin/` prefix.
  volumes:
    claude-auth          (shared)  OAuth credentials   → /auth
    claude-sshkeys       (shared)  SSH host keys        → /etc/ssh/host-keys
-   claude-config-<proj> (per ctr) sessions + state     → /home/claude/.claude
+   claude-config-<proj> (per ctr) sessions + config    → /home/claude/.claude
    claude-ws-<proj>     (per ctr) the git repo         → /workspace
    claude-scratch-<proj>(per ctr) disk-backed TMPDIR   → /scratch
+   claude-state-<proj>  (per ctr) app dbs and keys     → /state  (CLAUDE_STATE_DIR)
+   claude-cache         (shared)  tool caches only     → /cache
 ```
+
+`/cache` is shared by every container on the host, all as one user, so anything in it is
+readable from every container. An app's private state (a database, a key, a token) goes
+in `/state/<app>`, the container's own volume, which no other container mounts, and so do
+worktrees, clones and working folders that must last (`/state/wt`, `/state/tmp`):
+[docs/volume-reference.md](docs/volume-reference.md#private-state).
 
 Why credentials and config are split: a single shared `~/.claude` across
 containers would corrupt concurrent sessions and collide on the `/workspace`
@@ -107,12 +115,12 @@ vars override `.env`. Full reference: `.env.example`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `CLAUDE_IMAGE` | `claude-code-box:latest` | Image tag built/run |
-| `CLAUDE_CODE_VERSION` | `2.1.280` | Pinned Claude Code npm version (min 2.1.52). `opus` resolves to the latest Opus: **Opus 5.5 from CLI 2.1.280**, Opus 5 from 2.1.219, Opus 4.8 from 2.1.154. Auto-update is on by default (`DISABLE_AUTOUPDATER` is unset), so a running container's binary can self-update past this pin unless the operator sets `DISABLE_AUTOUPDATER=1` |
+| `CLAUDE_CODE_VERSION` | `2.1.293` | Pinned Claude Code npm version (min 2.1.52). `opus` resolves to the latest Opus: **Opus 5.5 from CLI 2.1.280** (unchanged on 2.1.293), Opus 5 from 2.1.219, Opus 4.8 from 2.1.154. Auto-update is on by default (`DISABLE_AUTOUPDATER` is unset), so a running container's binary can self-update past this pin unless the operator sets `DISABLE_AUTOUPDATER=1` |
 | `NODE_VERSION` | `24` | Base Node LTS |
 | `UV_VERSION` | `latest` | `uv` version (pin for reproducibility) |
 | `PNPM_VERSION` | `latest` | `pnpm` version baked in (pin for reproducibility) |
 | `CLAUDE_UID`/`CLAUDE_GID`/`CLAUDE_USER` | `1000`/`1000`/`claude` | Container user |
-| `CLAUDE_MODEL` | `opus` | Model the session runs. Defaults to the best available model (the `opus` alias always resolves to the latest Opus, **Opus 5**, 1M context, on the pinned CLI; it became the default Opus in 2.1.219, so the 2.1.207→2.1.220 bump moved the fleet off Opus 4.8). Passed through to `--model` verbatim, so use an alias the pinned CLI actually ships (`opus`/`sonnet`/`haiku`/`opusplan`/`fable`/`best`) or a full id like `claude-opus-5` / `claude-opus-4-8` (set the latter to hold a container on 4.8). **`default` is not in the pinned CLI's alias table**, don't rely on it to defer to Claude Code's own pick. Both launchers now default to `opus` when this is unset, so a session can never silently fall back to Claude Code's default (which is Sonnet 5 from CLI 2.1.197). Per-container via `claude-launch --model`, per-repo via `claude-compose-gen --model REPO=MODEL` |
+| `CLAUDE_MODEL` | `opus` | Model the session runs. Defaults to the best available model (the `opus` alias always resolves to the latest Opus, **Opus 5.5**, 1M context, on the pinned CLI; it became the default Opus in 2.1.280, after Opus 5 from 2.1.219, which moved the fleet off Opus 4.8). Passed through to `--model` verbatim, so use an alias the pinned CLI actually ships (`opus`/`sonnet`/`haiku`/`opusplan`/`fable`/`best`) or a full id like `claude-opus-5` / `claude-opus-4-8` (set the latter to hold a container on 4.8). **`default` is not in the pinned CLI's alias table**, don't rely on it to defer to Claude Code's own pick. Both launchers now default to `opus` when this is unset, so a session can never silently fall back to Claude Code's default (which is Sonnet 5 from CLI 2.1.197). Per-container via `claude-launch --model`, per-repo via `claude-compose-gen --model REPO=MODEL` |
 | `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `acceptEdits`/`auto`/`bypassPermissions`/`manual`/`dontAsk`/`plan`: the choice set the pinned CLI accepts. Honored by both the interactive session and autopilot; `acceptEdits` is the safer fleet posture (gates shell/network). **`default` was renamed `manual` upstream in CLI 2.1.200** and no longer appears in `claude --help`; it is still accepted for now (re-verified on 2.1.241, a bogus mode is rejected with the allowed-choices list, `default` is not), so existing `.env` files keep working, but prefer `manual`, since an undocumented alias can be dropped |
 | `CLAUDE_SECRET_GUARD` | `1` | `1` installs a fleet-wide git pre-commit hook that blocks committing secrets (`.env`, `*.pem`, `*.key`, `id_rsa`, PRIVATE KEY blocks). Bypass once with `git commit --no-verify`; extend via `CLAUDE_SECRET_GUARD_EXTRA` |
 | `CLAUDE_AUTOPILOT` | `0` | `1` = unattended mode: main pane runs a headless `claude -p` loop instead of Remote Control (see [Unattended autopilot](#unattended-autopilot)) |
@@ -132,8 +140,8 @@ vars override `.env`. Full reference: `.env.example`.
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` |: | Clone source (or use `--repo`/`--branch`/`--depth`) |
 | `GIT_REPOS` |: | Several repos in one container: whitespace-separated `URL[#BRANCH]`, each cloned into `/workspace/<repo>` (set by `claude-compose-gen --group` or several `--repo`). Not together with `GIT_REPO_URL` |
 | `GIT_AUTHOR_NAME`/`_EMAIL` (+`COMMITTER`) | host git config | Commit identity |
-| `GIT_SSH_KEY` | `~/.ssh/claude-git-key` | Host SSH key for git, mounted read-only |
-| `SSH_AUTHORIZED_KEYS` | `~/.ssh/authorized_keys` | Host pubkeys allowed to SSH in (read-only) |
+| `GIT_SSH_KEY` | `~/.ssh/claude-git-key` | Host SSH key for git, mounted read-only and brokered. For git alone: never in `SSH_AUTHORIZED_KEYS` (the launch tools refuse that, and sshd in the container refuses it for logins) |
+| `SSH_AUTHORIZED_KEYS` | `~/.ssh/authorized_keys` | Your own public keys allowed to SSH in (read-only), never the git key's |
 | `SSH_PORT_RANGE_START`/`_END` | `2200`/`2299` | Auto-assigned host SSH port range |
 | `CLAUDE_SSH_HOST` | this host's name | Hostname shown in the connect line |
 | `CLAUDE_SSH_BIND` |: | Bind the SSH port to one host interface (e.g. `127.0.0.1`); empty = all |
@@ -513,7 +521,7 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   egress isn't firewalled. The name in the app is the project name.
 - **`--dangerously-skip-permissions` vs Remote Control**: there were earlier
   reports that skip-permissions didn't fully apply under Remote Control. On the
-  pinned **2.1.280** both flags are accepted together with no interlock, and the
+  pinned **2.1.293** both flags are accepted together with no interlock, and the
   launch (`claude --dangerously-skip-permissions --remote-control <name>`) combines
   them, so it works. This is the reason the CLI version is pinned at all: re-verify
   it on any bump. If a future version regresses, set
@@ -521,7 +529,8 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
   prompts): see troubleshooting for the verification steps.
 - **SSH connection refused**: no `authorized_keys` was mounted, or wrong port.
   `claude-list` shows the port; the connect line is reprinted by
-  `claude-launch <name>`.
+  `claude-launch <name>`. The git key never logs in: use a key of your own in
+  `SSH_AUTHORIZED_KEYS` (see [docs/security-notes.md](docs/security-notes.md), SSH keys).
 - **Git push fails**: `GIT_SSH_KEY` not mounted or not authorized on the
   remote. Public/https clones still work without it.
 - **Workspace trust prompt**: pre-accepted by the entrypoint; if you see it,

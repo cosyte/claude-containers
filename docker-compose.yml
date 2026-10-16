@@ -18,7 +18,7 @@ services:
       context: .
       args:
         NODE_VERSION: ${NODE_VERSION:-24}
-        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-2.1.280}
+        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-2.1.293}
         UV_VERSION: ${UV_VERSION:-latest}
         PNPM_VERSION: ${PNPM_VERSION:-latest}
         CLAUDE_UID: ${CLAUDE_UID:-1000}
@@ -57,6 +57,9 @@ services:
       # (RAM). pip/uv wheel builds, docker save|load tarballs and the inner containerd's
       # mount dirs all honor TMPDIR; on /tmp they hit a 1 GiB wall.
       TMPDIR: /scratch
+      # This container's private state (the claude-state volume below): apps keep databases,
+      # keys and tokens under /state/<app>, never in a shared cache other containers mount.
+      CLAUDE_STATE_DIR: /state
       CLAUDE_EXTRA_ARGS: ${CLAUDE_EXTRA_ARGS:-}
       CLAUDE_MCP_ENABLED: ${CLAUDE_MCP_ENABLED:-}
       # Frontend debugging: set to 1 to register the chrome-devtools MCP
@@ -97,7 +100,11 @@ services:
       # without this a large pip/npm install or a docker save|load dies at 1 GiB with an
       # ENOSPC that looks like a bug. See the TMPDIR env below.
       - claude-scratch:/scratch
+      # Private per-container state (databases, keys, tokens): mounted in this container only.
+      - claude-state:/state
       # - ${CLAUDE_WORKSPACE_HOST_DIR:-./workspace}:/workspace
+      # Two key inputs, kept apart: your own SSH login keys, and the key git pushes with. The
+      # git key's public half never goes in authorized_keys (docs/security-notes.md, SSH keys).
       - ${SSH_AUTHORIZED_KEYS:-~/.ssh/authorized_keys}:/etc/claude/authorized_keys:ro
       - ${GIT_SSH_KEY:-~/.ssh/claude-git-key}:/etc/claude/git-key:ro
     # Same labels the bin/claude-* launchers set, so a container started via
@@ -125,3 +132,5 @@ volumes:
     name: claude-ws-${CLAUDE_PROJECT_NAME}
   claude-scratch:
     name: claude-scratch-${CLAUDE_PROJECT_NAME}
+  claude-state:
+    name: claude-state-${CLAUDE_PROJECT_NAME}

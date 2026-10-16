@@ -46,8 +46,21 @@ What the stack does enforce, and therefore what a bypass of *is* a valid report:
   gets a signing socket only, so it cannot read the private key bytes; only an
   explicit `CLAUDE_BROKER_GIT_KEY=0` opts out to a readable key file, and a
   broker that fails to come up installs no key file rather than falling back.
+  The mounted key sits in `/etc/claude`, a root-owned mode-700 directory, so the
+  agent cannot open it off the mount even when the host file's owner is the
+  agent's own UID; a brokered key the agent could still read stops the boot.
   A path by which the unprivileged agent reads the master credential or the raw
   private key is in scope.
+- **The git key is never an SSH login key.** Every session can sign with the git
+  key through its agent, so a container that accepted it for SSH logins could be
+  entered from every session. `claude-launch` and `claude-compose-gen` refuse a
+  `GIT_SSH_KEY` whose public half is in `SSH_AUTHORIZED_KEYS`, and name any other
+  container on the host that accepts this git key (or pushes with a key this
+  `SSH_AUTHORIZED_KEYS` accepts). In the container, sshd refuses the git key
+  whatever any `authorized_keys` file says: the entrypoint lists it in sshd's
+  root-owned `RevokedKeys` file at every boot. A path by which a session logs in
+  over SSH, to its own container or another, with the key in its agent is in
+  scope.
 - **Egress lockdown** (`CLAUDE_EGRESS_LOCKDOWN=1`) is enforced in netfilter,
   default-deny, IP-pinned, applied at boot before the agent starts and while it
   is still unprivileged, so the agent cannot disable its own rules. A path that
@@ -73,6 +86,16 @@ What the stack does enforce, and therefore what a bypass of *is* a valid report:
   refresh failed to tighten an allowlist is therefore not a vulnerability;
   narrowing a live container's egress on a transient DNS failure would be the
   worse outcome and is the behaviour being deliberately avoided.
+- **Private state per container.** Each container gets its own
+  `claude-state-<name>` volume at `/state` (`CLAUDE_STATE_DIR`) for an app's
+  databases, keys and tokens; `claude-launch` and `claude-compose-gen` mount it
+  into that container only, and `claude-compose-gen --mount` refuses another
+  container's state or config volume. A generated or launched configuration that
+  gives one container another's `/state` is in scope. The shared `/cache` is the
+  opposite by design: every container mounts it and runs as the same UID, so
+  anything in it is readable from every container. Private state left there is
+  named in the boot log, not hidden; a report that `/cache` is readable across
+  containers is not a vulnerability.
 - **Secret guard** installs a git pre-commit hook blocking obvious secret
   material. It is a backstop against an agent committing a credential, not a
   DLP control; `--no-verify` bypasses it by design.
@@ -86,7 +109,9 @@ Known and accepted, so **not** vulnerabilities in this project:
 - **The SSH port publishes on `0.0.0.0`** by default, so it is LAN-reachable.
   Auth is pubkey-only; set `CLAUDE_SSH_BIND=127.0.0.1` to limit it.
 - **All containers share one SSH host key** (stable fingerprint), acceptable for
-  a single-owner host. Use distinct keys if that matters to you.
+  a single-owner host: the private host keys are root-only in every container, so
+  only root in one container could pose as another. Use distinct keys if that
+  matters to you.
 - **Egress is open by default.** Lockdown is opt-in.
 - **An IP-pinned allowlist goes stale** as CDNs rotate addresses, and
   `statsig.anthropic.com` is not publicly resolvable so it cannot be pinned.

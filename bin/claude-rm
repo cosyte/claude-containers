@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # claude-rm <name> [--yes] [--purge]
 #   --yes    skip the confirmation prompt
-#   --purge  also delete the per-container workspace + config volumes
+#   --purge  also delete the per-container workspace, config and private state volumes
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 need_docker
@@ -25,15 +25,19 @@ CFG_VOL="$(cfg_volume "$PROJECT")"
 # without ceremony; it exists as a volume rather than a tmpfs precisely so it CAN be
 # reclaimed here instead of bloating the container's writable layer forever.
 SCRATCH_VOL="$(scratch_volume "$PROJECT")"
+# Private state (/state): the container's own databases and keys. Only purged with the rest;
+# a container launched before /state existed has none, hence the inspect below.
+STATE_VOL="$(state_volume "$PROJECT")"
 [[ "$(container_state "$CN")" == "absent" ]] && die "no such container: $CN"
 
 PURGE_VOLS=("$WS_VOL" "$CFG_VOL")
 docker volume inspect "$SCRATCH_VOL" >/dev/null 2>&1 && PURGE_VOLS+=("$SCRATCH_VOL")
+docker volume inspect "$STATE_VOL" >/dev/null 2>&1 && PURGE_VOLS+=("$STATE_VOL")
 
 echo "About to remove container: $CN"
 if [[ "$PURGE" == "1" ]]; then
-    echo "  --purge: also DELETING volumes '$WS_VOL' and '$CFG_VOL'"
-    echo "  (workspace contents and conversation history will be lost)"
+    echo "  --purge: also DELETING volumes: ${PURGE_VOLS[*]}"
+    echo "  (workspace contents, conversation history and private state will be lost)"
 fi
 if [[ "$YES" != "1" ]]; then
     read -rp "Proceed? [y/N] " ans

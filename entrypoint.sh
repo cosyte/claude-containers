@@ -21,6 +21,15 @@ WORKSPACE="/workspace"
 log()  { echo "[entrypoint] $*"; }
 die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
 asclaude() { gosu "$CLAUDE_USER" env CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" "$@"; }
+# Hand a tree to the agent user, touching only what is not already its own. `chown -R` writes
+# every inode (a chown with the same owner still updates ctime), so on maker's config volume
+# and ten-repo workspace on spinning disk it held every boot for minutes before any session
+# started (2026-10-07). find only reads a tree that is already right. -h: a symlink itself,
+# never its target, as chown -R did; find does not follow symlinks either.
+own_tree() {
+    find "$@" \( ! -uid "$CLAUDE_UID" -o ! -gid "$CLAUDE_GID" \) \
+        -exec chown -h "$CLAUDE_UID:$CLAUDE_GID" {} +
+}
 
 # --- 0. Refuse retired broker/Sysbox env -------------------------------
 # bin/claude-launch and bin/claude-compose-gen already REFUSE the removed --broker /
@@ -151,7 +160,7 @@ fi
 
 # --- 2. Fix ownership of mounted volumes -------------------------------------
 mkdir -p "$CLAUDE_CONFIG_DIR" "$AUTH_DIR" "$HOSTKEY_DIR" "$CLAUDE_HOME/.ssh" "$WORKSPACE"
-chown -R "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR" "$CLAUDE_HOME/.ssh"
+own_tree "$CLAUDE_CONFIG_DIR" "$CLAUDE_HOME/.ssh"
 chown "$CLAUDE_UID:$CLAUDE_GID" "$WORKSPACE" 2>/dev/null || true
 chmod 700 "$CLAUDE_HOME/.ssh"
 
@@ -230,6 +239,58 @@ if [[ "${CLAUDE_GPU:-0}" =~ ^(1|true|yes|on)$ ]]; then
     unset gpu_line gpu_rc
 fi
 
+# --- 2c. Private state (/state) ----------------------------------------------
+# /cache is ONE volume shared by every container on the host, and every container runs as the
+# same UID, so whatever one container keeps there every other can read: right for tool caches,
+# wrong for a database, a key or a token. /state is this container's own volume
+# (claude-state-<name>, which claude-launch and claude-compose-gen mount here and in no other
+# container): apps keep private state under $CLAUDE_STATE_DIR/<app>. Owned by the agent user,
+# mode 700. Without the volume (an older compose file, a plain `docker run`) /state is the
+# image's directory: it works, but it is lost when the container is recreated, so say so.
+# STATE_DIR / STATE_MOUNTINFO / STATE_SHARED_CACHE are named on their own lines so
+# test/state-unit.sh can run this exact block unprivileged against a sandbox.
+STATE_DIR=/state
+STATE_MOUNTINFO=/proc/self/mountinfo
+STATE_SHARED_CACHE=/cache
+export CLAUDE_STATE_DIR="$STATE_DIR"
+# The isolation is the volume itself (no other container mounts it), so a directory that
+# cannot be prepared degrades loudly instead of stopping the boot.
+if ! { mkdir -p "$STATE_DIR" && own_tree "$STATE_DIR" && chmod 700 "$STATE_DIR"; } 2>/dev/null; then
+    log "WARNING: could not prepare $STATE_DIR (owner $CLAUDE_USER, mode 700): apps cannot keep private state there."
+elif awk -v d="$STATE_DIR" '$5 == d { found = 1 } END { exit !found }' "$STATE_MOUNTINFO" 2>/dev/null; then
+    log "Private state       : $STATE_DIR (this container's own volume; CLAUDE_STATE_DIR)"
+else
+    log "WARNING: $STATE_DIR is not a volume: private state kept there is lost when the container is"
+    log "WARNING: recreated. Regenerate the stack (claude-compose-gen) or relaunch (claude-launch)."
+fi
+# Private state an app still keeps in the shared cache under this container's name
+# (/cache/<app>/<name>/, the layout apps used before /state existed) is readable from every
+# other container. Name it at every boot until it is moved. Never move it here: the app would
+# not know the new place and would start an empty one at the old path. Bounded: one glob over
+# the cache's top level, then at most two levels under each match.
+state_name="${CLAUDE_PROJECT_NAME:-$(hostname 2>/dev/null || true)}"
+state_legacy=()
+if [[ -n "$state_name" && "$state_name" != "." && "$state_name" != ".." && "$state_name" != */* ]]; then
+    for state_d in "$STATE_SHARED_CACHE"/*/"$state_name"; do
+        [[ -d "$state_d" && ! -L "$state_d" ]] || continue
+        while IFS= read -r -d '' state_f; do state_legacy+=("$state_f"); done < <(
+            timeout 10 find "$state_d" -maxdepth 2 -type f \( -name '*.db' -o -name '*.sqlite' \
+                -o -name '*.sqlite3' -o -name '*.key' -o -name '*.pem' -o -name '*token*' \
+                -o -name '*credential*' \) -print0 2>/dev/null || true)
+    done
+fi
+if (( ${#state_legacy[@]} )); then
+    log "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    log "PRIVATE STATE IN THE SHARED CACHE: ${#state_legacy[@]} file(s) under $STATE_SHARED_CACHE/*/$state_name look like a"
+    log "database or a key, and every container that mounts $STATE_SHARED_CACHE can read them:"
+    for state_f in "${state_legacy[@]:0:5}"; do log "  $state_f"; done
+    (( ${#state_legacy[@]} <= 5 )) || log "  ... and $(( ${#state_legacy[@]} - 5 )) more"
+    log "Move them into $STATE_DIR (this container's own volume) and point the app there."
+    log "How: docs/volume-reference.md, Private state."
+    log "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+fi
+unset state_name state_legacy state_d state_f
+
 # --- 3. SSH host keys (persistent) -------------------------------------------
 if [[ ! -f "$HOSTKEY_DIR/ssh_host_ed25519_key" ]]; then
     log "Generating persistent SSH host keys"
@@ -239,15 +300,87 @@ fi
 chmod 600 "$HOSTKEY_DIR"/ssh_host_*_key
 chmod 644 "$HOSTKEY_DIR"/ssh_host_*_key.pub
 
-# --- 4. Authorized keys (SSH access) -----------------------------------------
+# --- 4. Key inputs: a root-only directory, and the git key refused for SSH ---
+# The host mounts two key inputs into $KEYS_DIR, read-only: authorized_keys (the owner's SSH
+# login keys) and git-key (the private key git pushes with, §5). A bind mount keeps the HOST
+# file's owner and mode, and on a single-user host that owner's UID is the agent's (1000), so a
+# key the owner keeps at 0600 would be readable by the agent straight off the mount. The
+# DIRECTORY stops that: root-owned, mode 700, baked so in the image and re-asserted here before
+# any agent process starts. Opening a path needs search permission on every directory in it,
+# so the agent cannot open either file whatever their own owner and mode. Root (this script
+# and the broker) still reads them; the agent gets its copy of authorized_keys below and the
+# broker's relay socket (§5), never the key file.
+#
+# FAIL CLOSED: a key that is to be brokered but that the agent user can still read is not
+# brokered at all, so the boot stops here, before the agent exists. That happens when
+# $KEYS_DIR is not the image's root-only directory, e.g. a whole host directory mounted on it.
+# Only the explicit CLAUDE_BROKER_GIT_KEY=0 opt-out (a readable key by choice) passes.
+#
+# THE GIT KEY IS NEVER A LOGIN KEY. Every session can sign with it through its agent (§5), so
+# a container that accepts it for SSH logins can be entered from every session that holds it,
+# in any container. claude-launch and claude-compose-gen refuse a configuration that names one
+# key for both. Here sshd refuses it whatever any authorized_keys file says: its public half is
+# written to $REVOKED_KEYS, sshd_config's RevokedKeys, which is root's alone (the agent owns
+# its authorized_keys and could add the key back; it cannot touch this file). The file is
+# written on every boot, empty without a git key: sshd refuses ALL public-key logins when it
+# cannot read it. A git key that is also in authorized_keys is named in the boot log.
+#
+# KEYS_DIR, AUTHKEYS_DST and REVOKED_KEYS are named on their own lines so test/keys-unit.sh can
+# run this exact block unprivileged against a sandbox.
+KEYS_DIR="/etc/claude"
+AUTHKEYS_DST="$CLAUDE_HOME/.ssh/authorized_keys"
+REVOKED_KEYS="/etc/ssh/revoked_keys"
+chmod 700 "$KEYS_DIR" 2>/dev/null || log "WARNING: could not set $KEYS_DIR to mode 700"
+gitkey_pub=""
+gitkey_fp=""
+if [[ -s "$GITKEY_SRC" ]]; then
+    if [[ ! "${CLAUDE_BROKER_GIT_KEY:-}" =~ ^(0|false|no|off)$ ]] \
+       && gosu "$CLAUDE_USER" test -r "$GITKEY_SRC" 2>/dev/null; then
+        die "the git key at $GITKEY_SRC is readable by $CLAUDE_USER, so brokering it would not keep it from the agent.
+       $KEYS_DIR must be the image's root-only directory (here: $(stat -c 'owner %U, mode %a' "$KEYS_DIR" 2>/dev/null)).
+       Mount the key FILE at $GITKEY_SRC, never a host directory at $KEYS_DIR.
+       CLAUDE_BROKER_GIT_KEY=0 accepts an agent-readable key instead."
+    fi
+    # Its public half ("type key"), derived as root from the key itself. -P '' never prompts:
+    # a passphrase-protected key gives nothing, and the broker cannot load one either.
+    gitkey_pub="$(ssh-keygen -y -P '' -f "$GITKEY_SRC" 2>/dev/null </dev/null \
+        | awk 'NR == 1 && $2 ~ /^AAAA/ { print $1, $2 }' || true)"
+    gitkey_fp="$(ssh-keygen -lf - <<<"$gitkey_pub" 2>/dev/null | awk '{ print $2; exit }' || true)"
+    if [[ -n "$gitkey_pub" ]]; then
+        log "Git key for SSH     : refused for SSH logins here ($gitkey_fp, sshd RevokedKeys)"
+    else
+        log "WARNING: could not derive the git key's public half (passphrase-protected?), so sshd"
+        log "WARNING: here is not told to refuse it for SSH logins."
+    fi
+fi
+install -m 644 <(if [[ -n "$gitkey_pub" ]]; then printf '%s\n' "$gitkey_pub"; fi) "$REVOKED_KEYS"
 if [[ -s "$AUTHKEYS_SRC" ]]; then
-    install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 \
-        "$AUTHKEYS_SRC" "$CLAUDE_HOME/.ssh/authorized_keys"
-    log "Installed authorized_keys for SSH"
+    install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 "$AUTHKEYS_SRC" "$AUTHKEYS_DST"
+    # Fingerprints, as sshd reads the file: options, cert-authority, every key-type name.
+    authkeys_fps="$(ssh-keygen -lf "$AUTHKEYS_DST" 2>/dev/null | awk '{ print $2 }' || true)"
+    authkeys_n="$(grep -c . <<<"$authkeys_fps" || true)"
+    authkeys_git=0
+    [[ -z "$gitkey_fp" ]] || authkeys_git="$(grep -cxF -- "$gitkey_fp" <<<"$authkeys_fps" || true)"
+    if (( authkeys_git > 0 )); then
+        log "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        log "GIT KEY IN AUTHORIZED_KEYS: the git key ($gitkey_fp) is also in the mounted"
+        log "authorized_keys. Every session signs with the git key through its agent, so a container"
+        log "that accepts it for SSH can be entered from every session. sshd here refuses it (see"
+        log "above), but keep it out: put only your own login keys in SSH_AUTHORIZED_KEYS, never"
+        log "the git key's public half. How: docs/security-notes.md, SSH keys."
+        log "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    fi
+    if (( authkeys_n - authkeys_git > 0 )); then
+        log "Installed authorized_keys for SSH ($(( authkeys_n - authkeys_git )) login key(s))"
+    else
+        log "WARNING: authorized_keys holds no login key sshd will accept: SSH will be unusable;"
+        log "         Remote Control still works."
+    fi
 else
     log "WARNING: no authorized_keys mounted at $AUTHKEYS_SRC"
     log "         SSH will be unusable; Remote Control still works."
 fi
+unset gitkey_pub gitkey_fp authkeys_fps authkeys_n authkeys_git
 
 # --- 5. Git SSH key + identity -----------------------------------------------
 # A mounted deploy key is BROKERED BY DEFAULT: it is loaded into a ROOT-owned
@@ -333,7 +466,7 @@ EOF
             printf 'export SSH_AUTH_SOCK=%s\n' "$CLAUDE_SOCK" > "$BROKER_PROFILE_D"
             git_brokered=1
             log "Git SSH key broker  : key held in a root ssh-agent (claude signs via relay, cannot read it)"
-            log "Deploy key readable : NO. The agent user cannot read this deploy key's private bytes: no key file exists under $CLAUDE_HOME, and signing happens inside a root-owned ssh-agent."
+            log "Deploy key readable : NO. The agent user cannot read this deploy key's private bytes: the mounted key is in a root-only directory (§4), no key file exists under $CLAUDE_HOME, and signing happens inside a root-owned ssh-agent."
         else
             # FAIL CLOSED: no readable-file fallback, ever. Loud, because the
             # operator's git pushes over this key will now fail and the reason
@@ -1214,7 +1347,7 @@ else
     die "Empty workspace and no GIT_REPO_URL or GIT_REPOS. Set one, or bind-mount a
        checkout onto $WORKSPACE (use 'claude-launch --repo' or --workspace)."
 fi
-chown -R "$CLAUDE_UID:$CLAUDE_GID" "$WORKSPACE" 2>/dev/null || true
+own_tree "$WORKSPACE" 2>/dev/null || true
 
 # --- 10. Register baked-in MCP servers ---------------------------------------
 # Done via the CLI so the on-disk schema is always correct for this Claude
