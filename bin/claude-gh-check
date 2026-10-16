@@ -13,8 +13,8 @@
 # Every probe is read-only by construction: a GET, or a PUT/POST with NO body, which GitHub
 # validates (and so reports the permission) before it could change anything:
 #   read            GET  /repos/{o}/{r}                                     200 = ok
-#   contents-write  PUT  /repos/{o}/{r}/contents/.claude-gh-check (no body) 403/404 = NO, other 4xx = ok
-#   pr              POST /repos/{o}/{r}/pulls (no body)                     403/404 = NO, 422 = ok
+#   contents-write  PUT  /repos/{o}/{r}/contents/.claude-gh-check (no body) 403/404 = NO, 400/409/422 = ok
+#   pr              POST /repos/{o}/{r}/pulls (no body)                     403/404 = NO, 400/422 = ok
 #   checks          GET  /repos/{o}/{r}/commits/HEAD/check-runs?per_page=1  403/404 = NO, 200 = ok
 # Anything else reads "?<code>". It NEVER probes a merge endpoint: an empty body there merges
 # an open PR. It uses curl (never gh) with a 5s cap per call. Offline or a timeout: it prints
@@ -32,10 +32,10 @@ MAX_REPOS=30
 
 # owner/repo of a github.com remote URL, or nothing.
 gh_slug() {
-    local u="$1"
-    [[ "$u" =~ ^(git@github\.com:|ssh://git@github\.com/|https://([^@/]+@)?github\.com/)([^/]+)/([^/]+)$ ]] || return 1
-    local o="${BASH_REMATCH[3]}" r="${BASH_REMATCH[4]}"
-    r="${r%/}"; r="${r%.git}"
+    local u="${1%/}"
+    [[ "$u" =~ ^(git@github\.com:|ssh://git@github\.com/|https://([^@/]+@)?github\.com/)([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)$ ]] || return 1
+    local o="${BASH_REMATCH[3]}" r="${BASH_REMATCH[4]%.git}"
+    [[ -n "$r" && "$r" != . && "$r" != .. ]] || return 1
     echo "$o/$r"
 }
 
@@ -49,13 +49,13 @@ code() {  # code <METHOD> <path>
         "$API$2" 2>/dev/null || true
 }
 
-# ok | NO | ?<code> for a write probe that says "held" with any 4xx but 403/404.
-write_verdict() {
-    case "$1" in
-        403|404) echo NO ;;
-        4??) echo ok ;;
-        *) echo "?$1" ;;
-    esac
+# ok | NO | ?<code>: ok for one of the "held" codes given, NO for 403/404, else the code
+# (a 429 rate limit or a 5xx says nothing about the permission).
+verdict() {  # verdict <code> <held code>...
+    local c="$1"; shift
+    [[ " $* " == *" $c "* ]] && { echo ok; return; }
+    [[ "$c" == 403 || "$c" == 404 ]] && { echo NO; return; }
+    echo "?$c"
 }
 
 repos=()
@@ -81,8 +81,7 @@ for slug in "${repos[@]}"; do
     if [[ "$put_c" == 000 || "$pr_c" == 000 || "$chk_c" == 000 ]]; then
         echo "github: skipped (offline or timeout)"; exit 0
     fi
-    pr="$( [[ "$pr_c" == 422 ]] && echo ok || { [[ "$pr_c" =~ ^40[34]$ ]] && echo NO || echo "?$pr_c"; })"
-    chk="$( [[ "$chk_c" == 200 ]] && echo ok || { [[ "$chk_c" =~ ^40[34]$ ]] && echo NO || echo "?$chk_c"; })"
-    echo "github $slug: read ok, contents-write $(write_verdict "$put_c"), pr $pr, checks $chk"
+    echo "github $slug: read ok, contents-write $(verdict "$put_c" 400 409 422)," \
+        "pr $(verdict "$pr_c" 400 422), checks $(verdict "$chk_c" 200)"
 done
 exit 0

@@ -50,6 +50,8 @@ mkrepo alpha git@github.com:me/alpha.git
 mkrepo beta https://github.com/myorg/beta
 mkrepo alpha2 ssh://git@github.com/me/alpha.git
 mkrepo other git@gitlab.com:me/other.git
+mkrepo gamma https://github.com/me/gamma/
+mkrepo odd 'https://github.com/me/x#frag'
 
 run() {  # run [ENV=VAL ...]: claude-gh-check against the sandbox; output in $out, code in $rc
     : > "$CALLS"
@@ -61,10 +63,12 @@ run() {  # run [ENV=VAL ...]: claude-gh-check against the sandbox; output in $ou
 echo "== claude-gh-check =="
 run
 (( rc == 0 )) && ok "exits 0" || bad "exit $rc"
-[[ "$(grep -c '^github ' <<<"$out")" == 2 ]] \
+[[ "$(grep -c '^github ' <<<"$out")" == 3 ]] \
     && grep -qxF 'github me/alpha: read ok, contents-write ok, pr ok, checks ok' <<<"$out" \
     && grep -qxF 'github myorg/beta: read ok, contents-write ok, pr ok, checks ok' <<<"$out" \
-    && ok "all held: one ok line per github.com repo (ssh + https, twin once, gitlab skipped)" \
+    && grep -qxF 'github me/gamma: read ok, contents-write ok, pr ok, checks ok' <<<"$out" \
+    && ! grep -qF 'frag' "$CALLS" \
+    && ok "all held: one ok line per github.com repo (ssh, https, trailing slash; twin once; gitlab and a malformed slug skipped)" \
     || bad "all held: $out"
 grep -qF 'GET https://api.github.com/repos/me/alpha ' "$CALLS" \
     && grep -qF 'PUT https://api.github.com/repos/me/alpha/contents/.claude-gh-check ' "$CALLS" \
@@ -89,6 +93,11 @@ run FAKE_READ=404
 (( rc == 0 )) && grep -qxF 'github me/alpha: read NO (HTTP 404)' <<<"$out" \
     && ! grep -q '^PUT\|^POST' "$CALLS" \
     && ok "no read access: read NO, and no further probe" || bad "read 404: $out / $(cat "$CALLS")"
+run FAKE_PUT=429
+grep -qF 'contents-write ?429' <<<"$out" && ok "a rate limit (429) reads ?429, never ok" || bad "contents 429: $out"
+run FAKE_PUT=422 FAKE_POST=400
+grep -qxF 'github me/alpha: read ok, contents-write ok, pr ok, checks ok' <<<"$out" \
+    && ok "contents 422 and pulls 400 also read held" || bad "422/400: $out"
 run FAKE_POST=500
 grep -qF 'pr ?500' <<<"$out" && ok "an unexpected code reads ?<code>, not ok" || bad "pulls 500: $out"
 
@@ -115,7 +124,7 @@ echo "== claude-gh-check by source =="
 if command -v rg >/dev/null 2>&1; then GREP=(rg -n); else GREP=(grep -nE); fi
 "${GREP[@]}" '/merge' "$CHECK" >/dev/null && bad "names /merge (an empty-body merge call merges)" \
     || ok "never names /merge"
-"${GREP[@]}" -- '(^|[[:space:]])(-d|--data[a-z-]*|--json|-F|--form|-T|--upload-file)([[:space:]=]|$)' "$CHECK" >/dev/null \
+"${GREP[@]}" -- '(^|[[:space:]])(-d|--data[a-z-]*|--json|-F|--form|-T|--upload-file)([[:space:]='"'"'"$@{]|$)' "$CHECK" >/dev/null \
     && bad "sends a body (-d/--data/--json/-F/-T)" || ok "never sends a body"
 "${GREP[@]}" '(^|[[:space:];(|&])gh[[:space:]]' "$CHECK" >/dev/null \
     && bad "calls gh" || ok "never calls gh (curl only)"

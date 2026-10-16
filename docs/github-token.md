@@ -68,5 +68,8 @@ probes the merge endpoint, where an empty body merges an open PR. `?<code>` is a
 not expect (a 5xx, a rate limit); `github: skipped (...)` means it could not ask (offline, a
 timeout, no `GH_TOKEN`, no github.com repo).
 
+On a public repo `read` and `checks` answer 200 to any token, so there they say only that the
+call works, not that the token holds the permission; the two write probes are exact everywhere.
+
 A new or changed token reaches a container when it is recreated with the new `GH_TOKEN`; the
 check runs at that start.
