@@ -94,7 +94,8 @@ same refused  "--marketplace with no URL"  --marketplace kit -- --marketplace si
 same accepted "--plugin"                   --plugin helper@kit --marketplace "$KIT" -- --plugin site=helper@kit --marketplace "site=$KIT"
 same refused  "--plugin empty"             --plugin '' -- --plugin site=
 same accepted "--accounts"                 --accounts a1,a2 -- --accounts site=a1,a2
-same refused  "--accounts with an empty name" --accounts a1,,a2 -- --accounts site=a1,,a2
+same accepted "--accounts with stray spaces and commas" --accounts 'a1, ,a2 ' -- --accounts 'site=a1, ,a2 '
+same refused  "--accounts with no name"    --accounts ' , ' -- --accounts 'site= , ' 
 same accepted "--session"                  --session 'home model=sonnet' -- --session 'site=home model=sonnet'
 same refused  "--session with a bad name"  --session Bad -- --session site=Bad
 same refused  "--session empty"            --session ' ; ' -- --session 'site= ; '

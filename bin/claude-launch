@@ -133,7 +133,7 @@ STARTCMD="$(flag_last "$STARTCMD" "${STARTCMD_RAW[@]}")"
 CACHE_ARG="$(flag_last "" "${CACHE_RAW[@]}")"
 MKTS="$(flag_join , "$MKTS" "${MKTS_RAW[@]}")"
 PLUGINS="$(flag_join , "$PLUGINS" "${PLUGINS_RAW[@]}")"
-ACCOUNTS="$(flag_join , "$ACCOUNTS" "${ACCOUNTS_RAW[@]}")"
+ACCOUNTS="$(flag_join , "$ACCOUNTS" "${ACCOUNTS_RAW[@]}" | tr -s ',[:space:]' ',' | sed 's/^,//; s/,$//')"
 SESSIONS="$(flag_join '; ' "$SESSIONS" "${SESSION_RAW[@]}")"
 # --browser / --no-browser and --gpu / --no-gpu: the last one given wins.
 BROWSER="$(flag_last "" "${BROWSER_RAW[@]}")"

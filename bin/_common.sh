@@ -551,8 +551,8 @@ flag_check_marketplace() {   # with the container's own parser, so a typo fails 
         || die "$1 is not valid:
 $(sed 's/^/       /' <<<"$errs")"
 }
-flag_check_accounts() {
-    [[ "$2" =~ ^[^,[:space:]]+(,[^,[:space:]]+)*$ ]] || die "$1 must be NAME[,NAME...] (got '$2')"
+flag_check_accounts() {   # names split on commas and whitespace (a .conf line may end in CR)
+    [[ -n "${2//[,[:space:]]/}" ]] || die "$1 must be NAME[,NAME...] (got '$2')"
 }
 flag_check_session() {   # one value; the whole declaration is checked again once it is joined
     local errs
