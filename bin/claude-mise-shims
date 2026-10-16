@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# claude-mise-shims: rebuild this container's own view of the shared mise shims.
+#
+#   claude-mise-shims [-q]
+#
+# The shims dir (/cache/mise/shims) is shared by every container through /cache, so it holds a
+# shim for every tool any container ever installed. A shim for a tool with no version set here
+# still answers `command -v`, then fails with "No version is set for shim", so presence checks
+# lie. PATH therefore holds a per-container dir instead, with a symlink to the shared shim of
+# each tool that resolves in THIS container (the global config, plus every mise config under
+# /workspace), and not the shared dir: a tool with no version reads "command not found". The shared dir is only read, never changed: other containers resolve other versions
+# from it.
+#
+# The entrypoint (§9b) runs it at every start; run it again after a `mise use`.
+#   -q   print nothing on success
+# The view is $CLAUDE_STATE_DIR/mise-shims, else ~/.local/share/claude-mise-shims (both on the
+# image's PATH). CLAUDE_MISE_WORKSPACE (a test seam) is the tree searched for configs (/workspace).
+set -uo pipefail
+
+QUIET=0
+case "${1:-}" in
+    -q) QUIET=1 ;;
+    "") ;;
+    -h|--help) sed -n '2,/^set /{/^set /d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
+    *) echo "claude-mise-shims: unknown argument '$1' (try --help)" >&2; exit 2 ;;
+esac
+
+if [[ -n "${CLAUDE_STATE_DIR:-}" ]]; then
+    VIEW="$CLAUDE_STATE_DIR/mise-shims"
+else
+    VIEW="$HOME/.local/share/claude-mise-shims"
+fi
+SHARED="${MISE_DATA_DIR:-/cache/mise}/shims"
+WORKSPACE="${CLAUDE_MISE_WORKSPACE:-/workspace}"
+
+mkdir -p "$VIEW" || { echo "claude-mise-shims: cannot create $VIEW" >&2; exit 1; }
+
+# The files mise reads a config from. mise walks up from where it is asked, so the dir holding
+# one (even .mise/ or .config/mise/) is a place to ask from.
+CONFIG_MATCH=(-name mise.toml -o -name .mise.toml -o -name 'mise.*.toml' -o -name '.mise.*.toml'
+              -o -name .tool-versions -o -path '*/.mise/config.toml' -o -path '*/mise/config.toml'
+              -o -path '*/mise/conf.d/*.toml')
+
+# The bin dirs of every tool with a version in this container: the global config (asked from
+# $HOME), then each dir under the workspace that holds a mise config. One `mise bin-paths` per
+# dir; a shim resolves here exactly when one of these dirs has its executable.
+declare -A BINS=()
+add_bins() {  # add_bins <dir>
+    local p
+    while IFS= read -r p; do
+        [[ -n "$p" ]] && BINS["$p"]=1
+    done < <(cd "$1" 2>/dev/null && timeout 30 mise bin-paths 2>/dev/null)
+}
+if command -v mise >/dev/null 2>&1; then
+    add_bins "$HOME"
+    if [[ -d "$WORKSPACE" ]]; then
+        declare -A DIRS=()
+        while IFS= read -r -d "" f; do DIRS["${f%/*}"]=1; done < <(
+            timeout 30 find "$WORKSPACE" -maxdepth 5 \
+                \( -name .git -o -name node_modules -o -name .venv -o -name target \) -prune \
+                -o -type f \( "${CONFIG_MATCH[@]}" \) -print0 2>/dev/null)
+        for d in "${!DIRS[@]}"; do add_bins "$d"; done
+    fi
+fi
+
+# The wanted links: each shared shim whose tool one of those bin dirs provides.
+declare -A WANT=()
+total=0
+if [[ -d "$SHARED" ]]; then
+    for s in "$SHARED"/*; do
+        [[ -e "$s" || -L "$s" ]] || continue
+        total=$((total + 1))
+        t="${s##*/}"
+        for b in "${!BINS[@]}"; do
+            if [[ -x "$b/$t" && ! -d "$b/$t" ]]; then WANT["$t"]=1; break; fi
+        done
+    done
+fi
+
+# Update in place (never an empty dir on PATH mid-run): drop what no longer resolves, then link
+# what does.
+for e in "$VIEW"/* "$VIEW"/.[!.]*; do
+    [[ -e "$e" || -L "$e" ]] || continue
+    [[ -n "${WANT[${e##*/}]:-}" ]] || rm -f "$e"
+done
+for t in "${!WANT[@]}"; do
+    [[ "$(readlink "$VIEW/$t" 2>/dev/null)" == "$SHARED/$t" ]] || ln -sfn "$SHARED/$t" "$VIEW/$t"
+done
+
+(( QUIET )) || echo "claude-mise-shims: ${#WANT[@]} of $total shared shims linked into $VIEW"

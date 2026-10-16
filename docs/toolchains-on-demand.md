@@ -11,13 +11,29 @@ mise use aqua:BurntSushi/ripgrep   # arbitrary prebuilt CLIs (aqua registry)
 mise use github:cli/cli            # …or straight from a GitHub release
 ```
 
-Installed tools land in the shared **`/cache`** tree (see below) and are on
-`PATH` for the agent immediately (via mise's shims dir, baked onto `PATH` for
-non-interactive shells; interactive SSH/tmux shells get full `mise activate`).
+Installed tools land in the shared **`/cache`** tree (see below). Run
+`mise reshim && claude-mise-shims` after a `mise use`, or after a `pip install` /
+`npm i -g` that adds a CLI to a mise toolchain, to put the new tool on `PATH` for the agent
+(interactive SSH/tmux shells get full `mise activate` and see it at once).
 mise is **pinned + SHA256-verified in the Dockerfile** at build: the release
 binary is downloaded from GitHub and checked against a hardcoded digest, no
 `curl | sh` (bump `MISE_VERSION` + the two digests together). `pipx:` installs
 reuse the baked `uv` automatically.
+
+**This container's shims.** mise's shims dir (`/cache/mise/shims`) is shared by every
+container, so it holds a shim for every tool any container ever installed, and a shim for a
+tool with no version set here still answers `command -v`, then fails with "No version is set
+for shim". So `PATH` holds a per-container view instead: `$CLAUDE_STATE_DIR/mise-shims`
+(`~/.local/share/claude-mise-shims` without `CLAUDE_STATE_DIR`), holding a link to the shared
+shim of each tool `mise` resolves in this container, from the global config and every mise
+config under `/workspace`. The shared dir is not on `PATH`, so a tool with no version reads
+"command not found". The entrypoint builds the view at every start (it logs how many
+shims it linked), and `claude-mise-shims` rebuilds it on demand. Neither ever changes the
+shared dir: other containers resolve other versions from it. A tool `mise` resolves only
+inside one repo is linked for the whole container; outside that repo its shim falls through
+to the next one on `PATH` (a system `python3`, say), as before. A version a config pins but
+that is not installed yet is not linked either (mise reports no bin dir for it): run
+`mise install`, then `claude-mise-shims`.
 
 **Shared, persistent tool cache.** mise's install store **and** the
 `cargo`/`go`/`npm`/`uv`/`pip` caches live on **one shared docker volume**

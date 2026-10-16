@@ -584,6 +584,9 @@ COPY bin/claude-disk-gc /usr/local/bin/claude-disk-gc
 COPY bin/claude-deps-check /usr/local/bin/claude-deps-check
 # Writes the "This container" section of the session's managed memory at every start (§7c).
 COPY bin/claude-container-facts /usr/local/bin/claude-container-facts
+# This container's view of the shared mise shims, rebuilt at every start (§9b) and after a
+# `mise use`: see the PATH note in the ENV block.
+COPY bin/claude-mise-shims /usr/local/bin/claude-mise-shims
 # Read-only probes of what GH_TOKEN can do on each repo (§12e, /run/claude/gh-check.txt).
 COPY bin/claude-gh-check /usr/local/bin/claude-gh-check
 # claude-reaper and claude-controller were REMOVED: the reaper pruned a spool
@@ -606,6 +609,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude /usr/local/bin/c
         /usr/local/bin/claude-disk-gc \
         /usr/local/bin/claude-deps-check \
         /usr/local/bin/claude-container-facts \
+        /usr/local/bin/claude-mise-shims \
         /usr/local/bin/claude-gh-check \
     && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
                                             /home/${CLAUDE_USER}/.bash_profile
@@ -685,10 +689,14 @@ RUN set -eux; \
 #    shared /cache tree, so a toolchain/CLI installed by one container is a
 #    cache hit for the next and for parallel workers. With no cache volume mounted
 #    /cache is a plain image-layer dir → per-container installs (fail-safe).
-#  - PATH: prepend the mise shims dir (now /cache/mise/shims) so NON-interactive /
-#    agent shells (`bash -c "…"`, the Claude Code process) resolve mise-installed
-#    tools with no shell activation; also prepend cargo/go bin so `cargo install` /
-#    `go install` CLIs resolve. Interactive shells get full `mise activate` via
+#  - PATH: lead with THIS container's view of the mise shims (/state/mise-shims, or
+#    ~/.local/share/claude-mise-shims without CLAUDE_STATE_DIR), which claude-mise-shims
+#    fills with links to the shared shims of the tools that resolve here, so NON-interactive /
+#    agent shells (`bash -c "…"`, the Claude Code process) resolve mise-installed tools
+#    with no shell activation. The shared /cache/mise/shims holds a shim for every tool any
+#    container installed, and one with no version set here answers `command -v` and then
+#    fails, so it is NOT on PATH: a tool with no version reads "command not found". Also
+#    prepend cargo/go bin so `cargo install` / `go install` CLIs resolve. Interactive shells get full `mise activate` via
 #    ~/.bashrc (which re-exports these dirs, see the bashrc block). The dirs need
 #    not be populated yet: mise creates + fills them (as UID 1000) on first `mise use`.
 #  - MISE_TRUSTED_CONFIG_PATHS: auto-trust a `mise.toml` ONLY under /workspace
@@ -713,7 +721,7 @@ ENV CLAUDE_USER=${CLAUDE_USER} \
     npm_config_cache=/cache/npm \
     UV_CACHE_DIR=/cache/uv \
     PIP_CACHE_DIR=/cache/pip \
-    PATH=/cache/mise/shims:/cache/cargo/bin:/cache/go/bin:${PATH}:/opt/claude-code/bin
+    PATH=/state/mise-shims:/home/${CLAUDE_USER}/.local/share/claude-mise-shims:/cache/cargo/bin:/cache/go/bin:${PATH}:/opt/claude-code/bin
 
 # Global npm prefix -> the claude-owned /opt/claude-code (see the Claude Code install
 # section): what lets the auto-updater, and any agent `npm i -g`, write without root.

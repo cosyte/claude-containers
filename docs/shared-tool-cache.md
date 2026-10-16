@@ -50,10 +50,11 @@ claude-compose-gen --out stack.yml --no-cache …            # per-container ins
 2. **Env points the tools at `/cache` (`Dockerfile` ENV).** `MISE_DATA_DIR`, `CARGO_HOME`,
    `GOPATH`, `GOMODCACHE`, `npm_config_cache`, `UV_CACHE_DIR`, `PIP_CACHE_DIR` all resolve
    under `/cache`. The **agent** (the Claude Code process + its non-interactive `bash -c`
-   calls) inherits these from the image ENV. `PATH` prepends `/cache/mise/shims` (so the
-   agent resolves mise-installed tools with no shell activation: the provisioner's guarantee, just
-   relocated) plus `/cache/cargo/bin` and `/cache/go/bin` (so `cargo install` / `go install`
-   CLIs resolve too).
+   calls) inherits these from the image ENV. `PATH` leads with this container's own view of
+   the mise shims (`/state/mise-shims`, links to the shared shims of the tools that resolve
+   here, built by `claude-mise-shims`), so the agent resolves mise-installed tools with no
+   shell activation; the shared `/cache/mise/shims` is not on `PATH`. It also prepends
+   `/cache/cargo/bin` and `/cache/go/bin` (so `cargo install` / `go install` CLIs resolve too).
 
 3. **Interactive shells stay consistent (`~/.bashrc`).** An SSH login normally attaches to
    the tmux session the entrypoint started, which already carries the image ENV. A *fresh*
