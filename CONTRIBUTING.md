@@ -31,9 +31,13 @@ vulnerabilities go through private reporting rather than an issue.
    npm test       # every unit suite, in parallel (no Docker required); TEST_JOBS caps it
    ```
    Both must be clean. CI runs exactly these (the required checks `ci` and `no-emdash`).
-3. `make smoke` builds the image and exercises a real container. It is **not** in
-   CI: a hosted runner cannot build and run the image usefully, so run it
-   yourself for anything touching the Dockerfile, the entrypoint, or launch.
+3. The image smoke test (`test/smoke.sh`) builds the image and exercises a real
+   container. CI's `smoke` job runs it when a PR touches the Dockerfile, the
+   entrypoint (`entrypoint.sh`, `entrypoint.d/`), `bin/`, `claude-config/`,
+   `scripts/`, `test/smoke.sh`, the Makefile, `docker-compose.yml` or `ci.yml`,
+   and on every push to `main`; on any other PR it is skipped and reports success.
+   It takes 10 to 20 minutes, and the parts that need a GPU, routable IPv6 or a
+   firewall report SKIP on a hosted runner. `make smoke` locally stays optional.
 4. Keep PRs focused: one logical change. Large reworks should start as an issue.
 5. Imperative commit subjects (`fix(entrypoint): …`, `feat(launch): …`) are
    encouraged, not enforced. No Conventional-Commits tooling.

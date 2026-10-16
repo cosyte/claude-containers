@@ -554,8 +554,9 @@ acceptance criterion maps to this implementation and how to verify it.
 ## Contributing, security, licence
 
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md), the gates are
-  `make lint` + `npm test` (both Docker-free, both what CI runs); `make smoke`
-  builds a real image and is a local gate only.
+  `make lint` + `npm test` (both Docker-free, both what CI runs); the image smoke
+  test runs in CI's `smoke` job when an image path changes (`make smoke` locally
+  is optional).
 - **Security:** [SECURITY.md](SECURITY.md). Report privately, never in an issue.
   Read the model first: **a container is not a security boundary against a fully
   weaponized agent**, and several plausible reports are documented non-goals.
