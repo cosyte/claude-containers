@@ -629,6 +629,7 @@ done
 # --- Apply include/exclude, sanitize, sort, dedupe ---------------------------
 declare -A SEEN=()
 declare -a FINAL=()
+# shellcheck disable=SC2053  # $g is a --include/--exclude glob, matched as a pattern on purpose
 match_any() { local n="$1"; shift; for g in "$@"; do [[ "$n" == $g ]] && return 0; done; return 1; }
 # sort by repo name so port assignment is stable across regenerations
 while IFS=$'\t' read -r owner name branch; do

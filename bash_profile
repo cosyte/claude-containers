@@ -1,6 +1,8 @@
+# shellcheck shell=bash
 # Interactive SSH logins attach to the live 'claude' tmux session so a
 # disconnect never kills Claude Code. Non-interactive SSH (scp/sftp/rsync,
 # `ssh host cmd`) is left alone.
+# shellcheck disable=SC1090  # ~/.bashrc is the user's own file, not in the repo
 [ -f ~/.bashrc ] && . ~/.bashrc
 
 # Disk-backed TMPDIR. The container's env carries TMPDIR=/scratch, and the tmux session

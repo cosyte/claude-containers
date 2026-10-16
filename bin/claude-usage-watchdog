@@ -124,7 +124,8 @@ reset_seconds_from_pane() {
 # on every tick would push a fallback-window cooldown later forever as long
 # as the pane keeps showing the same stale limit message.
 mark_cooldown_if_new() {
-    local acct="$1" cd_file="$COOLDOWN_DIR/$acct.cooldown-until" now until_ts=0
+    local acct="$1"
+    local cd_file="$COOLDOWN_DIR/$acct.cooldown-until" now until_ts=0
     now="$(date +%s)"
     [[ -s "$cd_file" ]] && until_ts="$(cat "$cd_file" 2>/dev/null || echo 0)"
     (( now < until_ts )) && return 0   # already cooling down from an earlier tick

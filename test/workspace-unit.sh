@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # variables set in subshells are read by the entrypoint blocks run with eval
 # Unit tests for the workspace: one repo at /workspace, or several in /workspace/<repo>.
 # NO docker daemon, NO network, NO root: the repos are local bare repos (file://).
 #
@@ -43,6 +44,7 @@ mkbare home; mkbare 3d; mkbare keys dev
 BLOCK="$(awk '/^# --- 9\. Workspace/{f=1} f&&/^# --- 10\./{exit} f{print}' "$REPO_ROOT/entrypoint.sh")"
 run9() {  # run9 <workspace> <env...>: section 9 as the entrypoint runs it, sandboxed
     local ws="$1"; shift
+    # shellcheck disable=SC2163  # "$@" is VAR=VAL pairs, exported as given
     ( export "$@" 2>/dev/null
       log()  { echo "[entrypoint] $*"; }
       die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
@@ -70,7 +72,7 @@ else
     out="$(run9 "$WS" GIT_REPOS="$B/home.git $B/3d.git $B/keys.git#dev")"; rc=$?
     (( rc == 0 )) && [[ -f "$WS/3d/WIP" ]] && grep -q '3d (existing checkout, left as it is)' <<<"$out" \
         && ok "a second boot leaves existing checkouts (and their work) alone" || bad "re-boot (rc=$rc): $out"
-    rm -rf "$WS/home"
+    rm -rf "${WS:?}/home"
     out="$(run9 "$WS" GIT_REPOS="$B/home.git $B/3d.git $B/keys.git#dev")"
     [[ -d "$WS/home/.git" ]] && grep -q 'cloning .*home.git' <<<"$out" && ! grep -q 'cloning .*3d.git' <<<"$out" \
         && ok "a missing (or newly listed) repo is cloned on the next boot, and only that one" || bad "partial re-clone: $out"

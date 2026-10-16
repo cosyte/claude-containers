@@ -87,7 +87,7 @@ echo "[scm] interval  : ${INTERVAL}s   queue: $QUEUE_DIR"
 echo
 
 poll() {
-    local json events line key kind num title url n=0
+    local json events key kind num title url n=0
     json="$(gh pr list --state open --limit "$PR_LIMIT" $PR_FILTER \
         --json number,title,url,headRefOid,mergeable,reviewDecision,statusCheckRollup 2>/dev/null)" || {
         echo "[scm] gh pr list failed (auth? not a GitHub repo?): will retry next poll"; return; }

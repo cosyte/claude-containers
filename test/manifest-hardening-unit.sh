@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034,SC2088  # STRICT is read by the sourced is_unpinned; "~/" is message text
 # manifest-hardening-unit.sh: pure-static + function-level tests for the
 # reproducible-manifest + install-script hardening. NO docker, NO network, NO build.
 #

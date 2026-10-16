@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # variables set in subshells are read by the entrypoint blocks run with eval
 # Unit tests for what a session is told about its container: NO docker, NO root.
 #
 #   - bin/claude-container-facts: the section with and without chromium on PATH, the

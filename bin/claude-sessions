@@ -362,7 +362,7 @@ start_one() {  # start_one <name> <claude-session flag>
         say "$n: NOT started, tmux could not open window $TMUX_SESSION:$n"
         return 1
     fi
-    local rc="Remote Control $(rc_name "$n")"
+    local rc; rc="Remote Control $(rc_name "$n")"
     [[ "$(cget "$n" rc)" == off ]] && rc="no Remote Control"
     local model; model="$(cget "$n" model)"; [[ -n "$model" ]] || model="$(cenv CLAUDE_MODEL)"
     say "$n: started in window $TMUX_SESSION:$n ($d; $rc; model ${model:-opus})"
@@ -610,13 +610,13 @@ pane_limited() {  # the window shows a usage-limit message (the same phrases cla
 # Restart one session onto the new account, resuming its conversation. A session a usage limit
 # had stopped is then told to continue: getting past a limit is the usual reason to switch.
 switch_one() {  # switch_one <name>
-    local n="$1" limited=0 i st=""
+    local n="$1" limited=0 st=""
     pane_limited "$n" && limited=1
     record_one "$n"
     respawn_one "$n" --continue >/dev/null 2>&1 || return 1
     say "$n: restarted onto the new account (its conversation resumes)"
     if (( limited )) && is_on "$SWITCH_NUDGE"; then
-        for i in $(seq 1 "${CLAUDE_SESSIONS_SWITCH_NUDGE_TRIES:-20}"); do
+        for _ in $(seq 1 "${CLAUDE_SESSIONS_SWITCH_NUDGE_TRIES:-20}"); do
             st="$(session_state "$n" "$(live_sessions)")"; [[ "$st" == idle ]] && break; sleep 3
         done
         if [[ "$st" == idle ]] && ( cmd_send "$n" "[account-switch] This container now uses a different Claude account, so the usage limit that stopped you no longer applies. Continue what you were doing." ) >/dev/null 2>&1; then
@@ -663,7 +663,7 @@ account_switch_pass() {
 
 # account [--now]: the Claude account this container uses, and how far a switch has got.
 cmd_account() {
-    local email acct t a pend
+    local email acct t pend
     email="$(jq -r '.oauthAccount.emailAddress // "unknown"' "$CONFIG_DIR/.claude.json" 2>/dev/null || echo unknown)"
     acct="$(cat "$CONFIG_DIR/.credentials-account" 2>/dev/null || true)"
     echo "account: $email${acct:+ (${acct:0:8})}"
@@ -671,7 +671,7 @@ cmd_account() {
         echo "switch : none in progress (every session runs on this account)"
         return 0
     fi
-    read -r t a < "$ACCOUNT_SWITCH_FILE"
+    read -r t _ < "$ACCOUNT_SWITCH_FILE"
     if [[ "${1:-}" == --now ]]; then account_switch_pass --now; fi
     pend="$(switch_pending | paste -sd' ' -)"
     if [[ -n "$pend" ]]; then

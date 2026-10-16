@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # variables set in subshells are read by the entrypoint blocks run with eval
 # Unit tests for --gpu: NO docker daemon, NO GPU, NO root.
 #
 #   - claude-compose-gen: a GPU service gets the CDI device, a RAM /scratch and

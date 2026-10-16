@@ -40,7 +40,7 @@
 #   CLAUDE_EXTRA_ARGS             extra args appended to `claude`
 set -uo pipefail
 
-cd /workspace 2>/dev/null || cd "$HOME"
+cd /workspace 2>/dev/null || cd "$HOME" || exit 1
 
 PROMPT="${CLAUDE_AUTOPILOT_CMD:-}"
 INTERVAL="${CLAUDE_AUTOPILOT_INTERVAL:-3600}"
@@ -241,7 +241,7 @@ while :; do
     #      to prevent. Keeping stderr out of the JSON is what makes the checks below trustworthy.
     err="$out.err"
     ok=1
-    # shellcheck disable=SC2086  # flag vars are intentionally word-split
+    # shellcheck disable=SC2086,SC2046  # flag vars and flag functions are intentionally word-split
     claude -p "$RUN_PROMPT" $(perm_flags) $(model_flags) --output-format json $resume_flags $EXTRA \
         </dev/null >"$out" 2>"$err" || ok=0
 
@@ -358,7 +358,7 @@ while :; do
         if [ "$ok" = 1 ]; then dest="$QUEUE_DIR/done/$ts-$(basename "$task_path")"
         else                   dest="$QUEUE_DIR/failed/$ts-$(basename "$task_path")"; fi
         mv -f "$task_path" "$dest" 2>/dev/null || true
-        echo "[autopilot] task     : $([ "$ok" = 1 ] && echo done || echo FAILED) → $(basename "$dest")"
+        echo "[autopilot] task     : $([ "$ok" = 1 ] && echo "done" || echo FAILED) → $(basename "$dest")"
     fi
 
     if (( unknown )); then

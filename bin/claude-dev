@@ -5,7 +5,7 @@
 # container's published port actually reaches them.
 set -uo pipefail
 
-cd /workspace 2>/dev/null || cd "$HOME"
+cd /workspace 2>/dev/null || cd "$HOME" || exit 1
 CMD="${CLAUDE_DEV_CMD:-}"
 
 if [[ -z "$CMD" ]]; then

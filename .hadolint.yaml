@@ -1,0 +1,14 @@
+# hadolint config for `make lint`. Only rules the Dockerfile breaks on purpose, each with its reason.
+ignored:
+  # Debian packages come from the base image's own trixie mirror; an exact =version pin breaks the
+  # build as soon as the mirror moves on. Reproducibility comes from the pinned base image instead.
+  - DL3008
+  # Every pipe ends in the command whose status counts (sha256sum -c, grep -q, cut, sort | head);
+  # pipefail would fail `--help | grep -q` on the SIGPIPE grep -q causes by exiting early.
+  - DL4006
+  # CLAUDE_UID is 1000 by default; an operator's own UID is never large enough to bloat lastlog.
+  - DL3046
+  # `mkdir -p -m 755 /etc/apt/keyrings`: /etc/apt always exists, so -m applies to the one new dir.
+  - SC2174
+  # The single-quoted printf lines write script text into the image, to expand at run time.
+  - SC2016

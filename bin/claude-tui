@@ -66,8 +66,8 @@ declare -gA STACK_SCENARIO=()  # stack name -> its *.conf, only when exactly one
 
 discover_stacks() {
     STACK_FILE=(); STACK_ENV=(); STACK_SCENARIO=()
-    local name state project port repo status cproj cfgfile csvc
-    while IFS=$'\t' read -r name state project port repo status cproj cfgfile csvc; do
+    local name state project port repo cproj cfgfile csvc
+    while IFS=$'\t' read -r name state project port repo _ cproj cfgfile csvc; do
         [[ -n "$cproj" && -n "$cfgfile" ]] && STACK_FILE["$cproj"]="$cfgfile"
     done < <(fleet_rows)
     # Pre-seed stacks that have no containers created yet (see header note).
@@ -435,11 +435,11 @@ container_menu() {  # container_menu <project>
 
 standalone_menu() {
     while true; do
-        local rows menu_items=() name state project port repo status cproj cfgfile csvc icon
+        local rows menu_items=() name state project port repo cproj cfgfile csvc icon
         rows="$(fleet_rows | awk -F'\t' '$7==""')"
         menu_items=()
         if [[ -n "$rows" ]]; then
-            while IFS=$'\t' read -r name state project port repo status cproj cfgfile csvc; do
+            while IFS=$'\t' read -r name state project port repo _ cproj cfgfile csvc; do
                 [[ -z "$name" ]] && continue
                 icon="○"; [[ "$state" == running ]] && icon="●"
                 menu_items+=("$project" "$icon $state  ssh:$port  auth:$(container_auth_volume "$name")  ${repo:-(no repo)}")
@@ -462,11 +462,11 @@ stack_menu() {  # stack_menu <stack>
     local stack="$1"
     local file="${STACK_FILE[$stack]}"
     while true; do
-        local rows known=() menu_items=() name state project port repo status cproj cfgfile csvc icon auth
+        local rows known=() menu_items=() name state project port repo cproj cfgfile csvc icon auth
         rows="$(fleet_rows | awk -F'\t' -v s="$stack" '$7==s')"
         auth="$(stack_auth_volume "$stack")"
         if [[ -n "$rows" ]]; then
-            while IFS=$'\t' read -r name state project port repo status cproj cfgfile csvc; do
+            while IFS=$'\t' read -r name state project port repo _ cproj cfgfile csvc; do
                 [[ -z "$name" ]] && continue
                 known+=("$csvc")
                 icon="○"; [[ "$state" == running ]] && icon="●"

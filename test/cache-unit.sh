@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2088  # "~/" in a message is text, not a path
 # cache-unit.sh: pure-static + function-level tests for the shared tool cache.
 # NO docker, NO network, NO image build: safe for CI / scripts/verify.sh.
 #

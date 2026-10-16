@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # variables set in subshells are read by the entrypoint blocks run with eval
 # Unit tests for the GitHub token check: NO docker, NO root, NO network.
 #
 #   - bin/claude-gh-check against a fake curl on PATH returning scripted codes: every

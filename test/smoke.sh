@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # variables are read inside the eval'd strings passed to check
 # Automated smoke test for the Claude Code container image.
 #
 # Validates everything that does NOT require the interactive OAuth flow or a
@@ -137,7 +138,7 @@ docker run -d --name "$CN" \
     "$IMAGE" >/dev/null
 
 # wait for the entrypoint to reach the tmux launch (or die)
-for i in $(seq 1 60); do
+for _ in $(seq 1 60); do
     log="$(docker logs "$CN" 2>&1 || true)"
     grep -q "Claude Code session 'claude' started in tmux" <<<"$log" && break
     [[ "$(docker inspect -f '{{.State.Running}}' "$CN" 2>/dev/null)" == "true" ]] \
@@ -1223,7 +1224,6 @@ docker run -d --name "$SESSCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAM
     -v "$SESSCFG:/home/claude/.claude" -v "$MRVOL:/repos:ro" "$IMAGE" >/dev/null 2>&1 || true
 wait_tmux "$SESSCN" || true
 for _ in $(seq 1 30); do docker logs "$SESSCN" 2>&1 | grep -q "Named sessions" && break; sleep 1; done
-sesslog="$(docker logs "$SESSCN" 2>&1 || true)"
 sx() { docker exec "$SESSCN" gosu claude "$@"; }
 check "every declared session is started, '*' after the named ones" \
     '[ "$(sx tmux list-windows -t claude -F "#{window_name}" | tr "\n" " ")" = "main alpha review beta " ]'

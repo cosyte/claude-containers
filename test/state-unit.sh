@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # variables set in subshells are read by the entrypoint blocks run with eval
 # Unit tests for private per-container state (/state): NO docker daemon, NO root.
 #
 # /cache is one volume shared by every container on the host, all running as UID 1000, so a
@@ -147,7 +148,7 @@ echo "== claude-launch: its own claude-state-<name> at /state =="
 mkdir -p "$TMPD/ws"
 launch() {  # launch <project>: run the launcher against the stub
     rm -f "$TMPD/run-args" "$TMPD/created"
-    STUB_STATE="$TMPD" PATH="$STUBD:$PATH" CLAUDE_PORTS_USED_OVERRIDE="" CLAUDE_GPU= \
+    STUB_STATE="$TMPD" PATH="$STUBD:$PATH" CLAUDE_PORTS_USED_OVERRIDE="" CLAUDE_GPU="" \
         "$LAUNCH" "$1" --workspace "$TMPD/ws" --port 2299 >"$TMPD/launch.log" 2>&1
 }
 launch alpha; rc=$?

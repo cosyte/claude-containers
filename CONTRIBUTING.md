@@ -27,7 +27,7 @@ vulnerabilities go through private reporting rather than an issue.
 1. Fork and branch from `main`.
 2. **Run the gates locally before pushing:**
    ```bash
-   npm run lint   # make lint (bash -n over every shell entrypoint) plus the no-em-dash check
+   npm run lint   # make lint (bash -n, shellcheck -S warning, hadolint; `mise install` once) plus the no-em-dash check
    npm test       # every unit suite, in parallel (no Docker required); TEST_JOBS caps it
    ```
    Both must be clean. CI runs exactly these (the required checks `ci` and `no-emdash`).

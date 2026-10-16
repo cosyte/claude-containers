@@ -20,9 +20,10 @@ fi
 # "-" = main only, or no healthcheck has run yet. One inspect for the whole fleet.
 declare -A SESS=()
 if command -v jq >/dev/null 2>&1; then
+    mapfile -t names < <(cut -f1 <<<"$rows")
     while IFS=$'\t' read -r n s; do
         [[ -n "$n" ]] && SESS[$n]="$s"
-    done < <(docker inspect $(cut -f1 <<<"$rows") 2>/dev/null | jq -r '.[]
+    done < <(docker inspect "${names[@]}" 2>/dev/null | jq -r '.[]
         | [ (.Name | ltrimstr("/")),
             (((.State.Health.Log // []) | last // {} | .Output // "")
              | capture("sessions: (?<s>[0-9]+/[0-9]+ up)(?<p> \\([^)]*\\))?").s // "-") ] | @tsv' 2>/dev/null || true)

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2088  # "~" here is message text or a literal pattern, not a path
 # mise-unit.sh: pure-static tests for the baked `mise` toolchain provisioner.
 # NO docker, NO network, NO image build: safe for CI / scripts/verify.sh.
 #

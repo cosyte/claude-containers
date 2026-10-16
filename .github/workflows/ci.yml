@@ -22,7 +22,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: lint (bash -n over all shell entrypoints)
+      - name: install the linters at the mise.toml pins (shellcheck, hadolint)
+        uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+      - name: lint (bash -n, shellcheck -S warning, hadolint)
         run: make lint
       # One step: test/run-all.sh finds every suite by glob and runs them in parallel, so there
       # is no list here to drift from package.json. Its summary names each suite.
