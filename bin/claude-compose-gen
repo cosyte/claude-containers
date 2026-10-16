@@ -863,6 +863,11 @@ for row in "${FINAL[@]}"; do
         # came up with no chrome-devtools MCP while the tag insisted otherwise. Emit it per
         # service so the built image matches the tag it is given.
         WITH_BROWSER: "${BROWSER[$svc]:-0}"
+        # Provenance labels: interpolations the builder sets (the rebuild script exports
+        # them), never a literal commit, which would go stale the moment it was written.
+        GIT_COMMIT: "\${GIT_COMMIT:-unknown}"
+        GIT_DIRTY: "\${GIT_DIRTY:-unknown}"
+        BUILD_DATE: "\${BUILD_DATE:-unknown}"
     container_name: claude-${svc}
     hostname: ${svc}
     restart: unless-stopped

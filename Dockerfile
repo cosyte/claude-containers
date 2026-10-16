@@ -734,3 +734,18 @@ HEALTHCHECK --interval=60s --timeout=15s --start-period=120s --retries=3 \
     CMD ["/usr/local/bin/claude-healthcheck"]
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# --- Provenance labels --------------------------------------------------------
+# Which commit and CLI this image was built from, so a reader (claude-list, the
+# rebuild script) can tell an image that is behind main. The Makefile and the
+# compose-gen build args pass them; a bare `docker build` leaves them `unknown`,
+# and an older image has none at all: readers show `unknown`, never fail. Last
+# in the file on purpose: a new commit changes only these metadata lines, so
+# every cached layer above stays a cache hit.
+ARG GIT_COMMIT=unknown
+ARG GIT_DIRTY=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      claude.dirty="${GIT_DIRTY}" \
+      claude.cli-version="${CLAUDE_CODE_VERSION}"

@@ -150,6 +150,13 @@ runtime-managed cache. The launcher reads the image's `claude.browser` LABEL to
 fail loud + early if `--browser` is requested against the lean image; the
 in-container entrypoint can't read its own image labels, so it auto-detects the
 variant by probing the baked binaries on `PATH`.
+The image also carries provenance labels, set last in the Dockerfile so a new
+commit changes only metadata and every cached layer stays a hit:
+`org.opencontainers.image.revision` (the commit), `claude.dirty` (whether the tree
+had changes), `org.opencontainers.image.created` (UTC) and `claude.cli-version`.
+The Makefile's `BUILD_ARGS` fill them from git; `claude-compose-gen` emits them as
+`${GIT_COMMIT:-unknown}`-style interpolations, never a literal commit. Older images
+have none, so a reader treats a missing label as `unknown`.
 Chrome is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
 (required in unprivileged Docker; Chrome's user-namespace sandbox conflicts
 with the default seccomp).

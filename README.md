@@ -134,6 +134,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_EXTRA_ARGS` |: | Extra args to `claude` (or `--extra-args`) |
 | `CLAUDE_MCP_ENABLED` |: | CSV of baked MCP servers to load (empty = all) |
 | `WITH_BROWSER` | `0` | Build arg: 1 bakes Chromium + chrome-devtools-mcp (+~200 MB). `make build-browser` flips it. |
+| `GIT_COMMIT`/`GIT_DIRTY`/`BUILD_DATE` | from git | Build args for the provenance labels (`org.opencontainers.image.revision`, `claude.dirty`, `org.opencontainers.image.created`, plus `claude.cli-version`). `make build` fills them from the checkout; a compose build reads them from the environment, and an image built without them says `unknown`. |
 | `CLAUDE_BROWSER` | auto | Tri-state for the chrome-devtools MCP: unset = auto (a browser image self-enables it), `1`/`--browser` = force on (fails loud on a lean image), `0`/`--no-browser` = opt out. Also gates the `frontend-debugging` skill and the browser line of the session's container facts. |
 | `CLAUDE_GPU` | `0` | `1`/`--gpu` gives the session the host's NVIDIA GPU through CDI (see [GPU sessions](#gpu-sessions-optional)); `--no-gpu` opts out of an ambient `1`. Fixed at container creation. |
 | `CLAUDE_GPU_SCRATCH_TMPFS` | `4g` | Size of the RAM `/scratch` a GPU session gets instead of the disk volume. Charged to `CLAUDE_MEM_LIMIT`. |
