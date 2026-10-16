@@ -1610,7 +1610,7 @@ echo "== entrypoint.sh §7a: operator policy is delivered where the agent user c
 # regresses. Only its two root-only path constants are redirected into a sandbox so it
 # can run unprivileged, and that redirect is asserted below so this can never degrade
 # into a suite that writes to the real /etc.
-MS_BLOCK="$(awk '/^# --- 7a\. Managed settings/{f=1} f && /^# --- 8\. /{exit} f{print}' "$ENTRYPOINT")"
+MS_BLOCK="$(awk '/^# --- 7a\. Managed settings/{f=1} f && /^# --- 7b\. /{exit} f{print}' "$ENTRYPOINT")"
 MSD="$(mktemp -d)"; trap 'rm -rf "$STUB" "$APD" "$GKD" "$EGD" "$MSD"' EXIT
 
 ms_block() { printf '%s\n' "$MS_BLOCK" \

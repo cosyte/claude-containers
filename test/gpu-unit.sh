@@ -406,7 +406,7 @@ NOTE="$REPO_ROOT/claude-config/CLAUDE.gpu.md"
     && ok "the GPU note teaches claude-gpu status/run and claude-blender-install" || bad "the GPU note is missing its essentials"
 grep -q 'claude-containers: GPU session note' "$NOTE" && grep -q 'GPU_NOTE_MARK="claude-containers: GPU session note"' "$REPO_ROOT/entrypoint.sh" \
     && ok "the note carries the marker the entrypoint uses to never overwrite an operator's file" || bad "the note's marker must match the entrypoint's"
-awk '/^# --- 7b\. GPU note/,/^# --- 8\./' "$REPO_ROOT/entrypoint.sh" | grep -q 'CLAUDE_GPU:-0' \
+awk '/^# --- 7c\. Session memory/,/^# --- 8\./' "$REPO_ROOT/entrypoint.sh" | grep -q 'CLAUDE_GPU:-0' \
     && ok "the note is written only when CLAUDE_GPU=1" || bad "the GPU note must be gated on CLAUDE_GPU"
 
 echo
