@@ -703,6 +703,8 @@ for g in "${!GPU[@]}"; do
     [[ -n "${SEEN[$g]:-}" ]] \
         || die "--gpu names '$g', which is not a repo in this stack (repos: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
 done
+(( ${#CONTAINERS[@]} == 0 )) || [[ "$CONTAINERS_SECCOMP" != *[\"\\]* ]] \
+    || die "--containers: this checkout's path ($CLAUDE_DOCKER_ROOT) holds a quote or a backslash, which the compose file cannot carry; move the checkout"
 for g in "${!CONTAINERS[@]}"; do
     [[ -n "${SEEN[$g]:-}" ]] \
         || die "--containers names '$g', which is not a repo in this stack (repos: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
@@ -951,7 +953,7 @@ EOF
     echo "      - no-new-privileges:true"
     # --containers: the options of containers_run_args (bin/_common.sh), and nothing else.
     if [[ -n "${CONTAINERS[$svc]:-}" ]]; then
-        echo "      - \"seccomp=${CONTAINERS_SECCOMP}\""
+        echo "      - \"seccomp=${CONTAINERS_SECCOMP//\$/\$\$}\""
         echo "      - apparmor=unconfined"
         echo "      - systempaths=unconfined"
     fi

@@ -306,6 +306,21 @@ cgen --out "$TMPD/cdc-bad.yml" --containers nosuch acme/api; rc=$?
     && ok "compose: --containers naming no repo of the stack refuses" \
     || bad "compose: --containers nosuch must refuse (rc=$rc)"
 
+# The ownership passes leave a nested container's ids alone (postgres's 999 is 100998 here): a
+# real find over a tree holding the agent's file and a "nested" one, with chown recorded.
+# shellcheck disable=SC2034  # read by the extracted own_tree
+own_out="$(
+    CLAUDE_UID=1000 CLAUDE_GID=1000
+    eval "$(sed -n '/^OWN_TREE_KEEP_IDS=/,/^}/p' "$REPO_ROOT/entrypoint.sh")"
+    find() { printf '%s\n' "$*"; }
+    own_tree /ws; OWN_TREE_KEEP_IDS="100000 165535"; own_tree /ws
+)"
+[[ "$(sed -n 1p <<<"$own_out")" == '/ws ( ! -uid 1000 -o ! -gid 1000 ) -execdir chown -h 1000:1000 {} +' \
+   && "$(sed -n 2p <<<"$own_out")" == '/ws ( ! -uid 1000 -o ! -gid 1000 ) ! ( -uid +99999 -uid -165536 ) -execdir chown -h 1000:1000 {} +' ]] \
+    && grep -q 'OWN_TREE_KEEP_IDS="$CONTAINERS_SUBID_START' "$(ep_section 2d)" \
+    && ok "own_tree is unchanged by default and skips the subordinate range on a --containers session" \
+    || bad "own_tree must skip uids 100000..165535 only when §2d sets OWN_TREE_KEEP_IDS: $own_out"
+
 # The profile is the vendored upstream through containers/seccomp.jq, nothing else.
 if command -v jq >/dev/null 2>&1; then
     diff -q <(jq -f "$REPO_ROOT/containers/seccomp.jq" "$REPO_ROOT/containers/seccomp-upstream.json") \

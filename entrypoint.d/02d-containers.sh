@@ -15,7 +15,8 @@
 CONTAINERS_RUNTIME_DIR="/run/user/$CLAUDE_UID"
 CONTAINERS_SOCK="$CONTAINERS_RUNTIME_DIR/podman/podman.sock"
 CONTAINERS_STORE_DIR="$CLAUDE_HOME/.local/share/containers"
-CONTAINERS_SUBIDS="$CLAUDE_USER:100000:65536"
+CONTAINERS_SUBID_START=100000 CONTAINERS_SUBID_COUNT=65536
+CONTAINERS_SUBIDS="$CLAUDE_USER:$CONTAINERS_SUBID_START:$CONTAINERS_SUBID_COUNT"
 CONTAINERS_LOG_DIR=/var/log/claude-containers
 CONTAINERS_PROFILE_D=/etc/profile.d/claude-containers.sh
 UIDMAP_HELPER=/usr/local/lib/claude/containers/uidmap-helper
@@ -26,6 +27,9 @@ if [[ "${CLAUDE_CONTAINERS:-0}" =~ ^(1|true|yes|on)$ ]]; then
         chmod 644 "$_f.tmp" && mv -f "$_f.tmp" "$_f"
     done
     unset _f
+    # The workspace ownership passes (§9, §12g) leave the nested containers' ids alone.
+    # shellcheck disable=SC2034  # own_tree (entrypoint.sh) reads it
+    OWN_TREE_KEEP_IDS="$CONTAINERS_SUBID_START $((CONTAINERS_SUBID_START + CONTAINERS_SUBID_COUNT - 1))"
     # The store's top directory only: what is inside belongs to the mapped ids.
     install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" "$CLAUDE_HOME/.local" "$CLAUDE_HOME/.local/share"
     install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 700 "$CONTAINERS_STORE_DIR"
@@ -34,9 +38,11 @@ if [[ "${CLAUDE_CONTAINERS:-0}" =~ ^(1|true|yes|on)$ ]]; then
     rm -rf "$CONTAINERS_RUNTIME_DIR"
     install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 700 "$CONTAINERS_RUNTIME_DIR" "$CONTAINERS_RUNTIME_DIR/podman"
     install -d -m 755 "${UIDMAP_SOCK%/*}" "$CONTAINERS_LOG_DIR"
-    # Both restart when they exit; their output stays out of the boot log.
+    # Both restart when they exit; their output stays out of the boot log. The service waits
+    # (bounded) for the helper: podman with subordinate ids and no helper fails its first map.
     ( while :; do "$UIDMAP_HELPER" "$UIDMAP_SOCK"; echo "uid-map helper exited ($?), restarting"; sleep 1; done ) \
         >> "$CONTAINERS_LOG_DIR/uidmap-helper.log" 2>&1 &
+    for _ in $(seq 20); do [[ -S "$UIDMAP_SOCK" ]] && break; sleep 0.25; done
     ( while :; do
           asclaude env XDG_RUNTIME_DIR="$CONTAINERS_RUNTIME_DIR" \
               podman system service --time=0 "unix://$CONTAINERS_SOCK"

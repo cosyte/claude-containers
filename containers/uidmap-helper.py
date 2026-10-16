@@ -81,7 +81,13 @@ def write_as(uid, dirfd, name, text):
 def handle(conn):
     pid_, uid, _gid = struct.unpack("3i", conn.getsockopt(
         socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
-    words = conn.recv(65536).decode().split()
+    data = b""
+    while len(data) < 65536:
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+    words = data.decode().split()
     if len(words) < 5 or words[0] not in ("uid", "gid") or (len(words) - 2) % 3:
         return "bad request"
     kind, pid = words[0], int(words[1])
@@ -112,6 +118,8 @@ def main():
     srv.listen(16)
     while True:
         conn, _ = srv.accept()
+        # One request at a time: a client that connects and sends nothing must not stall the rest.
+        conn.settimeout(5)
         with conn:
             try:
                 reply = handle(conn)

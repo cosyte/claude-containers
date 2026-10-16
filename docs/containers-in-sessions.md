@@ -46,6 +46,18 @@ the exact list for both):
 | `-v claude-containers-<name>:/home/claude/.local/share/containers` | the image store: overlay on the container's own overlayfs is refused. `claude-rm --purge` and `compose down -v` delete it |
 | `-e CLAUDE_CONTAINERS=1` | the entrypoint's §2d (below) |
 
+**The cost, plainly:** the session's root is host root (Docker gives it no user-namespace
+remap), and with `systempaths` and AppArmor unconfined it can write host-wide sysctls such as
+`kernel.core_pattern`, which needs no capability and makes the host kernel run a program as host
+root. The agent cannot reach that (uid 1000, `CapEff` 0, `no-new-privileges`), so it stays one
+root-side bug away: the entrypoint, sshd, the egress firewall and the uid-map helper are host
+attack surface in a `--containers` session. That is the "weightiest row" below, chosen with it.
+
+Every `--containers` session uses the same subordinate range (`100000:65536`), so nested
+processes in two sessions run as the same host uids; namespaces and separate store volumes keep
+them apart. Files a nested container writes into the workspace (a bind-mounted data directory)
+keep those ids: the boot-time ownership pass leaves that range alone.
+
 Kept as in every session: `--cap-drop ALL` with production's minimal cap set, `no-new-privileges`,
 no `--privileged`, no `CAP_SYS_ADMIN`, no host Docker socket. A session without `--containers`
 gets none of the above (asserted by the unit suites and by smoke).
