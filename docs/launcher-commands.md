@@ -81,7 +81,8 @@ claude-compose-gen --org ORG --out FILE [--active REPOS]... [--dormant-profile N
                    [--marketplace REPO=NAME=URL]... [--plugin REPO=PLUGIN[,...]]...
                    [--include GLOB] [--exclude GLOB] [--forks] [--archived]
                    [--scenario FILE] [--env-file FILE] [--port-base N] [--limit N]
-                   [--all-dormant] [--network NAME] [--cache VOLUME | --no-cache]
+                   [--all-dormant] [--network NAME] [--extra-network REPO=NETWORK]...
+                   [--scratch-size REPO=SIZE]... [--cache VOLUME | --no-cache]
                    [--mount REPO=VOLUME:/PATH[:ro]]... [--build-context DIR]
 claude-compose-gen --out FILE repo-a repo-b:dev      # explicit list, no gh needed
 ```
@@ -178,6 +179,12 @@ so a repo keeps its port whether active or dormant.
 - `--network NAME`: attach every service to an existing external network (create it first with
   `docker network create NAME`) instead of the stack's own `<project>_default`, so several
   stacks share one network.
+- `--extra-network REPO=NETWORK`: one service also joins another existing external network (e.g.
+  a telemetry network; create it first). The service keeps the stack's default network, its own
+  or `--network`'s; the network is declared external, so `down` never deletes it.
+- `--scratch-size REPO=SIZE`: the RAM `/scratch` size of one `--gpu` or `--browser` service, over
+  `CLAUDE_GPU_SCRATCH_TMPFS` / `CLAUDE_BROWSER_SCRATCH_TMPFS`. Refused for any other service:
+  its `/scratch` is a disk volume. See [temp-space.md](temp-space.md).
 - `--cache VOLUME` / `--no-cache`: as for `claude-launch`, one volume for the whole stack.
 - `--mount REPO=VOLUME:/PATH[:ro]`: mount an existing named volume into one service, e.g.
   another stack's checkout read-only. The volume is declared external, so `down -v` never

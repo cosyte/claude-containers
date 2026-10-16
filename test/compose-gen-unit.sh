@@ -339,6 +339,134 @@ else
     bad "could not generate the lockdown services: the strict cap_add checks are void"
 fi
 
+# --- --scratch-size / --extra-network: per-service /scratch size, a second network ----------
+echo
+echo "== --scratch-size / --extra-network =="
+OUTX="$TMPD/x/dc.yml"
+gx() { env CLAUDE_PORTS_USED_OVERRIDE= "$GEN" --env-file "$ENVF" --out "$OUTX" --port-base 3900 \
+    --gpu g1 --browser b1 "$@" z/g1 z/b1 z/plain; }
+svc_block() { awk -v s="  $1:" '$0==s{f=1;print;next} f&&/^  [a-z0-9._-]+:$/{exit} f&&/^[^ ]/{exit} f' "$OUTX"; }
+if gx >/dev/null 2>&1; then
+    BASE="$(cat "$OUTX")"
+    # The same stack (same --out, so ports are read back) with both flags.
+    if gx --scratch-size g1=8g --scratch-size b1=512m --extra-network g1=telemetry \
+          --extra-network g1=telemetry --extra-network b1=metrics >/dev/null 2>&1; then
+        grep -qx '      - /scratch:rw,nosuid,nodev,exec,size=8g' <<<"$(svc_block g1)" \
+            && ok "--scratch-size sets a GPU service's /scratch tmpfs (8g over the 4g default)" \
+            || bad "--scratch-size g1=8g not on g1's /scratch tmpfs"
+        grep -qx '      - /scratch:rw,nosuid,nodev,exec,size=512m' <<<"$(svc_block b1)" \
+            && ok "--scratch-size sets a browser service's /scratch tmpfs (512m)" \
+            || bad "--scratch-size b1=512m not on b1's /scratch tmpfs"
+        [[ "$(awk '/^    networks:$/{f=1;print;next} f&&/^    [a-z_]+:/{exit} f' <<<"$(svc_block g1)")" \
+            == $'    networks:\n      - default\n      - "telemetry"' ]] \
+            && ok "--extra-network: the service joins default AND telemetry (a repeat is joined once)" \
+            || bad "--extra-network g1=telemetry: g1's networks: should be [default, telemetry]"
+        grep -q '^    networks:' <<<"$(svc_block plain)" \
+            && bad "a service with no --extra-network got a networks: list" \
+            || ok "a service with no --extra-network keeps no networks: list"
+        NETS="$(awk '/^networks:/{p=1; print; next} p && /^[^ ]/{p=0} p' "$OUTX")"
+        [[ "$NETS" == $'networks:\n  "metrics":\n    name: "metrics"\n    external: true\n  "telemetry":\n    name: "telemetry"\n    external: true' ]] \
+            && ok "--extra-network networks are declared external at the top level, sorted" \
+            || bad "top-level networks: wrong without --network: $NETS"
+        # Nothing else moved: the diff against the flagless stack is exactly the added lines.
+        GOT_DIFF="$(diff <(printf '%s\n' "$BASE") "$OUTX" | grep '^[<>]')"
+        WANT_DIFF="$(cat <<'EOF'
+<       - /scratch:rw,nosuid,nodev,exec,size=3g
+>       - /scratch:rw,nosuid,nodev,exec,size=512m
+>     networks:
+>       - default
+>       - "metrics"
+<       - /scratch:rw,nosuid,nodev,exec,size=4g
+>       - /scratch:rw,nosuid,nodev,exec,size=8g
+>     networks:
+>       - default
+>       - "telemetry"
+> 
+> networks:
+>   "metrics":
+>     name: "metrics"
+>     external: true
+>   "telemetry":
+>     name: "telemetry"
+>     external: true
+EOF
+)"
+        [[ "$GOT_DIFF" == "$WANT_DIFF" ]] \
+            && ok "the flags change only their own lines (the rest is byte-identical)" \
+            || bad "unexpected diff from the flags: $GOT_DIFF"
+    else
+        bad "--scratch-size / --extra-network generation failed"
+    fi
+    # With --network, the shared default and the extra network both sit in one block.
+    if gx --network shared --extra-network plain=telemetry >/dev/null 2>&1; then
+        NETS="$(awk '/^networks:/{p=1; print; next} p && /^[^ ]/{p=0} p' "$OUTX")"
+        [[ "$NETS" == $'networks:\n  default:\n    name: shared\n    external: true\n  "telemetry":\n    name: "telemetry"\n    external: true' ]] \
+            && ok "--extra-network with --network: one networks: block, default first" \
+            || bad "networks: wrong with --network: $NETS"
+        [[ "$(awk '/^    networks:$/{f=1;print;next} f&&/^    [a-z_]+:/{exit} f' <<<"$(svc_block plain)")" \
+            == $'    networks:\n      - default\n      - "telemetry"' ]] \
+            && ok "with --network the service still joins default (the shared network)" \
+            || bad "with --network: plain's networks: should be [default, telemetry]"
+    else
+        bad "--extra-network with --network generation failed"
+    fi
+    # Absent flags: byte-identical to the flagless stack.
+    gx >/dev/null 2>&1 && [[ "$(cat "$OUTX")" == "$BASE" ]] \
+        && ok "no --scratch-size / --extra-network: output byte-identical" \
+        || bad "regenerating without the flags changed the output"
+else
+    bad "baseline generation for --scratch-size / --extra-network failed"
+fi
+# Refusals, each naming the problem.
+xerr() { local out; out="$(gx "$@" 2>&1)" && return 1; printf '%s' "$out"; }
+[[ "$(xerr --scratch-size g1=lots)" == *"--scratch-size value must be a size like 8g (got 'lots')"* ]] \
+    && ok "--scratch-size refuses a bad size" || bad "--scratch-size g1=lots was not refused by size"
+[[ "$(xerr --scratch-size g1=0)" == *"must be a size like 8g"* ]] \
+    && ok "--scratch-size refuses a zero size" || bad "--scratch-size g1=0 was not refused"
+[[ "$(xerr --scratch-size g1=8)" == *"must be a size like 8g"* ]] \
+    && ok "--scratch-size refuses a size with no unit (8 bytes)" || bad "--scratch-size g1=8 was not refused"
+# A service that is both --gpu and --browser: the override wins even below the larger default.
+if gx --browser g1 --scratch-size g1=2g >/dev/null 2>&1; then
+    grep -qx '      - /scratch:rw,nosuid,nodev,exec,size=2g' <<<"$(svc_block g1)" \
+        && ok "--scratch-size beats the larger of the GPU and browser defaults" \
+        || bad "--scratch-size g1=2g lost to the GPU/browser default"
+else
+    bad "--gpu + --browser + --scratch-size generation failed"
+fi
+[[ "$(xerr --scratch-size plain=8g)" == *"whose /scratch is a disk volume"* ]] \
+    && ok "--scratch-size refuses a disk-scratch service, saying so" \
+    || bad "--scratch-size on a disk-scratch service was not refused"
+[[ "$(xerr --scratch-size nope=8g)" == *"names 'nope', which is not a service"* ]] \
+    && ok "--scratch-size refuses an unknown service" || bad "--scratch-size nope=8g was not refused"
+[[ "$(xerr --extra-network plain=a/b)" == *"must be a Docker network name"* ]] \
+    && ok "--extra-network refuses a bad network name" || bad "--extra-network plain=a/b was not refused"
+[[ "$(xerr --network shared --extra-network plain=shared)" == *"is the stack's default network already"* ]] \
+    && ok "--extra-network refuses the --network network" || bad "--extra-network = --network was not refused"
+[[ "$(xerr --extra-network plain=default)" == *"is the stack's default network already"* ]] \
+    && ok "--extra-network refuses 'default'" || bad "--extra-network plain=default was not refused"
+[[ "$(xerr --extra-network nope=telemetry)" == *"names 'nope', which is not a service"* ]] \
+    && ok "--extra-network refuses an unknown service" || bad "--extra-network nope=telemetry was not refused"
+# Both flags in a scenario .conf, one per line.
+XCONF="$TMPD/x.conf"
+OUTXC="$TMPD/xc/dc.yml"
+cat > "$XCONF" <<EOF
+--env-file $ENVF
+--out $OUTXC
+--gpu g1
+--scratch-size g1=6g
+--extra-network g1=telemetry
+z/g1
+EOF
+if gen --scenario "$XCONF"; then
+    XB="$(awk '$0=="  g1:"{f=1;print;next} f&&/^  [a-z0-9._-]+:$/{exit} f&&/^[^ ]/{exit} f' "$OUTXC")"
+    grep -q 'size=6g$' <<<"$XB" && grep -qx '      - "telemetry"' <<<"$XB" \
+        && grep -qx '  "telemetry":' "$OUTXC" \
+        && ok "--scratch-size / --extra-network work from a scenario .conf" \
+        || bad "the .conf's --scratch-size / --extra-network did not reach the compose"
+else
+    bad "generation from the --scratch-size / --extra-network .conf failed"
+fi
+
 # --- summary ------------------------------------------------------------------------------
 echo
 echo "compose-gen-unit: $PASS passed, $FAIL failed"

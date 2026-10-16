@@ -40,6 +40,11 @@
 #                       stack split costs zero extra networks: matters when the
 #                       daemon address pool is nearly full). Create it first:
 #                       docker network create <name>.
+#     --extra-network <map>  one service also joins another pre-existing EXTERNAL
+#                       network, e.g. a telemetry network. Format REPO=NETWORK
+#                       (repeatable). The service stays on the stack's default
+#                       network (its own, or --network's) too. Create it first:
+#                       docker network create <name>.
 #     --cache <volume>  shared tool cache volume mounted at /cache on every service
 #                       (default: claude-cache). One volume shared stack-wide,
 #                       so a mise/cargo/go/npm/uv install by one worker is a cache hit
@@ -84,6 +89,11 @@
 #                       CLAUDE_GPU=1 for the in-container guard (claude-gpu). Needs the
 #                       NVIDIA Container Toolkit's CDI spec on the host (nvidia-ctk cdi
 #                       generate); without it Docker refuses to create the service.
+#     --scratch-size <map>  the /scratch RAM tmpfs size for one --browser or --gpu
+#                       service, over the stack-wide CLAUDE_BROWSER_SCRATCH_TMPFS /
+#                       CLAUDE_GPU_SCRATCH_TMPFS. Format REPO=SIZE, e.g. render=8g
+#                       (repeatable). Refused for any other service: its /scratch is a
+#                       disk volume, which has no size to set.
 #     --marketplace <map>  add a git plugin marketplace to a repo at runtime.
 #                       Format REPO=NAME=URL[#REF] (repeatable). The repo's service
 #                       gets CLAUDE_EXTRA_MARKETPLACES with this entry appended. NAME is
@@ -238,6 +248,7 @@ NETWORK=""
 BUILD_CONTEXT=""
 DORMANT_PROFILE="dormant"
 INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() PIDS_RAW=() CPU_RAW=() MEM_RAW=() GROUP_RAW=() MOUNTS_RAW=()
+SCRATCH_RAW=() XNET_RAW=()
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
 # follow so they override scalars (--out/--org/--port-base) and append to
 # repeatables (--active/--expose/…). --scenario/--env-file were consumed in the
@@ -259,6 +270,8 @@ while [[ $# -gt 0 ]]; do
         --mem)             MEM_RAW+=("$2"); shift 2 ;;
         --group)           GROUP_RAW+=("$2"); shift 2 ;;
         --mount)           MOUNTS_RAW+=("$2"); shift 2 ;;
+        --scratch-size)    SCRATCH_RAW+=("$2"); shift 2 ;;
+        --extra-network)   XNET_RAW+=("$2"); shift 2 ;;
         --build-context)   BUILD_CONTEXT="$2"; shift 2 ;;
         --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
         --forks)           WANT_FORKS=1; shift ;;
@@ -374,6 +387,35 @@ for tok in "${GPU_RAW[@]:-}"; do
     for one in $(echo "$tok" | tr ',' ' '); do
         GPU["$(sanitize "$one")"]=1
     done
+done
+# Per-service /scratch tmpfs size: svc -> SIZE. Only a --browser or --gpu service has a
+# tmpfs /scratch to size; that is checked against the final repo list below.
+declare -A SCRATCH=()
+for tok in "${SCRATCH_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == ?*=* ]] || die "--scratch-size must be REPO=SIZE (got '$tok')"
+    scv="${tok#*=}"
+    # A unit is required: a bare 8 is 8 bytes to tmpfs, one page that fills on the first write.
+    [[ "$scv" =~ ^[0-9]+[kmgKMG]$ && "$(size_to_mib "$scv")" =~ ^[1-9][0-9]*$ ]] \
+        || die "--scratch-size value must be a size like 8g (got '$scv')"
+    SCRATCH["$(sanitize "${tok%%=*}")"]="$scv"
+done
+# Extra external networks per service: svc -> newline-separated network names. Each is
+# declared external once at the top level; the service keeps the stack's default network.
+declare -A XNETS=() XNET_NAMES=()
+for tok in "${XNET_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    [[ "$tok" == ?*=?* ]] || die "--extra-network must be REPO=NETWORK (got '$tok')"
+    xs="$(sanitize "${tok%%=*}")"
+    xn="${tok#*=}"
+    [[ "$xn" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
+        || die "--extra-network network must be a Docker network name (got '$xn' in '$tok')"
+    # The name is also its compose key, and `default` is the stack's own network.
+    [[ "$xn" != default && "$xn" != "$NETWORK" ]] \
+        || die "--extra-network '$xn' is the stack's default network already (in '$tok')"
+    [[ $'\n'"${XNETS[$xs]:-}"$'\n' == *$'\n'"$xn"$'\n'* ]] && continue
+    XNETS[$xs]="${XNETS[$xs]:-}${XNETS[$xs]:+$'\n'}${xn}"
+    XNET_NAMES[$xn]=1
 done
 
 # Runtime plugin marketplaces per service: svc -> comma-separated "name=url" list.
@@ -652,6 +694,18 @@ for g in "${!STARTCMD[@]}" "${!PIDS[@]}"; do
     [[ -n "${SEEN[$g]:-}" ]] \
         || die "--start-cmd/--pids names '$g', which is not a service in this stack (services: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
 done
+for g in "${!SCRATCH[@]}"; do
+    [[ -n "${SEEN[$g]:-}" ]] \
+        || die "--scratch-size names '$g', which is not a service in this stack (services: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
+done
+for g in "${!XNETS[@]}"; do
+    [[ -n "${SEEN[$g]:-}" ]] \
+        || die "--extra-network names '$g', which is not a service in this stack (services: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
+done
+for g in "${!SCRATCH[@]}"; do
+    [[ -n "${BROWSER[$g]:-}${GPU[$g]:-}" ]] \
+        || die "--scratch-size names '$g', whose /scratch is a disk volume (claude-scratch-$g) with no size to set: only a --browser or --gpu service has a RAM tmpfs /scratch"
+done
 
 # --- Stable SSH port assignment ----------------------------------------------
 # Reuse each repo's previously assigned port from an existing OUT file; only
@@ -777,6 +831,7 @@ for row in "${FINAL[@]}"; do
                 || (( $(size_to_mib "$GPU_SCRATCH_TMPFS") > $(size_to_mib "$svc_scratch_size") )); }; then
             svc_scratch_size="$GPU_SCRATCH_TMPFS"
         fi
+        svc_scratch_size="${SCRATCH[$svc]:-$svc_scratch_size}"
         svc_scratch_tmpfs=$'\n      - /scratch:rw,nosuid,nodev,exec,size='"${svc_scratch_size}"
         svc_scratch_vol=""
     else
@@ -1011,6 +1066,13 @@ EOF
       claude.ssh_port: "${port}"
       claude.repo: "${svc_repo_label}"
 EOF
+    # --extra-network: the service joins those external networks AND keeps `default` (the
+    # stack's own network, or --network's), which a networks: list would otherwise replace.
+    if [[ -n "${XNETS[$svc]:-}" ]]; then
+        printf '    networks:\n      - default\n'
+        # Quoted: YAML reads a name like 123 or true as a number or a boolean.
+        while IFS= read -r xn; do printf '      - "%s"\n' "$xn"; done <<< "${XNETS[$svc]}"
+    fi
     # Non-active repos: defined but behind a profile, so `up -d` skips them.
     if [[ $HAVE_ACTIVE -eq 1 && -z "${ACTIVE[$svc]:-}" ]]; then
         printf '    profiles:\n      - %s\n' "$DORMANT_PROFILE"
@@ -1085,15 +1147,17 @@ done
 # stacks on one host share ONE Docker network, so splitting a stack in two costs
 # ZERO extra networks: critical where the daemon's address pool is nearly full.
 # Create it once (docker network create ${NETWORK}) before `up`.
-if [[ -n "$NETWORK" ]]; then
-    cat <<EOF
-
-networks:
-  default:
-    name: ${NETWORK}
-    external: true
-EOF
+if [[ -n "$NETWORK" || ${#XNET_NAMES[@]} -gt 0 ]]; then
+    printf '\nnetworks:\n'
 fi
+if [[ -n "$NETWORK" ]]; then
+    printf '  default:\n    name: %s\n    external: true\n' "$NETWORK"
+fi
+# --extra-network: another stack's (or a service's) network, joined by name and never
+# created or deleted here; `up` fails fast when it does not exist.
+while IFS= read -r xn; do
+    if [[ -n "$xn" ]]; then printf '  "%s":\n    name: "%s"\n    external: true\n' "$xn" "$xn"; fi
+done < <(printf '%s\n' "${!XNET_NAMES[@]}" | sort)
 } > "$TMP"
 
 mv -f "$TMP" "$OUT"
@@ -1129,6 +1193,8 @@ for r in "${FINAL[@]}"; do
     fi
     [[ -n "${STARTCMD[$s]:-}" ]] && extra="$extra +start-cmd"
     [[ -n "${PIDS[$s]:-}" ]] && extra="$extra +pids(${PIDS[$s]})"
+    [[ -n "${SCRATCH[$s]:-}" ]] && extra="$extra +scratch(${SCRATCH[$s]})"
+    [[ -n "${XNETS[$s]:-}" ]] && extra="$extra +networks($(paste -sd, - <<<"${XNETS[$s]}"))"
     if [[ -n "${ACCOUNTS[$s]:-}" ]]; then
         n_accts="$(awk -F, '{print NF}' <<<"${ACCOUNTS[$s]}")"
         extra="$extra +accounts($n_accts)"
