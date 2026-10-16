@@ -204,6 +204,23 @@ else
     bad "Refusal: '/etc' + '/opt' + '/usr' MUST all be named as no-touch paths"
 fi
 
+# A9. The everyday-tools lines: pkill -f, the system Python's modules, build outputs.
+if has "$CLAUDE_MD" 'never `pkill -f <pattern>`' && has "$CLAUDE_MD" 'by its PID'; then
+    ok "Kill: 'by its PID, never pkill -f <pattern>' stated"
+else
+    bad "Kill: the 'kill by its PID, never \`pkill -f <pattern>\`' line MUST appear"
+fi
+if has "$CLAUDE_MD" 'is 3.13 with `yaml`, `PIL` and `pypdf`'; then
+    ok "Python: the system interpreter's baked modules (yaml, PIL, pypdf) named"
+else
+    bad "Python: 'system Python is 3.13 with yaml, PIL and pypdf' MUST be stated"
+fi
+if has "$CLAUDE_MD" 'Build outputs go to `/state/tmp`, not `/scratch`'; then
+    ok "Scratch: build outputs go to /state/tmp, not /scratch"
+else
+    bad "Scratch: 'Build outputs go to /state/tmp, not /scratch' MUST be stated"
+fi
+
 # ============================================================================================
 echo "== B. entrypoint.sh §8a: installs the baked CLAUDE.md =="
 # ============================================================================================

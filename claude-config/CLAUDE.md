@@ -14,7 +14,15 @@ Keep this short. Project-specific guidance belongs in the repo's own
 
 - You are running in a disposable Docker container. The host is isolated from
   you; the repo under `/workspace` is the thing that matters and is persisted.
-- `git`, `gh`, `rg`, `fzf`, `jq`, `python3`, `uv`, and `node` are available.
+- `git`, `gh`, `rg`, `fzf`, `jq`, `yq`, `python3`, `uv`, and `node` are available, and so are
+  `file`, `bc`, `zip`/`unzip`, `xxd`, `pdftotext`, `column`, `sqlite3`, `rsync`, `ss`/`ip`,
+  `dig` and `fuser`.
+- The system Python (`/usr/bin/python3`) is 3.13 with `yaml`, `PIL` and `pypdf`;
+  anything else via `uv run --with <pkg>`.
+- Kill a process by its PID, never `pkill -f <pattern>`: the pattern is in your own
+  command line, so it kills your own shell.
+- Build outputs go to `/state/tmp`, not `/scratch`: `/scratch` is a RAM tmpfs of a few GiB
+  (and `/cache` is shared with every container, tool caches only).
 - A tool with no version set in this container reads "command not found": install it
   with `mise use` (or `pip install` / `npm i -g` a CLI into a mise toolchain), then run
   `mise reshim && claude-mise-shims` so it is on `PATH`.

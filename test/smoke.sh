@@ -73,6 +73,8 @@ check(){ local r=0; set +o pipefail; eval "$2" || r=1; set -o pipefail; if (( r 
 
 echo "== image: $IMAGE =="
 docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "image missing: build first"; exit 1; }
+# Its size, so a run's log shows what a change to the image costs.
+echo "  image size: $(( $(docker image inspect -f '{{.Size}}' "$IMAGE") / 1000000 )) MB"
 
 # --- fixtures ---------------------------------------------------------------
 ssh-keygen -q -t ed25519 -f "$TMP/key" -N ''
@@ -195,6 +197,14 @@ check "image ships the pinned uv ($PINNED_UV)" \
     '[[ -n "$PINNED_UV" && "$(cexec "uv --version" 2>/dev/null | awk "{print \$2}")" == "$PINNED_UV" ]]'
 check "image ships the pinned pnpm ($PINNED_PNPM)" \
     '[[ -n "$PINNED_PNPM" && "$(cexec "pnpm --version" 2>/dev/null)" == "$PINNED_PNPM" ]]'
+# The everyday CLIs and Python modules (the Dockerfile's "Everyday CLIs" block, and yq):
+# each one runs, so a dropped package fails here rather than in a session.
+for t in "file --version" "bc --version" "unzip -v" "zip -v" "xxd -v" "pdftotext -v" "column -V" \
+         "sqlite3 --version" "rsync --version" "ss -V" "ip -V" "dig -v" "fuser -V" "yq --version"; do
+    check "everyday CLI runs: $t" 'cexec "$t" >/dev/null 2>&1'
+done
+check "the system python3 imports yaml, PIL and pypdf" \
+    'cexec "/usr/bin/python3 -c \"import yaml, PIL, pypdf\"" >/dev/null 2>&1'
 # Provenance labels (the end of the Dockerfile), set from the Makefile's BUILD_ARGS: the
 # commit a reader compares with main, and the CLI the label claims it ships.
 check "image is labelled with its source commit (40-hex org.opencontainers.image.revision)" \
@@ -812,6 +822,8 @@ check "agent can USE the key (ssh-agent lists it via the relay)" \
     'grep -qE "ED25519|SHA256" <<<"$(brk "ssh-add -l" 2>/dev/null || true)"'
 check "agent CANNOT read the private key (no readable key file)" \
     '! brk "test -e ~/.ssh/id_ed25519"'
+# Name the file on a failure, so the log says what holds it.
+brksh 'grep -rl -- "PRIVATE KEY" /home/claude 2>/dev/null' | sed 's/^/  holds "PRIVATE KEY": /' || true
 check "no file ANYWHERE under the agent's home holds private key material" \
     '! brksh "grep -rq -- \"PRIVATE KEY\" /home/claude 2>/dev/null"'
 check "the mounted key itself is root-only (the agent cannot read it off the mount)" \
