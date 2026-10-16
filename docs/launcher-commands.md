@@ -6,6 +6,8 @@ claude-launch <name> [--repo URL [--repo URL[#BRANCH]]... | --workspace PATH] [-
                       [--gpu|--no-gpu]
                       [--extra-args "…"] [--expose H:C ...] [--dev-cmd "…"]
                       [--session "NAME [key=value ...]" ...] [--env KEY=VALUE ...]
+                      [--image REF] [--cache VOLUME | --no-cache] [--accounts NAMES]
+                      [--marketplace NAME=URL[#REF] ...] [--plugin PLUGIN[,...] ...] [--start-cmd "…"]
 claude-tui                        interactive whiptail menu over the whole fleet: per-session
                                    (attach/start/stop/restart/logs/remove/launch), grouped by
                                    compose stack (bring up a dormant repo, switch a stack's auth
@@ -73,11 +75,14 @@ session container per repo in a GitHub org:
 claude-compose-gen --org ORG --out FILE [--active REPOS]... [--dormant-profile NAME]
                    [--expose REPO:HOSTPORT:CONTAINERPORT]...
                    [--dev-cmd REPO=COMMAND]...
-                   [--cpu REPO=N]... [--mem REPO=SIZE]... [--model REPO=MODEL]...
+                   [--cpu REPO=N]... [--mem REPO=SIZE]... [--pids REPO=N]... [--model REPO=MODEL]...
                    [--browser REPOS]... [--gpu REPOS]...
                    [--group NAME=REPO[:BRANCH],REPO[:BRANCH],...]...
                    [--marketplace REPO=NAME=URL]... [--plugin REPO=PLUGIN[,...]]...
                    [--include GLOB] [--exclude GLOB] [--forks] [--archived]
+                   [--scenario FILE] [--env-file FILE] [--port-base N] [--limit N]
+                   [--all-dormant] [--network NAME] [--cache VOLUME | --no-cache]
+                   [--mount REPO=VOLUME:/PATH[:ro]]... [--build-context DIR]
 claude-compose-gen --out FILE repo-a repo-b:dev      # explicit list, no gh needed
 ```
 
@@ -148,3 +153,40 @@ docker compose -f FILE stop repo-a                 # free its resources
 With no `--active`, all repos start (backward compatible). Regenerate any time
 the repo or active set changes: ports stay stable (services sorted by name),
 so a repo keeps its port whether active or dormant.
+
+### Flags not shown above
+
+`claude-launch`:
+
+- `--image REF`: the image to run, over `CLAUDE_IMAGE` (default `claude-code-box:latest`).
+  It must exist locally; only the default image builds itself. E.g. `claude-code-box:browser`.
+- `--cache VOLUME` / `--no-cache`: the shared tool cache volume at `/cache` (default
+  `claude-cache`), or none. Private state is separate: `/state` is always this container's own.
+
+`claude-compose-gen`:
+
+- `--scenario FILE`: read flags from a scenario `.conf`, one `--flag value` per line
+  (`scenarios/example.conf.example`); flags after it on the command line override or append.
+- `--env-file FILE`: source this env on top of the repo `.env` while generating. Point it at the
+  `.env` beside `--out`, so the generated file and `docker compose` read the same values.
+- `--port-base N`: the first SSH host port (default `SSH_PORT_RANGE_START`).
+- `--pids REPO=N`: the pids limit for one service, over `CLAUDE_PIDS_LIMIT`. Threads count as
+  pids, so a service running several sessions and parallel test suites needs more.
+- `--limit N`: how many repos `gh repo list` returns for `--org` (default 500).
+- `--all-dormant`: put every service behind the dormant profile, so a plain `up -d` starts
+  nothing. Do not combine it with `--active`: the named repos would still start.
+- `--network NAME`: attach every service to an existing external network (create it first with
+  `docker network create NAME`) instead of the stack's own `<project>_default`, so several
+  stacks share one network.
+- `--cache VOLUME` / `--no-cache`: as for `claude-launch`, one volume for the whole stack.
+- `--mount REPO=VOLUME:/PATH[:ro]`: mount an existing named volume into one service, e.g.
+  another stack's checkout read-only. The volume is declared external, so `down -v` never
+  deletes it.
+- `--build-context DIR`: `build.context` for every service (default: the checkout the generator
+  runs from). Pin it when the deployment builds from a different clone.
+
+### Removed flags
+
+`--docker`, `--no-docker`, `--sysbox`, `--broker` and `--worker-tarball` were removed from both
+launchers with the per-session Docker engine and the Sysbox worker broker. Each still exits with
+an error that says so: see [legacy-sysbox-broker.md](legacy-sysbox-broker.md).

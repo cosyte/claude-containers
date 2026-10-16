@@ -280,7 +280,8 @@ attribution needs the host PID namespace, so it lives on the host side, not in t
 
 **`/scratch` on RAM.** Blender's render temp and kernel caches, and throwaway venvs,
 churn under `TMPDIR`; on a spinning pool that churn is the D-state wedge class the browser
-variant already moved to RAM. 4g plus the 1g `/tmp` leaves 11g of the 16g default limit.
+variant already moved to RAM. 4g plus the 1g `/tmp` can exceed the 4g default memory limit
+when full (a tmpfs is charged only as it fills), so a rendering service raises `--mem`.
 
 **Blender is installed, not baked.** A pinned, SHA-256-verified blender.org LTS tarball
 (`claude-blender-install`) goes rootless into the shared `/cache/blender`, under a lock

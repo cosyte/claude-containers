@@ -46,7 +46,7 @@ FROM node:${NODE_VERSION}-trixie-slim
 # WHY THE FLOOR EXISTS (CC-CLAUDE-CODE-UPGRADE): the `opus` alias resolves to the LATEST
 # Opus, and Opus 4.8 shipped in CLI 2.1.154, so the old 2.1.145 pin silently resolved
 # `--model opus` (this image's default) to Opus 4.7, quietly downgrading every gate
-# agent below what ADR 0009 requires. The >=2.1.154 floor below is what makes that
+# agent below the Opus 4.8 floor they need. The >=2.1.154 floor below is what makes that
 # downgrade impossible; it stays a floor, not an equality.
 #
 # AUTO-UPDATER NOW ON BY DEFAULT (CC-CLAUDE-CODE-UPGRADE): DISABLE_AUTOUPDATER=1 was
@@ -295,7 +295,7 @@ RUN set -eu; \
     # --- GUARD 1: the effective version must clear the Opus-4.8 floor -------------
     # This is NOT hygiene. `--model opus` (this image's default) resolves to the LATEST
     # Opus, and Opus 4.8 arrived in CLI 2.1.154, so ANY build below that floor silently
-    # serves Opus 4.7 and quietly downgrades every gate agent below what ADR 0009 requires.
+    # serves Opus 4.7 and quietly downgrades every gate agent below the Opus 4.8 floor they need.
     #
     # The floor lives HERE, in the Dockerfile, because it is the ONLY choke point every
     # build path passes through (`make build`, `docker compose build`, a compose-gen'd
@@ -320,7 +320,7 @@ RUN set -eu; \
     esac; \
     if [ "$(printf '%s\n%s\n' "$OPUS48_FLOOR" "${CLAUDE_CODE_VERSION}" | sort -V | head -1)" != "$OPUS48_FLOOR" ]; then \
         echo "ERROR: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} is below the Opus-4.8 floor ($OPUS48_FLOOR)." >&2; \
-        echo "       '--model opus' would silently resolve to Opus 4.7, violating ADR 0009." >&2; \
+        echo "       '--model opus' would silently resolve to Opus 4.7, below the floor the gate agents need." >&2; \
         echo "       Most likely cause: a stale .env pinning an old CLAUDE_CODE_VERSION." >&2; \
         echo "       The Makefile's '-include .env' beats its own default AND the Dockerfile ARG." >&2; \
         echo "       Fix: update (or delete) CLAUDE_CODE_VERSION in your .env, then rebuild." >&2; \

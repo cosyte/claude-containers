@@ -456,8 +456,9 @@ with `--no-gpu` to opt one out). Removing it is the same in reverse.
   (the spec decides what is mounted).
 - `/scratch` (`TMPDIR`) on a RAM tmpfs (`CLAUDE_GPU_SCRATCH_TMPFS`, 4g) instead of the disk
   volume, so render temp and kernel caches stay off a spinning pool. With the 1g `/tmp`
-  that is 5g of the 16g default `CLAUDE_MEM_LIMIT`, leaving 11g for the session and the
-  render's own memory.
+  that can reach 5g, more than the 4g default `CLAUDE_MEM_LIMIT`: a tmpfs is charged only as
+  it fills, but raise `--mem` for a service that renders, so the session and the render's
+  own memory fit beside it (`--mem` in compose-gen, `CLAUDE_MEM_LIMIT` for `claude-launch`).
 - `CLAUDE_GPU=1`, which turns on the boot probe, the GPU line in `claude-healthcheck`, and
   a short GPU note in the session's managed memory (`/etc/claude-code/CLAUDE.md`, after the
   container facts every session gets), so the agent finds the tooling on its own.
@@ -508,13 +509,15 @@ and regenerate. Runbook: [docs/troubleshooting.md](docs/troubleshooting.md#gpu-s
 
 ## Temp space: `/scratch`, not `/tmp`
 
-Why `TMPDIR` points at a disk-backed volume rather than the `/tmp` tmpfs:
-[docs/temp-space.md](docs/temp-space.md).
+Why `TMPDIR` points at `/scratch` rather than the `/tmp` tmpfs, and why `/scratch` is a disk
+volume on most sessions but RAM on GPU and browser ones: [docs/temp-space.md](docs/temp-space.md).
 
 ## Toolchains on demand (`mise`)
 
 Rootless toolchain and CLI installs, the shared `/cache` volume, and what
 lockdown costs them: [docs/toolchains-on-demand.md](docs/toolchains-on-demand.md).
+Their design records: [docs/toolchain-provisioning.md](docs/toolchain-provisioning.md) and
+[docs/shared-tool-cache.md](docs/shared-tool-cache.md).
 
 ## Troubleshooting (summary)
 
@@ -548,6 +551,9 @@ Full runbook: [docs/troubleshooting.md](docs/troubleshooting.md).
 The threat model, managed policy, the secret guard, secret brokering, egress
 lockdown and the honest blast radius:
 [docs/security-notes.md](docs/security-notes.md).
+How the managed policy is laid out and why the session cannot rewrite it:
+[docs/managed-settings.md](docs/managed-settings.md). What the vendor's network requirements
+name that the egress allowlist leaves out, and why: [docs/egress-allowlist.md](docs/egress-allowlist.md).
 
 ## Acceptance checklist
 
