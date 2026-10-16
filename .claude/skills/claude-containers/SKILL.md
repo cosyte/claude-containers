@@ -128,6 +128,7 @@ small descriptive commits as you change things.
 | `test/sizing-unit.sh` | Docker-free sizing tests (size/reservation math, K resolution from config, compose reservation/pids emission): CI. |
 | `test/disk-unit.sh` | Docker-free disk tests (`disk_free_mib` parse/fail-closed, `claude-disk-gc`'s plan safety): CI. |
 | `bin/claude-disk-gc` | Standalone maintenance tool: `docker system prune -f` + `docker builder prune -f` (a fixed plan, never `-a`/`--volumes`), plus the shared-cache trim; one-shot or `--loop`; fail-safe. No entrypoint path auto-starts it. |
+| `bin/claude-scratch-reap` | In-container: removes the `/scratch` folders of gone sessions (no process with the id in its environ, none holding a file or cwd there, idle 6 hours), and warns near full. Run by the sessions supervisor every `CLAUDE_SCRATCH_REAP_MIN` minutes; `CLAUDE_SCRATCH_REAP=report` (default) only logs. Tests: `test/scratch-unit.sh`. |
 | `bin/claude-disk-verify` | Docker-free sanity pass re-running the disk-hygiene logic (free-space parsing, gc-plan safety, cache-trim safety): safe anywhere, no docker needed. |
 | `bin/claude-autopilot` | tmux main-window command for unattended mode (`CLAUDE_AUTOPILOT=1`): runs `CLAUDE_AUTOPILOT_CMD` headless on an interval, or drains the durable queue (`CLAUDE_AUTOPILOT_QUEUE=1`). |
 | `bin/claude-enqueue` | Adds a task (args or stdin) to the autopilot queue; `--priority N` orders it. |

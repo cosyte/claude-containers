@@ -39,3 +39,45 @@ at the cost described above: every page written is charged to the service's memo
 (`CLAUDE_MEM_LIMIT`, default `4g`) alongside `/tmp`. The sizes are ceilings, not reservations,
 but a session that fills its scratch can reach the limit, so raise its limit (`--mem REPO=SIZE` in
 `claude-compose-gen`, `CLAUDE_MEM_LIMIT` for `claude-launch`) when it renders or builds big. The tmpfs is empty on every start, like the volume.
+
+## Two kinds of `/scratch`
+
+| Kind | Who gets it | Size | Cleared |
+|---|---|---|---|
+| Disk volume `claude-scratch-<name>` | every session by default | the volume's pool | on every boot |
+| RAM tmpfs | GPU and browser services | set by the stack: `CLAUDE_GPU_SCRATCH_TMPFS`, `CLAUDE_BROWSER_SCRATCH_TMPFS` | on every start |
+
+Either way it is per container but **shared by every session in it**, and Claude Code gives each
+session its own folder there, `/scratch/claude-<uid>/<project>/<session-id>/`. A container that
+lives for weeks collects hundreds of them (one had about 538 at once), and the boot wipe is the
+only other cleanup: `claude-disk-gc` never touches `/scratch`. When a 24G RAM `/scratch` reached
+100%, Claude Code's own temp writes failed and every Bash call in about 10 sessions broke.
+
+## The reaper: gone sessions' folders
+
+`claude-scratch-reap` frees them. The sessions supervisor (`claude-sessions supervise`) runs it
+every `CLAUDE_SCRATCH_REAP_MIN` minutes (default 15), and its lines land in `docker logs` as
+`[scratch-reap] ...`. It removes a session folder only when **all** of these hold:
+
+- the session is not live: no live Claude process names it in `~/.claude/sessions/<pid>.json`
+  (an idle session's id is only there: Claude Code sets `CLAUDE_CODE_SESSION_ID` on the commands
+  it runs, not on itself), and no process has it in its environment (`/proc/*/environ`, those
+  commands and everything they start) or command line (`/proc/*/cmdline`, `claude --resume <id>`);
+- no process has its working directory or an open file under the folder (`/proc/*/cwd`, `/proc/*/fd`);
+- nothing in it was modified in the last 6 hours;
+- it is not the caller's own session, and it is not reached through a symlink.
+
+Anything else under `/scratch` (a `mktemp` dir, a build's temp tree) is never touched. Then, when
+`/scratch` is fuller than `CLAUDE_SCRATCH_WARN_PCT` percent (default 85), it logs a warning naming
+the 5 largest top-level folders, so the session filling it can be found.
+
+`CLAUDE_SCRATCH_REAP` sets what it does:
+
+- `report` (the default): logs `would remove <folder> (<size>)` and removes nothing.
+- `on`: removes them.
+- `off`: does nothing, not even the warning.
+
+**Switching it on:** the owner reads a week of reports first (`docker logs <container> 2>&1 | grep
+scratch-reap`), checks that no listed folder belonged to a live session, then sets
+`CLAUDE_SCRATCH_REAP=on` in `.env` and recreates the containers. To see what it would remove right
+now, inside a container: `claude-scratch-reap --dry-run`.

@@ -27,6 +27,9 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_BROWSER` | auto | Tri-state for the chrome-devtools MCP: unset = auto (a browser image self-enables it), `1`/`--browser` = force on (fails loud on a lean image), `0`/`--no-browser` = opt out. Also gates the `frontend-debugging` skill and the browser line of the session's container facts. |
 | `CLAUDE_GPU` | `0` | `1`/`--gpu` gives the session the host's NVIDIA GPU through CDI (see [GPU sessions](gpu-sessions.md)); `--no-gpu` opts out of an ambient `1`. Fixed at container creation. |
 | `CLAUDE_GPU_SCRATCH_TMPFS` | `4g` | Size of the RAM `/scratch` a GPU session gets instead of the disk volume. Charged to `CLAUDE_MEM_LIMIT`. |
+| `CLAUDE_SCRATCH_REAP` | `report` | The `/scratch` reaper ([temp space](temp-space.md#the-reaper-gone-sessions-folders)): `report` logs the gone sessions' folders it would remove, `on` removes them, `off` disables it |
+| `CLAUDE_SCRATCH_REAP_MIN` | `15` | Minutes between reaper runs in the sessions supervisor |
+| `CLAUDE_SCRATCH_WARN_PCT` | `85` | The reaper logs a warning naming the 5 largest top-level folders when `/scratch` is fuller than this percent |
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` |: | Clone source (or use `--repo`/`--branch`/`--depth`) |
 | `GIT_REPOS` |: | Several repos in one container: whitespace-separated `URL[#BRANCH]`, each cloned into `/workspace/<repo>` (set by `claude-compose-gen --group` or several `--repo`). Not together with `GIT_REPO_URL` |
 | `GIT_AUTHOR_NAME`/`_EMAIL` (+`COMMITTER`) | host git config | Commit identity |
