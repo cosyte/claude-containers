@@ -24,14 +24,15 @@ done
 
 LOGS="$(mktemp -d)"
 trap 'rm -rf "$LOGS"' EXIT
+trap 'kill $(jobs -p) 2>/dev/null; exit 130' INT TERM
 
 # Each suite's result lands in $LOGS/<i>.rc as "<exit status> <seconds>" once it ends.
 start=$SECONDS
 printed=0
-flush() {   # print, in order, every finished suite's log not yet printed
-    while (( printed < ${#suites[@]} )) && [[ -f "$LOGS/$printed.rc" ]]; do
+flush() {   # print, in order, every finished suite's log not yet printed; "all": every one left
+    while (( printed < ${#suites[@]} )) && [[ -f "$LOGS/$printed.rc" || "${1:-}" == all ]]; do
         echo "=== $(basename "${suites[$printed]}")"
-        cat "$LOGS/$printed.log"
+        cat "$LOGS/$printed.log" 2>/dev/null
         printed=$((printed + 1))
     done
 }
@@ -54,14 +55,18 @@ while (( $(jobs -rp | wc -l) > 0 )); do
     flush
 done
 wait
-flush
+flush all   # a suite whose wrapper died wrote no .rc: print its log anyway
 
 echo
 echo "=== summary"
 failed=0
 for i in "${!suites[@]}"; do
-    read -r rc secs <"$LOGS/$i.rc"
-    if (( rc == 0 )); then
+    rc="" secs="?"
+    read -r rc secs <"$LOGS/$i.rc" 2>/dev/null
+    if [[ -z "$rc" ]]; then
+        printf '  FAIL  %-28s %4ss  (no result: its runner died)\n' "$(basename "${suites[$i]}")" "$secs"
+        failed=$((failed + 1))
+    elif (( rc == 0 )); then
         printf '  PASS  %-28s %4ss\n' "$(basename "${suites[$i]}")" "$secs"
     else
         printf '  FAIL  %-28s %4ss  (exit %s)\n' "$(basename "${suites[$i]}")" "$secs" "$rc"

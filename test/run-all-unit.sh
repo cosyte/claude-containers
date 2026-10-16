@@ -45,10 +45,20 @@ order="$(grep -E '^(=== |out of)' <<<"$out" | head -4 | tr '\n' '|')"
 [[ "$order" == "=== a-unit.sh|out of a-unit.sh|=== b-unit.sh|out of b-unit.sh|" ]] \
     && ok "logs print in the fixed order, whole" || bad "log order: $order"
 
+# --- a suite whose runner dies leaves no result: FAIL, never the previous suite's PASS -------
+D="$TMPD/dies"; mkdir "$D"
+fake "$D" a-unit.sh 0 0
+printf '#!/usr/bin/env bash\necho "out of b-unit.sh"\nkill -9 $PPID\n' >"$D/b-unit.sh"; chmod +x "$D/b-unit.sh"
+fake "$D" c-unit.sh 0 0
+out="$(TEST_DIR="$D" "$RUN" 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && grep -q '^  FAIL  b-unit.sh .*no result' <<<"$out" \
+    && ok "a suite with no result is FAIL and the run exits nonzero" || bad "dead runner (rc=$rc): $out"
+grep -q '^out of c-unit.sh' <<<"$out" && ok "later suites' logs still print" || bad "c-unit.sh log missing: $out"
+
 # --- all pass; the glob; the jobs cap ------------------------------------------------------
 D="$TMPD/many"; mkdir "$D"
 fake "$D" unit.sh 0 0.3
-for n in c d e f; do fake "$D" "$n-unit.sh" 0 0.3; done
+for n in c d e f; do fake "$D" "$n-unit.sh" 0 0.6; done
 fake "$D" smoke.sh 1 0          # not a unit suite: never run
 fake "$D" helper.sh 1 0
 out="$(TEST_DIR="$D" TEST_JOBS=2 "$RUN" 2>&1)"; rc=$?
