@@ -33,7 +33,7 @@ vulnerabilities go through private reporting rather than an issue.
    Both must be clean. CI runs exactly these (the required checks `ci` and `no-emdash`).
 3. The image smoke test (`test/smoke.sh`) builds the image and exercises a real
    container. CI's `smoke` job runs it when a PR touches the Dockerfile,
-   `entrypoint.sh`, `sshd_config`, `bash_profile`, `bin/`, `claude-config/`,
+   `entrypoint.sh`, `entrypoint.d/`, `sshd_config`, `bash_profile`, `bin/`, `claude-config/`,
    `scripts/`, `test/smoke.sh`, the Makefile, `docker-compose.yml` or `ci.yml`,
    and on every push to `main`; on any other PR it is skipped and reports success.
    It takes about 3 minutes with a warm layer cache, 8 cold, and the parts that
@@ -56,8 +56,11 @@ task runner. Do not add a dependency without a strong reason.
   A flag both `claude-launch` and `claude-compose-gen` take is one row of
   `shared_flag_row` there (parsed and validated once, the same message in both tools);
   `test/flags-unit.sh` holds them to it.
-- `entrypoint.sh`: the container boot path, in numbered sections. Most behaviour
-  lives here.
+- `entrypoint.sh` and `entrypoint.d/`: the container boot path, in numbered sections.
+  Most behaviour lives here. `entrypoint.sh` is the loader: it sources `entrypoint.d/NN[x]-name.sh`
+  in number order (the files are listed in `docs/architecture.md`); the sections not yet
+  moved there are still inline below its loop. `test/lib/entrypoint.sh` gives a suite a
+  section's file (`ep_section 7a`) or the whole boot path in run order (`ep_boot`).
 - `test/*.sh`: Docker-free unit suites, one per area. `npm test` is `test/run-all.sh`: it runs
   `test/unit.sh` and every `test/*-unit.sh` (a glob, so a new suite needs no list edited) in
   parallel and prints a PASS/FAIL summary with seconds. CI runs the same `npm test`.

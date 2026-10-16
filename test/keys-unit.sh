@@ -24,6 +24,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=test/lib/entrypoint.sh
+source "$REPO_ROOT/test/lib/entrypoint.sh"
+EP_BOOT="$TMPDIR/boot.sh"; ep_boot > "$EP_BOOT"   # the whole boot path, in run order
 TMPD="$(mktemp -d)"
 trap 'rm -rf "$TMPD"' EXIT
 
@@ -195,7 +198,7 @@ args="$(cat "$TMPD/run-args" 2>/dev/null)"
 
 # ======================================================================================
 echo "== entrypoint.sh §4, run in a sandbox: a root-only key directory, the git key refused =="
-BLOCK4="$(awk '/^# --- 4\. Key inputs/{f=1} /^# --- 5\. /{exit} f' "$ENTRYPOINT")"
+BLOCK4="$(awk '/^# --- 4\. Key inputs/{f=1} /^# --- 5\. /{exit} f' "$(ep_section 4)")"
 REAL_DIE="$(awk '/^die\(\)/{f=1} f{print; if (/\}[[:space:]]*$/) exit}' "$ENTRYPOINT")"
 mkdir -p "$TMPD/bin"
 # The one fake: whether the agent user can read a file, which the sandbox (one user, no root)
@@ -320,9 +323,9 @@ echo "== the image and the order of the boot =="
 grep -qxF 'RUN install -d -o root -g root -m 700 /etc/claude' "$REPO_ROOT/Dockerfile" \
     && ok "the image bakes /etc/claude root-owned, mode 700 (protected before the entrypoint runs)" \
     || bad "the Dockerfile must create /etc/claude root-owned, mode 700"
-n4="$(grep -n '^# --- 4\. Key inputs' "$ENTRYPOINT" | cut -d: -f1)"
-n5="$(grep -n '^# --- 5\. Git SSH key' "$ENTRYPOINT" | cut -d: -f1)"
-n12="$(grep -n '^# --- 12\. Launch Claude Code' "$ENTRYPOINT" | cut -d: -f1)"
+n4="$(grep -n '^# --- 4\. Key inputs' "$EP_BOOT" | cut -d: -f1)"
+n5="$(grep -n '^# --- 5\. Git SSH key' "$EP_BOOT" | cut -d: -f1)"
+n12="$(grep -n '^# --- 12\. Launch Claude Code' "$EP_BOOT" | cut -d: -f1)"
 [[ -n "$n4" && -n "$n5" && -n "$n12" ]] && (( n4 < n5 && n5 < n12 )) \
     && ok "§4 runs before the broker (§5) and before any session starts (§12)" \
     || bad "§4 must come before §5 and §12 (lines: $n4 $n5 $n12)"
@@ -330,7 +333,7 @@ grep -qxF 'RUN install -o root -g root -m 644 /dev/null /etc/ssh/revoked_keys' "
     && grep -qxF 'RevokedKeys /etc/ssh/revoked_keys' "$REPO_ROOT/sshd_config" \
     && ok "sshd_config names the RevokedKeys file, and the image bakes it empty (sshd never starts without it)" \
     || bad "sshd_config must set RevokedKeys /etc/ssh/revoked_keys and the Dockerfile bake it"
-grep -q 'Deploy key readable : NO. .*root-only directory' "$ENTRYPOINT" \
+grep -q 'Deploy key readable : NO. .*root-only directory' "$(ep_section 5)" \
     && ok "the brokered boot log line names the root-only directory" \
     || bad "the 'Deploy key readable : NO' line must say the mounted key is in a root-only directory"
 

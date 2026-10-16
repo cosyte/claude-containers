@@ -25,6 +25,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=test/lib/entrypoint.sh
+source "$REPO_ROOT/test/lib/entrypoint.sh"
 CS="$REPO_ROOT/bin/claude-sessions"
 SESSION="$REPO_ROOT/bin/claude-session"
 TMPD="$(mktemp -d)"
@@ -593,7 +595,7 @@ check "--env ANTHROPIC_API_KEY is refused" test "$rc" -ne 0
 
 # ======================================================================================
 echo "== the entrypoint follows an account change in the shared credential =="
-SYNC="$(awk '/^# >>> credential sync/{f=1} f{print} /^# <<< credential sync/{exit}' "$REPO_ROOT/entrypoint.sh")"
+SYNC="$(awk '/^# >>> credential sync/{f=1} f{print} /^# <<< credential sync/{exit}' "$(ep_section 6)")"
 AU="$TMPD/auth"; CF="$TMPD/cfgsync"; mkdir -p "$AU" "$CF"
 cred() { printf '{"claudeAiOauth":{"accessToken":"%s","refreshToken":"r-%s"}}\n' "$1" "$1"; }
 acct() { printf '{"oauthAccount":{"accountUuid":"%s","emailAddress":"%s@example.com"}}\n' "$1" "$1"; }

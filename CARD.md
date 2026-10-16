@@ -5,7 +5,7 @@ The Docker image, launchers and session tools that run isolated Claude Code sess
 
 ## Offers
 
-- The image: `Dockerfile` + `entrypoint.sh` (boot path, numbered sections); `make build`.
+- The image: `Dockerfile` + `entrypoint.sh` (boot path: a loader, sections in `entrypoint.d/`); `make build`.
 - Host CLIs in `bin/`: `claude-launch` (one container), `claude-compose-gen` (a stack from a
   scenario `.conf`), `claude-list`, `claude-attach`, `claude-stop`, `claude-rm`, `claude-logs`,
   `claude-account-login`, `claude-disk-gc`.
