@@ -185,9 +185,9 @@ PINNED_PNPM="$(sed -n 's/^ARG PNPM_VERSION=\(.*\)$/\1/p' "$REPO_ROOT/Dockerfile"
 echo "  uv --version: $(cexec "uv --version" 2>&1)"
 echo "  pnpm --version: $(cexec "pnpm --version" 2>&1)"
 check "image ships the pinned uv ($PINNED_UV)" \
-    '[[ "$(cexec "uv --version" 2>/dev/null | awk "{print \$2}")" == "$PINNED_UV" ]]'
+    '[[ -n "$PINNED_UV" && "$(cexec "uv --version" 2>/dev/null | awk "{print \$2}")" == "$PINNED_UV" ]]'
 check "image ships the pinned pnpm ($PINNED_PNPM)" \
-    '[[ "$(cexec "pnpm --version" 2>/dev/null)" == "$PINNED_PNPM" ]]'
+    '[[ -n "$PINNED_PNPM" && "$(cexec "pnpm --version" 2>/dev/null)" == "$PINNED_PNPM" ]]'
 # Provenance labels (the end of the Dockerfile), set from the Makefile's BUILD_ARGS: the
 # commit a reader compares with main, and the CLI the label claims it ships.
 check "image is labelled with its source commit (40-hex org.opencontainers.image.revision)" \

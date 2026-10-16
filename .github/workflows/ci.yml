@@ -69,7 +69,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The Makefile's BUILD_ARGS, read from the Makefile itself so the two never drift. A
-      # clean environment, so a runner variable (NODE_VERSION, say) cannot override a default.
+      # clean environment, so a runner variable (PNPM_VERSION, say) cannot override a default.
       - id: args
         name: build args (the Makefile's BUILD_ARGS)
         run: |
