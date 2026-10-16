@@ -178,7 +178,8 @@ for mode in "${MODES[@]}"; do
     step "$mode" unshare-U 30 "$cn" 'unshare -U true'
     if [[ "$mode" == helper ]]; then
         # The helper must refuse an id outside the caller's own and its subuid range (host root).
-        if step "$mode" helper-root 30 "$cn" 'unshare -U sleep 10 & p=$!; sleep 1; newuidmap $p 0 0 1'; then
+        if docker exec -u "$U" -e PATH="$HELPER_BIN:/usr/bin:/bin" "$cn" bash -c \
+                'unshare -U sleep 10 & p=$!; sleep 1; newuidmap $p 0 0 1' > "$OUT/logs/helper-helper-root.log" 2>&1; then
             sec "$mode" helper-refuses 0 "the helper mapped uid 0"
         else
             sec "$mode" helper-refuses 1 "$(tail -1 "$OUT/logs/helper-helper-root.log" | tr '\t|' '  ')"
