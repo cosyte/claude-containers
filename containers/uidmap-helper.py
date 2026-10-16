@@ -1,12 +1,14 @@
-#!/usr/bin/env python3
-"""Mode "helper": a root daemon that writes a user namespace's uid/gid map for the caller.
+#!/usr/bin/python3 -I
+"""The uid-map helper of a --containers session: a root daemon that writes the map for the caller.
 
 newuidmap/newgidmap are setuid (or file-capability) binaries, and under no-new-privileges
 neither kind gains anything, so rootless podman cannot map its subordinate ids. This daemon
-runs as root (started by the container's root side, as an entrypoint would) and does what
-newuidmap does: it reads the caller's uid from SO_PEERCRED, refuses a pid the caller does not
-own, refuses any range outside the caller's own id plus its /etc/subuid (/etc/subgid) lines,
-then writes /proc/<pid>/uid_map (gid_map). The client on PATH is newidmap-client.py.
+runs as root (started by the entrypoint, §2d) and does what newuidmap does: it reads the
+caller's uid from SO_PEERCRED, refuses a pid the caller does not own, refuses any range outside
+the caller's own id plus its /etc/subuid (/etc/subgid) lines, then writes /proc/<pid>/uid_map
+(gid_map). The client on PATH is newidmap-client.py. The pid's /proc directory is opened once
+and both the owner check and the write go through that handle, so a pid reused in between
+cannot redirect the write.
 
 The kernel lets a map be written only by a process with CAP_SYS_ADMIN over the new namespace,
 which its owner has and root outside it (a session has no CAP_SYS_ADMIN) does not. So, as
@@ -20,7 +22,7 @@ import socket
 import struct
 import sys
 
-SOCK = sys.argv[1] if len(sys.argv) > 1 else "/run/containers-proto/uidmap.sock"
+SOCK = sys.argv[1] if len(sys.argv) > 1 else "/run/claude-containers/uidmap.sock"
 
 
 def allowed_ranges(uid, kind):
@@ -41,8 +43,8 @@ PR_SET_KEEPCAPS = 8
 CAP_SETGID, CAP_SETUID = 6, 7
 
 
-def write_as(uid, path, text):
-    """Write path from a child running as uid with CAP_SETUID and CAP_SETGID effective."""
+def write_as(uid, dirfd, name, text):
+    """Write name under dirfd from a child running as uid with CAP_SETUID and CAP_SETGID."""
     r, w = os.pipe()
     child = os.fork()
     if child == 0:
@@ -59,8 +61,11 @@ def write_as(uid, path, text):
             data = (ctypes.c_uint32 * 6)(caps, caps, 0, 0, 0, 0)
             if LIBC.capset(hdr, data) != 0:
                 raise OSError(ctypes.get_errno(), "capset")
-            with open(path, "w") as f:
-                f.write(text)
+            fd = os.open(name, os.O_WRONLY, dir_fd=dirfd)
+            try:
+                os.write(fd, text.encode())
+            finally:
+                os.close(fd)
             os.write(w, b"ok")
         except Exception as e:  # noqa: BLE001 - reported to the parent
             os.write(w, ("error: %s" % e).encode())
@@ -80,8 +85,6 @@ def handle(conn):
     if len(words) < 5 or words[0] not in ("uid", "gid") or (len(words) - 2) % 3:
         return "bad request"
     kind, pid = words[0], int(words[1])
-    if os.stat("/proc/%d" % pid).st_uid != uid:
-        return "pid %d is not owned by uid %d" % (pid, uid)
     ranges = allowed_ranges(uid, kind)
     lines = []
     nums = [int(w) for w in words[2:]]
@@ -90,7 +93,13 @@ def handle(conn):
         if count < 1 or not any(s <= outer and outer + count <= s + c for s, c in ranges):
             return "range %d %d %d is not uid %d's" % (inner, outer, count, uid)
         lines.append("%d %d %d" % (inner, outer, count))
-    return write_as(uid, "/proc/%d/%s_map" % (pid, kind), "\n".join(lines) + "\n")
+    dirfd = os.open("/proc/%d" % pid, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if os.fstat(dirfd).st_uid != uid:
+            return "pid %d is not owned by uid %d" % (pid, uid)
+        return write_as(uid, dirfd, "%s_map" % kind, "\n".join(lines) + "\n")
+    finally:
+        os.close(dirfd)
 
 
 def main():

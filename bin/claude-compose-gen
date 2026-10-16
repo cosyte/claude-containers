@@ -89,6 +89,14 @@
 #                       CLAUDE_GPU=1 for the in-container guard (claude-gpu). Needs the
 #                       NVIDIA Container Toolkit's CDI spec on the host (nvidia-ctk cdi
 #                       generate); without it Docker refuses to create the service.
+#     --containers <repos>  let these repos' sessions build and run containers (repeatable;
+#                       comma/space lists ok; each must be a repo in this stack): rootless
+#                       podman as the agent, docker / docker compose pointed at it
+#                       (DOCKER_HOST). The service gets podman's seccomp profile
+#                       (containers/seccomp.json in this checkout), apparmor and
+#                       systempaths unconfined, /dev/net/tun and its own image-store
+#                       volume (claude-containers-<repo>); cap_drop ALL and
+#                       no-new-privileges stay. See docs/containers-in-sessions.md.
 #     --scratch-size <map>  the /scratch RAM tmpfs size for one --browser or --gpu
 #                       service, over the stack-wide CLAUDE_BROWSER_SCRATCH_TMPFS /
 #                       CLAUDE_GPU_SCRATCH_TMPFS. Format REPO=SIZE, e.g. render=8g
@@ -386,6 +394,15 @@ for tok in "${GPU_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
     for one in $(echo "$tok" | tr ',' ' '); do
         GPU["$(sanitize "$one")"]=1
+    done
+done
+# Containers sessions: rootless podman (CLAUDE_CONTAINERS=1, entrypoint §2d). Checked against
+# the final repo list below, like --gpu.
+declare -A CONTAINERS=()
+for tok in "${CONTAINERS_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    for one in $(echo "$tok" | tr ',' ' '); do
+        CONTAINERS["$(sanitize "$one")"]=1
     done
 done
 # Per-service /scratch tmpfs size: svc -> SIZE. Only a --browser or --gpu service has a
@@ -686,6 +703,10 @@ for g in "${!GPU[@]}"; do
     [[ -n "${SEEN[$g]:-}" ]] \
         || die "--gpu names '$g', which is not a repo in this stack (repos: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
 done
+for g in "${!CONTAINERS[@]}"; do
+    [[ -n "${SEEN[$g]:-}" ]] \
+        || die "--containers names '$g', which is not a repo in this stack (repos: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
+done
 for g in "${!SESSIONS[@]}" "${!ENVS[@]}"; do
     [[ -n "${SEEN[$g]:-}" ]] \
         || die "--session/--env names '$g', which is not a service in this stack (services: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
@@ -917,15 +938,23 @@ EOF
     # libraries (CUDA, OptiX, the EGL/GLX vendor libraries) and nvidia-smi; no runtime:
     # line, no extra capability, no privilege. The image ships only the vendor-neutral
     # glvnd side.
-    if [[ -n "${GPU[$svc]:-}" ]]; then
+    # --containers adds /dev/net/tun for pasta, podman's rootless network.
+    if [[ -n "${GPU[$svc]:-}${CONTAINERS[$svc]:-}" ]]; then
         echo "    devices:"
-        echo "      - nvidia.com/gpu=all"
+        [[ -z "${GPU[$svc]:-}" ]] || echo "      - nvidia.com/gpu=all"
+        [[ -z "${CONTAINERS[$svc]:-}" ]] || echo "      - $CONTAINERS_TUN_DEV"
     fi
     # Escape hardening (mirrors claude-launch via _common.sh): no-new-privileges
     # always; drop ALL caps + re-add the minimal set unless CLAUDE_HARDEN_CAPS=0;
     # add NET_ADMIN when the egress firewall is enabled.
     echo "    security_opt:"
     echo "      - no-new-privileges:true"
+    # --containers: the options of containers_run_args (bin/_common.sh), and nothing else.
+    if [[ -n "${CONTAINERS[$svc]:-}" ]]; then
+        echo "      - \"seccomp=${CONTAINERS_SECCOMP}\""
+        echo "      - apparmor=unconfined"
+        echo "      - systempaths=unconfined"
+    fi
     _caps=""
     if [[ "$CLAUDE_HARDEN_CAPS" =~ ^(1|true|yes|on)$ ]]; then
         echo "    cap_drop:"
@@ -991,6 +1020,7 @@ EOF
             echo "      ${gv}: \"\${${gv}:-}\""
         done
     fi
+    [[ -n "${CONTAINERS[$svc]:-}" ]] && echo '      CLAUDE_CONTAINERS: "1"'
     # Account names come only from sanitize() (charset [a-z0-9._-]), so no
     # quoting hazard, unlike CLAUDE_DEV_CMD/MKTS/PLUGINS: no escaping needed.
     [[ -n "${ACCOUNTS[$svc]:-}" ]] && echo "      CLAUDE_ACCOUNTS: \"${ACCOUNTS[$svc]}\""
@@ -1047,6 +1077,7 @@ EOF
       - $(state_volume "$svc"):${STATE_MOUNT}${CACHE_NAME:+
       - claude-cache:/cache}
 EOF
+    [[ -z "${CONTAINERS[$svc]:-}" ]] || echo "      - $(containers_volume "$svc"):${CONTAINERS_STORE}"
     # Extra foreign volumes (--mount): another stack's workspace, usually :ro.
     # Emitted INSIDE the volumes list, before the key binds.
     if [[ -n "${MOUNTS[$svc]:-}" ]]; then
@@ -1126,6 +1157,11 @@ for row in "${FINAL[@]}"; do
     OWNED_VOLS["claude-config-$svc"]=1
     OWNED_VOLS["claude-ws-$svc"]=1
     OWNED_VOLS["$(state_volume "$svc")"]=1
+    # A --containers service's image store, owned like its workspace.
+    if [[ -n "${CONTAINERS[$svc]:-}" ]]; then
+        printf '  %s:\n    name: %s\n' "$(containers_volume "$svc")" "$(containers_volume "$svc")"
+        OWNED_VOLS["$(containers_volume "$svc")"]=1
+    fi
     # Browser and GPU services use a RAM tmpfs for /scratch (BROWSER_/GPU_SCRATCH_TMPFS), so
     # there is no disk scratch volume to declare/own. Other build-repos keep the volume.
     if [[ -z "${BROWSER[$svc]:-}" && -z "${GPU[$svc]:-}" ]]; then
@@ -1182,6 +1218,7 @@ for r in "${FINAL[@]}"; do
     [[ -n "${CPU[$s]:-}" || -n "${MEM[$s]:-}" ]] && extra="$extra +res(${CPU[$s]:-$CLAUDE_CPU_LIMIT}cpu/${MEM[$s]:-$CLAUDE_MEM_LIMIT})"
     [[ -n "${BROWSER[$s]:-}" ]] && extra="$extra +browser"
     [[ -n "${GPU[$s]:-}" ]] && extra="$extra +gpu"
+    [[ -n "${CONTAINERS[$s]:-}" ]] && extra="$extra +containers"
     [[ -n "${MODEL[$s]:-}" ]] && extra="$extra +model(${MODEL[$s]})"
     if [[ -n "${MKTS[$s]:-}" ]]; then
         n_mkts="$(awk -F, '{print NF}' <<<"${MKTS[$s]}")"
@@ -1223,6 +1260,12 @@ if (( ${#GPU[@]} > 0 )); then
     cdi="$(docker info --format '{{range .DiscoveredDevices}}{{.ID}} {{end}}' 2>/dev/null || true)"
     [[ " $cdi " == *" nvidia.com/gpu=all "* ]] \
         || warn "Docker lists no CDI device nvidia.com/gpu=all: --gpu services will fail to start until the NVIDIA Container Toolkit's CDI spec exists (nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml, or its refresh unit)"
+fi
+
+# --containers needs the host to allow it at `up` time: say so now.
+if (( ${#CONTAINERS[@]} > 0 )); then
+    containers_problem="$(containers_host_problem)"
+    [[ -z "$containers_problem" ]] || warn "--containers services will not run containers until this is fixed: $containers_problem"
 fi
 
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing: run 'make login'"

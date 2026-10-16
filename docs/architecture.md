@@ -75,6 +75,7 @@ rationale: the sections below.
   | `02a-scratch.sh` | §2a: disk-backed scratch (`TMPDIR`) |
   | `02b-gpu.sh` | §2b: the GPU probe |
   | `02c-state.sh` | §2c: private state (`/state`) |
+  | `02d-containers.sh` | §2d: a `--containers` session's subordinate ids, uid-map helper and podman API |
   | `03-host-keys.sh` | §3: persistent SSH host keys |
   | `04-key-inputs.sh` | §4: the root-only key directory; the git key refused for SSH |
   | `05-git.sh` | §5: the git key broker, identity, secret guard, `GH_TOKEN` |
@@ -83,7 +84,7 @@ rationale: the sections below.
   | `07-claude-json.sh` | §7: seed `.claude.json` |
   | `07a-managed-policy.sh` | §7a: managed settings |
   | `07b-browser.sh` | §7b: the browser decision (`CLAUDE_BROWSER`) |
-  | `07c-session-memory.sh` | §7c: the managed CLAUDE.md: container facts, the GPU note |
+  | `07c-session-memory.sh` | §7c: the managed CLAUDE.md: container facts, the GPU and containers notes |
   | `08a-global-claude-md.sh` | §8a: the image's global CLAUDE.md |
   | `08b-settings.sh` | §8b: merge `settings.json`, its self-heals |
   | `08c-plugins.sh` | §8c: baked plugins and the runtime kit's |

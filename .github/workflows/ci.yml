@@ -53,6 +53,7 @@ jobs:
               - bin/**
               - claude-config/**
               - scripts/**
+              - containers/**
               - test/smoke.sh
               - Makefile
               - docker-compose.yml
@@ -91,7 +92,12 @@ jobs:
           build-args: ${{ steps.args.outputs.list }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # Ubuntu 23.10 and later let only AppArmor-profiled programs create user namespaces, and
+      # a --containers session runs apparmor=unconfined: lift it on the runner (a host setting,
+      # docs/containers-in-sessions.md), so smoke's section 19 runs, required, not skipped.
+      - name: host allows unprivileged user namespaces (--containers)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # Parts that need a GPU, routable IPv6 or a working firewall report SKIP, as on any host
       # without them.
       - name: smoke (test/smoke.sh against claude-code-box:ci)
-        run: IMAGE=claude-code-box:ci test/smoke.sh
+        run: SMOKE_CONTAINERS=require IMAGE=claude-code-box:ci test/smoke.sh

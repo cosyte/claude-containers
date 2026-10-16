@@ -8,6 +8,7 @@
 | `/workspace` | `claude-ws-<proj>` volume *or* `--workspace` bind | per container | The git repo |
 | `/scratch` | `claude-scratch-<proj>` volume; a RAM tmpfs on `--browser` and `--gpu` services | per container | **`TMPDIR`**: disk-backed temp. Cleared on every boot; `claude-rm --purge` deletes it |
 | `/state` | `claude-state-<proj>` volume | per container, mounted in no other | **Private state** (`CLAUDE_STATE_DIR`): an app's databases, keys and tokens, under `/state/<app>`. Mode 700. `claude-rm --purge` and `compose down -v` delete it |
+| `/home/claude/.local/share/containers` | `claude-containers-<proj>` volume, on `--containers` sessions only | per container | Rootless podman's images, containers and their volumes. Kept across restarts; `claude-rm --purge` and `compose down -v` delete it |
 | `/cache` | `claude-cache` volume | shared, readable from every container | Tool installs and package caches (mise, cargo, go, npm, uv, pip) and the pinned Blender (`/cache/blender`). Never private state, and never a worktree, a clone or a working folder |
 | `/tmp` | tmpfs (**RAM**, 1 GB) | per container | Small temp only. Charged to the memory cgroup: big writes belong in `/scratch` |
 | `/etc/claude/authorized_keys` | host `SSH_AUTHORIZED_KEYS` | read-only, in root-only `/etc/claude` | Who may SSH in: the owner's login keys, never the git key |

@@ -28,6 +28,12 @@
 #                              Container Toolkit's CDI spec on the host. CLAUDE_GPU=1 in
 #                              .env makes it the default.
 #   --no-gpu                   opt out when CLAUDE_GPU=1 is set in .env
+#   --containers               let the session build and run containers: rootless podman
+#                              as the agent, with docker / docker compose pointed at it
+#                              (DOCKER_HOST). Adds podman's seccomp profile, apparmor and
+#                              systempaths unconfined, /dev/net/tun and an image-store
+#                              volume (claude-containers-<name>); cap-drop ALL and
+#                              no-new-privileges stay. See docs/containers-in-sessions.md.
 #   --extra-args "<args>"      extra args passed to claude via CLAUDE_EXTRA_ARGS
 #   --expose <h:c>             publish an extra host:container port (repeatable)
 #   --dev-cmd <command>        auto-start a dev server on boot in a tmux 'dev' window
@@ -139,6 +145,7 @@ SESSIONS="$(flag_join '; ' "$SESSIONS" "${SESSION_RAW[@]}")"
 BROWSER="$(flag_last "" "${BROWSER_RAW[@]}")"
 [[ -n "$BROWSER" ]] && BROWSER_EXPLICIT=1
 GPU="$(flag_last "" "${GPU_RAW[@]}")"
+CONTAINERS="$(flag_last 0 "${CONTAINERS_RAW[@]}")"
 
 # --browser / --no-browser can also be set via CLAUDE_BROWSER in .env / the host
 # env: a CLI flag wins; env is the fallback; unset leaves auto-detect to the
@@ -289,6 +296,16 @@ if [[ "$GPU" == "1" ]]; then
     SCRATCH_ARGS=(--tmpfs "/scratch:rw,nosuid,nodev,exec,size=${gpu_scratch}")
 fi
 
+# Containers: what the host must allow is checked NOW, so an impossible request fails the
+# launch instead of a session whose podman fails at its first step.
+CONTAINERS_ARGS=()
+if [[ "$CONTAINERS" == "1" ]]; then
+    containers_problem="$(containers_host_problem)"
+    [[ -z "$containers_problem" ]] || die "--containers: $containers_problem.
+       Or drop --containers to launch without containers."
+    mapfile -t CONTAINERS_ARGS < <(containers_run_args "$PROJECT")
+fi
+
 [[ -n "$PORT" ]] || PORT="$(alloc_port)"
 host_port_free "$PORT" || warn "host port $PORT looks busy; Docker may refuse it"
 
@@ -404,6 +421,7 @@ docker run -d \
     "${EXPOSE_ARGS[@]}" \
     "${ENV_FILE_ARG[@]}" \
     "${GPU_ARGS[@]}" \
+    "${CONTAINERS_ARGS[@]}" \
     "${SCRATCH_ARGS[@]}" \
     -e TMPDIR=/scratch \
     -v "$(state_volume "$PROJECT"):$STATE_MOUNT" \
@@ -476,6 +494,8 @@ fi
 # (a browser image auto-registers, a lean image stays silent): no noise here.
 [[ "$GPU" == "1" ]] && \
     info "GPU: nvidia.com/gpu=all via CDI; run 'claude-gpu status' inside (see docs/troubleshooting.md, GPU)"
+[[ "$CONTAINERS" == "1" ]] && \
+    info "Containers: rootless podman, docker/compose via DOCKER_HOST (see docs/containers-in-sessions.md)"
 case "$BROWSER" in
     1) info "Frontend debug: chrome-devtools MCP force-enabled (headless Chromium in-container)" ;;
     0) info "Frontend debug: chrome-devtools MCP opted out (--no-browser)" ;;

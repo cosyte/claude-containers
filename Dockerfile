@@ -286,6 +286,38 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     test -f /usr/share/glvnd/egl_vendor.d/50_mesa.json
 
+# --- Rootless podman (every variant; used only by a --containers session) --------------
+# A session launched with --containers runs rootless podman as the agent user, and the docker
+# CLI and compose drive it through `podman system service` (DOCKER_HOST, entrypoint §2d). The
+# packages are inert in any other session: Docker's default seccomp profile refuses the
+# user-namespace syscalls podman needs, so `podman` there fails at its first unshare.
+#   podman crun conmon            the engine, its OCI runtime and its monitor
+#   netavark aardvark-dns nftables  container networks and their name resolution
+#   passt                         pasta, the rootless network (needs /dev/net/tun)
+#   catatonit                     the init `podman run --init` uses
+#   docker-cli docker-compose     `docker build`, `docker compose up` against podman's API
+# No uidmap: its setuid newuidmap/newgidmap gain nothing under no-new-privileges, and
+# /usr/local/bin carries the uid-map helper's client under those names instead (below).
+# hadolint ignore=DL3008
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        podman crun conmon netavark aardvark-dns nftables passt catatonit \
+        docker-cli docker-compose; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*; \
+    for b in newuidmap newgidmap; do [ ! -e "/usr/bin/$b" ] || chmod u-s,g-s "/usr/bin/$b"; done; \
+    podman --version; docker compose version
+# No systemd in a session (containers.conf); short names resolve on Docker Hub (registries.conf).
+COPY containers/containers.conf /etc/containers/containers.conf.d/50-claude-session.conf
+COPY containers/registries.conf /etc/containers/registries.conf.d/50-claude-session.conf
+# The uid-map helper (root, started by §2d) and its client on PATH as newuidmap/newgidmap.
+# podman refuses a newuidmap with neither the setuid bit nor a setuid file capability. The
+# client is a script, and the kernel ignores setuid on scripts: the bit only passes the check.
+COPY --chmod=755 containers/uidmap-helper.py /usr/local/lib/claude/containers/uidmap-helper
+COPY --chmod=4755 containers/newidmap-client.py /usr/local/bin/newuidmap
+COPY --chmod=4755 containers/newidmap-client.py /usr/local/bin/newgidmap
+
 # --- uv / uvx (multi-arch via the official distroless image) ------------------
 COPY --from=uv /uv /uvx /usr/local/bin/
 
@@ -562,7 +594,10 @@ RUN set -eux; \
     else \
         useradd -m -u "${CLAUDE_UID}" -g "${CLAUDE_GID}" -s /bin/bash "${CLAUDE_USER}"; \
     fi; \
+    # .local/share/containers: a --containers session mounts its image store here, and a
+    # volume mounted on a missing path would leave its parents root-owned.
     mkdir -p /home/${CLAUDE_USER}/.ssh /home/${CLAUDE_USER}/.claude /workspace \
+             /home/${CLAUDE_USER}/.local/share/containers \
              /etc/ssh/host-keys /opt/claude-config /run/sshd; \
     chown -R ${CLAUDE_UID}:${CLAUDE_GID} /home/${CLAUDE_USER} /workspace; \
     chmod 700 /home/${CLAUDE_USER}/.ssh

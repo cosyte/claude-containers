@@ -8,6 +8,8 @@
 #   - removed flags refuse, naming the removal (never a silent no-op)
 #   - claude-compose-gen emission: every service on plain runc, cap_drop kept
 #   - the disk-backed scratch (TMPDIR) that keeps big installs off the 1g /tmp tmpfs
+#   - --containers: exactly the options it adds (launch and compose), nothing privileged, the
+#     host checks, and every other session unchanged; containers/seccomp.json is its filter's
 # shellcheck source=test/lib/prelude.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
@@ -197,6 +199,122 @@ fi
 grep -q 'export TMPDIR=/scratch' "$REPO_ROOT/bash_profile" \
     && ok "bash_profile re-exports TMPDIR (sshd does not inherit the container env)" \
     || bad "bash_profile must export TMPDIR so SSH logins get the disk-backed temp too"
+
+# --- --containers ------------------------------------------------------------------------
+# A --containers session adds exactly the options the owner chose (docs/containers-in-sessions.md,
+# helper mode) and nothing else: never privileged, never SYS_ADMIN, never a host socket, and
+# cap-drop ALL and no-new-privileges kept. A session without it is unchanged.
+echo "== --containers: exactly its options, nothing privileged, others unchanged =="
+CSTUB="$TMPD/cstub"; mkdir -p "$CSTUB" "$TMPD/cws"
+cat > "$CSTUB/docker" <<'STUB'
+#!/usr/bin/env bash
+d="${STUB_STATE:?}"
+case "$1" in
+    inspect) [[ -e "$d/created" ]] && { echo running; exit 0; }; exit 1 ;;
+    run)     shift; printf '%s\n' "$@" > "$d/run-args"; touch "$d/created"; echo deadbeef ;;
+    *)       exit 0 ;;
+esac
+STUB
+printf '#!/bin/sh\nexit 0\n' > "$CSTUB/sleep"
+chmod +x "$CSTUB/docker" "$CSTUB/sleep"
+# /dev/null stands in for /dev/net/tun: a character device on every host.
+claunch() {   # claunch <env...> -- <args...>: run-args in $TMPD/run-args, log in $TMPD/claunch.log
+    local envs=()
+    while [[ "$1" != -- ]]; do envs+=("$1"); shift; done; shift
+    rm -f "$TMPD/run-args" "$TMPD/created"
+    env -u CLAUDE_CONTAINERS STUB_STATE="$TMPD" PATH="$CSTUB:$PATH" CLAUDE_PORTS_USED_OVERRIDE="" \
+        CLAUDE_CONTAINERS_TUN_DEV=/dev/null CLAUDE_CONTAINERS_USERNS_SYSCTL="$TMPD/no-sysctl" "${envs[@]}" \
+        "$LAUNCH" ctest --workspace "$TMPD/cws" --port 2297 "$@" >"$TMPD/claunch.log" 2>&1
+}
+want_extra="--security-opt
+seccomp=$REPO_ROOT/containers/seccomp.json
+--security-opt
+apparmor=unconfined
+--security-opt
+systempaths=unconfined
+--device
+/dev/null
+-v
+claude-containers-ctest:/home/claude/.local/share/containers
+-e
+CLAUDE_CONTAINERS=1"
+claunch -- ; rc=$?; cp "$TMPD/run-args" "$TMPD/run-plain" 2>/dev/null
+(( rc == 0 )) && [[ -s "$TMPD/run-plain" ]] && ! grep -qE 'CLAUDE_CONTAINERS|claude-containers-ctest|unconfined|seccomp|/dev/net/tun|DOCKER_HOST' "$TMPD/run-plain" \
+    && ok "a launch without --containers adds none of its options" \
+    || bad "a launch without --containers must be unchanged (rc=$rc): $(grep -E 'CONTAINERS|unconfined|seccomp' "$TMPD/run-plain" 2>/dev/null | tr '\n' ' ')"
+claunch -- --containers; rc=$?
+extra="$(diff <(cat "$TMPD/run-plain") "$TMPD/run-args" 2>/dev/null | sed -n 's/^> //p')"
+(( rc == 0 )) && [[ "$extra" == "$want_extra" ]] \
+    && ok "--containers adds exactly seccomp, apparmor and systempaths unconfined, the tun device, the store volume and CLAUDE_CONTAINERS=1" \
+    || bad "--containers must add exactly its options (rc=$rc); added: ${extra//$'\n'/ }"
+removed="$(diff <(cat "$TMPD/run-plain") "$TMPD/run-args" 2>/dev/null | sed -n 's/^< //p')"
+[[ -z "$removed" ]] && grep -qx -- --cap-drop "$TMPD/run-args" && grep -qx no-new-privileges "$TMPD/run-args" \
+    && ok "--containers keeps every other option: cap-drop ALL and no-new-privileges stay" \
+    || bad "--containers must not drop an option; dropped: ${removed//$'\n'/ }"
+grep -qiE -- 'privileged|SYS_ADMIN|docker\.sock|^--cap-add$' <<<"$extra" \
+    && bad "--containers must add no privilege, no capability and no socket: $extra" \
+    || ok "--containers adds no privileged, no capability and no Docker socket"
+claunch CLAUDE_CONTAINERS_TUN_DEV="$TMPD/no-tun" -- --containers; rc=$?
+(( rc != 0 )) && [[ ! -e "$TMPD/run-args" ]] && grep -q -- "--containers: this host has no $TMPD/no-tun" "$TMPD/claunch.log" \
+    && ok "--containers on a host without /dev/net/tun refuses before docker run" \
+    || bad "--containers without a tun device must refuse (rc=$rc): $(tail -2 "$TMPD/claunch.log")"
+echo 1 > "$TMPD/userns-restricted"
+claunch CLAUDE_CONTAINERS_USERNS_SYSCTL="$TMPD/userns-restricted" -- --containers; rc=$?
+(( rc != 0 )) && [[ ! -e "$TMPD/run-args" ]] && grep -q "lets only AppArmor-profiled programs create user namespaces" "$TMPD/claunch.log" \
+    && ok "--containers on a host restricting user namespaces (Ubuntu's AppArmor sysctl) refuses" \
+    || bad "--containers with apparmor_restrict_unprivileged_userns=1 must refuse (rc=$rc): $(tail -2 "$TMPD/claunch.log")"
+echo 0 > "$TMPD/userns-open"
+claunch CLAUDE_CONTAINERS_USERNS_SYSCTL="$TMPD/userns-open" -- --containers; rc=$?
+(( rc == 0 )) && ok "the sysctl at 0 lets --containers through" || bad "the sysctl at 0 must not refuse: $(tail -2 "$TMPD/claunch.log")"
+
+# compose: the same options as YAML on the --containers service only.
+COUT="$TMPD/cdc.yml"
+cgen() { env STUB_STATE="$TMPD" PATH="$CSTUB:$PATH" CLAUDE_PORTS_USED_OVERRIDE="" CLAUDE_CONTAINERS_TUN_DEV=/dev/net/tun \
+    "$GEN" "$@" >"$TMPD/cgen.log" 2>&1; }
+cgen --out "$TMPD/cdc-plain.yml" acme/api acme/web
+cgen --out "$COUT" --containers api acme/api acme/web; rc=$?
+OUT="$COUT"
+blk="$(svc_block api)"
+(( rc == 0 )) && [[ "$(sed -n '/^    devices:$/,/^    [a-z_]*:$/p' <<<"$blk" | sed '$d')" == $'    devices:\n      - /dev/net/tun' ]] \
+    && ok "compose: the --containers service gets /dev/net/tun and no other device" \
+    || bad "compose: devices must be exactly /dev/net/tun (rc=$rc): $(grep -A3 'devices:' <<<"$blk" | tr '\n' ' ')"
+[[ "$(sed -n '/^    security_opt:$/,/^    [a-z_]*:$/p' <<<"$blk" | sed '$d')" == "    security_opt:
+      - no-new-privileges:true
+      - \"seccomp=$REPO_ROOT/containers/seccomp.json\"
+      - apparmor=unconfined
+      - systempaths=unconfined" ]] \
+    && ok "compose: security_opt is no-new-privileges plus exactly seccomp, apparmor and systempaths" \
+    || bad "compose: security_opt is wrong: $(grep -A5 'security_opt:' <<<"$blk" | tr '\n' ' ')"
+grep -qE '^      CLAUDE_CONTAINERS: "1"$' <<<"$blk" && grep -qE '^      - claude-containers-api:/home/claude/\.local/share/containers$' <<<"$blk" \
+    && grep -qE '^  claude-containers-api:$' "$COUT" \
+    && ok "compose: CLAUDE_CONTAINERS=1, the store volume mounted and declared" \
+    || bad "compose: the --containers service needs CLAUDE_CONTAINERS and its store volume"
+grep -qE '^    cap_drop:$' <<<"$blk" && ! grep -qE 'privileged|SYS_ADMIN|docker\.sock' <<<"$blk" \
+    && ok "compose: cap_drop ALL kept, nothing privileged" \
+    || bad "compose: the --containers service must keep cap_drop and add nothing privileged"
+OUT="$TMPD/cdc-plain.yml"; web_plain="$(svc_block web)"; api_plain="$(svc_block api)"
+OUT="$COUT"; web_c="$(svc_block web)"
+[[ -n "$web_plain" && "$web_plain" == "$web_c" ]] \
+    && ok "compose: the service without --containers is byte-identical" \
+    || bad "compose: --containers on api must not change web"
+! grep -qE 'claude-containers-api|unconfined|seccomp|/dev/net/tun|CLAUDE_CONTAINERS' "$TMPD/cdc-plain.yml" \
+    && [[ "$(diff <(cat <<<"$api_plain") <(cat <<<"$blk") | grep -c '^>')" == 7 && "$(diff <(cat <<<"$api_plain") <(cat <<<"$blk") | grep -c '^<')" == 0 ]] \
+    && ok "compose: a stack without --containers carries none of it; with it, api only gains its 7 lines" \
+    || bad "compose: the plain stack must be unchanged and api gain only its lines: $(diff <(cat <<<"$api_plain") <(cat <<<"$blk") | tr '\n' ' ')"
+cgen --out "$TMPD/cdc-bad.yml" --containers nosuch acme/api; rc=$?
+(( rc != 0 )) && grep -q -- "--containers names 'nosuch', which is not a repo" "$TMPD/cgen.log" \
+    && ok "compose: --containers naming no repo of the stack refuses" \
+    || bad "compose: --containers nosuch must refuse (rc=$rc)"
+
+# The profile is the vendored upstream through containers/seccomp.jq, nothing else.
+if command -v jq >/dev/null 2>&1; then
+    diff -q <(jq -f "$REPO_ROOT/containers/seccomp.jq" "$REPO_ROOT/containers/seccomp-upstream.json") \
+        <(jq . "$REPO_ROOT/containers/seccomp.json") >/dev/null \
+        && ok "containers/seccomp.json is containers/seccomp-upstream.json through containers/seccomp.jq" \
+        || bad "containers/seccomp.json differs from its filter's output: rebuild it with jq -f containers/seccomp.jq"
+else
+    bad "jq is needed to check containers/seccomp.json"
+fi
 
 echo
 echo "launch-unit: $PASS passed, $FAIL failed"

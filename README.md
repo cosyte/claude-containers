@@ -129,7 +129,7 @@ and `.env.example`.
 | Security notes, managed settings, egress allowlist | [docs/security-notes.md](docs/security-notes.md), [docs/managed-settings.md](docs/managed-settings.md), [docs/egress-allowlist.md](docs/egress-allowlist.md) |
 | Troubleshooting | [docs/troubleshooting.md](docs/troubleshooting.md) |
 | The retired Sysbox broker | [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md) |
-| Containers in sessions (rootless podman prototype, results) | [docs/containers-in-sessions.md](docs/containers-in-sessions.md) |
+| Containers in sessions (`--containers`: rootless podman, docker and compose) | [docs/containers-in-sessions.md](docs/containers-in-sessions.md) |
 
 ## Contributing, security, licence
 

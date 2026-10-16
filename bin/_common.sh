@@ -261,6 +261,46 @@ state_volume() { echo "claude-state-$1"; }
 # shellcheck disable=SC2034  # read by the scripts that source this file
 STATE_MOUNT="/state"
 
+# --- Containers in sessions (--containers) -------------------------------------
+# A --containers session runs rootless podman as the agent user (docs/containers-in-sessions.md,
+# the "helper" mode the owner chose). Production's hardening stays: cap-drop ALL with the minimal
+# set, no-new-privileges; no privilege flag, no admin capability, no host engine socket.
+# What it adds, and what each costs, is the options table in that doc:
+#   seccomp=containers/seccomp.json  podman's profile, so unshare/mount/setns reach the kernel,
+#                                    which still checks caps per user namespace
+#   apparmor=unconfined              docker-default denies mount
+#   systempaths=unconfined           a nested container mounts a fresh /proc
+#   /dev/net/tun                     pasta, podman's rootless network
+# plus its own image store, a volume (overlay on the container's overlayfs is refused).
+# The entrypoint (§2d) writes the subordinate ids and starts the root uid-map helper.
+containers_volume() { echo "claude-containers-$1"; }
+# shellcheck disable=SC2034  # read by the scripts that source this file
+CONTAINERS_STORE="/home/claude/.local/share/containers"
+CONTAINERS_SECCOMP="$CLAUDE_DOCKER_ROOT/containers/seccomp.json"
+# The host facts --containers needs; named so the unit suites can point them at a sandbox.
+CONTAINERS_TUN_DEV="${CLAUDE_CONTAINERS_TUN_DEV:-/dev/net/tun}"
+CONTAINERS_USERNS_SYSCTL="${CLAUDE_CONTAINERS_USERNS_SYSCTL:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}"
+
+# containers_run_args <project>: the docker-run arguments a --containers session adds, one per
+# line (read with mapfile). claude-compose-gen emits the same options as YAML.
+containers_run_args() {
+    printf -- '%s\n' --security-opt "seccomp=$CONTAINERS_SECCOMP" \
+        --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
+        --device "$CONTAINERS_TUN_DEV" \
+        -v "$(containers_volume "$1"):$CONTAINERS_STORE" -e CLAUDE_CONTAINERS=1
+}
+
+# containers_host_problem: why this host cannot run a --containers session, or nothing (status 0
+# either way). The checks are the ones a launch can make before the container exists.
+containers_host_problem() {
+    [[ -f "$CONTAINERS_SECCOMP" ]] || { echo "the seccomp profile $CONTAINERS_SECCOMP is missing from this checkout"; return 0; }
+    [[ -c "$CONTAINERS_TUN_DEV" ]] || { echo "this host has no $CONTAINERS_TUN_DEV (load the tun module: modprobe tun)"; return 0; }
+    if [[ "$(cat "$CONTAINERS_USERNS_SYSCTL" 2>/dev/null)" == 1 ]]; then
+        echo "this host lets only AppArmor-profiled programs create user namespaces (${CONTAINERS_USERNS_SYSCTL#/proc/sys/} = 1, Ubuntu 23.10 and later); as root: sysctl -w kernel.apparmor_restrict_unprivileged_userns=0, and persist it in /etc/sysctl.d/"
+    fi
+    return 0
+}
+
 # --- Shared tool cache -----------------------------------------------
 # cache_name: the shared cache volume name, or "" when disabled. A launcher may
 # pass an override (its --cache value); "", "off", "none", "0", "false" all disable.
@@ -475,7 +515,7 @@ print_connect() {
 # shellcheck disable=SC2034  # read by the scripts that source this file
 MODEL_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() STARTCMD_RAW=() BROWSER_RAW=() GPU_RAW=() MKTS_RAW=()
 # shellcheck disable=SC2034
-PLUGINS_RAW=() ACCOUNTS_RAW=() SESSION_RAW=() ENV_RAW=() CACHE_RAW=()
+PLUGINS_RAW=() ACCOUNTS_RAW=() SESSION_RAW=() ENV_RAW=() CACHE_RAW=() CONTAINERS_RAW=()
 shared_flag_row() {   # shared_flag_row <flag>: "arg sep check target format", or status 1
     case "$1" in
         --model)       echo "value = nonempty MODEL MODEL" ;;
@@ -484,6 +524,7 @@ shared_flag_row() {   # shared_flag_row <flag>: "arg sep check target format", o
         --start-cmd)   echo "value = start_cmd STARTCMD COMMAND" ;;
         --browser)     echo "list - - BROWSER -" ;;
         --gpu)         echo "list - - GPU -" ;;
+        --containers)  echo "list - - CONTAINERS -" ;;
         --marketplace) echo "value = marketplace MKTS NAME=URL[#REF]" ;;
         --plugin)      echo "value = nonempty PLUGINS PLUGIN@MKT[,PLUGIN@MKT...]" ;;
         --accounts)    echo "value = accounts ACCOUNTS NAME[,NAME...]" ;;

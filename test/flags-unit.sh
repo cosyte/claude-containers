@@ -46,6 +46,7 @@ errtext() { sed -n '/==> error:/,$p' "$1"; }
 run_launch() {
     rm -f "$TMPD/run-args" "$TMPD/created"
     env -u CLAUDE_SESSIONS -u CLAUDE_GPU -u CLAUDE_BROWSER STUB_STATE="$TMPD" PATH="$STUBD:$PATH" \
+        CLAUDE_CONTAINERS_TUN_DEV=/dev/null CLAUDE_CONTAINERS_USERNS_SYSCTL="$TMPD/no-sysctl" \
         CLAUDE_PORTS_USED_OVERRIDE="" "$LAUNCH" ftest --workspace "$TMPD/ws" --port 2298 "$@" \
         >"$TMPD/launch.log" 2>&1
     if [[ $? -eq 0 && -e "$TMPD/run-args" ]]; then echo accepted; else echo refused; errtext "$TMPD/launch.log"; fi
@@ -89,6 +90,7 @@ same refused  "--start-cmd empty"          --start-cmd '' -- --start-cmd site=
 same refused  "--start-cmd with a newline" --start-cmd $'echo a\necho b' -- --start-cmd $'site=echo a\necho b'
 same accepted "--browser"                  --browser -- --browser site
 same accepted "--gpu"                      --gpu -- --gpu site
+same accepted "--containers"               --containers -- --containers site
 same accepted "--marketplace"              --marketplace "$KIT" -- --marketplace "site=$KIT"
 same refused  "--marketplace with no URL"  --marketplace kit -- --marketplace site=kit
 same accepted "--plugin"                   --plugin helper@kit --marketplace "$KIT" -- --plugin site=helper@kit --marketplace "site=$KIT"

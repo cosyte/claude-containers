@@ -3,7 +3,7 @@
 ```
 claude-launch <name> [--repo URL [--repo URL[#BRANCH]]... | --workspace PATH] [--branch B] [--depth N]
                       [--port N] [--model NAME] [--mcp NAME ...] [--browser|--no-browser]
-                      [--gpu|--no-gpu]
+                      [--gpu|--no-gpu] [--containers]
                       [--extra-args "…"] [--expose H:C ...] [--dev-cmd "…"]
                       [--session "NAME [key=value ...]" ...] [--env KEY=VALUE ...]
                       [--image REF] [--cache VOLUME | --no-cache] [--accounts NAMES]
@@ -76,7 +76,7 @@ claude-compose-gen --org ORG --out FILE [--active REPOS]... [--dormant-profile N
                    [--expose REPO:HOSTPORT:CONTAINERPORT]...
                    [--dev-cmd REPO=COMMAND]...
                    [--cpu REPO=N]... [--mem REPO=SIZE]... [--pids REPO=N]... [--model REPO=MODEL]...
-                   [--browser REPOS]... [--gpu REPOS]...
+                   [--browser REPOS]... [--gpu REPOS]... [--containers REPOS]...
                    [--group NAME=REPO[:BRANCH],REPO[:BRANCH],...]...
                    [--marketplace REPO=NAME=URL]... [--plugin REPO=PLUGIN[,...]]...
                    [--include GLOB] [--exclude GLOB] [--forks] [--archived]
@@ -182,6 +182,12 @@ so a repo keeps its port whether active or dormant.
 - `--extra-network REPO=NETWORK`: one service also joins another existing external network (e.g.
   a telemetry network; create it first). The service keeps the stack's default network, its own
   or `--network`'s; the network is declared external, so `down` never deletes it.
+- `--containers REPOS` (and `claude-launch --containers`): the session builds and runs containers
+  with rootless podman, and `docker` / `docker compose` drive it through `DOCKER_HOST`. The
+  service gets podman's seccomp profile (`containers/seccomp.json`), `apparmor=unconfined`,
+  `systempaths=unconfined`, `/dev/net/tun` and its own image-store volume
+  (`claude-containers-<repo>`); `cap_drop: ALL` and `no-new-privileges` stay. What each option
+  costs, and the host settings it needs: [containers-in-sessions.md](containers-in-sessions.md).
 - `--scratch-size REPO=SIZE`: the RAM `/scratch` size of one `--gpu` or `--browser` service, over
   `CLAUDE_GPU_SCRATCH_TMPFS` / `CLAUDE_BROWSER_SCRATCH_TMPFS`. Refused for any other service:
   its `/scratch` is a disk volume. See [temp-space.md](temp-space.md).
