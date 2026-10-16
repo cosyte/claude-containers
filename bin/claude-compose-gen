@@ -395,7 +395,8 @@ for tok in "${SCRATCH_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
     [[ "$tok" == ?*=* ]] || die "--scratch-size must be REPO=SIZE (got '$tok')"
     scv="${tok#*=}"
-    [[ "$(size_to_mib "$scv" 2>/dev/null)" =~ ^[1-9][0-9]*$ ]] \
+    # A unit is required: a bare 8 is 8 bytes to tmpfs, one page that fills on the first write.
+    [[ "$scv" =~ ^[0-9]+[kmgKMG]$ && "$(size_to_mib "$scv")" =~ ^[1-9][0-9]*$ ]] \
         || die "--scratch-size value must be a size like 8g (got '$scv')"
     SCRATCH["$(sanitize "${tok%%=*}")"]="$scv"
 done
@@ -689,9 +690,17 @@ for g in "${!SESSIONS[@]}" "${!ENVS[@]}"; do
     [[ -n "${SEEN[$g]:-}" ]] \
         || die "--session/--env names '$g', which is not a service in this stack (services: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
 done
-for g in "${!STARTCMD[@]}" "${!PIDS[@]}" "${!SCRATCH[@]}" "${!XNETS[@]}"; do
+for g in "${!STARTCMD[@]}" "${!PIDS[@]}"; do
     [[ -n "${SEEN[$g]:-}" ]] \
-        || die "--start-cmd/--pids/--scratch-size/--extra-network names '$g', which is not a service in this stack (services: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
+        || die "--start-cmd/--pids names '$g', which is not a service in this stack (services: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
+done
+for g in "${!SCRATCH[@]}"; do
+    [[ -n "${SEEN[$g]:-}" ]] \
+        || die "--scratch-size names '$g', which is not a service in this stack (services: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
+done
+for g in "${!XNETS[@]}"; do
+    [[ -n "${SEEN[$g]:-}" ]] \
+        || die "--extra-network names '$g', which is not a service in this stack (services: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
 done
 for g in "${!SCRATCH[@]}"; do
     [[ -n "${BROWSER[$g]:-}${GPU[$g]:-}" ]] \
@@ -1061,7 +1070,8 @@ EOF
     # stack's own network, or --network's), which a networks: list would otherwise replace.
     if [[ -n "${XNETS[$svc]:-}" ]]; then
         printf '    networks:\n      - default\n'
-        while IFS= read -r xn; do printf '      - %s\n' "$xn"; done <<< "${XNETS[$svc]}"
+        # Quoted: YAML reads a name like 123 or true as a number or a boolean.
+        while IFS= read -r xn; do printf '      - "%s"\n' "$xn"; done <<< "${XNETS[$svc]}"
     fi
     # Non-active repos: defined but behind a profile, so `up -d` skips them.
     if [[ $HAVE_ACTIVE -eq 1 && -z "${ACTIVE[$svc]:-}" ]]; then
@@ -1146,7 +1156,7 @@ fi
 # --extra-network: another stack's (or a service's) network, joined by name and never
 # created or deleted here; `up` fails fast when it does not exist.
 while IFS= read -r xn; do
-    if [[ -n "$xn" ]]; then printf '  %s:\n    name: %s\n    external: true\n' "$xn" "$xn"; fi
+    if [[ -n "$xn" ]]; then printf '  "%s":\n    name: "%s"\n    external: true\n' "$xn" "$xn"; fi
 done < <(printf '%s\n' "${!XNET_NAMES[@]}" | sort)
 } > "$TMP"
 
