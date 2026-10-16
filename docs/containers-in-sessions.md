@@ -1,23 +1,115 @@
-# Containers in sessions (prototype results)
+# Containers in sessions (`--containers`)
 
-Sessions cannot build or run containers today: no Docker socket, no `--privileged`, and Docker's
-default seccomp profile refuses the namespace syscalls a rootless engine needs without
+Sessions cannot build or run containers by default: no Docker socket, no `--privileged`, and
+Docker's default seccomp profile refuses the namespace syscalls a rootless engine needs without
 `CAP_SYS_ADMIN`. The retired Sysbox path ([legacy-sysbox-broker.md](legacy-sysbox-broker.md))
-was one answer and had many issues. This page records a prototype of another: **rootless podman
-run by the `claude` user inside a session container that keeps production's hardening**, plus a
-few named options. Nothing here ships: the image and the launchers are unchanged, and choosing
-an option is a separate decision for the owner.
+was one answer and had many issues. `--containers` is the other: **rootless podman run by the
+`claude` user inside a session container that keeps production's hardening**, with `docker` and
+`docker compose` driving it through `podman system service`. This page records the decision,
+what ships, and the prototype it rests on.
 
-## How it was proven
+## The decision
 
-[`.github/workflows/containers-proto.yml`](../.github/workflows/containers-proto.yml) (manual, and
-on PRs touching it or `test/containers-proto/`) runs on `ubuntu-24.04`:
+The prototype (below) proved two modes that run the whole matrix, so the owner was asked, on
+2026-10-16, "How should sessions get containers?", with five options: (a) rootless podman,
+single uid only (failed the matrix, offered only as "Other"); (b) rootless podman, multi-uid
+through a root uid-map helper, keeping `no-new-privileges`; (c) rootless podman, multi-uid with
+`no-new-privileges` off; (d) a privileged Docker-in-Docker sidecar behind its own flag; (e) none,
+documenting the workarounds (Jib, crane, ko, apko). The owner's answer:
+
+> "(b) Helper (Recommended)"
+
+So `--containers` is the **helper** mode, opt-in per session, default off.
+
+## Using it
+
+```bash
+claude-launch myproj --repo git@github.com:me/x.git --containers
+claude-compose-gen --out /srv/claude/compose.yml --containers x me/x     # per service
+```
+
+Inside the session `podman`, `docker build`, `docker run` and `docker compose up` work as the
+agent; `DOCKER_HOST` is `unix:///run/user/1000/podman/podman.sock` in every pane and SSH login,
+and the session's managed memory carries a short note saying so. Short image names resolve on
+Docker Hub. A published port (`-p 8080:80`) listens inside the session's network namespace.
+
+What `--containers` adds to a session, and nothing else (`containers_run_args` in
+`bin/_common.sh`; `claude-compose-gen` emits the same as YAML; `test/launch-unit.sh` asserts
+the exact list for both):
+
+| Added | Why |
+|---|---|
+| `--security-opt seccomp=containers/seccomp.json` | podman's profile with three syscalls made unconditional; see the options table below |
+| `--security-opt apparmor=unconfined` | `docker-default` denies `mount` |
+| `--security-opt systempaths=unconfined` | a nested container mounts a fresh `/proc` |
+| `--device /dev/net/tun` | pasta, podman's rootless network |
+| `-v claude-containers-<name>:/home/claude/.local/share/containers` | the image store: overlay on the container's own overlayfs is refused. `claude-rm --purge` and `compose down -v` delete it |
+| `-e CLAUDE_CONTAINERS=1` | the entrypoint's §2d (below) |
+
+**The cost, plainly:** the session's root is host root (Docker gives it no user-namespace
+remap), and with `systempaths` and AppArmor unconfined it can write host-wide sysctls such as
+`kernel.core_pattern`, which needs no capability and makes the host kernel run a program as host
+root. The agent cannot reach that (uid 1000, `CapEff` 0, `no-new-privileges`), so it stays one
+root-side bug away: the entrypoint, sshd, the egress firewall and the uid-map helper are host
+attack surface in a `--containers` session. That is the "weightiest row" below, chosen with it.
+
+Every `--containers` session uses the same subordinate range (`100000:65536`), so nested
+processes in two sessions run as the same host uids; namespaces and separate store volumes keep
+them apart. Files a nested container writes into the workspace (a bind-mounted data directory)
+keep those ids: the boot-time ownership pass leaves that range alone.
+
+Kept as in every session: `--cap-drop ALL` with production's minimal cap set, `no-new-privileges`,
+no `--privileged`, no `CAP_SYS_ADMIN`, no host Docker socket. A session without `--containers`
+gets none of the above (asserted by the unit suites and by smoke).
+
+The image (every variant) ships podman, crun, conmon, netavark, aardvark-dns, nftables, passt,
+catatonit, the docker CLI and compose, but no `uidmap`: its setuid `newuidmap` gains nothing
+under `no-new-privileges`. In its place `/usr/local/bin/newuidmap` and `newgidmap` are the
+client of the uid-map helper ([`containers/newidmap-client.py`](../containers/newidmap-client.py)).
+In a session without `--containers` they are inert: Docker's seccomp profile stops podman at
+its first `unshare`.
+
+The entrypoint's §2d (`entrypoint.d/02d-containers.sh`), only when `CLAUDE_CONTAINERS=1`:
+
+1. writes one subordinate range for the agent, `claude:100000:65536`, to `/etc/subuid` and
+   `/etc/subgid`;
+2. starts the uid-map helper as root on `/run/claude-containers/uidmap.sock`
+   ([`containers/uidmap-helper.py`](../containers/uidmap-helper.py)), restarted if it exits;
+3. clears the agent's runtime dir `/run/user/1000` (it is in the container layer, not a tmpfs,
+   so it would carry the last boot's podman state) and starts `podman system service` as the
+   agent on a socket in it, restarted if it exits;
+4. exports `XDG_RUNTIME_DIR` and `DOCKER_HOST`, and writes them to
+   `/etc/profile.d/claude-containers.sh` for SSH logins.
+
+Logs: `/var/log/claude-containers/`. The boot log's `Containers` line says whether both sockets
+came up within 10 seconds.
+
+### Host requirements
+
+`claude-launch --containers` refuses, and `claude-compose-gen` warns, when the host lacks one:
+
+- `/dev/net/tun` (the `tun` module);
+- on Ubuntu 23.10 and later, `kernel.apparmor_restrict_unprivileged_userns=0` (as root:
+  `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, persisted in `/etc/sysctl.d/`).
+  Debian hosts do not set it.
+
+CI's `smoke` job sets the sysctl on its runner and runs smoke's section 19 as required: a
+`--containers` session started with exactly the launcher's options and the real entrypoint,
+whose agent builds an image with an apt `RUN` and brings up a two-service compose stack, plus
+the posture checks (not privileged, `CapDrop` ALL, `no-new-privileges`, `CapEff` 0 for the
+agent, the helper refusing host uid 0).
+
+## The prototype it rests on
+
+The prototype was a throwaway workflow, `containers-proto.yml`, with its own stage and runner
+script under `test/containers-proto/` (both removed once smoke's section 19 replaced them; they
+are in the history of the prototype's PR). It ran on `ubuntu-24.04`:
 
 1. `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` on the runner (a host setting).
 2. Builds the session image, then adds podman 5.4.2, crun 1.21, conmon, netavark 1.14, nftables,
    passt, uidmap, the docker CLI 26.1 and docker-compose 2.26 in a throwaway stage
-   ([`test/containers-proto/Dockerfile`](../test/containers-proto/Dockerfile)).
-3. [`test/containers-proto/run.sh`](../test/containers-proto/run.sh) starts the image with
+   (`test/containers-proto/Dockerfile`).
+3. `test/containers-proto/run.sh` starts the image with
    `docker run` and production's hardening exactly as `claude-launch` builds it
    (`harden_run_args` from `bin/_common.sh`: `--cap-drop ALL`, the minimal cap set the entrypoint's
    `gosu` needs, `no-new-privileges`) and its other run flags at their defaults (`--init`,
@@ -49,11 +141,14 @@ on commit `dc3e419`, kernel 6.17 (Azure), 2026-10-16. The run's logs (one per st
 | `--device /dev/net/tun` | pasta, podman's rootless network, needs a tap device. | A tun device in the session. |
 | Host: `kernel.apparmor_restrict_unprivileged_userns=0` | Ubuntu 23.10 and later let only AppArmor-profiled programs create user namespaces. | Host-wide: any unconfined program may create one. |
 | `/etc/subuid` and `/etc/subgid` lines (`claude:100000:65536`) | Images own files as many uids (postgres 999, nginx 101, apt's `_apt` 42). | Nothing by themselves; how the map gets written is the mode. |
-| Mode **helper**: a root daemon writes the map | `newuidmap` is setuid (or file-capability); under `no-new-privileges` neither gains anything, and podman fails outright. | A root process on a socket in the session (~100 lines, [`uidmap-helper.py`](../test/containers-proto/uidmap-helper.py)). |
+| Mode **helper**: a root daemon writes the map | `newuidmap` is setuid (or file-capability); under `no-new-privileges` neither gains anything, and podman fails outright. | A root process on a socket in the session (~100 lines, [`uidmap-helper.py`](../containers/uidmap-helper.py)). |
 | Mode **fcaps**: `no-new-privileges` off | Lets the `cap_setuid`/`cap_setgid` file capabilities on `newuidmap`/`newgidmap` work. | `no-new-privileges` for that session: any setuid or file-capability binary in the image works again (still bounded by production's cap set). |
 
-The vendored profile is [`test/containers-proto/seccomp.json`](../test/containers-proto/seccomp.json),
-containers/common `pkg/seccomp/seccomp.json` at commit `82146f3` (tag v0.64.2), unmodified.
+The vendored profile is [`containers/seccomp-upstream.json`](../containers/seccomp-upstream.json),
+containers/common `pkg/seccomp/seccomp.json` at commit `82146f3` (tag v0.64.2), unmodified. The
+profile sessions get, [`containers/seccomp.json`](../containers/seccomp.json), is that file through
+the one filter in [`containers/seccomp.jq`](../containers/seccomp.jq) (the second row above);
+`test/launch-unit.sh` rebuilds it and fails on any difference.
 
 ## Results
 
@@ -95,19 +190,18 @@ Both multi-uid modes run the whole matrix. The helper mode does it with every pr
 kept, at the price of a root daemon in the session; fcaps does it with no extra process, at the
 price of `no-new-privileges`.
 
-## Not prototyped, and the owner's host checks
+## Not shipped, and the owner's host checks
 
-- **A privileged Docker-in-Docker sidecar** (`docker:dind` with `--privileged`, the session given
-  `DOCKER_HOST=tcp://...`): works with any image, but the sidecar is root on the host in all but
-  name and every session sharing it shares its daemon. An option to weigh, not tried here.
-- **Sysbox**: retired (see above), out of scope.
-- **GPU sessions**: CDI mounts `/proc/driver/nvidia/params` over `/proc`; with
-  `systempaths=unconfined` and a nested `/proc` mount, check on the host that a nested container
-  starts and the GPU session still sees its card.
+- **The other options**: (c) `no-new-privileges` off and (d) a privileged DinD sidecar were not
+  chosen; (d) would make the sidecar root on the host in all but name and bypass the session's
+  egress firewall. Sysbox stays retired.
+- **GPU sessions**: `--gpu` and `--containers` combine (one `devices:` list). CDI mounts
+  `/proc/driver/nvidia/params` over `/proc`; check on the host that a nested container starts
+  and the GPU session still sees its card.
 - **Egress lockdown**: the firewall is iptables in the session's network namespace; pasta
   traffic leaves through that namespace, so the rules should still apply. Check on the host that
   a nested container cannot reach a denied host under `CLAUDE_EGRESS_LOCKDOWN=1`.
-- **The host's AppArmor**: on an Ubuntu 23.10+ host, `apparmor_restrict_unprivileged_userns`
-  must be 0 (or a profile written for the session); Debian hosts do not set it.
-- **Storage**: podman's store needs a volume (overlay on the container's own overlayfs is
-  refused); in production that is a per-container volume, sized and reaped like `/scratch`.
+- **Storage**: the store volume is not sized or reaped; a session that pulls many images fills
+  the pool like any volume. `podman system prune` inside, or `claude-rm --purge`.
+- **Enabling it on the owner's stacks**: a `--containers` line in that deployment's scenario
+  `.conf`, the owner's change, after this merges.

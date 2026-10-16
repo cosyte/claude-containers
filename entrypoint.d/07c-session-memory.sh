@@ -1,17 +1,19 @@
 # shellcheck shell=bash
-# --- 7c. Session memory: what this container has (+ the GPU note) ------------------
+# --- 7c. Session memory: what this container has (+ the GPU and containers notes) ---
 # Every session reads Claude Code's MANAGED memory file (root-owned, read above the
 # user's own CLAUDE.md). At every boot it gets a "This container" section that
 # claude-container-facts writes from probes run now (browser, chrome-devtools MCP, GPU,
-# toolchains, /cache and /scratch, how to install more), and on a --gpu session the GPU
-# note after it. It lives in the container layer and is rewritten on every boot, but
-# never over a file an operator put there: ours carries one of the two markers.
+# toolchains, /cache and /scratch, how to install more), then the GPU note on a --gpu
+# session and the containers note on a --containers one. It lives in the container layer
+# and is rewritten on every boot, but never over a file an operator put there: ours
+# carries one of the two markers.
 # The paths are named on their own lines so test/container-facts-unit.sh can run this
 # exact block unprivileged against a sandbox.
 SESSION_MD=/etc/claude-code/CLAUDE.md
 SESSION_MD_OWNER=root:root
 FACTS_CMD=/usr/local/bin/claude-container-facts
 GPU_NOTE_SRC=/opt/claude-config/CLAUDE.gpu.md
+CONTAINERS_NOTE_SRC=/opt/claude-config/CLAUDE.containers.md
 FACTS_MARK="claude-containers: container facts"
 GPU_NOTE_MARK="claude-containers: GPU session note"
 if [[ -e "$SESSION_MD" ]] && ! grep -qF -e "$FACTS_MARK" -e "$GPU_NOTE_MARK" "$SESSION_MD" 2>/dev/null; then
@@ -28,6 +30,10 @@ else
     if [[ "${CLAUDE_GPU:-0}" =~ ^(1|true|yes|on)$ && -f "$GPU_NOTE_SRC" ]]; then
         { echo; cat "$GPU_NOTE_SRC"; } >> "$smd_tmp"
         smd_what="container facts + GPU note"
+    fi
+    if [[ "${CLAUDE_CONTAINERS:-0}" =~ ^(1|true|yes|on)$ && -f "$CONTAINERS_NOTE_SRC" ]]; then
+        { echo; cat "$CONTAINERS_NOTE_SRC"; } >> "$smd_tmp"
+        smd_what="$smd_what + containers note"
     fi
     if mkdir -p "${SESSION_MD%/*}" && chmod 755 "${SESSION_MD%/*}" \
             && install -m 644 "$smd_tmp" "$SESSION_MD" && chown "$SESSION_MD_OWNER" "$SESSION_MD"; then

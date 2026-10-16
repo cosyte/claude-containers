@@ -35,6 +35,13 @@ browser() {
     echo "chromium ${ver:-(version unknown)} at \`$exe\`"
 }
 
+containers() {
+    if [[ "${CLAUDE_CONTAINERS:-0}" =~ ^(1|true|yes|on)$ ]]; then
+        echo "rootless podman; \`docker\` and \`docker compose\` use it (DOCKER_HOST); see the containers note"
+    else
+        echo "none: podman and docker are installed but cannot run here (not a --containers session; relaunching with --containers is the operator's call)"
+    fi
+}
 gpu() {
     local line=""
     if [[ -s "$GPU_STATE" ]]; then
@@ -89,6 +96,7 @@ cat <<EOF
 - Browser: $(browser)
 - chrome-devtools MCP: $mcp
 - GPU: $(gpu)
+- Containers: $(containers)
 - Toolchains: $(toolchains)
 - Space: $(space); TMPDIR is \`${TMPDIR:-/tmp}\`
 - Install more: \`mise use <tool>@<version>\` first, then that language's own manager:

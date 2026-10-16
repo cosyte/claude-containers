@@ -26,6 +26,18 @@
   (`permissions.disableBypassPermissionsMode`) is available at this path and is
   deliberately **not** set by this image: that call is the operator's. Full
   guide: [docs/managed-settings.md](managed-settings.md).
+- **`--containers` widens one session's kernel surface, by choice.** It keeps cap-drop ALL,
+  production's cap set and `no-new-privileges`, and is never privileged, never `CAP_SYS_ADMIN`
+  and never a host Docker socket. It does give that session podman's seccomp profile (namespace
+  and mount syscalls reach the host kernel, which checks caps per user namespace),
+  `apparmor=unconfined`, `systempaths=unconfined` and a root uid-map helper on a socket. The
+  agent (uid 1000, `CapEff` 0, `no-new-privileges`) still cannot write `/proc/sys`. But the
+  session has no user-namespace remap, so its root is host root, and with the `/proc` masks and
+  AppArmor gone that root can write host-wide sysctls: `kernel.core_pattern` needs no
+  capability and runs a program as host root. In such a session **any bug in a root-side
+  process (the entrypoint, sshd, the egress firewall, the uid-map helper) is a host escape**,
+  not a container escape. Opt-in, per session, off by default; the full trade-off table is in
+  [containers-in-sessions.md](containers-in-sessions.md).
 - **Secret guard (on by default).** A fleet-wide git pre-commit hook
   (`CLAUDE_SECRET_GUARD=1`) blocks the autonomous agent from committing obvious
   secrets: `.env`, `*.pem`, `*.key`, `id_rsa`, files containing a `PRIVATE KEY`

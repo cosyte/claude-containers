@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # claude-rm <name> [--yes] [--purge]
 #   --yes    skip the confirmation prompt
-#   --purge  also delete the per-container workspace, config and private state volumes
+#   --purge  also delete the per-container workspace, config, private state and (--containers)
+#            image-store volumes
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 need_docker
@@ -28,11 +29,14 @@ SCRATCH_VOL="$(scratch_volume "$PROJECT")"
 # Private state (/state): the container's own databases and keys. Only purged with the rest;
 # a container launched before /state existed has none, hence the inspect below.
 STATE_VOL="$(state_volume "$PROJECT")"
+# A --containers session's image store: its images, containers and volumes.
+CONTAINERS_VOL="$(containers_volume "$PROJECT")"
 [[ "$(container_state "$CN")" == "absent" ]] && die "no such container: $CN"
 
 PURGE_VOLS=("$WS_VOL" "$CFG_VOL")
 docker volume inspect "$SCRATCH_VOL" >/dev/null 2>&1 && PURGE_VOLS+=("$SCRATCH_VOL")
 docker volume inspect "$STATE_VOL" >/dev/null 2>&1 && PURGE_VOLS+=("$STATE_VOL")
+docker volume inspect "$CONTAINERS_VOL" >/dev/null 2>&1 && PURGE_VOLS+=("$CONTAINERS_VOL")
 
 echo "About to remove container: $CN"
 if [[ "$PURGE" == "1" ]]; then

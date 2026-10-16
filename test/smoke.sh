@@ -51,11 +51,13 @@ PASS=0 FAIL=0
 cleanup() {
     docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" "$BRKOFFCN" "$BRKFAILCN" "$NOKEYCN" "$KEYDIRCN" \
                  "$BRWACN" "$BRWOCN" "$BRWFCN" "$BRWLCN" \
-                 "$EG6CN" "$EG6ALLOW" "$EG6DENY" "$EGSFCN" "$EGSOKCN" "$EGRFCN" >/dev/null 2>&1 || true
+                 "$EG6CN" "$EG6ALLOW" "$EG6DENY" "$EGSFCN" "$EGSOKCN" "$EGRFCN" \
+                 "claude-smoke-containers-$$" >/dev/null 2>&1 || true
     # The network only goes after its containers do, or Docker refuses to remove it.
     docker network rm "$EG6NET" >/dev/null 2>&1 || true
     docker volume rm "$AUTHVOL" "$WSVOL" >/dev/null 2>&1 || true
     docker volume rm "$MRVOL" >/dev/null 2>&1 || true
+    docker volume rm "claude-containers-csmoke-$$" >/dev/null 2>&1 || true
     # The entrypoint hands a bind-mounted /workspace to the agent's uid; where that is not ours
     # (a CI runner is uid 1001), hand the fixtures back before removing them.
     rm -rf "$TMP" 2>/dev/null || {
@@ -155,7 +157,7 @@ check "entrypoint reached tmux launch" \
     'grep -q "started in tmux" <<<"$(docker logs "$CN" 2>&1)"'
 # The loader announces each section of entrypoint.d/ as it sources it: all of them, once, in the
 # order the sections ran in when they were one file.
-EP_ORDER="0 0b 1 1b 2 2a 2b 2c 3 4 5 6 6a 7 7a 7b 7c 8a 8b 8c 8d 8e 9 9b 10 10b 11 12 12a 12b 12c 12d 12e 12f 12g 13"
+EP_ORDER="0 0b 1 1b 2 2a 2b 2c 2d 3 4 5 6 6a 7 7a 7b 7c 8a 8b 8c 8d 8e 9 9b 10 10b 11 12 12a 12b 12c 12d 12e 12f 12g 13"
 check "the boot log announces the sections in their order ($EP_ORDER)" \
     '[[ "$(docker logs "$CN" 2>&1 | sed -n "s/^\[entrypoint\] §\([0-9][0-9a-z]*\) .*/\1/p" | tr "\n" " ")" == "$EP_ORDER " ]]'
 check "the session launch ran from its own file (§12b session-launch, then its tmux line)" \
@@ -823,9 +825,11 @@ check "agent can USE the key (ssh-agent lists it via the relay)" \
 check "agent CANNOT read the private key (no readable key file)" \
     '! brk "test -e ~/.ssh/id_ed25519"'
 # Name the file on a failure, so the log says what holds it.
-brksh 'grep -rl -- "PRIVATE KEY" /home/claude 2>/dev/null' | sed 's/^/  holds "PRIVATE KEY": /' || true
-check "no file ANYWHERE under the agent's home holds private key material" \
-    '! brksh "grep -rq -- \"PRIVATE KEY\" /home/claude 2>/dev/null"'
+# The key's own body, not the "PRIVATE KEY" marker: a plugin marketplace clone under
+# ~/.claude/plugins is third-party content, and one ships a test file holding the marker.
+brksh "grep -rlF -- '$GKPRIV' /home/claude 2>/dev/null" | sed 's/^/  holds the git key: /' || true
+check "no file ANYWHERE under the agent's home holds the git key's private material" \
+    '! brksh "grep -rqF -- \"$GKPRIV\" /home/claude 2>/dev/null"'
 check "the mounted key itself is root-only (the agent cannot read it off the mount)" \
     '! brksh "cat /etc/claude/git-key >/dev/null 2>&1"'
 check "the key directory is root-owned, mode 700, and the agent cannot list it" \
@@ -1357,6 +1361,61 @@ check "GPU work falls back to CPU and says so" \
 docker rm -f "$GPUDCN" >/dev/null 2>&1 || true
 check "a session WITHOUT --gpu gets no GPU note" \
     '! docker exec "$CN" test -e /etc/claude-code/CLAUDE.md 2>/dev/null || ! docker exec "$CN" grep -q "GPU session note" /etc/claude-code/CLAUDE.md'
+
+
+# --- 19. Containers in sessions (--containers) -------------------------------------
+# A session started with exactly claude-launch's options (harden_run_args plus
+# containers_run_args) and the real entrypoint: the agent, from a login shell as SSH gets it,
+# builds an image whose RUN installs with apt and brings up a two-service compose stack through
+# DOCKER_HOST. The host must allow it (bin/_common.sh containers_host_problem): a host that does
+# not reports SKIP, and SMOKE_CONTAINERS=require (CI) turns that into a FAIL.
+echo "== 19. --containers: rootless podman builds and composes, under production's hardening =="
+CTRPROJ="csmoke-$$"
+CTRCN="claude-smoke-containers-$$"
+ctr_problem="$(source "$REPO_ROOT/bin/_common.sh"; containers_host_problem)"
+if [[ -n "$ctr_problem" ]]; then
+    if [[ "${SMOKE_CONTAINERS:-}" == require ]]; then bad "19 --containers: $ctr_problem"
+    else echo "  SKIP  19 --containers checks ($ctr_problem)"; fi
+else
+    mapfile -t CTR_ARGS < <(source "$REPO_ROOT/bin/_common.sh"; containers_run_args "$CTRPROJ")
+    CTR_VOL="$(source "$REPO_ROOT/bin/_common.sh"; containers_volume "$CTRPROJ")"
+    # shellcheck disable=SC2086
+    docker run -d --name "$CTRCN" $GPUHARDEN "${CTR_ARGS[@]}" --init --pids-limit 2048 \
+        -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=containerssmoke \
+        -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+    wait_tmux "$CTRCN" || true
+    ctrlog="$(docker logs "$CTRCN" 2>&1 || true)"
+    check "the boot log reports rootless podman and its DOCKER_HOST" \
+        'grep -q "Containers          : rootless podman, DOCKER_HOST=unix:///run/user/1000/podman/podman.sock" <<<"$ctrlog"'
+    check "not privileged, CapDrop ALL, no-new-privileges kept, no SYS_ADMIN" \
+        '[[ "$(docker inspect -f "{{.HostConfig.Privileged}} {{.HostConfig.CapDrop}}" "$CTRCN")" == "false [ALL]" ]] \
+         && docker inspect -f "{{.HostConfig.SecurityOpt}}" "$CTRCN" | grep -q no-new-privileges \
+         && ! docker inspect -f "{{.HostConfig.CapAdd}}" "$CTRCN" | grep -q SYS_ADMIN'
+    check "the agent holds no capability (CapEff 0)" \
+        '[ "$(docker exec "$CTRCN" gosu claude awk "/^CapEff/{print \$2}" /proc/self/status)" = 0000000000000000 ]'
+    ctr() { timeout "$1" docker exec "$CTRCN" gosu claude bash -lc "set -euo pipefail; cd \"\$(mktemp -d)\"; $2" >"$TMP/ctr.log" 2>&1; }
+    check "podman maps the agent plus its subordinate range (0 to 1000, 1 to 100000 x 65536)" \
+        'ctr 120 "podman info --format \"{{json .Host.IDMappings.UIDMap}}\"" && grep -q "\"container_id\":1,\"host_id\":100000,\"size\":65536" "$TMP/ctr.log"'
+    check "the uid-map helper refuses to map host uid 0" \
+        '! ctr 30 "unshare -U sleep 10 & p=\$!; sleep 1; newuidmap \$p 0 0 1" && grep -q "is not uid" "$TMP/ctr.log"'
+    check "docker build of a Dockerfile whose RUN installs with apt" \
+        'ctr 900 "mkdir -p b && printf \"FROM debian:trixie-slim\nRUN apt-get update && apt-get install -y --no-install-recommends curl\n\" > b/Dockerfile && docker build -q -t smoke-build b && docker run --rm smoke-build curl --version" \
+         || { tail -5 "$TMP/ctr.log"; false; }'
+    check "docker compose up: postgres and a client that reaches it by service name" \
+        'ctr 600 "mkdir -p c && printf \"services:\n  db:\n    image: postgres:17\n    environment: { POSTGRES_PASSWORD: smoke }\n  app:\n    image: postgres:17\n    command: [sh, -c, \\\"until pg_isready -h db -U postgres; do sleep 1; done; echo reached-db; sleep infinity\\\"]\n    depends_on: [db]\n\" > c/compose.yaml && cd c
+             docker compose -p smoke up -d
+             r=1; for _ in \$(seq 90); do docker compose -p smoke logs app > logs 2>/dev/null || true; if grep -q reached-db logs; then r=0; break; fi; sleep 1; done
+             (( r == 0 )) || docker compose -p smoke logs
+             docker compose -p smoke down -t 1 || echo compose-down-failed
+             echo compose-result=\$r; (( r == 0 ))" || { echo "  rc=$?"; tail -20 "$TMP/ctr.log"; false; }'
+    check "the session memory carries the containers note" \
+        'docker exec "$CTRCN" grep -q "claude-containers: containers session note" /etc/claude-code/CLAUDE.md'
+    docker rm -f "$CTRCN" >/dev/null 2>&1 || true
+    docker volume rm "$CTR_VOL" >/dev/null 2>&1 || true
+fi
+check "a session WITHOUT --containers gets no DOCKER_HOST, no helper and no note" \
+    '! docker exec "$CN" test -e /etc/profile.d/claude-containers.sh && ! docker exec "$CN" test -S /run/claude-containers/uidmap.sock \
+     && ! docker exec "$CN" grep -q "containers session note" /etc/claude-code/CLAUDE.md 2>/dev/null'
 
 echo
 echo "==============================================="
