@@ -7,7 +7,13 @@ runs as root (started by the container's root side, as an entrypoint would) and 
 newuidmap does: it reads the caller's uid from SO_PEERCRED, refuses a pid the caller does not
 own, refuses any range outside the caller's own id plus its /etc/subuid (/etc/subgid) lines,
 then writes /proc/<pid>/uid_map (gid_map). The client on PATH is newidmap-client.py.
+
+The kernel lets a map be written only by a process with CAP_SYS_ADMIN over the new namespace,
+which its owner has and root outside it (a session has no CAP_SYS_ADMIN) does not. So, as
+newuidmap does, the write is made from a child that takes the caller's uid and keeps only
+CAP_SETUID and CAP_SETGID.
 """
+import ctypes
 import os
 import pwd
 import socket
@@ -30,6 +36,40 @@ def allowed_ranges(uid, kind):
     return out
 
 
+LIBC = ctypes.CDLL(None, use_errno=True)
+PR_SET_KEEPCAPS = 8
+CAP_SETGID, CAP_SETUID = 6, 7
+
+
+def write_as(uid, path, text):
+    """Write path from a child running as uid with CAP_SETUID and CAP_SETGID effective."""
+    r, w = os.pipe()
+    child = os.fork()
+    if child == 0:
+        try:
+            os.close(r)
+            if LIBC.prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) != 0:
+                raise OSError(ctypes.get_errno(), "prctl")
+            os.setresuid(uid, uid, uid)
+            caps = (1 << CAP_SETGID) | (1 << CAP_SETUID)
+            hdr = (ctypes.c_uint32 * 2)(0x20080522, 0)
+            data = (ctypes.c_uint32 * 6)(caps, caps, 0, 0, 0, 0)
+            if LIBC.capset(hdr, data) != 0:
+                raise OSError(ctypes.get_errno(), "capset")
+            with open(path, "w") as f:
+                f.write(text)
+            os.write(w, b"ok")
+        except Exception as e:  # noqa: BLE001 - reported to the parent
+            os.write(w, ("error: %s" % e).encode())
+        finally:
+            os._exit(0)
+    os.close(w)
+    reply = os.read(r, 4096).decode() or "error: no reply"
+    os.close(r)
+    os.waitpid(child, 0)
+    return reply
+
+
 def handle(conn):
     pid_, uid, _gid = struct.unpack("3i", conn.getsockopt(
         socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
@@ -47,9 +87,7 @@ def handle(conn):
         if count < 1 or not any(s <= outer and outer + count <= s + c for s, c in ranges):
             return "range %d %d %d is not uid %d's" % (inner, outer, count, uid)
         lines.append("%d %d %d" % (inner, outer, count))
-    with open("/proc/%d/%s_map" % (pid, kind), "w") as f:
-        f.write("\n".join(lines) + "\n")
-    return "ok"
+    return write_as(uid, "/proc/%d/%s_map" % (pid, kind), "\n".join(lines) + "\n")
 
 
 def main():
