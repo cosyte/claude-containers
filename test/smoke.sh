@@ -195,6 +195,12 @@ check "image ships the pinned uv ($PINNED_UV)" \
     '[[ -n "$PINNED_UV" && "$(cexec "uv --version" 2>/dev/null | awk "{print \$2}")" == "$PINNED_UV" ]]'
 check "image ships the pinned pnpm ($PINNED_PNPM)" \
     '[[ -n "$PINNED_PNPM" && "$(cexec "pnpm --version" 2>/dev/null)" == "$PINNED_PNPM" ]]'
+# The everyday CLIs and Python modules (the Dockerfile's "Everyday CLIs" block, and yq):
+# each one runs, so a dropped package fails here rather than in a session.
+check "everyday CLIs run (file bc unzip zip xxd pdftotext column sqlite3 rsync ss ip dig fuser yq)" \
+    'cexec "file --version && bc --version && unzip -v && zip -v && xxd -v && pdftotext -v && column -V && sqlite3 --version && rsync --version && ss -V && ip -V && dig -v && fuser -V && yq --version" >/dev/null 2>&1'
+check "the system python3 imports yaml, PIL and pypdf" \
+    'cexec "python3 -c \"import yaml, PIL, pypdf\"" >/dev/null 2>&1'
 # Provenance labels (the end of the Dockerfile), set from the Makefile's BUILD_ARGS: the
 # commit a reader compares with main, and the CLI the label claims it ships.
 check "image is labelled with its source commit (40-hex org.opencontainers.image.revision)" \

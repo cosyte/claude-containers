@@ -239,6 +239,25 @@ RUN set -eux; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
+# --- Everyday CLIs and Python modules -----------------------------------------
+# What sessions reached for and did not find: a scan of 3,656 session transcripts
+# counted 405 failed calls to these CLIs and 143 failed imports in the system Python.
+#   file bc unzip zip xxd sqlite3 rsync      the tools themselves
+#   poppler-utils                            pdftotext, pdfinfo
+#   bsdextrautils                            column (and hexdump)
+#   iproute2 bind9-dnsutils psmisc           ss/ip, dig, fuser
+#   python3-yaml python3-pil python3-pypdf   `import yaml, PIL, pypdf` in system python3
+# yq is a pinned binary below, next to mise and just.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        file bc unzip zip xxd sqlite3 rsync \
+        poppler-utils bsdextrautils \
+        iproute2 bind9-dnsutils psmisc \
+        python3-yaml python3-pil python3-pypdf; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
 # --- GL / EGL userspace (every variant) ---------------------------------------
 # A --gpu session gets the NVIDIA driver's own user libraries (libcuda, libEGL_nvidia,
 # libGLX_nvidia, OptiX, the Vulkan ICD, nvidia-smi) injected by CDI at container
@@ -420,6 +439,28 @@ RUN set -eux; \
     install -m 0755 /tmp/just /usr/local/bin/just; \
     rm -f /tmp/just.tar.gz /tmp/just; \
     just --version
+
+# --- yq: YAML/JSON/TOML processor ----------------------------------------
+# Pinned + checksummed IN-REPO, same rationale as mise and just above.
+# Bump: change YQ_VERSION and BOTH digests together, from the release's
+# published `checksums` file (the SHA-256 column, per `checksums_hashes_order`).
+ARG YQ_VERSION=v4.54.1
+ARG YQ_SHA256_AMD64=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
+ARG YQ_SHA256_ARM64=189088da0c6429ec5178dfaab1a114805f6cab0b61b165ab236efedf1d57a71b
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) sha="${YQ_SHA256_AMD64}" ;; \
+      arm64) sha="${YQ_SHA256_ARM64}" ;; \
+      *) echo "yq: unsupported arch '$arch'" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+      "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${arch}" \
+      -o /tmp/yq; \
+    echo "${sha}  /tmp/yq" | sha256sum -c -; \
+    install -m 0755 /tmp/yq /usr/local/bin/yq; \
+    rm -f /tmp/yq; \
+    yq --version
 
 # --- Shared, persistent tool cache -----------------------------------
 # One shared /cache tree holds mise's install store + the language package-manager

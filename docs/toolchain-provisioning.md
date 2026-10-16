@@ -39,6 +39,14 @@ agent immediately: no `sudo`, no image rebuild.
    - **uv**: `FROM ghcr.io/astral-sh/uv:0.13.1@sha256:... AS uv`, bumped by Dependabot.
    - **pnpm**: `ARG PNPM_VERSION=12.14.0`, matched by the Makefile and compose defaults; bumped by
      hand, still overridable per build.
+   - **just** and **yq**: `ARG JUST_VERSION` / `ARG YQ_VERSION` with per-arch SHA256 digests, the
+     same download-and-verify as mise; bumped by hand with both digests.
+
+   Everyday CLIs and Python modules ship from Debian trixie in their own apt layer: `file`, `bc`,
+   `zip`/`unzip`, `xxd`, `sqlite3`, `rsync`, `pdftotext` (poppler-utils), `column` (bsdextrautils),
+   `ss`/`ip` (iproute2), `dig` (bind9-dnsutils), `fuser` (psmisc), and `yaml`, `PIL`, `pypdf` in the
+   system `python3` (python3-yaml, python3-pil, python3-pypdf). A session scan found these the CLIs
+   and imports sessions reached for most and did not find; `make smoke` runs each one.
 
    There is no `NODE_VERSION` or `UV_VERSION` setting: Dependabot cannot rewrite a FROM line built
    from an ARG, so the Makefile refuses either one and names the FROM line to edit.
