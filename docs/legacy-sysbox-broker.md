@@ -128,6 +128,9 @@ was unreachable even in principle.
 
 ## Why we retired it
 
+For running containers in a session without Sysbox (rootless podman under production's
+hardening, prototyped in CI), see [containers-in-sessions.md](containers-in-sessions.md).
+
 - **Blast radius was already contained by the outer controller container.** The
   nested Sysbox layer duplicated the protection the leaf already provides. A
   prompt-injectable agent's blast radius is one repo either way: the outer
