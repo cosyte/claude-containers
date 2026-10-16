@@ -7,9 +7,7 @@ export
 
 CLAUDE_IMAGE        ?= claude-code-box:latest
 CLAUDE_CODE_VERSION ?= 2.1.293
-NODE_VERSION        ?= 24
-UV_VERSION          ?= latest
-PNPM_VERSION        ?= latest
+PNPM_VERSION        ?= 12.14.0
 CLAUDE_UID          ?= 1000
 CLAUDE_GID          ?= 1000
 CLAUDE_USER         ?= claude
@@ -19,6 +17,14 @@ BUILDX_BUILDER      ?= claude-box
 # Frontend-debugging variant: 1 bakes headless Chromium + chrome-devtools-mcp.
 # Off by default (the lean image is unchanged). `make build-browser` flips it.
 WITH_BROWSER        ?= 0
+
+# NODE_VERSION and UV_VERSION are gone: the base image and uv are pinned by tag and
+# digest on the Dockerfile's FROM lines, where Dependabot can bump them. Refuse one set
+# in .env or on the command line rather than silently ignoring it. The environment is
+# exempt: every node image (this one included) exports NODE_VERSION, so refusing it there
+# would break make inside the very containers this repo builds.
+$(foreach v,NODE_VERSION UV_VERSION,$(if $(filter file command line,$(origin $(v))),\
+  $(error $(v) is no longer a build setting: the version is pinned on a FROM line in the Dockerfile (node:24-trixie-slim@sha256:..., ghcr.io/astral-sh/uv:X.Y.Z@sha256:...); edit that line, and drop $(v) from your .env or make command)))
 
 # Provenance labels (the end of the Dockerfile): the commit, whether the tree had
 # changes git would show, and the build time in UTC. `unknown` outside a git checkout.
@@ -37,9 +43,7 @@ BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 endif
 
 BUILD_ARGS = \
-  --build-arg NODE_VERSION=$(NODE_VERSION) \
   --build-arg CLAUDE_CODE_VERSION=$(CLAUDE_CODE_VERSION) \
-  --build-arg UV_VERSION=$(UV_VERSION) \
   --build-arg PNPM_VERSION=$(PNPM_VERSION) \
   --build-arg CLAUDE_UID=$(CLAUDE_UID) \
   --build-arg CLAUDE_GID=$(CLAUDE_GID) \

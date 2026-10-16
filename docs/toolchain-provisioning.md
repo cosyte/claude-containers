@@ -33,6 +33,16 @@ agent immediately: no `sudo`, no image rebuild.
    digests together**, from the release's published `SHASUMS256.txt` (the `-linux-x64` / `-linux-arm64`
    raw-binary rows).
 
+   The other baked toolchains are pinned too, each where Dependabot or a reader can find it:
+   - **Node** (the base image): `FROM node:24-trixie-slim@sha256:...`, a literal tag and digest.
+     Dependabot bumps the digest; a Node major is a hand edit (ignored in `.github/dependabot.yml`).
+   - **uv**: `FROM ghcr.io/astral-sh/uv:0.13.1@sha256:... AS uv`, bumped by Dependabot.
+   - **pnpm**: `ARG PNPM_VERSION=12.14.0`, matched by the Makefile and compose defaults; bumped by
+     hand, still overridable per build.
+
+   There is no `NODE_VERSION` or `UV_VERSION` setting: Dependabot cannot rewrite a FROM line built
+   from an ARG, so the Makefile refuses either one and names the FROM line to edit.
+
 2. **Activated two ways, for two shell kinds.**
    - **Interactive** (SSH logins, tmux panes): `~/.bashrc` runs `eval "$(mise activate bash)"`, full
      activation with the `cd`-hook and env management. `~/.bash_profile` sources `~/.bashrc`, so login

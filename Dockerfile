@@ -1,15 +1,13 @@
 # syntax=docker/dockerfile:1
 
-# Global ARGs (usable in FROM lines). Node 24 ("Krypton") is the active LTS as
-# of 2026 and matches a verified-working Claude Code host; override with
-# --build-arg NODE_VERSION=22 if needed. uv: pin a real version (e.g. 0.8.4)
-# for reproducible builds; "latest" works but isn't reproducible.
-ARG NODE_VERSION=24
-ARG UV_VERSION=latest
+# Both FROM lines are literal tags pinned by digest, not built from ARGs:
+# Dependabot (.github/dependabot.yml) rewrites a literal FROM line and cannot
+# rewrite one built from a variable (dependabot-core#2057). To bump by hand,
+# edit the tag and digest here; the Makefile refuses NODE_VERSION/UV_VERSION.
 
 # Throwaway stage: just re-exports the uv/uvx binaries (BuildKit forbids
 # variable expansion directly in COPY --from=, so it goes through a stage).
-FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+FROM ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 AS uv
 
 # --- Base image ---------------------------------------------------------------
 #
@@ -20,9 +18,9 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 # all, so a CAD project could design a part in here and never slice it. Upstream
 # ships no older build, and an AppImage bundles its libraries but not its libc.
 #
-# Kept as a literal tag rather than an ARG: dependabot rewrites this FROM line
-# (see .github/dependabot.yml) and cannot do that through a variable.
-FROM node:${NODE_VERSION}-trixie-slim
+# Node 24 ("Krypton") is the active LTS. A literal tag and digest rather than
+# an ARG: Dependabot bumps the digest (and minor tags) here, never the major.
+FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b7a86afc57ebec315
 
 # --- Build-time configuration -------------------------------------------------
 # CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control.
@@ -207,9 +205,9 @@ FROM node:${NODE_VERSION}-trixie-slim
 #   - 2.1.198: Remote Control is disabled when ANTHROPIC_BASE_URL points at a
 #     non-Anthropic host. This image never sets it (and §1 refuses API-key auth).
 ARG CLAUDE_CODE_VERSION=2.1.293
-# PNPM_VERSION: pnpm baked into the image. "latest" works but isn't
-# reproducible: pin a real version (e.g. 10.4.1), same as UV_VERSION.
-ARG PNPM_VERSION=latest
+# PNPM_VERSION: pnpm baked into the image, an exact version for reproducible
+# builds (the Makefile default matches; still overridable with --build-arg).
+ARG PNPM_VERSION=12.14.0
 ARG CLAUDE_USER=claude
 ARG CLAUDE_UID=1000
 ARG CLAUDE_GID=1000
@@ -308,7 +306,7 @@ RUN set -eu; \
     OPUS48_FLOOR=2.1.154; \
     # Format-check FIRST: `sort -V` ranks non-numeric strings (`latest`, `abc`, `v2.1.1`)
     # ABOVE the floor, so it would fail OPEN on them. That is a plausible operator mistake,
-    # not a theoretical one: the same .env.example invites `latest` for UV_VERSION and
+    # not a theoretical one: an old .env.example invited `latest` for UV_VERSION and
     # PNPM_VERSION. Reject anything that is not a plain dotted-numeric version, so the
     # failure names the real problem instead of misfiring later.
     case "${CLAUDE_CODE_VERSION}" in \
