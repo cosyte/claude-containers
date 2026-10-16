@@ -12,11 +12,11 @@
 #           of a root daemon (uidmap-helper.py) that writes the maps
 #   fcaps   no-new-privileges OFF, subuid lines, newuidmap/newgidmap with file capabilities
 #
-# Each step is PASS or FAIL with its seconds, in $OUT/results.tsv, a Markdown table in
+# Each step is PASS or FAIL (OFF: a posture this mode drops on purpose) with its seconds, in $OUT/results.tsv, a Markdown table in
 # $OUT/results.md (and $GITHUB_STEP_SUMMARY), and one log per step in $OUT/logs. A mode's
 # failing step is a result, not an error; the exit status is nonzero only when a security
-# check fails (privileged, an extra capability, a non-zero CapEff, or unshare -U working
-# without the options).
+# check fails (privileged, an extra capability, a non-zero CapEff, unshare -U working
+# without the options, or the helper mapping an id that is not the caller's).
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -95,7 +95,7 @@ check_posture() { # mode container nnp-expected
     if [[ "$nnp" == 1 ]]; then
         sec "$mode" no-new-privs "$([[ "$opts" == *no-new-privileges* ]] && echo 1)" "$opts"
     else
-        record "$mode" no-new-privs FAIL 0 "off by design in this mode: $opts"
+        record "$mode" no-new-privs OFF 0 "off by design in this mode: $opts"
     fi
     c="$(docker exec -u "$U" "$cn" awk '/^CapEff/{print $2}' /proc/self/status)"
     sec "$mode" user-capeff-0 "$([[ "$c" == 0000000000000000 ]] && echo 1)" "CapEff=$c"
@@ -176,6 +176,14 @@ for mode in "${MODES[@]}"; do
     sleep 1
     check_posture "$mode" "$cn" "$([[ $mode == fcaps ]] && echo 0 || echo 1)"
     step "$mode" unshare-U 30 "$cn" 'unshare -U true'
+    if [[ "$mode" == helper ]]; then
+        # The helper must refuse an id outside the caller's own and its subuid range (host root).
+        if step "$mode" helper-root 30 "$cn" 'unshare -U sleep 10 & p=$!; sleep 1; newuidmap $p 0 0 1'; then
+            sec "$mode" helper-refuses 0 "the helper mapped uid 0"
+        else
+            sec "$mode" helper-refuses 1 "$(tail -1 "$OUT/logs/helper-helper-root.log" | tr '\t|' '  ')"
+        fi
+    fi
     step "$mode" podman-info 120 "$cn" 'podman info --format "{{.Store.GraphDriverName}} uids={{json .Host.IDMappings.UIDMap}}" | tee /dev/stderr'
     step "$mode" build-apt 900 "$cn" "mkdir -p /tmp/b && printf '%s\n' '$BUILD_DF' > /tmp/b/Dockerfile && podman build -t proto-build /tmp/b && podman run --rm proto-build curl --version"
     step "$mode" postgres 600 "$cn" 'podman run -d --name pg -e POSTGRES_PASSWORD=proto docker.io/library/postgres:17 >/dev/null
