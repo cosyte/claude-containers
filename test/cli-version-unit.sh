@@ -95,9 +95,11 @@ ee="$(sed -n 's/^CLAUDE_CODE_VERSION=\(.*\)$/\1/p' "$REPO_ROOT/.env.example")"
     && ok  ".env.example ($ee) == the pin" \
     || bad ".env.example says '$ee', expected '$PINNED': a fresh copy would pin operators to the wrong CLI"
 
-grep -q "| \`CLAUDE_CODE_VERSION\` | \`$PINNED\`" "$REPO_ROOT/README.md" \
-    && ok  "README documents the pin as $PINNED" \
-    || bad "README's CLAUDE_CODE_VERSION row does not document '$PINNED'"
+for doc in README.md docs/environment-variables.md; do
+    grep -q "| \`CLAUDE_CODE_VERSION\` | \`$PINNED\`" "$REPO_ROOT/$doc" \
+        && ok  "$doc documents the pin as $PINNED" \
+        || bad "$doc's CLAUDE_CODE_VERSION row does not document '$PINNED'"
+done
 
 grep -q "Pinned/verified Claude Code: \*\*$PINNED\*\*" "$REPO_ROOT/.claude/skills/claude-containers/SKILL.md" \
     && ok  "SKILL.md documents the pin as $PINNED" \

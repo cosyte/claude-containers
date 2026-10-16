@@ -15,6 +15,7 @@ token.
 > `@anthropic-ai/claude-code` CLI at a pinned version; your use of Claude Code
 > and of your Claude subscription remains subject to Anthropic's own terms.
 > Report Claude Code bugs to Anthropic, not here.
+
 > **Retired:** the nested-Sysbox worker broker (`--broker`/`--sysbox`) and the
 > per-session Docker engine (`--docker`); their flags refuse with an error. Background:
 > [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md).
@@ -50,9 +51,9 @@ the `./bin/` prefix.
 
 ## How it works
 
-`claude-launch` runs a container per project: the entrypoint refuses an API key, starts
-sshd, merges the baked-in config, clones or reuses `/workspace`, then runs Claude Code
-in tmux with Remote Control. Credentials live in one shared volume (one login, every
+`claude-launch` runs a container per project: the entrypoint refuses an API key, merges the
+baked-in config, clones or reuses `/workspace`, starts sshd, then runs Claude Code in
+tmux with Remote Control. Credentials live in one shared volume (one login, every
 container); config, workspace, scratch and state are per container. Diagram and design:
 [docs/architecture.md](docs/architecture.md).
 
