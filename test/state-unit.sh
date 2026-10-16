@@ -21,6 +21,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=test/lib/entrypoint.sh
+source "$REPO_ROOT/test/lib/entrypoint.sh"
 TMPD="$(mktemp -d)"
 trap 'rm -rf "$TMPD"' EXIT
 
@@ -181,7 +183,7 @@ STUB_STATE="$TMPD" PATH="$STUBD:$PATH" "$RM" alpha --yes >/dev/null 2>&1
 # ======================================================================================
 echo "== entrypoint.sh 2c: /state made private, the boot log honest, legacy state named =="
 ENTRY="$REPO_ROOT/entrypoint.sh"
-BLOCK="$(awk '/^# --- 2c\. Private state/{f=1} f&&/^# --- 3\./{exit} f{print}' "$ENTRY")"
+BLOCK="$(awk '/^# --- 2c\. Private state/{f=1} f&&/^# --- 3\./{exit} f{print}' "$(ep_section 2c)")"
 OWN_TREE="$(awk '/^own_tree\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$ENTRY")"
 SB="$TMPD/sb"
 run_2c() {  # run_2c <project name> <mountinfo file> [state dir]: the real block, paths redirected

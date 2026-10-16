@@ -60,6 +60,30 @@ rationale: the sections below.
   that changes nothing reads every inode (minutes on a spinning disk). Until the
   pass reaches it, a deeper file with a foreign owner (a bind mount from another
   uid) is read-only to the agent; the boot log says when the pass is done.
+  It is a loader: the numbered sections are moving into `entrypoint.d/` (installed
+  at `/usr/local/lib/claude/entrypoint.d/`), one file each, which it sources in
+  order into its own shell (so a section's variables, functions and background jobs
+  reach every later one) and announces in the boot log as `§<n> <name>`:
+
+  | File | Section |
+  |---|---|
+  | `00-retired-env.sh` | §0: warn about retired broker/Sysbox env |
+  | `00b-retired-controller.sh` | §0b: refuse the retired `CLAUDE_CONTROLLER` mode |
+  | `01-auth.sh` | §1: refuse API-key auth; `make login`'s login mode |
+  | `01b-accounts.sh` | §1b: multi-account mode, the active account |
+  | `02-volumes.sh` | §2: ownership of the mounted volumes |
+  | `02a-scratch.sh` | §2a: disk-backed scratch (`TMPDIR`) |
+  | `02b-gpu.sh` | §2b: the GPU probe |
+  | `02c-state.sh` | §2c: private state (`/state`) |
+  | `03-host-keys.sh` | §3: persistent SSH host keys |
+  | `04-key-inputs.sh` | §4: the root-only key directory; the git key refused for SSH |
+  | `05-git.sh` | §5: the git key broker, identity, secret guard, `GH_TOKEN` |
+  | `06-credentials.sh` | §6: the credential reconcile loop |
+  | `06a-account-switch.sh` | §6a: the account-switch listener |
+  | `07-claude-json.sh` | §7: seed `.claude.json` |
+  | `07a-managed-policy.sh` | §7a: managed settings |
+
+  §7b to §13 are still inline in `entrypoint.sh`, below the loop.
 - **claude-session**: the tmux pane command: `cd /workspace`, exec
   `claude --dangerously-skip-permissions --remote-control "<project>"`, and
   fall back to a shell if Claude exits so SSH stays usable. With `--session NAME`

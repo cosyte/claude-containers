@@ -151,6 +151,11 @@ asclaude_x() { docker exec "$CN" gosu claude env CLAUDE_CONFIG_DIR=/home/claude/
 
 check "entrypoint reached tmux launch" \
     'grep -q "started in tmux" <<<"$(docker logs "$CN" 2>&1)"'
+# The loader announces each section of entrypoint.d/ as it sources it: all of them, once, in the
+# order the sections ran in when they were one file.
+EP_ORDER="0 0b 1 1b 2 2a 2b 2c 3 4 5 6 6a 7 7a"
+check "the boot log announces the sections in their order ($EP_ORDER)" \
+    '[[ "$(docker logs "$CN" 2>&1 | sed -n "s/^\[entrypoint\] §\([0-9][0-9a-z]*\) .*/\1/p" | tr "\n" " ")" == "$EP_ORDER " ]]'
 check "tmux session 'claude' is alive" \
     'asclaude_x "tmux has-session -t claude" >/dev/null 2>&1'
 check "sshd is running" \

@@ -543,6 +543,8 @@ RUN install -o root -g root -m 644 /dev/null /etc/ssh/revoked_keys
 # --- Baked-in Claude config + entrypoint --------------------------------------
 COPY claude-config/ /opt/claude-config/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+# Its numbered sections, sourced in order by entrypoint.sh (root's, read-only to everyone else).
+COPY --chmod=644 entrypoint.d/*.sh /usr/local/lib/claude/entrypoint.d/
 COPY bin/claude-launcher /usr/local/bin/claude
 COPY bin/claude-session /usr/local/bin/claude-session
 COPY bin/claude-dev /usr/local/bin/claude-dev

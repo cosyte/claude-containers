@@ -10,6 +10,9 @@ set -uo pipefail
 # umask 022 comes from the prelude: the §7a checks judge the modes of what these tests make.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=test/lib/entrypoint.sh
+source "$REPO_ROOT/test/lib/entrypoint.sh"
+EP_BOOT="$TMPDIR/boot.sh"; ep_boot > "$EP_BOOT"   # the whole boot path, in run order
 PASS=0 FAIL=0
 ok()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
@@ -154,7 +157,7 @@ echo "== entrypoint.sh §0: retired env vars warn loudly, never silently no-op =
 # CLAUDE_CACHE_PROXY_HOST + CLAUDE_EGRESS_LOCKDOWN=1 had a single audited egress choke
 # point, and since the strip the firewall composes its default allowlist and public npm is
 # reachable again. §0 must SAY so. Extracted from entrypoint.sh, not mirrored.
-GUARD="$(awk '/^# --- 0\. Refuse retired/,/^unset _v _retired_set/' "$ENTRYPOINT")"
+GUARD="$(awk '/^# --- 0\. Refuse retired/,/^unset _v _retired_set/' "$(ep_section 0)")"
 
 # Run §0 under the ENTRYPOINT'S REAL SHELL OPTIONS (`set -euo pipefail`), not a laxer
 # subset. This is the whole point: §0 runs near the top of entrypoint.sh, so if it aborts
@@ -276,6 +279,9 @@ engine_gone() {  # engine_gone <file> <ere> <what>
 engine_gone Dockerfile          'WITH_DOCKER|docker-ce|containerd\.io'   "Docker engine build step"
 engine_gone Makefile            'WITH_DOCKER|build-docker'                "Docker engine build target"
 engine_gone entrypoint.sh       '(^|[[:space:]])dockerd'                  "inner dockerd start"
+for f in "$EP_D"/*.sh; do
+    engine_gone "entrypoint.d/${f##*/}" '(^|[[:space:]])dockerd'          "inner dockerd start"
+done
 engine_gone bin/claude-launch   'runtime=|DOCKER_RUNTIME|docker_volume'   "runtime selection or image-store volume"
 engine_gone bin/claude-compose-gen 'runtime:|WITH_DOCKER|claude\.docker'  "runtime, engine build arg or docker label"
 engine_gone bin/_common.sh      'preflight_sysbox|docker_volume'          "runtime preflight or image-store volume helper"
@@ -284,7 +290,7 @@ engine_gone bin/_common.sh      'preflight_sysbox|docker_volume'          "runti
     || bad "test/docker-unit.sh still exists"
 # The two shortcuts that would hand a prompt-injectable agent the host. If one appears, the
 # isolation story is gone.
-for f in bin/claude-launch bin/claude-compose-gen entrypoint.sh docker-compose.yml; do
+for f in bin/claude-launch bin/claude-compose-gen entrypoint.sh $(cd "$REPO_ROOT" && echo entrypoint.d/*.sh) docker-compose.yml; do
     [[ -e "$REPO_ROOT/$f" ]] || continue
     if has "$(code_of "$REPO_ROOT/$f")" '--privileged|privileged:[[:space:]]*true|/var/run/docker\.sock'; then
         bad "$f grants --privileged or mounts the host docker socket: either hands the agent the host"
@@ -315,7 +321,7 @@ echo "== entrypoint REFUSES CLAUDE_CONTROLLER=1 (never silently boots interactiv
 # BOTH the guard AND the real `die` it depends on are extracted from entrypoint.sh, never
 # mirrored. A local stub `die` would keep passing if entrypoint's real one stopped exiting
 # non-zero, which is exactly the drift that turns a gate into theater.
-CTRL_GUARD="$(awk '/^case "\$\{CLAUDE_CONTROLLER/,/^esac/' "$ENTRYPOINT")"
+CTRL_GUARD="$(awk '/^case "\$\{CLAUDE_CONTROLLER/,/^esac/' "$(ep_section 0b)")"
 # Handles die() written as a one-liner (as it is today) or reformatted across lines: start at
 # its definition, stop at the first line closing a brace.
 REAL_DIE="$(awk '/^die\(\)/{f=1} f{print; if (/\}[[:space:]]*$/) exit}' "$ENTRYPOINT")"
@@ -707,7 +713,7 @@ echo "== credential reconcile guard: creds_have_token refuses a tokenless (logge
 # entrypoint.sh here, not mirrored, so this test cannot silently drift from the
 # shipped predicate.
 ENTRYPOINT="$REPO_ROOT/entrypoint.sh"
-CREDS_FN="$(awk '/^creds_have_token\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$ENTRYPOINT")"
+CREDS_FN="$(awk '/^creds_have_token\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$(ep_section 6)")"
 if [[ -n "$CREDS_FN" ]] && eval "$CREDS_FN" 2>/dev/null; then
     CD="$(mktemp -d)"
     printf '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-REALtok","refreshToken":"rt","expiresAt":9}}' > "$CD/good.json"
@@ -728,8 +734,8 @@ fi
 # gate propagation on creds_have_token and delegate the atomic move to publish_creds (no raw
 # 'mv -f' that could republish a tokenless file). Locks the fix against an accidental revert
 # to unguarded copying.
-RECON_FN="$(awk '/^reconcile_once\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$ENTRYPOINT")"
-grep -q 'reconcile_once' <<<"$(awk '/^reconcile_creds\(\) \{/,/\}/' "$ENTRYPOINT")" || RECON_FN=""
+RECON_FN="$(awk '/^reconcile_once\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$(ep_section 6)")"
+grep -q 'reconcile_once' <<<"$(awk '/^reconcile_creds\(\) \{/,/\}/' "$(ep_section 6)")" || RECON_FN=""
 if [[ -n "$RECON_FN" ]] && grep -q 'creds_have_token' <<<"$RECON_FN" && ! grep -q 'mv -f' <<<"$RECON_FN"; then
     ok  "reconcile_creds gates every propagation on creds_have_token (no unguarded copy)"
 else
@@ -752,7 +758,7 @@ echo "== entrypoint.sh §5: the mounted deploy key is BROKERED unless the operat
 # two ROOT-ONLY paths it names ($BROKER_RUN_DIR, $BROKER_PROFILE_D) are redirected into
 # a sandbox so the block can run unprivileged, and that redirect is asserted below so it
 # cannot degrade into a test that quietly targets /run and /etc instead.
-GITKEY_BLOCK="$(awk '/^# --- 5\. Git SSH key \+ identity/{f=1} f{print} f&&/^fi$/{exit}' "$ENTRYPOINT")"
+GITKEY_BLOCK="$(awk '/^# --- 5\. Git SSH key \+ identity/{f=1} f{print} f&&/^fi$/{exit}' "$(ep_section 5)")"
 GKD="$(mktemp -d)"; trap 'rm -rf "$STUB" "$APD" "$GKD"' EXIT
 GK_UID="$(id -u)"; GK_GID="$(id -g)"; GK_USER="$(id -un)"
 # The private bytes the agent must never be able to reach, distinctive enough to grep
@@ -1181,7 +1187,7 @@ done
 [[ "$eg_unqualified" -eq 0 ]] \
     && ok "every Egress lockdown line names BOTH families (no unqualified 'lockdown is active')" \
     || bad "an Egress lockdown line claimed a posture without naming both address families"
-grep -q 'default-deny active' "$ENTRYPOINT" \
+grep -q 'default-deny active' "$EP_BOOT" \
     && bad "the old unqualified 'default-deny active' line is still in entrypoint.sh" \
     || ok "the old unqualified 'default-deny active' line is gone from entrypoint.sh"
 
@@ -1538,7 +1544,7 @@ echo "== entrypoint.sh §7: cached oauthAccount self-heals on an account switch 
 # 4 containers switched from the shared claude-auth volume to a named claude-auth-personal
 # volume kept showing the OLD account in the Claude app indefinitely.
 S7D="$(mktemp -d)"
-S7_BLOCK="$(awk '/^# --- 7\. Seed/{f=1} f && /^# --- 7a\./{exit} f{print}' "$ENTRYPOINT")"
+S7_BLOCK="$(awk '/^# --- 7\. Seed/{f=1} f && /^# --- 7a\./{exit} f{print}' "$(ep_section 7)")"
 [[ -n "$S7_BLOCK" ]] && ok "section 7 extracted from entrypoint.sh for the self-heal checks" \
                      || bad "could not extract section 7: the checks below would be vacuous"
 
@@ -1592,7 +1598,7 @@ S7_NOAUTH="$(s7_run noauth "$OLD_ACCT" "")"
     && ok  "no mounted auth account at all: the cached account is left alone, never wiped to null" \
     || bad "the cached account was lost when no auth source was present: $(jq -c '.oauthAccount' <<<"$S7_NOAUTH")"
 
-grep -qF 'SELF-HEALED' "$ENTRYPOINT" \
+grep -qF 'SELF-HEALED' "$(ep_section 7)" \
     && ok  "the self-heal is logged (an operator can see it happened, not just infer it)" \
     || bad "no log line announces the self-heal"
 rm -rf "$S7D"
@@ -1611,7 +1617,7 @@ echo "== entrypoint.sh §7a: operator policy is delivered where the agent user c
 # regresses. Only its two root-only path constants are redirected into a sandbox so it
 # can run unprivileged, and that redirect is asserted below so this can never degrade
 # into a suite that writes to the real /etc.
-MS_BLOCK="$(awk '/^# --- 7a\. Managed settings/{f=1} f && /^# --- 7b\. /{exit} f{print}' "$ENTRYPOINT")"
+MS_BLOCK="$(awk '/^# --- 7a\. Managed settings/{f=1} f && /^# --- 7b\. /{exit} f{print}' "$(ep_section 7a)")"
 MSD="$(mktemp -d)"; trap 'rm -rf "$STUB" "$APD" "$GKD" "$EGD" "$MSD"' EXIT
 
 ms_block() { printf '%s\n' "$MS_BLOCK" \
@@ -1715,7 +1721,7 @@ ms_has '.permissions // {} | has("disableBypassPermissionsMode") | not' \
     || bad "the image now disables bypass mode by itself: that is the operator's call, not the image's"
 # Comments are allowed to name the key (§7a's own block explains why it is deferred);
 # a line of CODE that sets it is the regression, so the scan drops comment lines first.
-grep -vE '^[[:space:]]*#' "$ENTRYPOINT" | grep -q 'disableBypassPermissionsMode' \
+grep -vE '^[[:space:]]*#' "$EP_BOOT" | grep -q 'disableBypassPermissionsMode' \
     && bad "entrypoint.sh sets disableBypassPermissionsMode in code: this change must not make that call" \
     || ok  "no line of entrypoint.sh code sets disableBypassPermissionsMode"
 
@@ -1987,7 +1993,7 @@ grep -qF 'Merged baked-in plugin marketplaces/plugins into settings.json' "$ENTR
 # The two blocks must not drift apart on what the built-in default IS. Both defaults are
 # read out of entrypoint.sh; a hand-copied expectation here would keep passing after one
 # of them changed, and the container would then assert one posture and enforce another.
-MS_7A_DEFAULT="$(sed -n 's/^MANAGED_PERM_MODE="\${CLAUDE_PERMISSION_MODE:-\(.*\)}"$/\1/p' "$ENTRYPOINT")"
+MS_7A_DEFAULT="$(sed -n 's/^MANAGED_PERM_MODE="\${CLAUDE_PERMISSION_MODE:-\(.*\)}"$/\1/p' "$(ep_section 7a)")"
 MS_8B_DEFAULT="$(sed -n 's/^PERM_MODE="\${CLAUDE_PERMISSION_MODE:-\(.*\)}"$/\1/p' "$ENTRYPOINT")"
 [[ -n "$MS_7A_DEFAULT" && "$MS_7A_DEFAULT" == "$MS_8B_DEFAULT" ]] \
     && ok  "§7a and §8b read the same operator input and share one built-in default ($MS_7A_DEFAULT)" \
@@ -2011,8 +2017,8 @@ grep -qF 'CLAUDE_MANAGED_POLICY' "$REPO_ROOT/.env.example" \
 
 # "Established before the agent process starts" is an ORDERING claim, so it is checked as
 # one: §7a has to sit above the tmux launch in the shipped file, not merely exist.
-MS_7A_LINE="$(grep -n '^# --- 7a\. Managed settings' "$ENTRYPOINT" | head -1 | cut -d: -f1)"
-MS_TMUX_LINE="$(grep -n '^asclaude tmux new-session' "$ENTRYPOINT" | head -1 | cut -d: -f1)"
+MS_7A_LINE="$(grep -n '^# --- 7a\. Managed settings' "$EP_BOOT" | head -1 | cut -d: -f1)"
+MS_TMUX_LINE="$(grep -n '^asclaude tmux new-session' "$EP_BOOT" | head -1 | cut -d: -f1)"
 [[ -n "$MS_7A_LINE" && -n "$MS_TMUX_LINE" && "$MS_7A_LINE" -lt "$MS_TMUX_LINE" ]] \
     && ok  "§7a runs before the tmux launch, so policy is in force before the agent exists" \
     || bad "§7a does not precede the agent launch (7a at line ${MS_7A_LINE:-none}, tmux at line ${MS_TMUX_LINE:-none})"
@@ -2035,7 +2041,7 @@ ot_run() {  # ot_run UID GID [FIND_ARG...]: own_tree over the tree, prints the p
         || echo "own_tree failed"
     tr ' ' '\n' < "$OT_DIR/calls" | grep "^$OT_DIR/" | sort
 }
-[[ -n "$OT_FN" ]] && ! grep -qE '^[^#]*chown -R "\$CLAUDE_UID:\$CLAUDE_GID" "\$(CLAUDE_CONFIG_DIR|WORKSPACE)"' "$ENTRYPOINT" \
+[[ -n "$OT_FN" ]] && ! grep -qE '^[^#]*chown -R "\$CLAUDE_UID:\$CLAUDE_GID" "\$(CLAUDE_CONFIG_DIR|WORKSPACE)"' "$EP_BOOT" \
     && ok  "the config volume and the workspace go through own_tree, not chown -R" \
     || bad "a recursive chown over the config volume or the workspace is back (or own_tree is gone)"
 [[ -z "$(ot_run "$(id -u)" "$(id -g)")" ]] \

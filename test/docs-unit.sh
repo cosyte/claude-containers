@@ -73,9 +73,9 @@ while IFS= read -r v; do
     grep -qw -- "$v" .env.example && continue
     [[ " ${ALLOWED[*]} " == *" $v "* ]] && continue
     missing+=("$v")
-done < <(grep -rohE '\b(CLAUDE|GIT)_[A-Z0-9_]*[A-Z0-9]\b' entrypoint.sh bin/ | sort -u)
+done < <(grep -rohE '\b(CLAUDE|GIT)_[A-Z0-9_]*[A-Z0-9]\b' entrypoint.sh entrypoint.d/ bin/ | sort -u)
 if (( ${#missing[@]} )); then
-    bad "read by entrypoint.sh or bin/ but in neither .env.example nor ALLOWED: ${missing[*]}"
+    bad "read by entrypoint.sh, entrypoint.d/ or bin/ but in neither .env.example nor ALLOWED: ${missing[*]}"
 else
     ok "every CLAUDE_*/GIT_* variable the code reads is in .env.example or allowed with a reason"
 fi

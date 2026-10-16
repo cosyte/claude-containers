@@ -18,6 +18,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=test/lib/entrypoint.sh
+source "$REPO_ROOT/test/lib/entrypoint.sh"
 TMPD="$(mktemp -d)"
 trap 'rm -rf "$TMPD"' EXIT
 
@@ -332,7 +334,7 @@ fi
 
 # ======================================================================================
 echo "== entrypoint.sh §2b: a broken GPU degrades loudly, never stops the boot =="
-BLOCK="$(awk '/^# --- 2b\. GPU probe/{f=1} f{print} f&&/^fi$/{exit}' "$REPO_ROOT/entrypoint.sh")"
+BLOCK="$(awk '/^# --- 2b\. GPU probe/{f=1} f{print} f&&/^fi$/{exit}' "$(ep_section 2b)")"
 FG="$TMPD/fakeguard"
 run_2b() {  # run_2b <guard-output> <guard-exit>: run the real block against a fake guard
     printf '#!/bin/sh\necho "%s"\nexit %s\n' "$1" "$2" > "$FG"; chmod +x "$FG"
@@ -364,7 +366,7 @@ else
         && ok "the state file is world-readable (0644) for the agent, the guard and SSH users" \
         || bad "the state file must be 0644"
 fi
-grep -q 'GPU DEGRADED: ${GPU_DEGRADED_REASON' "$REPO_ROOT/entrypoint.sh" && grep -q 'status-right' "$REPO_ROOT/entrypoint.sh" \
+grep -q 'GPU DEGRADED: ${GPU_DEGRADED_REASON' "$(ep_section 2b)" && grep -q 'status-right' "$REPO_ROOT/entrypoint.sh" \
     && ok "a degraded GPU is also put on the tmux status line" || bad "the tmux status banner is missing"
 
 # ======================================================================================

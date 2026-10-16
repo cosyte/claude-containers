@@ -13,6 +13,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=test/lib/entrypoint.sh
+source "$REPO_ROOT/test/lib/entrypoint.sh"
 TMPD="$(mktemp -d)"
 trap 'rm -rf "$TMPD"' EXIT
 
@@ -55,7 +57,7 @@ h="$(CLAUDE_HARDEN_CAPS=0 harden_run_args)"
 echo "== no --privileged and no host docker socket =="
 code_only() { sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' "$1"; }
 launch_code="$(code_only "$LAUNCH")"
-for f in bin/claude-launch bin/claude-compose-gen entrypoint.sh; do
+for f in bin/claude-launch bin/claude-compose-gen entrypoint.sh $(cd "$REPO_ROOT" && echo entrypoint.d/*.sh); do
     if grep -qE -- '--privileged|privileged:|/var/run/docker\.sock' <<<"$(code_only "$REPO_ROOT/$f")"; then
         bad "$f must NEVER grant privileged or mount the host docker socket"
     else
@@ -186,7 +188,7 @@ fi
 
 # The entrypoint must CLEAR scratch on boot: it is a volume, so unlike a tmpfs it survives
 # restarts and would otherwise accumulate abandoned wheel builds until the pool fills.
-if grep -qE 'find "\$SCRATCH_DIR" -mindepth 1' "$REPO_ROOT/entrypoint.sh"; then
+if grep -qE 'find "\$SCRATCH_DIR" -mindepth 1' "$(ep_section 2a)"; then
     ok "the entrypoint clears scratch on boot (a volume does not self-empty like a tmpfs)"
 else
     bad "the entrypoint must clear the scratch dir on boot"
