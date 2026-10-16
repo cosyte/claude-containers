@@ -32,8 +32,8 @@ vulnerabilities go through private reporting rather than an issue.
    ```
    Both must be clean. CI runs exactly these (the required checks `ci` and `no-emdash`).
 3. The image smoke test (`test/smoke.sh`) builds the image and exercises a real
-   container. CI's `smoke` job runs it when a PR touches the Dockerfile, the
-   entrypoint (`entrypoint.sh`, `entrypoint.d/`), `bin/`, `claude-config/`,
+   container. CI's `smoke` job runs it when a PR touches the Dockerfile,
+   `entrypoint.sh`, `sshd_config`, `bash_profile`, `bin/`, `claude-config/`,
    `scripts/`, `test/smoke.sh`, the Makefile, `docker-compose.yml` or `ci.yml`,
    and on every push to `main`; on any other PR it is skipped and reports success.
    It takes 10 to 20 minutes, and the parts that need a GPU, routable IPv6 or a

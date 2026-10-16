@@ -44,6 +44,7 @@ BRWFCN="claude-smoke-browser-force-$$"
 BRWLCN="claude-smoke-browser-live-$$"
 AUTHVOL="claude-smoke-auth-$$"
 WSVOL="claude-smoke-ws-$$"
+MRVOL="claude-smoke-mr-repos-$$"
 PASS=0 FAIL=0
 
 cleanup() {
@@ -53,13 +54,21 @@ cleanup() {
     # The network only goes after its containers do, or Docker refuses to remove it.
     docker network rm "$EG6NET" >/dev/null 2>&1 || true
     docker volume rm "$AUTHVOL" "$WSVOL" >/dev/null 2>&1 || true
-    rm -rf "$TMP"
+    docker volume rm "$MRVOL" >/dev/null 2>&1 || true
+    # The entrypoint hands a bind-mounted /workspace to the agent's uid; where that is not ours
+    # (a CI runner is uid 1001), hand the fixtures back before removing them.
+    rm -rf "$TMP" 2>/dev/null || {
+        docker run --rm --user 0 --entrypoint chown -v "$TMP:/t" "$IMAGE" -R "$(id -u):$(id -g)" /t >/dev/null 2>&1
+        rm -rf "$TMP"
+    }
 }
 trap cleanup EXIT
 
 ok()   { echo "  PASS  $*"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
-check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+# A check runs without pipefail: in `docker logs X | grep -q Y`, grep exits at its first match and
+# docker logs, still writing, dies of SIGPIPE, which pipefail would turn into a false FAIL.
+check(){ local r=0; set +o pipefail; eval "$2" || r=1; set -o pipefail; if (( r == 0 )); then ok "$1"; else bad "$1"; fi; }
 
 echo "== image: $IMAGE =="
 docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "image missing: build first"; exit 1; }
@@ -1166,10 +1175,19 @@ for r in alpha beta; do
     git clone -q --bare "$TMP/mr-src-$r" "$TMP/mr-bare/$r.git"
 done
 chmod -R a+rX "$TMP/mr-bare"
+# The bare repos reach the container in a volume owned by the agent user: git refuses to clone
+# from a repository another uid owns ("dubious ownership"), and $TMP is ours, uid 1000 on a
+# typical host but not on a CI runner.
+mr_repos() {
+    docker volume rm "$MRVOL" >/dev/null 2>&1 || true
+    docker run --rm --user 0 --entrypoint sh -v "$TMP/mr-bare:/src:ro" -v "$MRVOL:/repos" "$IMAGE" \
+        -c 'cp -a /src/. /repos/ && chown -R claude:claude /repos' >/dev/null
+}
+mr_repos
 MRCN="claude-smoke-multirepo-$$"
 docker run -d --name "$MRCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=multirepo \
     -e GIT_REPOS="file:///repos/alpha.git file:///repos/beta.git" \
-    -v "$TMP/mr-bare:/repos:ro" "$IMAGE" >/dev/null 2>&1 || true
+    -v "$MRVOL:/repos:ro" "$IMAGE" >/dev/null 2>&1 || true
 wait_tmux "$MRCN" || true
 mrlog="$(docker logs "$MRCN" 2>&1 || true)"
 check "the boot log says the workspace holds both repos" \
@@ -1190,12 +1208,13 @@ git -C "$TMP/mr-goal" add -A
 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
     git -C "$TMP/mr-goal" commit -qm goal
 git -C "$TMP/mr-goal" push -q origin HEAD:main
+mr_repos
 SESSCN="claude-smoke-sessions-$$"
 SESSCFG="claude-smoke-sessions-cfg-$$"
 docker run -d --name "$SESSCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=multi \
     -e GIT_REPOS="file:///repos/alpha.git file:///repos/beta.git" \
     -e "CLAUDE_SESSIONS=alpha goal=.claude/goals/g1.goal.txt; *; review dir=alpha model=sonnet mode=plan rc=off" \
-    -v "$SESSCFG:/home/claude/.claude" -v "$TMP/mr-bare:/repos:ro" "$IMAGE" >/dev/null 2>&1 || true
+    -v "$SESSCFG:/home/claude/.claude" -v "$MRVOL:/repos:ro" "$IMAGE" >/dev/null 2>&1 || true
 wait_tmux "$SESSCN" || true
 for _ in $(seq 1 30); do docker logs "$SESSCN" 2>&1 | grep -q "Named sessions" && break; sleep 1; done
 sesslog="$(docker logs "$SESSCN" 2>&1 || true)"

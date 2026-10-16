@@ -12,6 +12,11 @@ on:
 permissions:
   contents: read
 
+# A new push to a PR cancels its older run (a smoke run is long); pushes to main all run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ci:
     runs-on: ubuntu-latest
@@ -39,6 +44,8 @@ jobs:
           filters: |
             image:
               - Dockerfile
+              - sshd_config
+              - bash_profile
               - entrypoint.sh
               - entrypoint.d/**
               - bin/**
@@ -51,7 +58,10 @@ jobs:
 
   smoke:
     needs: changes
-    if: needs.changes.outputs.image == 'true' || github.event_name == 'push'
+    # A failed `changes` job runs smoke rather than skipping it: a skip would report success.
+    if: >-
+      !cancelled() && (needs.changes.result != 'success'
+      || needs.changes.outputs.image == 'true' || github.event_name == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
