@@ -199,6 +199,7 @@ cmd_install() {
 # --- the start command --------------------------------------------------------------------------
 cmd_start() {
     local cmd="${CLAUDE_EXTRA_START_CMD:-}"
+    rm -f "$CONFIG_DIR/kit-start.pid" 2>/dev/null   # the last boot's, read by claude-orphan-reaper
     [[ -n "${cmd//[[:space:]]/}" ]] || return 0
     mkdir -p "${START_LOG%/*}" 2>/dev/null || true
     # Keep the log small: it is a boot log, appended on every start.

@@ -10,10 +10,13 @@
 # is still there and still matches, when ALL of these hold:
 #   - it is owned by the agent user (this script's uid);
 #   - its parent is PID 1;
-#   - it is older than CLAUDE_ORPHAN_MAX_AGE;
-#   - its name is not kept: CLAUDE_ORPHAN_KEEP, a regex, is matched against the basename of
-#     each command-line word (so `bash /usr/local/bin/claude-session` is kept as claude-session,
-#     and a Gradle daemon by its main class, last on its line), and none matches;
+#   - it is older than CLAUDE_ORPHAN_MAX_AGE (its own age, not how long it has been orphaned:
+#     a 3 h `nohup` server is ended at the first pass after its parent exits);
+#   - its name is not kept: the kept names (KEEP below, plus CLAUDE_ORPHAN_KEEP) are matched
+#     against the basename of its command, or of its script when the command is an interpreter
+#     (so `bash /usr/local/bin/claude-session` is claude-session), or against any word of a
+#     java command line (a Gradle daemon by its main class). Arguments are never matched:
+#     `find /home/claude` is not kept;
 #   - it is not in the session of the kit's start command (claude-kit start writes that
 #     session's id to $CLAUDE_CONFIG_DIR/kit-start.pid): a supervisor a kit ships is meant
 #     to outlive its parent.
@@ -26,9 +29,8 @@
 # Env:
 #   CLAUDE_ORPHAN_MAX_AGE   minimum age: seconds, or a number with s, m, h or d (default 2h);
 #                           0 turns the reaper off
-#   CLAUDE_ORPHAN_KEEP      the kept names, an extended regex matched against each word's
-#                           basename (default: below; the Gradle and Kotlin daemons stop
-#                           themselves when idle, and ending one mid-build fails the build)
+#   CLAUDE_ORPHAN_KEEP      more kept names, an extended regex matched as above; it adds to the
+#                           built-in list, never replaces it (a bad regex is warned and ignored)
 # Test seams (unit tests only):
 #   CLAUDE_ORPHAN_PS        the command that lists processes as `pid ppid uid sid etimes args`
 #                           (default: ps)
@@ -38,8 +40,10 @@
 #   CLAUDE_ORPHAN_UID       the owner whose orphans are ended (default: this script's uid)
 set -uo pipefail
 
-DEFAULT_KEEP='^(tmux|claude-session|claude|ssh-agent|sshd|chrome_crashpad_handler|podman|conmon|catatonit|rootlessport|slirp4netns|pasta|org\.gradle\.launcher\.daemon\.bootstrap\.GradleDaemon|org\.jetbrains\.kotlin\.daemon\.KotlinCompileDaemon)(:.*)?$'
-KEEP="${CLAUDE_ORPHAN_KEEP:-$DEFAULT_KEEP}"
+# The Gradle and Kotlin daemons stop themselves when idle, and ending one mid-build fails the build.
+KEEP='^(tmux|claude-session|claude|ssh-agent|sshd|chrome_crashpad_handler|podman|conmon|catatonit|rootlessport|slirp4netns|pasta|org\.gradle\.launcher\.daemon\.bootstrap\.GradleDaemon|org\.jetbrains\.kotlin\.daemon\.KotlinCompileDaemon)(:.*)?$'
+EXTRA_KEEP="${CLAUDE_ORPHAN_KEEP:-}"
+INTERPRETERS='^(ba|da|z)?sh$|^(python|perl|ruby|node)[0-9.]*$'
 INTERVAL="${CLAUDE_ORPHAN_INTERVAL:-300}"
 GRACE="${CLAUDE_ORPHAN_GRACE:-30}"
 OWNER="${CLAUDE_ORPHAN_UID:-$(id -u)}"
@@ -55,6 +59,33 @@ max_age_seconds() {
         m) n=$((n * 60)) ;; h) n=$((n * 3600)) ;; d) n=$((n * 86400)) ;;
     esac
     echo "$n"
+}
+
+# A bad regex makes [[ =~ ]] return 2, which would read as "not kept" for tmux and claude too.
+if [[ -n "$EXTRA_KEEP" ]]; then
+    rc=0; bash -c '[[ x =~ $1 ]]' _ "$EXTRA_KEEP" || rc=$?
+    if (( rc == 2 )); then
+        say "WARNING: CLAUDE_ORPHAN_KEEP='$EXTRA_KEEP' is not an extended regex: ignored"
+        EXTRA_KEEP=""
+    fi
+fi
+
+kept_name() { [[ "$1" =~ $KEEP ]] || { [[ -n "$EXTRA_KEEP" ]] && [[ "$1" =~ $EXTRA_KEEP ]]; }; }
+
+# is_kept <args>: the command's name, its script's under an interpreter, or any java word
+is_kept() {
+    local -a words; read -ra words <<<"$1"
+    local cmd="${words[0]##*/}" w
+    kept_name "$cmd" && return 0
+    if [[ "$cmd" =~ $INTERPRETERS ]]; then
+        for w in "${words[@]:1}"; do
+            [[ "$w" == -* ]] && continue
+            kept_name "${w##*/}"; return
+        done
+    elif [[ "$cmd" == java ]]; then
+        for w in "${words[@]:1}"; do kept_name "$w" && return 0; done
+    fi
+    return 1
 }
 
 MAX_AGE="$(max_age_seconds "${CLAUDE_ORPHAN_MAX_AGE:-2h}")"
@@ -81,15 +112,13 @@ select_orphans() {
         say "skipped: PID 1 is the entrypoint, not an init (run the container with --init)" >&2
         return 0
     fi
-    local pid ppid uid sid age args w words kept
+    local pid ppid uid sid age args
     while read -r pid ppid uid sid age args; do
         [[ "$pid" =~ ^[0-9]+$ && "$age" =~ ^[0-9]+$ ]] || continue
         [[ "$uid" == "$OWNER" && "$ppid" == 1 && "$pid" != "$$" ]] || continue
         (( age > MAX_AGE )) || continue
         [[ -n "$kit_sid" && "$sid" == "$kit_sid" ]] && continue
-        read -ra words <<<"$args"; kept=0
-        for w in "${words[@]}"; do [[ "${w##*/}" =~ $KEEP ]] && { kept=1; break; }; done
-        (( kept )) && continue
+        is_kept "$args" && continue
         echo "$pid $age $args"
     done <<<"$listing"
 }
@@ -103,7 +132,8 @@ pass() {
     while read -r pid age args; do
         signal -TERM "$pid" && say "SIGTERM pid $pid (orphaned, age $(human_age "$age")): $args"
     done <<<"$found"
-    sleep "$GRACE"
+    sleep "$GRACE" & SLEEP_PID=$!   # in the background, so a SIGTERM is not held up 30 s
+    wait "$SLEEP_PID"
     # Only a pid that still matches: one that exited and was reused is no longer old.
     local again; again="$(select_orphans)"
     while read -r pid age args; do
