@@ -939,7 +939,7 @@ cmd_send() {
         local buf="claude-sessions-$$"
         printf '%s' "$text" | tmux load-buffer -b "$buf" - && tmux paste-buffer -p -r -d -b "$buf" -t "$t" || die "could not paste into $t"
     else
-        tmux send-keys -t "$t" -l "$text" || die "could not type into $t"
+        tmux send-keys -t "$t" -l -- "$text" || die "could not type into $t"
     fi
     sleep "${CLAUDE_SESSIONS_SEND_DELAY:-0.5}"
     tmux send-keys -t "$t" Enter || die "could not submit in $t"
