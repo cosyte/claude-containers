@@ -634,6 +634,8 @@ COPY bin/claude-session-id /usr/local/bin/claude-session-id
 COPY bin/claude-sessions /usr/local/bin/claude-sessions
 # Frees the /scratch folders of gone sessions; claude-sessions' supervise loop runs it.
 COPY bin/claude-scratch-reap /usr/local/bin/claude-scratch-reap
+# Ends the agent's processes orphaned to PID 1 for over CLAUDE_ORPHAN_MAX_AGE (entrypoint §12h).
+COPY bin/claude-orphan-reaper /usr/local/bin/claude-orphan-reaper
 # Installs a kit (a plugin marketplace from a git URL, its plugins, an optional start command)
 # declared by CLAUDE_EXTRA_MARKETPLACES / CLAUDE_EXTRA_PLUGINS / CLAUDE_EXTRA_START_CMD.
 COPY bin/claude-kit /usr/local/bin/claude-kit

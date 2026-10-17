@@ -31,6 +31,7 @@ shutdown() {
     [[ -n "${ACCT_SWITCH_PID:-}" ]] && kill "$ACCT_SWITCH_PID" >/dev/null 2>&1 || true
     [[ -n "${RC_WATCHDOG_PID:-}" ]] && kill "$RC_WATCHDOG_PID" >/dev/null 2>&1 || true
     [[ -n "${USAGE_WATCHDOG_PID:-}" ]] && kill "$USAGE_WATCHDOG_PID" >/dev/null 2>&1 || true
+    [[ -n "${ORPHAN_REAPER_PID:-}" ]] && kill "$ORPHAN_REAPER_PID" >/dev/null 2>&1 || true
     [[ -n "${SESSIONS_PID:-}" ]] && kill "$SESSIONS_PID" >/dev/null 2>&1 || true
     exit 0
 }
