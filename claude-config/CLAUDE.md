@@ -21,6 +21,9 @@ Keep this short. Project-specific guidance belongs in the repo's own
   anything else via `uv run --with <pkg>`.
 - Kill a process by its PID, never `pkill -f <pattern>`: the pattern is in your own
   command line, so it kills your own shell.
+- Never `find /` (or `bfs`, `du`, `rg` over `/` or all of `/cache`): search a named
+  directory. A walk of the whole disk outlives a timed-out tool call and keeps the host's
+  disk busy for hours; the orphan reaper ends such leftovers after 2 h.
 - Build outputs go to `/state/tmp`, not `/scratch`: `/scratch` is a RAM tmpfs of a few GiB
   (and `/cache` is shared with every container, tool caches only).
 - A tool with no version set in this container reads "command not found": install it

@@ -440,6 +440,17 @@ check "claude pane lives in tmux window 'main'" \
     'asclaude_x "tmux list-windows -t claude" 2>/dev/null | grep -qw main'
 check "RC watchdog process is running" \
     'cexec "pgrep -f claude-rc-watchdog" >/dev/null 2>&1'
+check "entrypoint starts the orphan reaper" \
+    'grep -q "Orphan reaper started" <<<"$(docker logs "$CN" 2>&1)"'
+# A shell that exits leaves its `setsid sleep` to PID 1: one pass past a 1 s age ends it, and
+# tmux (kept by name) lives on.
+asclaude_x 'setsid sleep 9999 >/dev/null 2>&1 < /dev/null & echo $! > /tmp/orphan.pid'
+sleep 3
+asclaude_x 'CLAUDE_ORPHAN_MAX_AGE=1s CLAUDE_ORPHAN_GRACE=1 claude-orphan-reaper --once' >/dev/null 2>&1
+check "the orphan reaper ends an orphaned sleep older than the age" \
+    '! cexec "kill -0 \$(cat /tmp/orphan.pid)" 2>/dev/null'
+check "the orphan reaper spares tmux" \
+    'asclaude_x "tmux has-session -t claude"'
 # No auth in smoke, so `claude` is not running and the probe will report
 # unhealthy: assert only that it executes cleanly and emits a verdict line.
 check "healthcheck runs and emits a verdict line" \

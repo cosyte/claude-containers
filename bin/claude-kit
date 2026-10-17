@@ -209,8 +209,10 @@ cmd_start() {
         echo "== $(date -u +%Y-%m-%dT%H:%M:%SZ) start command =="
     } >> "$START_LOG" 2>/dev/null || { warn "cannot write $START_LOG, start command not run"; return 0; }
     # Detached, with its own session: it outlives this script and holds none of its pipes.
+    # The session's id goes to kit-start.pid: claude-orphan-reaper spares that session.
     ( cd "${CLAUDE_WORKSPACE:-/workspace}" 2>/dev/null || cd /
       setsid bash -lc "$cmd" >> "$START_LOG" 2>&1 < /dev/null &
+      echo "$!" > "$CONFIG_DIR/kit-start.pid" 2>/dev/null || true
     )
     say "start command launched in the background (log: $START_LOG)"
 }

@@ -103,6 +103,7 @@ rationale: the sections below.
   | `12e-named-sessions.sh` | §12e: named sessions and their supervisor |
   | `12f-gh-check.sh` | §12f: the `GH_TOKEN` permission check |
   | `12g-workspace-owner.sh` | §12g: workspace ownership, the deep pass |
+  | `12h-orphan-reaper.sh` | §12h: the orphan reaper (agent processes left to PID 1, `CLAUDE_ORPHAN_MAX_AGE`) |
   | `13-stay-alive.sh` | §13: the boot summary, the liveness loop, shutdown |
 - **claude-session**: the tmux pane command: `cd /workspace`, exec
   `claude --dangerously-skip-permissions --remote-control "<project>"`, and

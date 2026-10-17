@@ -30,6 +30,8 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_GPU_SCRATCH_TMPFS` | `4g` | Size of the RAM `/scratch` a GPU session gets instead of the disk volume. Charged to `CLAUDE_MEM_LIMIT`. |
 | `CLAUDE_SCRATCH_REAP` | `report` | The `/scratch` reaper ([temp space](temp-space.md#the-reaper-gone-sessions-folders)): `report` logs the gone sessions' folders it would remove, `on` removes them, `off` disables it |
 | `CLAUDE_SCRATCH_REAP_MIN` | `15` | Minutes between reaper runs in the sessions supervisor |
+| `CLAUDE_ORPHAN_MAX_AGE` | `2h` | The orphan reaper (entrypoint §12h, `claude-orphan-reaper`): every 5 minutes it ends (SIGTERM, then SIGKILL 30 s later) each agent process re-parented to PID 1 and older than this, for example what a timed-out tool call left running. Seconds or `N[smhd]`; `0` turns it off. Each kill is in the container log |
+| `CLAUDE_ORPHAN_KEEP` | tmux, claude, claude-session, ssh-agent, sshd, chrome_crashpad_handler, podman's helpers, the Gradle and Kotlin daemons (they stop themselves when idle) | The names the orphan reaper never ends: an extended regex matched against the basename of each of a process's command-line words. Setting it replaces the default list. The kit's start command (`CLAUDE_EXTRA_START_CMD`) is always spared |
 | `CLAUDE_SCRATCH_WARN_PCT` | `85` | The reaper logs a warning naming the 5 largest top-level folders when `/scratch` is fuller than this percent |
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` |: | Clone source (or use `--repo`/`--branch`/`--depth`) |
 | `GIT_REPOS` |: | Several repos in one container: whitespace-separated `URL[#BRANCH]`, each cloned into `/workspace/<repo>` (set by `claude-compose-gen --group` or several `--repo`). Not together with `GIT_REPO_URL` |

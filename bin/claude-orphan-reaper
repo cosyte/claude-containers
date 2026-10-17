@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# claude-orphan-reaper: end the agent's processes that nothing waits on any more.
+#
+# A Bash tool call that times out leaves its children behind, re-parented to the container's
+# init (PID 1). On 2026-10-17 four `find /` walks had run 10-11 h that way, keeping the host's
+# one disk 100% busy, and simulators from a deleted worktree had run 8 h. The entrypoint (§12h)
+# starts this for the container's lifetime, as the agent user.
+#
+# Every CLAUDE_ORPHAN_INTERVAL seconds a process is sent SIGTERM, then SIGKILL 30 s later if it
+# is still there and still matches, when ALL of these hold:
+#   - it is owned by the agent user (this script's uid);
+#   - its parent is PID 1;
+#   - it is older than CLAUDE_ORPHAN_MAX_AGE;
+#   - its name is not kept: CLAUDE_ORPHAN_KEEP, a regex, is matched against the basename of
+#     each command-line word (so `bash /usr/local/bin/claude-session` is kept as claude-session,
+#     and a Gradle daemon by its main class, last on its line), and none matches;
+#   - it is not in the session of the kit's start command (claude-kit start writes that
+#     session's id to $CLAUDE_CONFIG_DIR/kit-start.pid): a supervisor a kit ships is meant
+#     to outlive its parent.
+# Each kill is logged with pid, age and command.
+#
+# Usage: claude-orphan-reaper            the loop (what the entrypoint runs)
+#        claude-orphan-reaper --once     one pass, then exit
+#        claude-orphan-reaper --list     print what a pass would end, end nothing
+#
+# Env:
+#   CLAUDE_ORPHAN_MAX_AGE   minimum age: seconds, or a number with s, m, h or d (default 2h);
+#                           0 turns the reaper off
+#   CLAUDE_ORPHAN_KEEP      the kept names, an extended regex matched against each word's
+#                           basename (default: below; the Gradle and Kotlin daemons stop
+#                           themselves when idle, and ending one mid-build fails the build)
+# Test seams (unit tests only):
+#   CLAUDE_ORPHAN_PS        the command that lists processes as `pid ppid uid sid etimes args`
+#                           (default: ps)
+#   CLAUDE_ORPHAN_KILL      the command that signals: <cmd> -TERM|-KILL <pid> (default: kill)
+#   CLAUDE_ORPHAN_INTERVAL  seconds between passes (default 300)
+#   CLAUDE_ORPHAN_GRACE     seconds between SIGTERM and SIGKILL (default 30)
+#   CLAUDE_ORPHAN_UID       the owner whose orphans are ended (default: this script's uid)
+set -uo pipefail
+
+DEFAULT_KEEP='^(tmux|claude-session|claude|ssh-agent|sshd|chrome_crashpad_handler|podman|conmon|catatonit|rootlessport|slirp4netns|pasta|org\.gradle\.launcher\.daemon\.bootstrap\.GradleDaemon|org\.jetbrains\.kotlin\.daemon\.KotlinCompileDaemon)(:.*)?$'
+KEEP="${CLAUDE_ORPHAN_KEEP:-$DEFAULT_KEEP}"
+INTERVAL="${CLAUDE_ORPHAN_INTERVAL:-300}"
+GRACE="${CLAUDE_ORPHAN_GRACE:-30}"
+OWNER="${CLAUDE_ORPHAN_UID:-$(id -u)}"
+KIT_PIDFILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/kit-start.pid"
+
+say() { echo "[orphan-reaper] $*"; }
+
+# max_age_seconds <spec>: 7200 for 2h, 90 for 90; empty on a bad spec
+max_age_seconds() {
+    [[ "$1" =~ ^([0-9]+)([smhd]?)$ ]] || return 0
+    local n=$((10#${BASH_REMATCH[1]}))
+    case "${BASH_REMATCH[2]}" in
+        m) n=$((n * 60)) ;; h) n=$((n * 3600)) ;; d) n=$((n * 86400)) ;;
+    esac
+    echo "$n"
+}
+
+MAX_AGE="$(max_age_seconds "${CLAUDE_ORPHAN_MAX_AGE:-2h}")"
+if [[ -z "$MAX_AGE" ]]; then
+    say "WARNING: CLAUDE_ORPHAN_MAX_AGE='${CLAUDE_ORPHAN_MAX_AGE}' is not seconds or N[smhd]: using 2h"
+    MAX_AGE=7200
+fi
+
+list_ps() {
+    if [[ -n "${CLAUDE_ORPHAN_PS:-}" ]]; then $CLAUDE_ORPHAN_PS
+    else ps -e -o pid=,ppid=,uid=,sid=,etimes=,args=; fi
+}
+
+signal() { ${CLAUDE_ORPHAN_KILL:-kill} "$1" "$2" 2>/dev/null; }
+
+# select_orphans: one `pid age args` line per process to end
+select_orphans() {
+    local kit_sid="" listing
+    [[ -r "$KIT_PIDFILE" ]] && kit_sid="$(tr -dc 0-9 < "$KIT_PIDFILE")"
+    listing="$(list_ps)"
+    # Without an init (a container run without --init), PID 1 is the entrypoint and every
+    # watchdog it started is its child: nothing with PPID 1 is an orphan then.
+    if awk '$1 == 1 && ($6 ~ /entrypoint/ || $7 ~ /entrypoint/) { f = 1 } END { exit !f }' <<<"$listing"; then
+        say "skipped: PID 1 is the entrypoint, not an init (run the container with --init)" >&2
+        return 0
+    fi
+    local pid ppid uid sid age args w words kept
+    while read -r pid ppid uid sid age args; do
+        [[ "$pid" =~ ^[0-9]+$ && "$age" =~ ^[0-9]+$ ]] || continue
+        [[ "$uid" == "$OWNER" && "$ppid" == 1 && "$pid" != "$$" ]] || continue
+        (( age > MAX_AGE )) || continue
+        [[ -n "$kit_sid" && "$sid" == "$kit_sid" ]] && continue
+        read -ra words <<<"$args"; kept=0
+        for w in "${words[@]}"; do [[ "${w##*/}" =~ $KEEP ]] && { kept=1; break; }; done
+        (( kept )) && continue
+        echo "$pid $age $args"
+    done <<<"$listing"
+}
+
+human_age() { printf '%dh%02dm' $(($1 / 3600)) $(($1 % 3600 / 60)); }
+
+pass() {
+    local found pid age args
+    found="$(select_orphans)"
+    [[ -n "$found" ]] || return 0
+    while read -r pid age args; do
+        signal -TERM "$pid" && say "SIGTERM pid $pid (orphaned, age $(human_age "$age")): $args"
+    done <<<"$found"
+    sleep "$GRACE"
+    # Only a pid that still matches: one that exited and was reused is no longer old.
+    local again; again="$(select_orphans)"
+    while read -r pid age args; do
+        awk -v p="$pid" '$1 == p { f = 1 } END { exit !f }' <<<"$found" || continue
+        signal -KILL "$pid" && say "SIGKILL pid $pid (survived SIGTERM, age $(human_age "$age")): $args"
+    done <<<"$again"
+}
+
+case "${1:-}" in
+    --list) [[ "$MAX_AGE" == 0 ]] || select_orphans; exit 0 ;;
+    --once) [[ "$MAX_AGE" == 0 ]] || pass; exit 0 ;;
+    "") ;;
+    *) echo "usage: claude-orphan-reaper [--once | --list]" >&2; exit 2 ;;
+esac
+if [[ "$MAX_AGE" == 0 ]]; then say "off (CLAUDE_ORPHAN_MAX_AGE=0)"; exit 0; fi
+trap 'kill "${SLEEP_PID:-}" 2>/dev/null; exit 0' TERM INT
+while :; do
+    pass
+    sleep "$INTERVAL" & SLEEP_PID=$!
+    wait "$SLEEP_PID"
+done
