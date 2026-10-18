@@ -17,6 +17,11 @@
 #     (so `bash /usr/local/bin/claude-session` is claude-session), or against any word of a
 #     java command line (a Gradle daemon by its main class). Arguments are never matched:
 #     `find /home/claude` is not kept;
+#   - it is not a VS Code server: a command, or an interpreter's script, installed under
+#     ~/.vscode-server/ (or -insiders). Its server outlives the SSH login that started it, by
+#     design, and its basenames (code-server, server-main.js, code-<commit>) are too generic
+#     to keep by name. Only that path is looked at, never an argument: `node app.js
+#     ~/.vscode-server/x` and other node or python orphans are ended as before;
 #   - it is not in the session of the kit's start command (claude-kit start writes that
 #     session's id to $CLAUDE_CONFIG_DIR/kit-start.pid): a supervisor a kit ships is meant
 #     to outlive its parent.
@@ -41,7 +46,11 @@
 set -uo pipefail
 
 # The Gradle and Kotlin daemons stop themselves when idle, and ending one mid-build fails the build.
-KEEP='^(tmux|claude-session|claude|ssh-agent|sshd|chrome_crashpad_handler|podman|conmon|catatonit|rootlessport|slirp4netns|pasta|org\.gradle\.launcher\.daemon\.bootstrap\.GradleDaemon|org\.jetbrains\.kotlin\.daemon\.KotlinCompileDaemon)(:.*)?$'
+# claude.exe is the native Claude binary's own name (an npm install runs it, a `claude --bg`
+# session lives on). aardvark-dns is the DNS server netavark starts for a podman network with
+# DNS on (a --containers session's compose network), and it daemonizes to PID 1: ending it stops
+# the nested containers resolving each other by name. netavark's `dhcp-proxy` is long-lived too.
+KEEP='^(tmux|claude-session|claude|claude\.exe|ssh-agent|sshd|chrome_crashpad_handler|podman|conmon|catatonit|rootlessport|slirp4netns|pasta|aardvark-dns|netavark|org\.gradle\.launcher\.daemon\.bootstrap\.GradleDaemon|org\.jetbrains\.kotlin\.daemon\.KotlinCompileDaemon)(:.*)?$'
 EXTRA_KEEP="${CLAUDE_ORPHAN_KEEP:-}"
 INTERPRETERS='^(ba|da|z)?sh$|^(python|perl|ruby|node)[0-9.]*$'
 INTERVAL="${CLAUDE_ORPHAN_INTERVAL:-300}"
@@ -71,15 +80,20 @@ if [[ -n "$EXTRA_KEEP" ]]; then
 fi
 
 kept_name() { [[ "$1" =~ $KEEP ]] || { [[ -n "$EXTRA_KEEP" ]] && [[ "$1" =~ $EXTRA_KEEP ]]; }; }
+# in_vscode_server <path>: a file of a VS Code server install (~/.vscode-server/...)
+in_vscode_server() { [[ "$1" == */.vscode-server/* || "$1" == */.vscode-server-insiders/* ]]; }
 
-# is_kept <args>: the command's name, its script's under an interpreter, or any java word
+# is_kept <args>: the command's name, its script's under an interpreter, or any java word;
+# or a command or script of a VS Code server
 is_kept() {
     local -a words; read -ra words <<<"$1"
     local cmd="${words[0]##*/}" w
     kept_name "$cmd" && return 0
+    in_vscode_server "${words[0]}" && return 0
     if [[ "$cmd" =~ $INTERPRETERS ]]; then
         for w in "${words[@]:1}"; do
             [[ "$w" == -* ]] && continue
+            in_vscode_server "$w" && return 0
             kept_name "${w##*/}"; return
         done
     elif [[ "$cmd" == java ]]; then

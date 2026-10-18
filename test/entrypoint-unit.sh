@@ -10,6 +10,8 @@
 #   - entrypoint.sh is the loader alone: under 80 lines, nothing after the loop
 #   - the loader, run for real against a sandbox, sources them in number order whatever the
 #     locale (00- before 00b-), announces each as "§<n> <name>", and refuses an empty directory
+#   - ep_order, the section list test/smoke.sh expects in the boot log, is exactly what the
+#     loader announces for the real entrypoint.d/
 #   - the image installs entrypoint.d/ where the loader reads it
 # shellcheck source=test/lib/prelude.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
@@ -82,6 +84,19 @@ out="$(loader C)"
 [[ "$(grep '§' <<<"$out")" == $'[entrypoint] §0 first\n[entrypoint] §0b second\n[entrypoint] §1 third\n[entrypoint] §2c fourth\n[entrypoint] §10b fifth' ]] \
     && ok "each section is announced as '§<n> <name>' before it runs" \
     || bad "the section announcements are wrong: $(grep '§' <<<"$out" | tr '\n' '|')"
+rm -f "$SB"/*.sh
+# test/smoke.sh expects the boot log to announce ep_order (test/lib/entrypoint.sh), read from the
+# repo's entrypoint.d/ instead of a hand-kept list. Pin that helper to the loader itself: stand
+# in a stub for each real section file, run the real loop, and compare what it announces.
+for f in "$EP_D"/[0-9]*.sh; do printf ':\n' > "$SB/${f##*/}"; done
+announced="$(loader C | sed -n 's/^\[entrypoint\] §\([0-9][0-9a-z]*\) .*/\1/p' | tr '\n' ' ')"
+want_order="$(ep_order)"
+[[ -n "$want_order" && "$announced" == "$want_order " ]] \
+    && ok "ep_order (what smoke expects in the boot log) is what the loader announces for entrypoint.d/ ($want_order)" \
+    || bad "ep_order says '$want_order' but the loader announces '$announced'"
+[[ "$(wc -w <<<"$want_order")" -eq "$n_files" ]] \
+    && ok "ep_order names every section file ($n_files)" \
+    || bad "ep_order names $(wc -w <<<"$want_order") sections, entrypoint.d/ holds $n_files files"
 rm -f "$SB"/*.sh
 out="$(loader C)" || true
 grep -q 'ERROR: no sections in' <<<"$out" && ! grep -q '^ran=' <<<"$out" \
