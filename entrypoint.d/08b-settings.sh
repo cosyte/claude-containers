@@ -37,6 +37,14 @@ EXISTING_SETTINGS='{}'
 # user settings win, so it would survive forever and fire an ENOENT at every
 # session start. Same class of residue, same fix, as the telemetry strip above.
 STALE_HOOK_CMD="/usr/local/bin/claude-md-fragments"
+# settings.json sits in the agent-owned config dir, so a session can replace it with a symlink
+# that survives a restart; a bare `> settings.json` as root would then truncate and write the
+# link's target. Build into a fresh temp in the same directory (mktemp makes it O_EXCL, so it
+# cannot be a planted symlink) and rename over settings.json, which replaces a symlink at that
+# name without ever following it. Same 0-byte-on-jq-failure behaviour as the old `>` (the type
+# guards below keep jq from failing), but never writing outside the config dir.
+SETTINGS_DST="$CLAUDE_CONFIG_DIR/settings.json"
+SETTINGS_TMP="$(mktemp "$CLAUDE_CONFIG_DIR/.settings.json.XXXXXX")"
 jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") <(echo "$EXISTING_SETTINGS") \
     | jq 'if .env then .env |= (del(.DISABLE_TELEMETRY,.DO_NOT_TRACK,.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)) else . end' \
     | jq --arg stale "$STALE_HOOK_CMD" '
@@ -59,7 +67,8 @@ jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") <(echo "$EXISTING_SETTINGS") \
            then del(.hooks.SessionStart) else . end)
         | (if (.hooks | type) == "object" and ((.hooks | length) == 0)
            then del(.hooks) else . end)' \
-    > "$CLAUDE_CONFIG_DIR/settings.json"
+    > "$SETTINGS_TMP"
+mv -f "$SETTINGS_TMP" "$SETTINGS_DST"
 if echo "$EXISTING_SETTINGS" \
     | jq -e --arg stale "$STALE_HOOK_CMD" \
         '[.hooks.SessionStart // [] | .[] | .hooks // [] | .[] | select((.command // "") == $stale)] | length > 0' \

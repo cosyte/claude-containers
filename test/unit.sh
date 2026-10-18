@@ -86,8 +86,8 @@ STALE_CMD="$(sed -n 's/^STALE_HOOK_CMD="\(.*\)"$/\1/p' "$ENTRYPOINT")"
     || bad "STALE_HOOK_CMD is '$STALE_CMD': does not match the baked hook; the self-heal is a NO-OP"
 HOOK_FILTER="$(awk '/jq --arg stale "\$STALE_HOOK_CMD"/{f=1; sub(/^.*--arg stale "\$STALE_HOOK_CMD" .$/,""); }
                     f{print}
-                    f && /^ *> "\$CLAUDE_CONFIG_DIR\/settings.json"$/{exit}' "$ENTRYPOINT" \
-                 | sed -e "s/' *\\\\$//" -e '/^ *> "\$CLAUDE_CONFIG_DIR/d')"
+                    f && /^ *> "\$SETTINGS_TMP"$/{exit}' "$ENTRYPOINT" \
+                 | sed -e "s/' *\\\\$//" -e '/^ *> "\$SETTINGS_TMP"/d')"
 
 if [[ -n "$HOOK_FILTER" ]] && echo '{}' | jq --arg stale "$STALE_CMD" "$HOOK_FILTER" >/dev/null 2>&1; then
     ok "the §8b stale-hook jq filter was extracted from entrypoint.sh and parses"
@@ -904,6 +904,38 @@ gk_stale_blk="$(gk_block "$GKD/stale")"
 [[ ! -e "$GKD/stale/home/.ssh/id_ed25519" ]] \
     && ok  "a readable key left by an earlier boot is DELETED when brokering takes over" \
     || bad "a stale ~/.ssh/id_ed25519 survived the brokered boot: the key is still readable"
+
+# --- §5 NEVER FOLLOWS A SYMLINK the agent left in ~/.ssh -----------------------------
+# ~/.ssh is agent-owned and persists across a restart, so a session can replace config or
+# id_ed25519 with a symlink pointing at a root-owned file. Root's cat>/install must write a
+# fresh file in ~/.ssh, never through the link to its target. The opt-out path (readable key
+# file) exercises both writes: config via `cat >` and id_ed25519 via `install`.
+rm -rf "$GKD/link"; mkdir -p "$GKD/link/home/.ssh" "$GKD/link/outside"
+printf 'ROOTOWNED_SENTINEL\n' > "$GKD/link/outside/config-target"
+printf 'ROOTOWNED_SENTINEL\n' > "$GKD/link/outside/key-target"
+ln -s "$GKD/link/outside/config-target" "$GKD/link/home/.ssh/config"
+ln -s "$GKD/link/outside/key-target"    "$GKD/link/home/.ssh/id_ed25519"
+gk_fake_key > "$GKD/link/git-key"
+gk_link_blk="$(gk_block "$GKD/link")"
+( unset GK_FAIL_AGENT GK_FAIL_ADD GK_FAIL_RELAY
+  export PATH="$GKD/bin:$PATH" CLAUDE_HOME="$GKD/link/home" GITKEY_SRC="$GKD/link/git-key" \
+         CLAUDE_USER="$GK_USER" CLAUDE_UID="$GK_UID" CLAUDE_GID="$GK_GID" \
+         GK_ADDLOG="$GKD/link/ssh-add.log" CLAUDE_BROKER_GIT_KEY=0
+  log() { echo "[entrypoint] $*"; }
+  set -euo pipefail
+  eval "$gk_link_blk" ) >/dev/null 2>&1 || true
+if [[ "$(cat "$GKD/link/outside/config-target")" == "ROOTOWNED_SENTINEL" \
+   && "$(cat "$GKD/link/outside/key-target")" == "ROOTOWNED_SENTINEL" ]]; then
+    ok  "§5 did not write through the symlinks: both link targets are untouched"
+else
+    bad "§5 followed a symlink in ~/.ssh and wrote to its target (root-owned file overwritten)"
+fi
+if [[ ! -L "$GKD/link/home/.ssh/config" && -f "$GKD/link/home/.ssh/config" \
+   && ! -L "$GKD/link/home/.ssh/id_ed25519" && -f "$GKD/link/home/.ssh/id_ed25519" ]]; then
+    ok  "§5 replaced the planted symlinks with fresh regular files in ~/.ssh"
+else
+    bad "§5 left a symlink at ~/.ssh/config or ~/.ssh/id_ed25519 (config=$(stat -c %F "$GKD/link/home/.ssh/config" 2>&1), key=$(stat -c %F "$GKD/link/home/.ssh/id_ed25519" 2>&1))"
+fi
 
 # --- THE EXPLICIT OPT-OUT: the historical readable file, unchanged -------------------
 for v in 0 false no off; do
@@ -1976,12 +2008,23 @@ ms_8b_missing=()
 for _needle in 'permissions: { defaultMode: $pm }' 'skipDangerousModePermissionPrompt: true' \
                'includeCoAuthoredBy: true' \
                'del(.DISABLE_TELEMETRY,.DO_NOT_TRACK,.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)' \
-               'STALE_HOOK_CMD' '> "$CLAUDE_CONFIG_DIR/settings.json"'; do
+               'STALE_HOOK_CMD' 'mv -f "$SETTINGS_TMP" "$SETTINGS_DST"'; do
     grep -qF "$_needle" <<<"$MS_8B" || ms_8b_missing+=("$_needle")
 done
 [[ ${#ms_8b_missing[@]} -eq 0 ]] \
     && ok  "§8b still composes the same settings, still strips the telemetry kills, still self-heals the stale hook" \
     || bad "§8b lost something managed policy does not replace: ${ms_8b_missing[*]}"
+# settings.json is written into a mktemp in the config dir and renamed over, never with a bare
+# `>`: a session can leave a symlink at that agent-owned path, and `> settings.json` as root
+# would truncate and write the link's target. mktemp is O_EXCL and mv replaces a link without
+# following it.
+if grep -qF 'SETTINGS_TMP="$(mktemp "$CLAUDE_CONFIG_DIR/.settings.json.XXXXXX")"' <<<"$MS_8B" \
+   && grep -qF 'mv -f "$SETTINGS_TMP" "$SETTINGS_DST"' <<<"$MS_8B" \
+   && ! grep -qF '> "$CLAUDE_CONFIG_DIR/settings.json"' <<<"$MS_8B"; then
+    ok  "§8b writes settings.json via a mktemp + mv, never a bare redirect through a possible symlink"
+else
+    bad "§8b still writes settings.json with a bare '> settings.json' (root would follow a symlink the agent planted there)"
+fi
 grep -qF 'chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"' "$ENTRYPOINT" \
     && ok  "§8b still hands settings.json to the agent user (managed policy did not take it away)" \
     || bad "settings.json is no longer chowned to the agent user"
