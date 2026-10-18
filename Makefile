@@ -6,7 +6,7 @@ SHELL := /bin/bash
 export
 
 CLAUDE_IMAGE        ?= claude-code-box:latest
-CLAUDE_CODE_VERSION ?= 2.1.293
+CLAUDE_CODE_VERSION ?= 2.1.302
 PNPM_VERSION        ?= 12.14.0
 CLAUDE_UID          ?= 1000
 CLAUDE_GID          ?= 1000

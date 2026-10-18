@@ -93,7 +93,7 @@ and `.env.example`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `CLAUDE_IMAGE` | `claude-code-box:latest` | Image tag built/run |
-| `CLAUDE_CODE_VERSION` | `2.1.293` | Pinned Claude Code npm version (min 2.1.52); auto-update stays on unless `DISABLE_AUTOUPDATER=1` |
+| `CLAUDE_CODE_VERSION` | `2.1.302` | Pinned Claude Code npm version (min 2.1.52); auto-update stays on unless `DISABLE_AUTOUPDATER=1` |
 | `CLAUDE_MODEL` | `opus` | Model the session runs, passed to `--model` verbatim (`opus` is the latest Opus on the pinned CLI). Per-container via `claude-launch --model` |
 | `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `acceptEdits`/`auto`/`bypassPermissions`/`manual`/`dontAsk`/`plan`; `acceptEdits` is the safer fleet posture |
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` |: | Clone source (or use `--repo`/`--branch`/`--depth`) |

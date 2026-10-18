@@ -25,7 +25,7 @@ FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b
 # --- Build-time configuration -------------------------------------------------
 # CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control.
 #
-# 2.1.293 (published to npm 2026-10-07) is verified to support the exact launch this
+# 2.1.302 (published to npm 2026-10-16) is verified to support the exact launch this
 # image makes: `claude --dangerously-skip-permissions --remote-control <name>`
 # (bin/claude-session): with both flags accepted TOGETHER and no interlock between
 # them (checked on a TTY as the unprivileged user, with a signed-out config dir: it
@@ -34,12 +34,11 @@ FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b
 # consistent; the live --remote-control handshake is the on-host check,
 # CC-CLAUDE-CODE-UPGRADE-SMOKE).
 #
-# NO DEFAULT-MODEL CHANGE IN THE 2.1.293 BUMP: `opus` still resolves to Opus 5.5
+# NO MODEL CHANGE IN THE 2.1.302 BUMP: `opus` still resolves to Opus 5.5
 # (`claude-opus-5-5`, 1M context), the target since 2.1.280, which moved the fleet off
 # Opus 5 (the target since CLI 2.1.219). Pin CLAUDE_MODEL=claude-opus-5 on a container
-# that must stay on Opus 5. The other aliases did move: `sonnet` means Sonnet 5.5 from
-# 2.1.284 and `haiku` means Haiku 5.5 from 2.1.293, so a container that sets either
-# alias changes model with this bump.
+# that must stay on Opus 5. `sonnet` (Sonnet 5.5 from 2.1.284) and `haiku` (Haiku 5.5
+# from 2.1.293) are unchanged too: no alias moved between 2.1.293 and 2.1.302.
 #
 # WHY THE FLOOR EXISTS (CC-CLAUDE-CODE-UPGRADE): the `opus` alias resolves to the LATEST
 # Opus, and Opus 4.8 shipped in CLI 2.1.154, so the old 2.1.145 pin silently resolved
@@ -70,6 +69,39 @@ FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b
 #     (ignore-scripts skips the postinstall) and bin/claude-launcher repairs it on the
 #     next launch; watch the first auto-update on this pin for an updater that now
 #     reports the stub as a failure.
+#
+# Landed between 2.1.293 and 2.1.302, and relevant to this image (from the upstream
+# CHANGELOG.md; none of them needs a script change here: the debug-log lines the RC
+# watchdog matches, the usage-limit wording the usage watchdog matches, the
+# sessions/<pid>.json keys claude-sessions reads and the trust keys it seeds are all
+# still in the 2.1.302 binary, and `--permission-mode default` still parses):
+#   - 2.1.300: fixed Remote Control sessions being marked stopped while still running
+#     on a computer serving several sessions at once: a container with CLAUDE_SESSIONS.
+#   - 2.1.300: fixed `claude remote-control` servers giving up on renewing their
+#     connection after a brief sign-in error; they now retry.
+#   - 2.1.300: removed `--sandbox` and `--no-sandbox` from `claude remote-control`
+#     (either now exits with an error). Nothing in this image passes them.
+#   - 2.1.300: local transcripts also record each request's system prompt, tools and
+#     parameters, so a per-container config volume grows faster than before.
+#   - 2.1.299: idle compaction: a conversation over 200K tokens left idle about 54
+#     minutes is compacted before its prompt cache expires. Long-lived sessions here
+#     idle often, so this spends usage while nobody is typing; `"idleCompaction": false`
+#     in settings.json turns it off (this image does not set it).
+#   - 2.1.299: fixed memory growth under heavy debug logging (`--debug-file`), which
+#     every Remote Control session here runs with for the RC watchdog.
+#   - 2.1.299: fixed resuming a conversation from before `/clear` reattaching to the
+#     Remote Control session of the conversation after it.
+#   - 2.1.296: fixed skills synced from claude.ai never finishing their install, and
+#     downloading again at every sync, when several sessions share a config directory:
+#     every multi-session container.
+#   - 2.1.301: fixed sign-outs after a short command such as `claude plugin list`
+#     exited in the middle of a token refresh. On the shared credentials volume a
+#     sign-out is every container's, and claude-kit runs `claude plugin` at boot.
+#   - 2.1.302: fixed `claude plugin` and other subcommands exiting before a queued
+#     settings write finished (claude-kit's `marketplace add` and `plugin install`).
+#   - 2.1.302: `claude remote-control --help` prints its usage signed out, so the
+#     subcommand's options are checkable in a container again (docs/architecture.md).
+#   - 2.1.302: fork subagents are on by default in `claude -p` (claude-autopilot).
 #
 # Landed between 2.1.280 and 2.1.293, and relevant to this image (from the upstream
 # CHANGELOG.md; none of them needs a script change here):
@@ -204,7 +236,7 @@ FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b
 #     tmux pane would die on an invalid-choice refusal.
 #   - 2.1.198: Remote Control is disabled when ANTHROPIC_BASE_URL points at a
 #     non-Anthropic host. This image never sets it (and §1 refuses API-key auth).
-ARG CLAUDE_CODE_VERSION=2.1.293
+ARG CLAUDE_CODE_VERSION=2.1.302
 # PNPM_VERSION: pnpm baked into the image, an exact version for reproducible
 # builds (the Makefile default matches; still overridable with --build-arg).
 ARG PNPM_VERSION=12.14.0
