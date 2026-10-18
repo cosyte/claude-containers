@@ -60,7 +60,9 @@ task runner. Do not add a dependency without a strong reason.
   Most behaviour lives here. `entrypoint.sh` is the loader: it sources `entrypoint.d/NN[x]-name.sh`
   in number order (the files are listed in `docs/architecture.md`); the sections not yet
   moved there are still inline below its loop. `test/lib/entrypoint.sh` gives a suite a
-  section's file (`ep_section 7a`) or the whole boot path in run order (`ep_boot`).
+  section's file (`ep_section 7a`), the whole boot path in run order (`ep_boot`), or the
+  section numbers the loader announces (`ep_order`, which `test/smoke.sh` expects in the boot
+  log, so a new section needs no list edited).
 - `test/*.sh`: Docker-free unit suites, one per area. `npm test` is `test/run-all.sh`: it runs
   `test/unit.sh` and every `test/*-unit.sh` (a glob, so a new suite needs no list edited) in
   parallel and prints a PASS/FAIL summary with seconds. CI runs the same `npm test`.

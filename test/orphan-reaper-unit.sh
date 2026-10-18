@@ -3,12 +3,16 @@
 # the container's processes and a fake `kill` records the signals.
 #   - ended: the agent's PID-1 child older than the age, also when it runs under an interpreter
 #   - spared: younger than the age, a live parent, another owner, a kept name (tmux, claude,
-#     claude-session under bash, sshd:, the Gradle daemon by its main class), the kit start command's session; a kept name as an argument is not kept; CLAUDE_ORPHAN_KEEP adds
-#     names, and a bad one is ignored
+#     claude.exe, claude-session under bash, sshd:, the Gradle daemon by its main class, podman's
+#     aardvark-dns and netavark), a VS Code server by its install path, the kit start command's
+#     session; a kept name or a ~/.vscode-server path as an argument is not kept;
+#     CLAUDE_ORPHAN_KEEP adds names, and a bad one is ignored
 #   - SIGKILL follows only for a pid that still matches after the grace
 #   - with no init (PID 1 the entrypoint) nothing is ended
 #   - CLAUDE_ORPHAN_MAX_AGE: 0 is off, N[smhd] parses, a bad value falls back to 2h
 #   - the entrypoint starts it and stops it, the image ships it, the docs name its variables
+#   - every session container runs an init (claude-launch, claude-compose-gen, smoke), and
+#     §12e clears the last boot's kit-start.pid even with no start command
 # shellcheck source=test/lib/prelude.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
@@ -43,6 +47,14 @@ cat > "$TMPD/ps.txt" <<'EOF'
   116     1  1000   116 39000 find /home/claude -name tmux
   117     1  1000   117 39000 bash -c find / -name claude
   115     1  1000   115 39000 /opt/java/bin/java -cp /k/kotlin-daemon.jar org.jetbrains.kotlin.daemon.KotlinCompileDaemon --daemon-runFilesPath /k
+  118     1  1000   118 39000 /usr/lib/podman/aardvark-dns --config /run/user/1000/containers/networks/aardvark-dns -p 53 run
+  119     1  1000   119 39000 /usr/lib/podman/netavark dhcp-proxy --activity-timeout 0
+  120     1  1000   120 39000 /opt/claude-code/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --bg
+  121     1  1000   121 39000 sh /home/claude/.vscode-server/bin/0123abc/bin/code-server --start-server --host=127.0.0.1
+  122     1  1000   122 39000 /home/claude/.vscode-server/bin/0123abc/node --inspect=0 /home/claude/.vscode-server/bin/0123abc/out/server-main.js
+  123     1  1000   123 39000 /home/claude/.vscode-server/code-0123abc command-shell --cli-data-dir /home/claude/.vscode-server/cli
+  124     1  1000   124 39000 node /workspace/app/server.js /home/claude/.vscode-server/data
+  125     1  1000   125 39000 find /home/claude/.vscode-server -name x
 EOF
 printf '#!/bin/sh\ncat "%s"\n' "$TMPD/ps.txt" > "$TMPD/ps"
 printf '#!/bin/sh\necho "$1 $2" >> "%s"\n' "$TMPD/kills" > "$TMPD/kill"
@@ -57,19 +69,23 @@ pids() { awk '{print $1}' | sort -n | tr '\n' ' '; }
 
 echo "== selection =="
 got="$(run "$REAP" --list | pids)"
-want="101 102 111 113 116 117 "
+want="101 102 111 113 116 117 124 125 "
 [[ "$got" == "$want" ]] && ok "ends old PID-1 orphans of the agent only ($want)" \
     || bad "selection: got '$got', want '$want'"
-for c in "116 a kept name as an argument (find /home/claude -name tmux)" "117 a kept name inside bash -c"; do
+for c in "116 a kept name as an argument (find /home/claude -name tmux)" "117 a kept name inside bash -c" \
+         "124 a node orphan whose ARGUMENT is under ~/.vscode-server" "125 find walking ~/.vscode-server"; do
     grep -qw "${c%% *}" <<<"$got" && ok "ended: ${c#* }" || bad "not ended: ${c#* }"
 done
 for c in "103 younger than the age" "104 a live parent" "105 another owner" "106 tmux" "107 claude" \
          "108 claude-session under bash" "109 sshd:" "110 the kit start session" "112 chrome_crashpad_handler" \
-         "114 a Gradle daemon (by its main class)" "115 a Kotlin compile daemon"; do
+         "114 a Gradle daemon (by its main class)" "115 a Kotlin compile daemon" \
+         "118 podman's aardvark-dns (a nested compose network's DNS)" "119 netavark dhcp-proxy" \
+         "120 the native Claude binary (claude.exe --bg)" "121 the VS Code server under sh" \
+         "122 the VS Code server's node, by its script's path" "123 the VS Code CLI (code-<commit>)"; do
     grep -qw "${c%% *}" <<<"$got" && bad "spared: ${c#* } (pid ${c%% *})" || ok "spared: ${c#* }"
 done
 got="$(run env CLAUDE_ORPHAN_KEEP='^(python3|bfs)$' "$REAP" --list | pids)"
-[[ "$got" == "102 113 116 117 " ]] && ok "CLAUDE_ORPHAN_KEEP adds to the kept names (python3 by command, bfs)" \
+[[ "$got" == "102 113 116 117 124 125 " ]] && ok "CLAUDE_ORPHAN_KEEP adds to the kept names (python3 by command, bfs)" \
     || bad "custom keep: got '$got'"
 out="$(run env CLAUDE_ORPHAN_KEEP='tmux|(claude' "$REAP" --list 2>&1)"
 [[ "$out" == *"WARNING: CLAUDE_ORPHAN_KEEP"*"ignored"* && "$(grep -v WARNING <<<"$out" | pids)" == "$want" ]] \
@@ -103,7 +119,7 @@ grep -q "off (CLAUDE_ORPHAN_MAX_AGE=0)" <<<"$out" && ok "the loop says it is off
 
 echo "== the signals =="
 out="$(run "$REAP" --once)"
-want="$(printf -- '-TERM %s\n' 101 102 111 113 116 117; printf -- '-KILL %s\n' 101 102 111 113 116 117)"
+want="$(printf -- '-TERM %s\n' 101 102 111 113 116 117 124 125; printf -- '-KILL %s\n' 101 102 111 113 116 117 124 125)"
 [[ "$(cat "$TMPD/kills")" == "$want" ]] && ok "SIGTERM each, then SIGKILL each still there" \
     || bad "signals: $(cat "$TMPD/kills")"
 grep -q 'SIGTERM pid 101 (orphaned, age 10h50m): bfs / -name foo' <<<"$out" \
@@ -126,6 +142,25 @@ grep -q 'kill "$ORPHAN_REAPER_PID"' "$REPO_ROOT/entrypoint.d/13-stay-alive.sh" \
     && ok "shutdown stops it" || bad "shutdown does not stop it"
 grep -q '^COPY bin/claude-orphan-reaper /usr/local/bin/claude-orphan-reaper$' "$REPO_ROOT/Dockerfile" \
     && ok "the image ships it" || bad "the Dockerfile does not COPY it"
+# The reaper skips every pass when PID 1 is the entrypoint, so every way a session is started runs
+# an init; smoke's main container too, or its reaper check proves nothing (it failed for that).
+e12e="$REPO_ROOT/entrypoint.d/12e-named-sessions.sh"
+grep -q -- '--init' <(sed -n '/^docker run -d \\$/,/"\$IMAGE"/p' "$REPO_ROOT/bin/claude-launch") \
+    && grep -q '^    init: true$' "$REPO_ROOT/bin/claude-compose-gen" \
+    && grep -qE '^docker run -d --name "\$CN" --init( |\\)' "$REPO_ROOT/test/smoke.sh" \
+    && ok "claude-launch, claude-compose-gen and smoke's main container all run an init (--init)" \
+    || bad "a session container is started without --init: the reaper would skip every pass in it"
+# The last boot's kit-start.pid names a session the reaper spares. claude-kit start clears it, so
+# the entrypoint runs it every boot, not only when a start command is set.
+grep -q '^asclaude /usr/local/bin/claude-kit start \\$' "$e12e" && ! grep -q 'CLAUDE_EXTRA_START_CMD:-}" ]]' "$e12e" \
+    && ok "§12e runs claude-kit start on every boot (it clears the last boot's kit-start.pid)" \
+    || bad "§12e runs claude-kit start only with a start command: a dropped command leaves a stale kit-start.pid"
+mkdir -p "$TMPD/kitcfg"; echo 4242 > "$TMPD/kitcfg/kit-start.pid"
+env -u CLAUDE_EXTRA_START_CMD CLAUDE_CONFIG_DIR="$TMPD/kitcfg" CLAUDE_KIT_START_LOG="$TMPD/kitcfg/kit-start.log" \
+    "$REPO_ROOT/bin/claude-kit" start >/dev/null 2>&1; rc=$?
+(( rc == 0 )) && [[ ! -e "$TMPD/kitcfg/kit-start.pid" ]] \
+    && ok "claude-kit start with no start command clears the last boot's kit-start.pid, exit 0" \
+    || bad "claude-kit start with no command: rc=$rc, pidfile $( [[ -e "$TMPD/kitcfg/kit-start.pid" ]] && echo kept || echo gone)"
 for v in CLAUDE_ORPHAN_MAX_AGE CLAUDE_ORPHAN_KEEP; do
     grep -q "$v" "$REPO_ROOT/docs/environment-variables.md" && grep -q "$v" "$REPO_ROOT/.env.example" \
         && ok "$v is documented" || bad "$v missing from docs/environment-variables.md or .env.example"
