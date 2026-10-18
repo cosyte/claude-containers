@@ -2234,7 +2234,8 @@ done
     set -euo pipefail
     CLAUDE_CONFIG_DIR="$NFC" CLAUDE_UID="$(id -u)" CLAUDE_GID="$(id -g)"
     ACCT_FILE="$NFC/.credentials-account" SWITCH_FILE="$NFC/.account-changed"
-    CLAUDE_ACCOUNTS="work,home"; ACCOUNT_NAMES=(work home)
+    # shellcheck disable=SC2034  # read by the eval'd §6 functions
+    { CLAUDE_ACCOUNTS="work,home"; ACCOUNT_NAMES=(work home); }
     eval "$S6_FNS"
     mkdir -p "$NF/master"; echo '{"oauthAccount":{"accountUuid":"u-new"}}' > "$NF/master/.claude.json"
     ln -s "$(nf_outside acct)" "$ACCT_FILE"; ln -s "$(nf_outside acct-tmp)" "$ACCT_FILE.tmp"
@@ -2285,6 +2286,7 @@ ln -s "$(nf_outside settings)" "$NFC/settings.json"
 ln -s "$NFO/cmds" "$NFC/commands"; ln -s "$NFO/skills" "$NFC/skills"
 (
     set -euo pipefail
+    # shellcheck disable=SC2034  # read by the sourced §8 sections
     CLAUDE_CONFIG_DIR="$NFC" BAKE_DIR="$NF/bake" CLAUDE_UID="$(id -u)" CLAUDE_GID="$(id -g)" BROWSER_MCP=off
     log() { :; }
     for s in 8a 8c 8d 8e; do
