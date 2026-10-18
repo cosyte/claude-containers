@@ -215,10 +215,19 @@ if has "$CLAUDE_MD" 'is 3.13 with `yaml`, `PIL` and `pypdf`'; then
 else
     bad "Python: 'system Python is 3.13 with yaml, PIL and pypdf' MUST be stated"
 fi
-if has "$CLAUDE_MD" 'Build outputs go to `/state/tmp`, not `/scratch`'; then
-    ok "Scratch: build outputs go to /state/tmp, not /scratch"
+# /scratch is the disk volume by default and a RAM tmpfs only on GPU and browser services
+# (docs/temp-space.md): the note must say so, and must not send every build to /state/tmp,
+# which nothing trims.
+if has "$CLAUDE_MD" 'Build outputs go to `/scratch` (`$TMPDIR`): a disk volume' \
+   && has "$CLAUDE_MD" 'On a GPU or browser service `/scratch` is a RAM tmpfs'; then
+    ok "Scratch: build outputs go to the disk /scratch; RAM only on GPU and browser services"
 else
-    bad "Scratch: 'Build outputs go to /state/tmp, not /scratch' MUST be stated"
+    bad "Scratch: 'Build outputs go to /scratch (\$TMPDIR): a disk volume' and the GPU/browser RAM exception MUST be stated"
+fi
+if ! has "$CLAUDE_MD" 'Build outputs go to `/state/tmp`, not `/scratch`'; then
+    ok "Scratch: no blanket 'build outputs go to /state/tmp' (nothing trims /state)"
+else
+    bad "Scratch: the note still sends every build to /state/tmp, which nothing trims"
 fi
 
 # ============================================================================================

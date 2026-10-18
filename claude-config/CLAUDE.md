@@ -24,8 +24,10 @@ Keep this short. Project-specific guidance belongs in the repo's own
 - Never `find /` (or `bfs`, `du`, `rg` over `/` or all of `/cache`): search a named
   directory. A walk of the whole disk outlives a timed-out tool call and keeps the host's
   disk busy for hours; the orphan reaper ends such leftovers after 2 h.
-- Build outputs go to `/state/tmp`, not `/scratch`: `/scratch` is a RAM tmpfs of a few GiB
-  (and `/cache` is shared with every container, tool caches only).
+- Build outputs go to `/scratch` (`$TMPDIR`): a disk volume, cleared at every boot.
+  On a GPU or browser service `/scratch` is a RAM tmpfs of a few GiB instead, charged to
+  memory: there, put a big build tree in `/state/tmp` and delete it when done, since
+  nothing trims `/state`. `/cache` is shared with every container: tool caches only.
 - A tool with no version set in this container reads "command not found": install it
   with `mise use` (or `pip install` / `npm i -g` a CLI into a mise toolchain), then run
   `mise reshim && claude-mise-shims` so it is on `PATH`.
