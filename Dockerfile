@@ -847,8 +847,10 @@ ENV CLAUDE_USER=${CLAUDE_USER} \
     npm_config_cache=/cache/npm \
     UV_CACHE_DIR=/cache/uv \
     PIP_CACHE_DIR=/cache/pip \
-    CLAUDE_AGENT_PATH=/state/mise-shims:/home/${CLAUDE_USER}/.local/share/claude-mise-shims:/cache/cargo/bin:/cache/go/bin:${PATH}:/opt/claude-code/bin \
-    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    CLAUDE_AGENT_PATH=/state/mise-shims:/home/${CLAUDE_USER}/.local/share/claude-mise-shims:/cache/cargo/bin:/cache/go/bin:${PATH}:/opt/claude-code/bin
+# Root's PATH (the first PATH note above), its own instruction so `${PATH}` in CLAUDE_AGENT_PATH
+# is plainly the base image's.
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Global npm prefix -> the claude-owned /opt/claude-code (see the Claude Code install
 # section): what lets the auto-updater, and any agent `npm i -g`, write without root.

@@ -173,26 +173,37 @@ check "tmux session 'claude' is alive" \
     'asclaude_x "tmux has-session -t claude" >/dev/null 2>&1'
 check "sshd is running" \
     'cexec "pgrep -x sshd" >/dev/null 2>&1'
-# Root and the agent resolve commands through different PATHs (docs/security-notes.md): a root
-# process the entrypoint started has the system PATH only, the agent's tmux panes get
-# CLAUDE_AGENT_PATH, so a tool in /cache/cargo/bin resolves for the agent and not for root.
+# Root and the agent resolve commands through different PATHs (docs/security-notes.md): what the
+# entrypoint runs as root has the system PATH only, the agent's tmux panes get CLAUDE_AGENT_PATH,
+# so a tool in /cache/cargo/bin resolves for the agent and not for root. A process's environment
+# is read as its own user: the container has no CAP_SYS_PTRACE, so root cannot read the agent's.
 ROOT_SYS_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-environ_path() { docker exec "$CN" sh -c 'tr "\0" "\n" < "/proc/$1/environ" | sed -n "s/^PATH=//p"' sh "$1"; }
-agent_window_finds() {   # agent_window_finds <tool>: what `command -v` says in a new agent tmux window
-    docker exec "$CN" gosu claude rm -f /tmp/path-probe.out
-    docker exec "$CN" gosu claude tmux new-window -d -t claude: -n path-probe "command -v $1 > /tmp/path-probe.out 2>&1"
-    for _ in $(seq 1 20); do docker exec "$CN" test -s /tmp/path-probe.out && break; sleep 0.5; done
-    docker exec "$CN" cat /tmp/path-probe.out 2>/dev/null
+environ_path() {   # environ_path <container> <user> <pid>: the PATH that process started with
+    docker exec -u "$2" "$1" sh -c 'tr "\0" "\n" < "/proc/$1/environ" | sed -n "s/^PATH=//p"' sh "$3" 2>/dev/null
+}
+pane_pid() { docker exec "$1" gosu claude tmux display-message -p -t "claude:$2" "#{pane_pid}" 2>/dev/null; }
+root_child_path() {   # the PATH of a command the entrypoint (PID 1, root) runs: its stay-alive sleep
+    local pid p
+    for _ in $(seq 1 20); do
+        pid="$(docker exec "$CN" pgrep -P 1 -x sleep 2>/dev/null | head -n 1)"
+        p="$([ -n "$pid" ] && environ_path "$CN" 0 "$pid")"
+        [ -n "$p" ] && { printf '%s\n' "$p"; return 0; }
+        sleep 0.5
+    done
+    return 1
+}
+same_path() {   # same_path <got> <want>: equal, else say what came back
+    [ "$1" = "$2" ] || { echo "    got PATH '$1', want '$2'" >&2; return 1; }
 }
 docker exec "$CN" gosu claude sh -c 'mkdir -p /cache/cargo/bin && printf "#!/bin/sh\nexit 0\n" > /cache/cargo/bin/smoke-agent-tool && chmod +x /cache/cargo/bin/smoke-agent-tool' >/dev/null 2>&1 || true
-check "a root process the entrypoint started (sshd) has the system PATH only" \
-    '[ "$(environ_path "$(docker exec "$CN" pgrep -xo sshd)")" = "$ROOT_SYS_PATH" ]'
+check "a command the entrypoint runs as root has the system PATH only" \
+    'same_path "$(root_child_path)" "$ROOT_SYS_PATH"'
 check "a root docker exec gets the system PATH only (the image's PATH)" \
-    '[ "$(docker exec "$CN" printenv PATH)" = "$ROOT_SYS_PATH" ]'
+    'same_path "$(docker exec "$CN" printenv PATH)" "$ROOT_SYS_PATH"'
 check "the agent's main pane runs with CLAUDE_AGENT_PATH" \
-    '[ "$(environ_path "$(docker exec "$CN" gosu claude tmux display-message -p -t claude:main "#{pane_pid}")")" = "$(docker exec "$CN" printenv CLAUDE_AGENT_PATH)" ]'
-check "an agent tmux window resolves a tool in /cache/cargo/bin" \
-    '[ "$(agent_window_finds smoke-agent-tool)" = /cache/cargo/bin/smoke-agent-tool ]'
+    'same_path "$(environ_path "$CN" claude "$(pane_pid "$CN" main)")" "$(docker exec "$CN" printenv CLAUDE_AGENT_PATH)"'
+check "the agent's PATH resolves a tool in /cache/cargo/bin" \
+    '[ "$(docker exec "$CN" gosu claude sh -c "PATH=\$CLAUDE_AGENT_PATH; command -v smoke-agent-tool")" = /cache/cargo/bin/smoke-agent-tool ]'
 check "root does not resolve that tool" \
     '! docker exec "$CN" sh -c "command -v smoke-agent-tool" >/dev/null 2>&1'
 # A stand-in CLI prefix that prints the uid it runs as: `claude` started by root must run it as
@@ -201,7 +212,7 @@ docker exec "$CN" sh -c 'mkdir -p /opt/smoke-prefix/bin && printf "#!/bin/sh\nid
 check "claude started as root runs the CLI as the agent, never as root" \
     '[ "$(docker exec -e CLAUDE_CODE_PREFIX=/opt/smoke-prefix "$CN" claude 2>/dev/null)" = "$(docker exec "$CN" id -u claude)" ]'
 docker exec "$CN" rm -rf /opt/smoke-prefix >/dev/null 2>&1 || true
-docker exec "$CN" gosu claude rm -f /cache/cargo/bin/smoke-agent-tool /tmp/path-probe.out >/dev/null 2>&1 || true
+docker exec "$CN" gosu claude rm -f /cache/cargo/bin/smoke-agent-tool >/dev/null 2>&1 || true
 check "workspace bind mount visible (skipped clone)" \
     'cexec "cat /workspace/marker.txt" 2>/dev/null | grep -q smoke-marker'
 # The boot owns only the workspace's top level; the full pass runs after the sessions are up.
@@ -1339,6 +1350,13 @@ check "claude-sessions ls lists every session" \
     '[ "$(sx claude-sessions ls --json | jq -r "[.[].name] | join(\",\")")" = "main,alpha,review,beta" ]'
 check "the healthcheck reports the named sessions" \
     'docker exec "$SESSCN" sh -c "d=\$(mktemp -d); printf \"#!/bin/sh\nexit 0\n\" > \$d/pgrep; chmod +x \$d/pgrep; CLAUDE_HEALTHCHECK_PGREP=\$d/pgrep /usr/local/bin/claude-healthcheck" | grep -q "; sessions: 3/3 up"'
+# A session a host tool starts (`docker exec -u claude`, so the system PATH) still runs with the
+# agent's PATH: tmux would otherwise hand the new window the calling client's PATH.
+sx claude-sessions new pathcheck --dir alpha --no-rc >/dev/null 2>&1
+for _ in $(seq 1 20); do [ -n "$(pane_pid "$SESSCN" pathcheck)" ] && break; sleep 0.5; done
+check "a session started through docker exec runs with CLAUDE_AGENT_PATH" \
+    'same_path "$(environ_path "$SESSCN" claude "$(pane_pid "$SESSCN" pathcheck)")" "$(docker exec "$SESSCN" printenv CLAUDE_AGENT_PATH)"'
+sx claude-sessions rm pathcheck >/dev/null 2>&1
 sx claude-sessions stop beta >/dev/null 2>&1
 docker restart "$SESSCN" >/dev/null 2>&1
 for _ in $(seq 1 60); do [ "$(docker logs --since 90s "$SESSCN" 2>&1 | grep -c "Named sessions")" -ge 1 ] && break; sleep 1; done

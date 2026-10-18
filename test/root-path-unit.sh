@@ -32,7 +32,8 @@ ROOT_RUN=(claude-healthcheck claude-egress-firewall claude-gpu claude-kit claude
 
 echo "== the image: root's PATH and the agent's =="
 DF="$REPO_ROOT/Dockerfile"
-img_path="$(grep -E '^ +PATH=' "$DF" | head -n 1 | sed -E 's/^ +PATH=//; s/ *\\$//')"
+# The image's final PATH: the last instruction that sets it (ENV PATH=..., or an ENV block line).
+img_path="$(grep -E '^(ENV)? +PATH=' "$DF" | tail -n 1 | sed -E 's/^(ENV)? +PATH=//; s/ *\\$//')"
 system_only "$img_path" \
     && ok "the image's PATH is system directories only ($img_path)" \
     || bad "the image's PATH must be system directories only, root and the HEALTHCHECK run with it (got '$img_path')"

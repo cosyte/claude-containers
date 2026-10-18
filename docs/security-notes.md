@@ -45,7 +45,8 @@
   HEALTHCHECK, a plain `docker exec`) uses the image's `PATH`, system directories only.
   The agent's PATH, `CLAUDE_AGENT_PATH`, leads with directories the agent can write (the
   mise shims views, `/cache/cargo/bin`, `/cache/go/bin`) and ends with the agent-owned
-  `/opt/claude-code/bin`; the entrypoint hands it only to processes that run as the agent.
+  `/opt/claude-code/bin`; the entrypoint hands it only to processes that run as the agent,
+  and `claude-sessions` gives it to every window it opens, whoever called it.
   The scripts root runs pin the system PATH themselves, and `claude` started as root is
   handed to the agent user before the CLI runs. A `docker exec -u claude` starts with the
   system PATH: run an agent-installed tool through the session (`claude-attach`) or with

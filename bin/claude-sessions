@@ -67,6 +67,11 @@ if [[ "${1:-}" == "-C" ]]; then
         "claude-$_proj" claude-sessions "$@"
 fi
 
+# The agent's PATH for every window and watchdog started from here. A host tool reaches this
+# through `docker exec -u claude`, which starts with the system PATH (root's), and tmux gives a
+# window the PATH of the client that created it.
+if (( EUID != 0 )) && [[ -n "${CLAUDE_AGENT_PATH:-}" ]]; then export PATH="$CLAUDE_AGENT_PATH"; fi
+
 TMUX_SESSION="${CLAUDE_TMUX_SESSION:-claude}"
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 REG="${CLAUDE_SESSIONS_REGISTRY:-$CONFIG_DIR/session-registry}"
