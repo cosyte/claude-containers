@@ -182,10 +182,12 @@ environ_path() {   # environ_path <container> <user> <pid>: the PATH that proces
     docker exec -u "$2" "$1" sh -c 'tr "\0" "\n" < "/proc/$1/environ" | sed -n "s/^PATH=//p"' sh "$3" 2>/dev/null
 }
 pane_pid() { docker exec "$1" gosu claude tmux display-message -p -t "claude:$2" "#{pane_pid}" 2>/dev/null; }
-root_child_path() {   # the PATH of a command the entrypoint (PID 1, root) runs: its stay-alive sleep
-    local pid p
+root_child_path() {   # the PATH of a command the entrypoint (root) runs: its stay-alive sleep
+    local ep pid p
     for _ in $(seq 1 20); do
-        pid="$(docker exec "$CN" pgrep -P 1 -x sleep 2>/dev/null | head -n 1)"
+        # PID 1 itself under an init (smoke runs one), its child otherwise: found by name.
+        ep="$(docker exec "$CN" pgrep -o -x entrypoint.sh 2>/dev/null)"
+        pid="$([ -n "$ep" ] && docker exec "$CN" pgrep -P "$ep" -x sleep 2>/dev/null | head -n 1)"
         p="$([ -n "$pid" ] && environ_path "$CN" 0 "$pid")"
         [ -n "$p" ] && { printf '%s\n' "$p"; return 0; }
         sleep 0.5

@@ -48,7 +48,7 @@ EP="$REPO_ROOT/entrypoint.sh"
 ep_root="$(sed -n 's/^ROOT_PATH=//p' "$EP")"
 system_only "$ep_root" && ok "ROOT_PATH is system directories only" || bad "ROOT_PATH is not system-only (got '$ep_root')"
 first_cmd="$(grep -nE '\$\((getent|id) ' "$EP" | head -n 1 | cut -d: -f1)"
-export_at="$(grep -nxF 'export PATH="$ROOT_PATH"' "$EP" | head -n 1 | cut -d: -f1)"
+export_at="$(grep -nE '^export PATH="\$ROOT_PATH"( |$)' "$EP" | head -n 1 | cut -d: -f1)"
 [[ -n "$export_at" && -n "$first_cmd" ]] && (( export_at < first_cmd )) \
     && ok "root's PATH is exported before the entrypoint runs its first command" \
     || bad "export PATH=\"\$ROOT_PATH\" must come before the first command (getent/id) in entrypoint.sh"
