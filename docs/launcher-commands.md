@@ -163,8 +163,16 @@ so a repo keeps its port whether active or dormant.
   It must exist locally; only the default image builds itself. E.g. `claude-code-box:browser`.
 - `--cache VOLUME` / `--no-cache`: the shared tool cache volume at `/cache` (default
   `claude-cache`), or none. Private state is separate: `/state` is always this container's own.
+- `--model NAME`: the model, over `CLAUDE_MODEL` from the environment or `.env`. An empty name
+  (`--model ""`) is the container's own default, `opus`, whatever `CLAUDE_MODEL` says: the way to
+  launch one container on the default while `.env` names another model.
 
 `claude-compose-gen`:
+
+- `--model REPO=MODEL`: one service's model, written into the compose file; a service without
+  one follows `CLAUDE_MODEL` at `up`, else `opus`. `REPO=` with no model is the container's own
+  default (`opus`) for that service, whatever `CLAUDE_MODEL` says, as `claude-launch --model ""`
+  is. The last value given for a repo wins.
 
 - `--scenario FILE`: read flags from a scenario `.conf`, one `--flag value` per line
   (`scenarios/example.conf.example`); flags after it on the command line override or append.

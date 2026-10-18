@@ -21,10 +21,20 @@
 # Usage: claude-scratch-reap [--dry-run]   (--dry-run: report only, whatever the mode)
 # claude-sessions' supervise loop runs it every CLAUDE_SCRATCH_REAP_MIN minutes.
 #
+# Report mode names each gone folder once, not on every pass: it keeps what it reported (the
+# folder, its own mtime and ctime, its size) in CLAUDE_SCRATCH_REAP_STATE and skips a folder it
+# already named, with no second `du` or walk of it. A folder that is gone from /scratch, became
+# live again, or whose own times changed (an entry added or removed in it) is forgotten, and
+# named again if it is still gone at a later pass. The summary counts the new and the already
+# reported ones. --dry-run lists every one each time, and neither reads nor writes that file.
+#
 # Env:
 #   CLAUDE_SCRATCH_REAP       report (default): log what would be removed, remove nothing;
 #                             on: remove; off: do nothing at all
 #   CLAUDE_SCRATCH_WARN_PCT   warn above this percent used (default 85)
+#   CLAUDE_SCRATCH_REAP_STATE what report mode already named (default
+#                             /tmp/claude-scratch-reap.reported: /tmp is cleared on a restart,
+#                             like /scratch itself)
 # Test seams (unit tests only):
 #   CLAUDE_SCRATCH_ROOT       the scratch root (default /scratch)
 #   CLAUDE_SCRATCH_PROC       the proc root (default /proc)
@@ -37,14 +47,16 @@ PROC="${CLAUDE_SCRATCH_PROC:-/proc}"
 SESSIONS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
 MODE="${CLAUDE_SCRATCH_REAP:-report}"
 WARN_PCT="${CLAUDE_SCRATCH_WARN_PCT:-85}"
+STATE="${CLAUDE_SCRATCH_REAP_STATE:-/tmp/claude-scratch-reap.reported}"
 IDLE_MIN=360
 UUID_RE='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
 say() { echo "[scratch-reap] $*"; }
 
+DRY=0
 case "${1:-}" in
     "") ;;
-    --dry-run) [[ "$MODE" == off ]] || MODE=report ;;
+    --dry-run) DRY=1; [[ "$MODE" == off ]] || MODE=report ;;
     *) echo "usage: claude-scratch-reap [--dry-run]" >&2; exit 2 ;;
 esac
 case "$MODE" in
@@ -71,7 +83,15 @@ holds() {  # holds <dir>: a process has its cwd or an open file at or under dir
         END { exit !f }' <<<"$held"
 }
 
-freed=0 n=0
+# What report mode named on earlier passes: "<dir>\t<mtime.ctime>\t<KiB>" per line. Kept only
+# between passes of a report-mode run that is not --dry-run.
+remember=0
+[[ "$MODE" == report && "$DRY" == 0 ]] && remember=1
+reported=""
+(( remember )) && reported="$(cat "$STATE" 2>/dev/null)"
+seen=""   # this pass's lines for the state file: every folder still gone, new or already named
+
+freed=0 n=0 old=0 old_kib=0
 for d in "$ROOT"/claude-*/*/*/; do
     d="${d%/}"; id="${d##*/}"
     [[ -d "$d" && "$(realpath -e -- "$d" 2>/dev/null)" == "$d" ]] || continue   # no symlink on the way
@@ -79,6 +99,14 @@ for d in "$ROOT"/claude-*/*/*/; do
     [[ "$id" == "$own" ]] && continue
     grep -qxF "$id" <<<"$live" && continue
     holds "$d" && continue
+    if (( remember )); then
+        sig="$(stat -c '%Y.%Z' -- "$d" 2>/dev/null)"
+        prev="$(awk -F'\t' -v d="$d" -v s="$sig" '$1 == d && $2 == s { print $3; exit }' <<<"$reported")"
+        if [[ "$prev" =~ ^[0-9]+$ ]]; then   # named on an earlier pass, unchanged since: no walk, no du
+            seen+="$d"$'\t'"$sig"$'\t'"$prev"$'\n'; old=$((old + 1)); old_kib=$((old_kib + prev))
+            continue
+        fi
+    fi
     [[ -n "$(find "$d" -mmin -"$IDLE_MIN" -print -quit 2>/dev/null)" ]] && continue
     kib="$(du -sk "$d" 2>/dev/null | cut -f1)"
     if [[ "$MODE" == on ]]; then
@@ -86,11 +114,17 @@ for d in "$ROOT"/claude-*/*/*/; do
         rm -rf -- "$d" && { say "removed $d (${kib:-?} KiB)"; freed=$(( freed + ${kib:-0} )); n=$((n + 1)); }
     else
         say "would remove $d (${kib:-?} KiB)"; freed=$(( freed + ${kib:-0} )); n=$((n + 1))
+        (( remember )) && seen+="$d"$'\t'"$sig"$'\t'"${kib:-0}"$'\n'
     fi
 done
-if (( n )); then
-    if [[ "$MODE" == on ]]; then say "freed $n gone session folder(s), $(( freed / 1024 )) MiB"
-    else say "report only: $n gone session folder(s), $(( freed / 1024 )) MiB (CLAUDE_SCRATCH_REAP=on removes them)"; fi
+if (( remember )); then   # only this pass's folders: whatever is no longer gone is forgotten
+    if printf '%s' "$seen" > "$STATE.tmp" 2>/dev/null; then mv -f "$STATE.tmp" "$STATE"
+    else rm -f "$STATE.tmp" 2>/dev/null; fi
+fi
+if [[ "$MODE" == on ]]; then
+    (( n )) && say "freed $n gone session folder(s), $(( freed / 1024 )) MiB"
+elif (( n )); then
+    say "report only: $n gone session folder(s), $(( freed / 1024 )) MiB$( (( old )) && echo ", plus $old already reported ($(( old_kib / 1024 )) MiB)") (CLAUDE_SCRATCH_REAP=on removes them)"
 fi
 
 # The warning near full.

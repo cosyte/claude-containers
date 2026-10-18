@@ -60,8 +60,11 @@ only other cleanup: `claude-disk-gc` never touches `/scratch`. When a 24G RAM `/
 ## The reaper: gone sessions' folders
 
 `claude-scratch-reap` frees them. The sessions supervisor (`claude-sessions supervise`) runs it
-every `CLAUDE_SCRATCH_REAP_MIN` minutes (default 15), and its lines land in `docker logs` as
-`[scratch-reap] ...`. It removes a session folder only when **all** of these hold:
+every `CLAUDE_SCRATCH_REAP_MIN` minutes (default 15), in the background so a slow walk of a big
+`/scratch` never holds the supervisor's own work (recording conversations, restarting Remote
+Control watchdogs); a lock keeps it to one run at a time, and each run is cut off after 5 minutes.
+Its lines land in `docker logs` as `[scratch-reap] ...`. It removes a session folder only when
+**all** of these hold:
 
 - the session is not live: no live Claude process names it in `~/.claude/sessions/<pid>.json`
   (an idle session's id is only there: Claude Code sets `CLAUDE_CODE_SESSION_ID` on the commands
@@ -77,11 +80,17 @@ the 5 largest top-level folders, so the session filling it can be found.
 
 `CLAUDE_SCRATCH_REAP` sets what it does:
 
-- `report` (the default): logs `would remove <folder> (<size>)` and removes nothing.
+- `report` (the default): logs `would remove <folder> (<size>)` and removes nothing. Each gone
+  folder is named once, not at every run: what was named is kept in `CLAUDE_SCRATCH_REAP_STATE`
+  (default `/tmp/claude-scratch-reap.reported`, cleared on a restart like `/scratch`), and a folder
+  already named is skipped without another walk or `du`. One that is removed, whose session comes
+  back, or whose own times change is forgotten, and named again if it is still gone later. The
+  summary line counts the new ones and those already reported.
 - `on`: removes them.
 - `off`: does nothing, not even the warning.
 
 **Switching it on:** the owner reads a week of reports first (`docker logs <container> 2>&1 | grep
 scratch-reap`), checks that no listed folder belonged to a live session, then sets
-`CLAUDE_SCRATCH_REAP=on` in `.env` and recreates the containers. To see what it would remove right
-now, inside a container: `claude-scratch-reap --dry-run`.
+`CLAUDE_SCRATCH_REAP=on` in `.env` and recreates the containers. To see everything it would remove
+right now, inside a container: `claude-scratch-reap --dry-run` (it lists every gone folder, already
+reported or not, and leaves the record alone).
