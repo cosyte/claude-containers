@@ -128,9 +128,12 @@ echo "== 4. boots with bind-mounted workspace =="
 # + minimal caps + no-new-privileges), so the whole suite proves boot, config
 # merge, SSH login, and git all work hardened. Sourced from _common.sh to avoid
 # drift. GH_TOKEN also exercises the git credential-helper wiring (asserted §8).
+# --init as claude-launch and claude-compose-gen run it: PID 1 an init, not the entrypoint, which
+# is what the orphan reaper needs (without one it skips every pass, by design) and what the
+# fleet runs.
 HARDEN_FLAGS="$(source "$REPO_ROOT/bin/_common.sh"; harden_run_args)"
 # shellcheck disable=SC2086  # HARDEN_FLAGS is intentionally word-split
-docker run -d --name "$CN" \
+docker run -d --name "$CN" --init \
     $HARDEN_FLAGS \
     -e CLAUDE_SKIP_AUTH_CHECK=1 \
     -e CLAUDE_PROJECT_NAME=smoke \
