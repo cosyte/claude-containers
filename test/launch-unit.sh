@@ -332,6 +332,33 @@ first_pass="$(grep -nE '^[^#]*own_tree "' "$TMPD/boot.sh" | head -1 | cut -d: -f
     && ok "the keep range is set before the first ownership pass (line $keep_line < $first_pass), and only there" \
     || bad "the keep range must be set before the first own_tree call (keep at ${keep_line:-none}, first pass at ${first_pass:-none})"
 
+# §2d creates the agent's podman store dirs without following a symlink the agent may have
+# left at ~/.local. The shipped snippet is extracted and run in a sandbox with asclaude stubbed
+# to run as the test user: a planted ~/.local symlink must be removed (never followed) and the
+# store dir created inside the real home, never in the link's target.
+D2D="$(sed -n '/for _d in "\$CLAUDE_HOME\/\.local"/,/asclaude chmod 700 "\$CONTAINERS_STORE_DIR"/p' "$(ep_section 2d)")"
+LINKD="$(mktemp -d)"
+mkdir -p "$LINKD/outside"
+ln -s "$LINKD/outside" "$LINKD/home/.local" 2>/dev/null || { mkdir -p "$LINKD/home"; ln -s "$LINKD/outside" "$LINKD/home/.local"; }
+(
+    set -euo pipefail
+    asclaude() { "$@"; }
+    export CLAUDE_HOME="$LINKD/home"
+    # shellcheck disable=SC2034  # read by the extracted §2d snippet run through eval below
+    CONTAINERS_STORE_DIR="$LINKD/home/.local/share/containers"
+    eval "$D2D"
+) >/dev/null 2>&1
+if [[ -n "$D2D" && ! -L "$LINKD/home/.local" && -d "$LINKD/home/.local/share/containers" \
+   && ! -e "$LINKD/outside/share" ]]; then
+    ok "§2d removed the ~/.local symlink and made the store dir inside the real home"
+else
+    bad "§2d followed the ~/.local symlink or did not create the store dir (local=$(stat -c %F "$LINKD/home/.local" 2>&1), outside/share exists: $([[ -e "$LINKD/outside/share" ]] && echo yes || echo no))"
+fi
+[[ "$(stat -c %a "$LINKD/home/.local/share/containers" 2>/dev/null)" == 700 ]] \
+    && ok "§2d store dir is mode 700" \
+    || bad "§2d store dir is not mode 700: $(stat -c %a "$LINKD/home/.local/share/containers" 2>&1)"
+rm -rf "$LINKD"
+
 # The profile is the vendored upstream through containers/seccomp.jq, nothing else.
 if command -v jq >/dev/null 2>&1; then
     diff -q <(jq -f "$REPO_ROOT/containers/seccomp.jq" "$REPO_ROOT/containers/seccomp-upstream.json") \

@@ -31,8 +31,17 @@ if [[ "${CLAUDE_CONTAINERS:-0}" =~ ^(1|true|yes|on)$ ]]; then
     # The ownership passes (§2, §2c, §9, §12g) leave the nested containers' ids alone: the
     # loader set OWN_TREE_KEEP_IDS from this range before §2.
     # The store's top directory only: what is inside belongs to the mapped ids.
-    install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" "$CLAUDE_HOME/.local" "$CLAUDE_HOME/.local/share"
-    install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 700 "$CONTAINERS_STORE_DIR"
+    # These live under the agent's own home, so create them AS THE AGENT: a root `install -d`
+    # would follow a symlink a session may have left at ~/.local or ~/.local/share and chown
+    # its target. Remove a symlink at each level first (outermost first, so a dead parent link
+    # does not hide an inner one), never follow it; then the agent makes the real directories,
+    # which can only land inside its own home.
+    for _d in "$CLAUDE_HOME/.local" "$CLAUDE_HOME/.local/share" "$CONTAINERS_STORE_DIR"; do
+        [[ -L "$_d" ]] && rm -f "$_d"
+    done
+    unset _d
+    asclaude mkdir -p "$CONTAINERS_STORE_DIR"
+    asclaude chmod 700 "$CONTAINERS_STORE_DIR"
     # /run/user is in the container layer here, not a tmpfs, so it survives a restart: clear it,
     # or podman reads the last boot's state as live.
     rm -rf "$CONTAINERS_RUNTIME_DIR"
