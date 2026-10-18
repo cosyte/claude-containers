@@ -12,6 +12,15 @@
 # size is a reliable test (install.cjs itself uses the same 4096 cutoff).
 set -u
 
+# Root never runs the CLI: the prefix is the agent's (the auto-updater writes it). A root
+# caller (a plain `docker exec <ctr> claude ...`) is handed to the agent user, with the
+# agent's PATH, the way the entrypoint starts every session.
+if (( EUID == 0 )); then
+    command -v gosu >/dev/null 2>&1 \
+        || { echo "claude: refusing to run as root (no gosu to drop to ${CLAUDE_USER:-claude})" >&2; exit 1; }
+    exec gosu "${CLAUDE_USER:-claude}" env PATH="${CLAUDE_AGENT_PATH:-$PATH}" "$0" "$@"
+fi
+
 PREFIX="${CLAUDE_CODE_PREFIX:-/opt/claude-code}"
 PKG="$PREFIX/lib/node_modules/@anthropic-ai/claude-code"
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # claude-kit: install a kit from a git URL when the container starts, with no image rebuild.
 #
 # A kit is a git repository that is a Claude Code plugin marketplace: skills, commands, hooks
@@ -43,6 +43,8 @@
 #   claude-kit check           validate the three values and print what they declare.
 #   claude-kit status          what is declared, known to the CLI and installed.
 set -uo pipefail
+# As root, system directories only: never a command from a directory the agent can write.
+if (( EUID == 0 )); then export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; fi
 
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 CLAUDE_BIN="${CLAUDE_KIT_CLAUDE_BIN:-claude}"

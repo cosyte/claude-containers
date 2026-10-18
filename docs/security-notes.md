@@ -40,6 +40,16 @@
   process (the entrypoint, sshd, the egress firewall, the uid-map helper) is a host escape**,
   not a container escape. Opt-in, per session, off by default; the full trade-off table is in
   [containers-in-sessions.md](containers-in-sessions.md).
+- **Root and the agent resolve commands through different PATHs.** Everything that runs
+  as root in a session container (the entrypoint and what it starts, the Docker
+  HEALTHCHECK, a plain `docker exec`) uses the image's `PATH`, system directories only.
+  The agent's PATH, `CLAUDE_AGENT_PATH`, leads with directories the agent can write (the
+  mise shims views, `/cache/cargo/bin`, `/cache/go/bin`) and ends with the agent-owned
+  `/opt/claude-code/bin`; the entrypoint hands it only to processes that run as the agent.
+  The scripts root runs pin the system PATH themselves, and `claude` started as root is
+  handed to the agent user before the CLI runs. A `docker exec -u claude` starts with the
+  system PATH: run an agent-installed tool through the session (`claude-attach`) or with
+  `sh -c 'PATH=$CLAUDE_AGENT_PATH exec <tool>'`.
 - **Secret guard (on by default).** A fleet-wide git pre-commit hook
   (`CLAUDE_SECRET_GUARD=1`) blocks the autonomous agent from committing obvious
   secrets: `.env`, `*.pem`, `*.key`, `id_rsa`, files containing a `PRIVATE KEY`

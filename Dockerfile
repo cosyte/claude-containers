@@ -370,7 +370,9 @@ COPY --from=uv /uv /uvx /usr/local/bin/
 # postinstall and leaves bin/claude.exe as a 500-byte stub that only prints "claude
 # native binary not installed". The launcher re-runs that postinstall (under a lock)
 # when it finds the stub, then execs the real binary. It sits before
-# /opt/claude-code/bin on PATH, and every caller in this image resolves `claude` by name.
+# /opt/claude-code/bin on the agent's PATH (root's PATH has no /opt/claude-code at all),
+# and every caller in this image resolves `claude` by name. A root caller is handed to the
+# agent user first: root never runs the CLI out of the agent's prefix.
 RUN set -eu; \
     # --- GUARD 1: the effective version must clear the Opus-4.8 floor -------------
     # This is NOT hygiene. `--model opus` (this image's default) resolves to the LATEST
@@ -803,16 +805,26 @@ RUN set -eux; \
 #    shared /cache tree, so a toolchain/CLI installed by one container is a
 #    cache hit for the next and for parallel workers. With no cache volume mounted
 #    /cache is a plain image-layer dir → per-container installs (fail-safe).
-#  - PATH: lead with THIS container's view of the mise shims (/state/mise-shims, or
+#  - PATH is root's: system directories only. The image has no USER line, so the
+#    entrypoint, everything it starts as root, the HEALTHCHECK and a plain `docker exec`
+#    all run as root with it, and none of them may resolve a command from a directory the
+#    agent can write (/state, the agent's home, /cache, /opt/claude-code).
+#  - CLAUDE_AGENT_PATH is the agent's PATH, handed to every process that runs as the
+#    agent (entrypoint.sh asclaude, so the tmux server, its panes, the watchdogs and the
+#    sessions supervisor). It is root's PATH with these around it, `${PATH}` being the base
+#    image's here: lead with THIS container's view of the mise shims (/state/mise-shims, or
 #    ~/.local/share/claude-mise-shims without CLAUDE_STATE_DIR), which claude-mise-shims
 #    fills with links to the shared shims of the tools that resolve here, so NON-interactive /
 #    agent shells (`bash -c "…"`, the Claude Code process) resolve mise-installed tools
 #    with no shell activation. The shared /cache/mise/shims holds a shim for every tool any
 #    container installed, and one with no version set here answers `command -v` and then
 #    fails, so it is NOT on PATH: a tool with no version reads "command not found". Also
-#    prepend cargo/go bin so `cargo install` / `go install` CLIs resolve. Interactive shells get full `mise activate` via
+#    prepend cargo/go bin so `cargo install` / `go install` CLIs resolve, and end with
+#    /opt/claude-code/bin (the claude-owned npm prefix). Interactive shells get full `mise activate` via
 #    ~/.bashrc (which re-exports these dirs, see the bashrc block). The dirs need
 #    not be populated yet: mise creates + fills them (as UID 1000) on first `mise use`.
+#    A `docker exec -u claude` starts with the system PATH; run a tool from these dirs
+#    through the session (claude-attach) or `sh -c 'PATH=$CLAUDE_AGENT_PATH exec <tool>'`.
 #  - MISE_TRUSTED_CONFIG_PATHS: auto-trust a `mise.toml` ONLY under /workspace
 #    (the repo the agent is working on), a DELIBERATE, scoped supply-chain trade,
 #    NOT a blanket "/", so the agent's own repo toolchain auto-applies while
@@ -835,7 +847,8 @@ ENV CLAUDE_USER=${CLAUDE_USER} \
     npm_config_cache=/cache/npm \
     UV_CACHE_DIR=/cache/uv \
     PIP_CACHE_DIR=/cache/pip \
-    PATH=/state/mise-shims:/home/${CLAUDE_USER}/.local/share/claude-mise-shims:/cache/cargo/bin:/cache/go/bin:${PATH}:/opt/claude-code/bin
+    CLAUDE_AGENT_PATH=/state/mise-shims:/home/${CLAUDE_USER}/.local/share/claude-mise-shims:/cache/cargo/bin:/cache/go/bin:${PATH}:/opt/claude-code/bin \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Global npm prefix -> the claude-owned /opt/claude-code (see the Claude Code install
 # section): what lets the auto-updater, and any agent `npm i -g`, write without root.

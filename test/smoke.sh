@@ -173,6 +173,35 @@ check "tmux session 'claude' is alive" \
     'asclaude_x "tmux has-session -t claude" >/dev/null 2>&1'
 check "sshd is running" \
     'cexec "pgrep -x sshd" >/dev/null 2>&1'
+# Root and the agent resolve commands through different PATHs (docs/security-notes.md): a root
+# process the entrypoint started has the system PATH only, the agent's tmux panes get
+# CLAUDE_AGENT_PATH, so a tool in /cache/cargo/bin resolves for the agent and not for root.
+ROOT_SYS_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+environ_path() { docker exec "$CN" sh -c 'tr "\0" "\n" < "/proc/$1/environ" | sed -n "s/^PATH=//p"' sh "$1"; }
+agent_window_finds() {   # agent_window_finds <tool>: what `command -v` says in a new agent tmux window
+    docker exec "$CN" gosu claude rm -f /tmp/path-probe.out
+    docker exec "$CN" gosu claude tmux new-window -d -t claude: -n path-probe "command -v $1 > /tmp/path-probe.out 2>&1"
+    for _ in $(seq 1 20); do docker exec "$CN" test -s /tmp/path-probe.out && break; sleep 0.5; done
+    docker exec "$CN" cat /tmp/path-probe.out 2>/dev/null
+}
+docker exec "$CN" gosu claude sh -c 'mkdir -p /cache/cargo/bin && printf "#!/bin/sh\nexit 0\n" > /cache/cargo/bin/smoke-agent-tool && chmod +x /cache/cargo/bin/smoke-agent-tool' >/dev/null 2>&1 || true
+check "a root process the entrypoint started (sshd) has the system PATH only" \
+    '[ "$(environ_path "$(docker exec "$CN" pgrep -xo sshd)")" = "$ROOT_SYS_PATH" ]'
+check "a root docker exec gets the system PATH only (the image's PATH)" \
+    '[ "$(docker exec "$CN" printenv PATH)" = "$ROOT_SYS_PATH" ]'
+check "the agent's main pane runs with CLAUDE_AGENT_PATH" \
+    '[ "$(environ_path "$(docker exec "$CN" gosu claude tmux display-message -p -t claude:main "#{pane_pid}")")" = "$(docker exec "$CN" printenv CLAUDE_AGENT_PATH)" ]'
+check "an agent tmux window resolves a tool in /cache/cargo/bin" \
+    '[ "$(agent_window_finds smoke-agent-tool)" = /cache/cargo/bin/smoke-agent-tool ]'
+check "root does not resolve that tool" \
+    '! docker exec "$CN" sh -c "command -v smoke-agent-tool" >/dev/null 2>&1'
+# A stand-in CLI prefix that prints the uid it runs as: `claude` started by root must run it as
+# the agent. The prefix is root's (under /opt), so only the launcher's hand-off is under test.
+docker exec "$CN" sh -c 'mkdir -p /opt/smoke-prefix/bin && printf "#!/bin/sh\nid -u\n" > /opt/smoke-prefix/bin/claude && chmod -R 755 /opt/smoke-prefix' >/dev/null 2>&1 || true
+check "claude started as root runs the CLI as the agent, never as root" \
+    '[ "$(docker exec -e CLAUDE_CODE_PREFIX=/opt/smoke-prefix "$CN" claude 2>/dev/null)" = "$(docker exec "$CN" id -u claude)" ]'
+docker exec "$CN" rm -rf /opt/smoke-prefix >/dev/null 2>&1 || true
+docker exec "$CN" gosu claude rm -f /cache/cargo/bin/smoke-agent-tool /tmp/path-probe.out >/dev/null 2>&1 || true
 check "workspace bind mount visible (skipped clone)" \
     'cexec "cat /workspace/marker.txt" 2>/dev/null | grep -q smoke-marker'
 # The boot owns only the workspace's top level; the full pass runs after the sessions are up.
@@ -1212,7 +1241,7 @@ check "an SSH-style login shell (cleared env) also gets CLAUDE_STATE_DIR" \
 check "the entrypoint builds this container's mise shims view and logs the count" \
     'docker logs "$STCN" 2>&1 | grep -q "mise shims          : 0 of 1 shared shims linked into /state/mise-shims"'
 check "command -v pytest fails with no pytest version, although the shared cache has its shim" \
-    '! docker exec "$STCN" gosu claude sh -c "command -v pytest" && docker exec "$STCN" test -L /cache/mise/shims/pytest'
+    '! docker exec "$STCN" gosu claude sh -c "PATH=\$CLAUDE_AGENT_PATH; command -v pytest" && docker exec "$STCN" test -L /cache/mise/shims/pytest'
 check "a database this container left in the shared cache is named in the boot log" \
     'docker logs "$STCN" 2>&1 | grep -q "PRIVATE STATE IN THE SHARED CACHE: 1 file" && docker logs "$STCN" 2>&1 | grep -q "/cache/app/statesmoke/app.db"'
 docker exec "$STCN" gosu claude sh -c 'mkdir -p /state/app && echo kept > /state/app/marker' >/dev/null 2>&1 || true
@@ -1309,7 +1338,7 @@ check "one RC watchdog per session with a link (main, alpha, beta), none for rev
 check "claude-sessions ls lists every session" \
     '[ "$(sx claude-sessions ls --json | jq -r "[.[].name] | join(\",\")")" = "main,alpha,review,beta" ]'
 check "the healthcheck reports the named sessions" \
-    'docker exec "$SESSCN" sh -c "d=\$(mktemp -d); printf \"#!/bin/sh\nexit 0\n\" > \$d/pgrep; chmod +x \$d/pgrep; PATH=\$d:\$PATH /usr/local/bin/claude-healthcheck" | grep -q "; sessions: 3/3 up"'
+    'docker exec "$SESSCN" sh -c "d=\$(mktemp -d); printf \"#!/bin/sh\nexit 0\n\" > \$d/pgrep; chmod +x \$d/pgrep; CLAUDE_HEALTHCHECK_PGREP=\$d/pgrep /usr/local/bin/claude-healthcheck" | grep -q "; sessions: 3/3 up"'
 sx claude-sessions stop beta >/dev/null 2>&1
 docker restart "$SESSCN" >/dev/null 2>&1
 for _ in $(seq 1 60); do [ "$(docker logs --since 90s "$SESSCN" 2>&1 | grep -c "Named sessions")" -ge 1 ] && break; sleep 1; done
@@ -1333,7 +1362,7 @@ GPUHARDEN="$(source "$REPO_ROOT/bin/_common.sh"; harden_run_args)"
 # smoke has no OAuth, so `claude` is not running and the probe would stop at "unhealthy"
 # before it ever reached the GPU line this section is about.
 hc_gpu() {
-    docker exec "$1" sh -c 'd="$(mktemp -d)"; printf "#!/bin/sh\nexit 0\n" > "$d/pgrep"; chmod +x "$d/pgrep"; PATH="$d:$PATH" /usr/local/bin/claude-healthcheck; echo "rc=$?"' 2>&1
+    docker exec "$1" sh -c 'd="$(mktemp -d)"; printf "#!/bin/sh\nexit 0\n" > "$d/pgrep"; chmod +x "$d/pgrep"; CLAUDE_HEALTHCHECK_PGREP="$d/pgrep" /usr/local/bin/claude-healthcheck; echo "rc=$?"' 2>&1
 }
 echo "== 18a. a --gpu session sees the card through CDI, on runc, fully hardened =="
 if [[ "$GPU_CDI" != 1 ]]; then

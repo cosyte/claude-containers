@@ -1,9 +1,17 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Claude Code container entrypoint.
 # Starts as root: sets up sshd, fixes volume ownership, merges baked-in config,
 # prepares the workspace, then drops to the unprivileged `claude` user to run
 # Claude Code inside a persistent tmux session.
 set -euo pipefail
+
+# Root resolves commands through system directories only, whatever the container's
+# environment says. The agent's PATH (CLAUDE_AGENT_PATH, the Dockerfile ENV) leads with
+# directories the agent can write, so it is handed only to processes that run as the agent
+# (asclaude below). Everything this file and entrypoint.d/ start inherits ROOT_PATH.
+ROOT_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH="$ROOT_PATH"
+export CLAUDE_AGENT_PATH="${CLAUDE_AGENT_PATH:-$ROOT_PATH}"
 
 CLAUDE_USER="${CLAUDE_USER:-claude}"
 CLAUDE_HOME="$(getent passwd "$CLAUDE_USER" | cut -d: -f6)"
@@ -23,7 +31,8 @@ WORKSPACE="/workspace"
 
 log()  { echo "[entrypoint] $*"; }
 die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
-asclaude() { gosu "$CLAUDE_USER" env CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" "$@"; }
+# Run as the agent, with the agent's PATH (root's own PATH stays ROOT_PATH).
+asclaude() { gosu "$CLAUDE_USER" env PATH="$CLAUDE_AGENT_PATH" CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" "$@"; }
 # Hand a tree to the agent user, touching only what is not already its own. `chown -R` writes
 # every inode (a chown with the same owner still updates ctime), so on maker's config volume
 # and ten-repo workspace on spinning disk it held every boot for minutes before any session

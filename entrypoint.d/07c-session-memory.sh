@@ -20,8 +20,10 @@ if [[ -e "$SESSION_MD" ]] && ! grep -qF -e "$FACTS_MARK" -e "$GPU_NOTE_MARK" "$S
     log "Session memory      : NOT written, $SESSION_MD is an operator's own file"
 else
     smd_tmp="$(mktemp)"
-    # Bounded: each probe has its own 5s limit, this caps the whole run.
-    if ! CLAUDE_FACTS_BROWSER_MCP="$BROWSER_MCP" CLAUDE_FACTS_GPU_STATE="$GPU_STATE_FILE" \
+    # Bounded: each probe has its own 5s limit, this caps the whole run. As the agent, with
+    # the agent's PATH: the toolchain versions it reports are the ones a session resolves,
+    # and root never runs a tool from a directory the agent can write.
+    if ! asclaude env CLAUDE_FACTS_BROWSER_MCP="$BROWSER_MCP" CLAUDE_FACTS_GPU_STATE="$GPU_STATE_FILE" \
             timeout 60 "$FACTS_CMD" > "$smd_tmp" 2>/dev/null; then
         printf '<!-- %s -->\n## This container\n\n- The probe (claude-container-facts) failed at this start: nothing is known about this container.\n' \
             "$FACTS_MARK" > "$smd_tmp"

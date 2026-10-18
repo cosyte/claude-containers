@@ -23,7 +23,7 @@ shutdown() {
     log "Shutting down"
     # Note every window's current conversation first, so the next boot resumes exactly it
     # (the supervisor only records every 15s). Bounded: a stop must never hang on this.
-    timeout 5 gosu "$CLAUDE_USER" env CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" \
+    timeout 5 gosu "$CLAUDE_USER" env PATH="$CLAUDE_AGENT_PATH" CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" \
         /usr/local/bin/claude-sessions record >/dev/null 2>&1 || true
     asclaude tmux kill-server >/dev/null 2>&1 || true
     pkill -x sshd >/dev/null 2>&1 || true

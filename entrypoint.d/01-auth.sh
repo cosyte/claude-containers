@@ -16,6 +16,6 @@ if [[ "${CLAUDE_LOGIN_MODE:-0}" == "1" ]]; then
     chown -R "$CLAUDE_UID:$CLAUDE_GID" "$AUTH_DIR"
     log "Starting OAuth login. Open the printed URL in a browser, then paste"
     log "the code back here. Credentials persist to the claude-auth volume."
-    exec gosu "$CLAUDE_USER" env CLAUDE_CONFIG_DIR="$AUTH_DIR" HOME="$CLAUDE_HOME" \
+    exec gosu "$CLAUDE_USER" env PATH="$CLAUDE_AGENT_PATH" CLAUDE_CONFIG_DIR="$AUTH_DIR" HOME="$CLAUDE_HOME" \
         claude auth login --claudeai
 fi
