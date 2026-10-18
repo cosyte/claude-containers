@@ -89,6 +89,7 @@ case "$cmd" in
         n=$(( $(cat "$T/next" 2>/dev/null || echo 10) + 1 )); echo "$n" > "$T/next"
         mkdir -p "$T/w/$name"
         echo "%$n" > "$T/w/$name/pane"; printf '%s' "$dir" > "$T/w/$name/dir"; printf '%s' "${args[0]}" > "$T/w/$name/cmd"
+        printf '%s' "$PATH" > "$T/w/$name/path"   # real tmux gives the window this client's PATH
         echo "$name" >> "$T/order" ;;
     kill-window)
         rm -rf "${T:?}/w/$win"; grep -vxF "$win" "$T/order" > "$T/order.t"; mv "$T/order.t" "$T/order" ;;
@@ -238,6 +239,14 @@ mkdir -p "$WS/later"
 "$CS" new later --dir later >/dev/null 2>&1
 check "a session added at runtime gets its directory trusted too" test "$(trust_of "$WS/later")" = true
 "$CS" rm later >/dev/null 2>&1
+# A host tool reaches claude-sessions through `docker exec -u claude`, on the system PATH, and
+# tmux starts a window with the PATH of the client that asked for it: the window must still get
+# the agent's PATH (CLAUDE_AGENT_PATH), the one every session gets from the entrypoint.
+AP="$FAKE/bin:$TMPD/agent-only:/usr/local/bin:/usr/bin:/bin"
+CLAUDE_AGENT_PATH="$AP" "$CS" new viapath --dir later --no-rc >/dev/null 2>&1
+check "a window claude-sessions opens runs with CLAUDE_AGENT_PATH, whatever PATH it was called with" \
+    test "$(cat "$FAKE/tm/w/viapath/path" 2>/dev/null)" = "$AP"
+"$CS" rm viapath >/dev/null 2>&1
 
 echo "== boot again: stopped stays stopped, dropped entries go, runtime sessions stay =="
 tm_reset; tm_main

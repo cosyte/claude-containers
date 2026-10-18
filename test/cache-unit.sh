@@ -64,9 +64,10 @@ done
 
 # the agent resolves cached tools through this container's view of the shared shims (under
 # /cache), not the shared dir itself (test/mise-unit.sh checks the order); PATH preserved.
-grep -Eq '^ +PATH=/state/mise-shims:.*:\$\{PATH\}' "$DOCKERFILE" \
-  && ok "this container's view of /cache/mise/shims leads PATH (agent resolves cached tools), PATH preserved" \
-  || bad "the per-container mise shims view does not lead PATH: the agent would not find cached tools"
+# That is the agent's PATH, CLAUDE_AGENT_PATH; root's PATH is checked by test/root-path-unit.sh.
+grep -Eq '^ +CLAUDE_AGENT_PATH=/state/mise-shims:.*:\$\{PATH\}' "$DOCKERFILE" \
+  && ok "this container's view of /cache/mise/shims leads the agent's PATH (agent resolves cached tools), PATH preserved" \
+  || bad "the per-container mise shims view does not lead CLAUDE_AGENT_PATH: the agent would not find cached tools"
 
 # interactive consistency: a fresh SSH shell that did NOT inherit the Dockerfile ENV must
 # still activate mise against the SHARED store (bashrc re-exports before `mise activate`).

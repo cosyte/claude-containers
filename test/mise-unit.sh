@@ -62,7 +62,8 @@ grep -Eq 'sha256sum -c' "$DOCKERFILE" \
 # for the AGENT depends entirely on PATH. The shared /cache/mise/shims holds a shim for every tool
 # any container installed, so PATH leads with the per-container view claude-mise-shims builds, then
 # the system dirs, and leaves the shared dir off: a tool with no version reads "command not found".
-ENV_PATH="$(grep -E '^ +PATH=' "$DOCKERFILE" | head -1 | sed -E 's/^ +PATH=//')"
+# The agent's PATH is CLAUDE_AGENT_PATH (root's own PATH is system dirs only: root-path-unit.sh).
+ENV_PATH="$(grep -E '^ +CLAUDE_AGENT_PATH=' "$DOCKERFILE" | head -1 | sed -E 's/^ +CLAUDE_AGENT_PATH=//; s/ *\\$//')"
 IFS=: read -ra PE <<<"$ENV_PATH"
 sys_i=-1
 for i in "${!PE[@]}"; do [[ "${PE[$i]}" == '${PATH}' ]] && sys_i=$i; done

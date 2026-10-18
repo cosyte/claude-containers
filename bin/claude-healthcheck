@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # claude-healthcheck: the container's Docker HEALTHCHECK probe.
 #
 # Reports the container UNHEALTHY when either:
@@ -26,19 +26,24 @@
 # recovery; this probe is the sensor: its result shows in `docker ps` and
 # `claude-list`. Output is one line; exit 0 = healthy, 1 = unhealthy.
 set -uo pipefail
+# As root, system directories only: never a command from a directory the agent can write.
+if (( EUID == 0 )); then export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; fi
 
 CLAUDE_USER="${CLAUDE_USER:-claude}"
 LOG="${CLAUDE_RC_DEBUG_LOG-/tmp/claude-rc-debug.log}"
 SESSION=claude
+# The liveness probe's process finder. Smoke sets it to a stub (it has no OAuth, so no
+# `claude` runs); only whoever runs the healthcheck can set it, never the agent.
+PGREP="${CLAUDE_HEALTHCHECK_PGREP:-pgrep}"
 
 fail() { echo "unhealthy: $*"; exit 1; }
 
 # --- liveness --------------------------------------------------------------
-pgrep -x sshd >/dev/null 2>&1 \
+"$PGREP" -x sshd >/dev/null 2>&1 \
     || fail "sshd is not running"
 gosu "$CLAUDE_USER" tmux has-session -t "$SESSION" >/dev/null 2>&1 \
     || fail "tmux session '$SESSION' is gone"
-pgrep -u "$CLAUDE_USER" -f 'remote-control' >/dev/null 2>&1 \
+"$PGREP" -u "$CLAUDE_USER" -f 'remote-control' >/dev/null 2>&1 \
     || fail "no 'claude --remote-control' process (Claude session exited)"
 
 # --- Remote Control link ---------------------------------------------------

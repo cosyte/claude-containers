@@ -100,13 +100,16 @@ grep -qE '^SESSION_MD=' <<<"$B7C" && grep -qE '^SESSION_MD_OWNER=' <<<"$B7C" && 
     && grep -qE '^GPU_NOTE_SRC=' <<<"$B7C" \
     && ok "§7c names its root-only paths on their own lines (so this sandbox redirect is real)" \
     || bad "§7c must assign SESSION_MD, SESSION_MD_OWNER, FACTS_CMD, GPU_NOTE_SRC on their own lines"
+grep -qE '^ *if ! asclaude env .*CLAUDE_FACTS_' <<<"$B7C" \
+    && ok "§7c runs the probe as the agent (asclaude), with the agent's PATH" \
+    || bad "§7c must run claude-container-facts through asclaude: as root it would resolve tools root must not run"
 SMD="$TMPD/etc/claude-code/CLAUDE.md"
 run_7c() {  # run_7c <CLAUDE_GPU> [PATH] (BROWSER_MCP from the caller, default off)
     local blk; blk="$(sed -e "s#^SESSION_MD=.*#SESSION_MD=\"$SMD\"#" \
         -e "s#^SESSION_MD_OWNER=.*#SESSION_MD_OWNER=\"$(id -u):$(id -g)\"#" \
         -e "s#^FACTS_CMD=.*#FACTS_CMD=\"$FACTS\"#" \
         -e "s#^GPU_NOTE_SRC=.*#GPU_NOTE_SRC=\"$REPO_ROOT/claude-config/CLAUDE.gpu.md\"#" <<<"$B7C")"
-    ( log() { echo "[entrypoint] $*"; }; set -euo pipefail; CLAUDE_GPU="$1"; BROWSER_MCP="${BROWSER_MCP:-off}"
+    ( log() { echo "[entrypoint] $*"; }; asclaude() { "$@"; }; set -euo pipefail; CLAUDE_GPU="$1"; BROWSER_MCP="${BROWSER_MCP:-off}"
       GPU_STATE_FILE="$TMPD/gpu-state"; PATH="${2:-$WITHOUT:$BASE}"; eval "$blk" )
 }
 out="$(run_7c 0)"; rc=$?

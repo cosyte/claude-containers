@@ -1,10 +1,14 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Claude Code container entrypoint.
 # Starts as root: sets up sshd, fixes volume ownership, merges baked-in config,
 # prepares the workspace, then drops to the unprivileged `claude` user to run
 # Claude Code inside a persistent tmux session.
 set -euo pipefail
 
+# Root resolves commands through system dirs only, whatever the environment says. The agent's
+# PATH (CLAUDE_AGENT_PATH) leads with dirs the agent can write: only asclaude hands it over.
+ROOT_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH="$ROOT_PATH" CLAUDE_AGENT_PATH="${CLAUDE_AGENT_PATH:-$ROOT_PATH}"
 CLAUDE_USER="${CLAUDE_USER:-claude}"
 CLAUDE_HOME="$(getent passwd "$CLAUDE_USER" | cut -d: -f6)"
 CLAUDE_UID="$(id -u "$CLAUDE_USER")"
@@ -23,7 +27,7 @@ WORKSPACE="/workspace"
 
 log()  { echo "[entrypoint] $*"; }
 die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
-asclaude() { gosu "$CLAUDE_USER" env CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" "$@"; }
+asclaude() { gosu "$CLAUDE_USER" env PATH="$CLAUDE_AGENT_PATH" CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" "$@"; }
 # Hand a tree to the agent user, touching only what is not already its own. `chown -R` writes
 # every inode (a chown with the same owner still updates ctime), so on maker's config volume
 # and ten-repo workspace on spinning disk it held every boot for minutes before any session

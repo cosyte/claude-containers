@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # claude-gpu: the NVIDIA GPU guard for a --gpu session. Runs inside the container.
 #
 #   claude-gpu status [--oneline]
@@ -38,6 +38,8 @@
 # NVIDIA only. Device-level numbers are global (every tenant's usage), which is exactly
 # what a polite guard needs; per-process attribution is only visible from the host.
 set -uo pipefail
+# As root, system directories only: never a command from a directory the agent can write.
+if (( EUID == 0 )); then export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; fi
 
 MIN_FREE="${CLAUDE_GPU_MIN_FREE_MIB:-2048}"
 WAIT="${CLAUDE_GPU_WAIT:-120}"

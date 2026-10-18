@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # claude-container-facts: print the "This container" section a session reads at start.
 #
 #   claude-container-facts
@@ -16,6 +16,8 @@
 #   - how to install more
 # Each probe is bounded (CLAUDE_FACTS_PROBE_TIMEOUT, 5s), so a wedged tool never hangs boot.
 set -uo pipefail
+# As root, system directories only: never a command from a directory the agent can write.
+if (( EUID == 0 )); then export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; fi
 
 PROBE_TIMEOUT="${CLAUDE_FACTS_PROBE_TIMEOUT:-5}"
 GPU_STATE="${CLAUDE_FACTS_GPU_STATE:-/run/claude-gpu/state}"

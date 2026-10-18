@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Default-deny egress firewall for the container's network namespace.
 #
 # Run by the entrypoint AS ROOT (before it drops to the non-root claude user)
@@ -61,6 +61,8 @@
 # a host that came back empty abandons that family's cycle, a restore that will
 # not commit leaves the table alone, and neither ever calls fail_open().
 set -uo pipefail
+# As root, system directories only: never a command from a directory the agent can write.
+if (( EUID == 0 )); then export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; fi
 [[ "${CLAUDE_EGRESS_DEBUG:-0}" == 1 ]] && set -x
 
 log() { echo "[egress] $*" >&2; }   # diagnostics on stderr (like fail_open): keeps stdout a clean data channel (e.g. the CLAUDE_EGRESS_PRINT_HOSTS host list)
