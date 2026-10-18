@@ -29,8 +29,10 @@
 - **`--containers` widens one session's kernel surface, by choice.** It keeps cap-drop ALL,
   production's cap set and `no-new-privileges`, and is never privileged, never `CAP_SYS_ADMIN`
   and never a host Docker socket. It does give that session podman's seccomp profile (namespace
-  and mount syscalls reach the host kernel, which checks caps per user namespace),
-  `apparmor=unconfined`, `systempaths=unconfined` and a root uid-map helper on a socket. The
+  and mount syscalls reach the host kernel, which checks caps per user namespace for those; the
+  profile keeps `keyctl` and `syslog` dropped, since kernel keyrings are not namespaced and
+  `syslog` reads the host kernel log), `apparmor=unconfined`, `systempaths=unconfined` and a
+  root uid-map helper on a socket. The
   agent (uid 1000, `CapEff` 0, `no-new-privileges`) still cannot write `/proc/sys`. But the
   session has no user-namespace remap, so its root is host root, and with the `/proc` masks and
   AppArmor gone that root can write host-wide sysctls: `kernel.core_pattern` needs no

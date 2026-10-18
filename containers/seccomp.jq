@@ -11,3 +11,15 @@
 (.syscalls[] | select(.includes.caps == ["CAP_SYS_ADMIN"] or .excludes.caps == ["CAP_SYS_ADMIN"])
     | .names) -= ["sethostname", "setdomainname", "setns"]
 | .syscalls += [{"names": ["sethostname", "setdomainname", "setns"], "action": "SCMP_ACT_ALLOW"}]
+
+# Drop keyctl and syslog from the unconditional allow list. containers/common allows both
+# outright, where moby's default profile gates them behind CAP_SYS_ADMIN (and CAP_SYSLOG for
+# syslog). A session holds no capability, so moby would already refuse them; removing them here
+# matches that. Kernel keyrings are not namespaced, so a session that can call keyctl reaches the
+# keyring of its own host uid, shared with the host user and every other session; syslog reads
+# the host kernel ring buffer when dmesg_restrict is 0. Rootless podman builds and composes do
+# not need either: keyring = false in containers/containers.conf keeps crun from asking for a
+# session keyring, and nothing in a build reads the kernel log. add_key and request_key are not
+# in this profile at all, so they stay blocked.
+| (.syscalls[] | select((.names // []) | index("keyctl") or index("syslog")) | .names)
+    -= ["keyctl", "syslog"]

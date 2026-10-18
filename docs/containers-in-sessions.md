@@ -39,7 +39,7 @@ the exact list for both):
 
 | Added | Why |
 |---|---|
-| `--security-opt seccomp=containers/seccomp.json` | podman's profile with three syscalls made unconditional; see the options table below |
+| `--security-opt seccomp=containers/seccomp.json` | podman's profile with three namespace syscalls made unconditional and `keyctl`/`syslog` dropped; see the options table below |
 | `--security-opt apparmor=unconfined` | `docker-default` denies `mount` |
 | `--security-opt systempaths=unconfined` | a nested container mounts a fresh `/proc` |
 | `--device /dev/net/tun` | pasta, podman's rootless network |
@@ -134,7 +134,7 @@ on commit `dc3e419`, kernel 6.17 (Azure), 2026-10-16. The run's logs (one per st
 
 | Option | Why | What it gives up |
 |---|---|---|
-| `--security-opt seccomp=<podman's profile>` | Docker's profile refuses `unshare`, `mount`, `clone` with namespace flags, `setns` and more without `CAP_SYS_ADMIN`; podman's allows them, the kernel then checks caps per namespace. | A wider syscall surface reachable from the session (namespace and mount code in the host kernel). |
+| `--security-opt seccomp=<podman's profile>` | Docker's profile refuses `unshare`, `mount`, `clone` with namespace flags, `setns` and more without `CAP_SYS_ADMIN`; podman's allows them, the kernel then checks caps per namespace for the namespace and mount syscalls. | A wider syscall surface reachable from the session (namespace and mount code in the host kernel). `keyctl` and `syslog`, which podman's profile also allows but needs for neither builds nor composes, are dropped back out (see below): kernel keyrings are not namespaced, and `syslog` reads the host kernel log. |
 | ...with `sethostname`, `setdomainname`, `setns` allowed unconditionally | Docker resolves a profile's `includes.caps` once, against the container's caps; with no `CAP_SYS_ADMIN` these stay refused even inside podman's own namespaces (`crun: sethostname: Operation not permitted`). moby's default already allows the first two. The kernel still needs `CAP_SYS_ADMIN` over the target namespace. | Nothing beyond the row above. `run.sh` derives this from the vendored file with one `jq` filter. |
 | `--security-opt apparmor=unconfined` | `docker-default` denies `mount`. | The AppArmor layer for the whole session. |
 | `--security-opt systempaths=unconfined` | Masked and read-only `/proc` paths stop a nested container from mounting a fresh `/proc`. | Docker's masks and read-only `/proc` paths (`/proc/sys`, `/proc/sysrq-trigger`, `/proc/kcore`, ...). The agent (`claude`, `CapEff` 0) still cannot write them, but the container's root (the entrypoint, the helper daemon) is host root to them: host-wide sysctls and sysrq become one root-side bug away. The weightiest row. |
@@ -147,7 +147,13 @@ on commit `dc3e419`, kernel 6.17 (Azure), 2026-10-16. The run's logs (one per st
 The vendored profile is [`containers/seccomp-upstream.json`](../containers/seccomp-upstream.json),
 containers/common `pkg/seccomp/seccomp.json` at commit `82146f3` (tag v0.64.2), unmodified. The
 profile sessions get, [`containers/seccomp.json`](../containers/seccomp.json), is that file through
-the one filter in [`containers/seccomp.jq`](../containers/seccomp.jq) (the second row above);
+the one filter in [`containers/seccomp.jq`](../containers/seccomp.jq) (the second row above):
+three namespace syscalls moved to the unconditional allow list (a session has no
+`CAP_SYS_ADMIN`, so the kernel still refuses them inside its own namespaces), and `keyctl` and
+`syslog` removed from it, because the kernel keyring is not namespaced and `syslog` reads the
+host kernel log, and a build needs neither (`keyring = false` in
+[`containers/containers.conf`](../containers/containers.conf) keeps crun from asking for a
+session keyring). `add_key` and `request_key` are not in the profile, so they stay refused.
 `test/launch-unit.sh` rebuilds it and fails on any difference.
 
 ## Results
