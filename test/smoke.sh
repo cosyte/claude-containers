@@ -1183,6 +1183,10 @@ docker volume create "$STVOL" >/dev/null 2>&1 || true
 docker volume create "$STCACHE" >/dev/null 2>&1 || true
 docker run --rm --user 0 --entrypoint sh -v "$STCACHE:/cache" "$IMAGE" \
     -c 'mkdir -p /cache/app/statesmoke && : > /cache/app/statesmoke/app.db' >/dev/null 2>&1 || true
+# A deep tree in /state with a foreign owner (a restored backup, a worktree another uid wrote):
+# the boot owns only the top level, and the background pass reaches the rest.
+docker run --rm --user 0 --entrypoint sh -v "$STVOL:/state" "$IMAGE" \
+    -c 'mkdir -p /state/wt/r/sub && : > /state/wt/r/sub/f && chown -R 4242:4242 /state/wt' >/dev/null 2>&1 || true
 # Another container's pytest shim in the shared cache (mise makes each one a link to itself).
 docker run --rm --user 1000 --entrypoint sh -v "$STCACHE:/cache" "$IMAGE" \
     -c 'mkdir -p /cache/mise/shims && ln -sf /usr/local/bin/mise /cache/mise/shims/pytest' >/dev/null 2>&1 || true
@@ -1198,6 +1202,9 @@ check "the entrypoint reports /state as this container's own volume" \
     'docker logs "$STCN" 2>&1 | grep -q "Private state       : /state"'
 check "/state is owned by the agent user, mode 700" \
     '[ "$(docker exec "$STCN" stat -c "%U %a" /state)" = "claude 700" ]'
+check "the full /state ownership pass ran in the background and reached a deep foreign file" \
+    '( for _ in $(seq 1 30); do grep -q "State ownership     : checked in .*(background)" <<<"$(docker logs "$STCN" 2>&1)" \
+        && [ "$(docker exec "$STCN" stat -c %u:%g /state/wt/r/sub/f)" = 1000:1000 ] && exit 0; sleep 1; done; exit 1 )'
 check "the agent's CLAUDE_STATE_DIR is /state" \
     '[ "$(docker exec "$STCN" gosu claude sh -c "echo \$CLAUDE_STATE_DIR")" = "/state" ]'
 check "an SSH-style login shell (cleared env) also gets CLAUDE_STATE_DIR" \

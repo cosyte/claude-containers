@@ -55,8 +55,9 @@ attack surface in a `--containers` session. That is the "weightiest row" below, 
 
 Every `--containers` session uses the same subordinate range (`100000:65536`), so nested
 processes in two sessions run as the same host uids; namespaces and separate store volumes keep
-them apart. Files a nested container writes into the workspace (a bind-mounted data directory)
-keep those ids: the boot-time ownership pass leaves that range alone.
+them apart. Files a nested container writes into the workspace or `/state` (a bind-mounted data
+directory) keep those ids, owner and group: every boot-time ownership pass leaves that range
+alone, the config volume's and `/state`'s included, which run before §2d.
 
 Kept as in every session: `--cap-drop ALL` with production's minimal cap set, `no-new-privileges`,
 no `--privileged`, no `CAP_SYS_ADMIN`, no host Docker socket. A session without `--containers`

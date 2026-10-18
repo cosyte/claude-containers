@@ -306,20 +306,31 @@ cgen --out "$TMPD/cdc-bad.yml" --containers nosuch acme/api; rc=$?
     && ok "compose: --containers naming no repo of the stack refuses" \
     || bad "compose: --containers nosuch must refuse (rc=$rc)"
 
-# The ownership passes leave a nested container's ids alone (postgres's 999 is 100998 here): a
-# real find over a tree holding the agent's file and a "nested" one, with chown recorded.
+# The ownership passes leave a nested container's ids alone (postgres's 999 is 100998 here),
+# owner and group: the loader's own block (the subordinate range, the keep range from it, and
+# own_tree), run once without and once with CLAUDE_CONTAINERS, with find's argv recorded.
 # shellcheck disable=SC2034  # read by the extracted own_tree
 own_out="$(
     CLAUDE_UID=1000 CLAUDE_GID=1000
-    eval "$(sed -n '/^OWN_TREE_KEEP_IDS=/,/^}/p' "$REPO_ROOT/entrypoint.sh")"
     find() { printf '%s\n' "$*"; }
-    own_tree /ws; OWN_TREE_KEEP_IDS="100000 165535"; own_tree /ws
+    unset CLAUDE_CONTAINERS
+    eval "$(sed -n '/^CONTAINERS_SUBID_START=/,/^}/p' "$REPO_ROOT/entrypoint.sh")"; own_tree /ws
+    CLAUDE_CONTAINERS=1
+    eval "$(sed -n '/^CONTAINERS_SUBID_START=/,/^}/p' "$REPO_ROOT/entrypoint.sh")"; own_tree /ws
 )"
 [[ "$(sed -n 1p <<<"$own_out")" == '/ws ( ! -uid 1000 -o ! -gid 1000 ) -execdir chown -h 1000:1000 {} +' \
-   && "$(sed -n 2p <<<"$own_out")" == '/ws ( ! -uid 1000 -o ! -gid 1000 ) ! ( -uid +99999 -uid -165536 ) -execdir chown -h 1000:1000 {} +' ]] \
-    && grep -q 'OWN_TREE_KEEP_IDS="$CONTAINERS_SUBID_START' "$(ep_section 2d)" \
-    && ok "own_tree is unchanged by default and skips the subordinate range on a --containers session" \
-    || bad "own_tree must skip uids 100000..165535 only when §2d sets OWN_TREE_KEEP_IDS: $own_out"
+   && "$(sed -n 2p <<<"$own_out")" == '/ws ( ! -uid 1000 -o ! -gid 1000 ) ! ( -uid +99999 -uid -165536 ) ! ( -gid +99999 -gid -165536 ) -execdir chown -h 1000:1000 {} +' ]] \
+    && ok "own_tree is unchanged by default and skips the subordinate range, uid and gid, on a --containers session" \
+    || bad "own_tree must skip uids and gids 100000..165535 only when CLAUDE_CONTAINERS is on: $own_out"
+# Known before the first pass: §2 (the config volume) and §2c (/state) run before §2d, so a
+# range set there would come too late for both.
+ep_boot > "$TMPD/boot.sh"
+keep_line="$(grep -n '^    OWN_TREE_KEEP_IDS="\$CONTAINERS_SUBID_START' "$TMPD/boot.sh" | head -1 | cut -d: -f1)"
+first_pass="$(grep -nE '^[^#]*own_tree "' "$TMPD/boot.sh" | head -1 | cut -d: -f1)"
+[[ -n "$keep_line" && -n "$first_pass" ]] && (( keep_line < first_pass )) \
+    && ! grep -q 'OWN_TREE_KEEP_IDS=' "$(ep_section 2d)" \
+    && ok "the keep range is set before the first ownership pass (line $keep_line < $first_pass), and only there" \
+    || bad "the keep range must be set before the first own_tree call (keep at ${keep_line:-none}, first pass at ${first_pass:-none})"
 
 # The profile is the vendored upstream through containers/seccomp.jq, nothing else.
 if command -v jq >/dev/null 2>&1; then
