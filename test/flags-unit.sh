@@ -79,7 +79,25 @@ same() {
 KIT='kit=https://git.example.com/org/kit.git#v1.2.0'
 echo "== each shared flag: the same accept or refuse, and the same message =="
 same accepted "--model sonnet"             --model sonnet -- --model site=sonnet
-same refused  "--model with no model"      --model '' -- --model site=
+same accepted "--model with no model (the container default)" --model '' -- --model site=
+# What the empty model does: the container gets an empty CLAUDE_MODEL (the entrypoint makes it
+# opus), over a CLAUDE_MODEL from the environment or .env, in both tools.
+CLAUDE_MODEL=sonnet run_launch --model '' >/dev/null
+grep -qx 'CLAUDE_MODEL=' "$TMPD/run-args" \
+    && ok "claude-launch --model '': CLAUDE_MODEL is passed empty, over CLAUDE_MODEL=sonnet" \
+    || bad "claude-launch --model '': $(grep CLAUDE_MODEL "$TMPD/run-args" 2>/dev/null)"
+CLAUDE_MODEL=sonnet run_launch >/dev/null
+grep -qx 'CLAUDE_MODEL=sonnet' "$TMPD/run-args" \
+    && ok "claude-launch without --model keeps CLAUDE_MODEL from the environment" \
+    || bad "claude-launch, no --model: $(grep CLAUDE_MODEL "$TMPD/run-args" 2>/dev/null)"
+run_gen --model site=sonnet --model site= >/dev/null
+grep -qxF '      CLAUDE_MODEL: ""' "$TMPD/dc.yml" && grep -qF '+model(container default)' "$TMPD/gen.log" \
+    && ok "claude-compose-gen --model site=: the service's CLAUDE_MODEL is empty (the last value wins), and the summary says so" \
+    || bad "claude-compose-gen --model site=: $(grep CLAUDE_MODEL "$TMPD/dc.yml" 2>/dev/null)"
+run_gen >/dev/null
+grep -qxF '      CLAUDE_MODEL: "${CLAUDE_MODEL:-opus}"' "$TMPD/dc.yml" \
+    && ok "claude-compose-gen without --model still follows CLAUDE_MODEL, else opus" \
+    || bad "claude-compose-gen, no --model: $(grep CLAUDE_MODEL "$TMPD/dc.yml" 2>/dev/null)"
 same accepted "--expose 4321:4321"         --expose 4321:4321 -- --expose site:4321:4321
 same refused  "--expose with one port"     --expose 4321 -- --expose site:4321
 same refused  "--expose with a name"       --expose web:4321 -- --expose site:web:4321
