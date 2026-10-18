@@ -2082,6 +2082,57 @@ OT_DEEP_TAIL="$([[ -n "$OT_DEEP_LINE" ]] && sed -n "$OT_DEEP_LINE,$(( OT_DEEP_LI
     && ok  "the full workspace pass runs after the sessions boot, in the background" \
     || bad "the full workspace pass is missing, runs before the sessions, or blocks the boot (deep at line ${OT_DEEP_LINE:-none}, sessions at line ${OT_SESSIONS_LINE:-none})"
 
+echo "== §6a: the account-switch listener outlives a failed step =="
+# It runs in the background under the boot's `set -euo pipefail`. A write that failed (a full
+# config volume) used to end it with no word in the log, and every later usage-limit rotation
+# then timed out until a restart. The real section, sourced as the loader does, with the §6
+# helpers stubbed and its poll shortened; a directory where the answer's temp file goes makes
+# that write fail.
+AS_DIR="$(mktemp -d)"; AS_CFG="$AS_DIR/config"; mkdir -p "$AS_CFG"
+(
+    set -euo pipefail
+    log() { echo "[entrypoint] $*" >> "$AS_DIR/log"; }
+    sleep() { command sleep 0.1; }
+    creds_have_token() { [[ -e "$AS_DIR/has-token" ]]; }
+    publish_creds() { [[ -e "$AS_DIR/publish-ok" ]]; }
+    set_local_account() { :; }
+    account_of() { :; }
+    CLAUDE_CONFIG_DIR="$AS_CFG" CLAUDE_ACCOUNTS="work,home"
+    # shellcheck source=/dev/null
+    source "$(ep_section 6a)"
+    echo "$ACCT_SWITCH_PID" > "$AS_DIR/pid"
+) >/dev/null 2>&1
+as_pid="$(cat "$AS_DIR/pid" 2>/dev/null)"
+as_ask() {  # as_ask <name>: send a request as the watchdog does, print the answer (none after 3 s)
+    rm -f "$AS_CFG/.account-switch-done"; echo "$1" > "$AS_CFG/.account-switch-request"
+    local i
+    for ((i = 0; i < 30; i++)); do
+        [[ -s "$AS_CFG/.account-switch-done" ]] && { cat "$AS_CFG/.account-switch-done"; return 0; }
+        sleep 0.1
+    done
+}
+as_alive() { [[ -n "$as_pid" ]] && kill -0 "$as_pid" 2>/dev/null; }
+mkdir "$AS_CFG/.account-switch-done.tmp"
+as_ask nosuch >/dev/null
+as_alive && grep -q "WARNING: account switch: could not write the answer 'ERROR:unknown-account:nosuch'" "$AS_DIR/log" 2>/dev/null \
+    && ok  "an answer that cannot be written is logged, and the listener keeps running" \
+    || bad "a failed answer write ended the listener or went unlogged (pid ${as_pid:-none}): $(cat "$AS_DIR/log" 2>/dev/null)"
+rmdir "$AS_CFG/.account-switch-done.tmp"
+[[ "$(as_ask nosuch)" == "ERROR:unknown-account:nosuch" ]] \
+    && ok  "once the write works again, the next request is answered" \
+    || bad "the listener did not answer after a failed write"
+touch "$AS_DIR/has-token"
+[[ "$(as_ask work)" == "ERROR:publish-failed:work" ]] && as_alive \
+    && grep -q "WARNING: account switch to 'work': could not publish its credentials" "$AS_DIR/log" \
+    && ok  "credentials that cannot be published are an error answer and a warning, not a dead listener" \
+    || bad "a failed publish ended the listener or was not answered as an error: $(cat "$AS_DIR/log" 2>/dev/null)"
+touch "$AS_DIR/publish-ok"
+[[ "$(as_ask work)" == "work" && "$(cat "$AS_CFG/.active-account" 2>/dev/null)" == "work" ]] \
+    && ok  "a switch that works is answered with the account and recorded as active" \
+    || bad "a working switch was not answered or not recorded"
+as_alive && kill "$as_pid" 2>/dev/null
+rm -rf "$AS_DIR"
+
 echo
 echo "== $PASS passed, $FAIL failed =="
 exit $(( FAIL > 0 ? 1 : 0 ))

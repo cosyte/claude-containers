@@ -8,10 +8,22 @@
 # Request/done files live inside $CLAUDE_CONFIG_DIR: root can read/write there
 # regardless of its claude:700 ownership, so no separate shared directory or
 # group permissions are needed.
+# It must outlive any one failed step. It runs in the background under the boot's
+# `set -e`, so a failed write (a full config volume) used to end it with no word in
+# the log, and every later rotation then timed out until the container restarted.
+# So errexit is off in here (`local -` keeps that to this function), and each step
+# that can fail is checked, logged, and answered with an error where it can be.
 account_switch_listener() {
+    local -
+    set +e
     local req_file="$CLAUDE_CONFIG_DIR/.account-switch-request"
     local done_file="$CLAUDE_CONFIG_DIR/.account-switch-done"
-    _switch_answer() { echo "$1" > "$done_file.tmp" && mv -f "$done_file.tmp" "$done_file"; }
+    _switch_answer() {
+        { echo "$1" > "$done_file.tmp" && mv -f "$done_file.tmp" "$done_file"; } 2>/dev/null && return 0
+        rm -f "$done_file.tmp" 2>/dev/null
+        log "WARNING: account switch: could not write the answer '$1' to $done_file (is the config volume full?): the watchdog's request will time out"
+        return 0
+    }
     while sleep 2; do
         [[ -s "$req_file" ]] || continue
         local req; req="$(cat "$req_file" 2>/dev/null)"; rm -f "$req_file"
@@ -24,11 +36,15 @@ account_switch_listener() {
         esac
         local src="/auth-accounts/$req/.credentials.json"
         if creds_have_token "$src"; then
-            publish_creds "$src" "$CLAUDE_CONFIG_DIR/.credentials.json"
+            if ! publish_creds "$src" "$CLAUDE_CONFIG_DIR/.credentials.json"; then
+                log "WARNING: account switch to '$req': could not publish its credentials (is the config volume full?)"
+                _switch_answer "ERROR:publish-failed:$req"; continue
+            fi
             # The watchdog respawns what it rotates; this is not an operator's account change.
             set_local_account "$(account_of "/auth-accounts/$req")"
-            echo "$req" > "$CLAUDE_CONFIG_DIR/.active-account.tmp" \
-                && mv -f "$CLAUDE_CONFIG_DIR/.active-account.tmp" "$CLAUDE_CONFIG_DIR/.active-account"
+            { echo "$req" > "$CLAUDE_CONFIG_DIR/.active-account.tmp" \
+                && mv -f "$CLAUDE_CONFIG_DIR/.active-account.tmp" "$CLAUDE_CONFIG_DIR/.active-account"; } 2>/dev/null \
+                || log "WARNING: account switch to '$req': could not record it in .active-account"
             _switch_answer "$req"
         else
             _switch_answer "ERROR:no-token:$req"
