@@ -2065,6 +2065,11 @@ ot_top="$(printf '%s\n' "$OT_DIR/tree" "$OT_DIR/tree/a" "$OT_DIR/tree/link" "$OT
 [[ "$(ot_run 4242 "$(id -g)" -maxdepth 1)" == "$ot_top" ]] \
     && ok  "the boot pass (-maxdepth 1) owns the root and its top level, nothing deeper" \
     || bad "own_tree -maxdepth 1 did not stop at the top level (got: $(ot_run 4242 "$(id -g)" -maxdepth 1 | tr '\n' ' '))"
+# A --containers session's keep range (uid and gid tests) through the real find: it parses, and
+# entries outside the range are still fixed.
+[[ "$(OWN_TREE_KEEP_IDS="100000 165535" ot_run 4242 "$(id -g)")" == "$ot_all" ]] \
+    && ok  "with a keep range set, the real find accepts it and still fixes every entry outside it" \
+    || bad "own_tree with OWN_TREE_KEEP_IDS broke the find or skipped entries outside the range (got: $(OWN_TREE_KEEP_IDS="100000 165535" ot_run 4242 "$(id -g)" | tr '\n' ' '))"
 rm -rf "$OT_DIR"
 # Even a pass that changes nothing reads every inode: over 25 minutes on one spinning disk
 # with no sshd and no session (a real host, 2026-10-07). So the boot only owns the
@@ -2076,11 +2081,26 @@ OT_SSHD_LINE="$(grep -n '^/usr/sbin/sshd' "$ENTRYPOINT" | head -1 | cut -d: -f1)
 [[ -n "$OT_SHALLOW_LINE" && -n "$OT_SSHD_LINE" && "$OT_SHALLOW_LINE" -lt "$OT_SSHD_LINE" ]] \
     && ok  "the workspace's top level is owned before sshd and the sessions start" \
     || bad "no shallow workspace pass before sshd (shallow at line ${OT_SHALLOW_LINE:-none}, sshd at line ${OT_SSHD_LINE:-none})"
-OT_DEEP_TAIL="$([[ -n "$OT_DEEP_LINE" ]] && sed -n "$OT_DEEP_LINE,$(( OT_DEEP_LINE + 2 ))p" "$ENTRYPOINT")"
+# The background subshell that holds the deep pass: from its line to the first `) &` after it.
+ot_in_bg() {  # ot_in_bg <line>: the line is inside a `( ... ) &` that closes within 8 lines
+    [[ -n "$1" ]] && sed -n "$1,$(( $1 + 8 ))p" "$ENTRYPOINT" | grep -qE '^\) &$'
+}
 [[ -n "$OT_DEEP_LINE" && -n "$OT_SESSIONS_LINE" && "$OT_DEEP_LINE" -gt "$OT_SESSIONS_LINE" ]] \
-    && grep -qE '^\) &$' <<<"$OT_DEEP_TAIL" \
+    && ot_in_bg "$OT_DEEP_LINE" \
     && ok  "the full workspace pass runs after the sessions boot, in the background" \
     || bad "the full workspace pass is missing, runs before the sessions, or blocks the boot (deep at line ${OT_DEEP_LINE:-none}, sessions at line ${OT_SESSIONS_LINE:-none})"
+# /state the same way: worktrees and working folders live there (/state/wt, /state/tmp), so its
+# deep pass can hold a boot as long as the workspace's did.
+OT_STATE_SHALLOW="$(grep -n 'own_tree "\$STATE_DIR" -maxdepth 1 &&' "$ENTRYPOINT" | head -1 | cut -d: -f1)"
+OT_STATE_DEEP="$(grep -n '^ *own_tree "\$STATE_DIR" 2>' "$ENTRYPOINT" | head -1 | cut -d: -f1)"
+[[ -n "$OT_STATE_SHALLOW" && -n "$OT_SSHD_LINE" && "$OT_STATE_SHALLOW" -lt "$OT_SSHD_LINE" ]] \
+    && ! grep -qE '^[^#]*own_tree "\$STATE_DIR" &&' "$ENTRYPOINT" \
+    && ok  "/state's root and top level are owned before sshd, and no full pass blocks the boot" \
+    || bad "§2c must own /state with -maxdepth 1 only (shallow at line ${OT_STATE_SHALLOW:-none}, sshd at line ${OT_SSHD_LINE:-none})"
+[[ -n "$OT_STATE_DEEP" && -n "$OT_SESSIONS_LINE" && "$OT_STATE_DEEP" -gt "$OT_SESSIONS_LINE" ]] \
+    && ot_in_bg "$OT_STATE_DEEP" \
+    && ok  "the full /state pass runs after the sessions boot, in the background" \
+    || bad "the full /state pass is missing, runs before the sessions, or blocks the boot (deep at line ${OT_STATE_DEEP:-none}, sessions at line ${OT_SESSIONS_LINE:-none})"
 
 echo "== §6a: the account-switch listener outlives a failed step =="
 # It runs in the background under the boot's `set -euo pipefail`. A write that failed (a full

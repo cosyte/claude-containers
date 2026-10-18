@@ -255,6 +255,27 @@ else
     (( rc == 0 )) && ! grep -q 'PRIVATE STATE' <<<"$out" \
         && ok "a name of '..' never widens the scan to the whole cache" \
         || bad "2c must refuse '.' and '..' as a container name (rc=$rc): $out"
+    # The boot pass owns /state's root and top level only: a tree of worktrees under /state/wt
+    # is checked in the background after the sessions start (§12g), never before sshd. The real
+    # block, with every entry "foreign" (CLAUDE_UID 4242) and a chown that only logs.
+    mkdir -p "$TMPD/chownbin" "$SB/deep/wt/repo/sub"
+    : > "$SB/deep/top.db"; : > "$SB/deep/wt/repo/sub/f"
+    cat > "$TMPD/chownbin/chown" <<'EOF'
+#!/bin/sh
+for a; do case "$a" in ./*) a="$PWD/${a#./}" ;; esac; printf '%s\n' "$a"; done >> "$CHOWN_CALLS"
+EOF
+    chmod +x "$TMPD/chownbin/chown"; : > "$TMPD/chown.calls"
+    blk="$(sed -e "s#^STATE_DIR=.*#STATE_DIR=\"$SB/deep\"#" \
+               -e "s#^STATE_MOUNTINFO=.*#STATE_MOUNTINFO=\"$TMPD/mi-none\"#" \
+               -e "s#^STATE_SHARED_CACHE=.*#STATE_SHARED_CACHE=\"$SB/no-cache\"#" <<<"$BLOCK")"
+    ( log() { :; }; CLAUDE_USER="$(id -un)"; CLAUDE_UID=4242; CLAUDE_GID="$(id -g)"; eval "$OWN_TREE"
+      export CHOWN_CALLS="$TMPD/chown.calls"; PATH="$TMPD/chownbin:$PATH"
+      set -euo pipefail; CLAUDE_PROJECT_NAME=box; eval "$blk" ) >/dev/null 2>&1; rc=$?
+    got="$(grep "^$SB/deep" "$TMPD/chown.calls" | sort | tr '\n' ' ')"
+    want="$(printf '%s\n' "$SB/deep" "$SB/deep/top.db" "$SB/deep/wt" | sort | tr '\n' ' ')"
+    (( rc == 0 )) && [[ "$got" == "$want" ]] \
+        && ok "2c owns /state's root and top level at boot, and leaves the deep tree to the background pass" \
+        || bad "2c must own only /state's top level at boot (rc=$rc): got [$got], want [$want]"
 fi
 
 # ======================================================================================

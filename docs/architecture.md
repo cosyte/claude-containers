@@ -74,7 +74,7 @@ rationale: the sections below.
   | `02-volumes.sh` | §2: ownership of the mounted volumes |
   | `02a-scratch.sh` | §2a: disk-backed scratch (`TMPDIR`) |
   | `02b-gpu.sh` | §2b: the GPU probe |
-  | `02c-state.sh` | §2c: private state (`/state`) |
+  | `02c-state.sh` | §2c: private state (`/state`); owns its top level, the rest in §12g |
   | `02d-containers.sh` | §2d: a `--containers` session's subordinate ids, uid-map helper and podman API |
   | `03-host-keys.sh` | §3: persistent SSH host keys |
   | `04-key-inputs.sh` | §4: the root-only key directory; the git key refused for SSH |
@@ -102,7 +102,7 @@ rationale: the sections below.
   | `12d-usage-watchdog.sh` | §12d: the usage-limit watchdog |
   | `12e-named-sessions.sh` | §12e: named sessions and their supervisor |
   | `12f-gh-check.sh` | §12f: the `GH_TOKEN` permission check |
-  | `12g-workspace-owner.sh` | §12g: workspace ownership, the deep pass |
+  | `12g-workspace-owner.sh` | §12g: workspace and `/state` ownership, the deep passes |
   | `12h-orphan-reaper.sh` | §12h: the orphan reaper (agent processes left to PID 1, `CLAUDE_ORPHAN_MAX_AGE`) |
   | `13-stay-alive.sh` | §13: the boot summary, the liveness loop, shutdown |
 - **claude-session**: the tmux pane command: `cd /workspace`, exec
