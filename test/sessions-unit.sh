@@ -720,6 +720,34 @@ jq --arg ps "$(sed -E 's/^[0-9]+ \(.*\) //' "/proc/$pid/stat" | awk '{print $20}
 "$CS" record
 check "the same file with the right procStart is used" grep -qx 'sid=s-home' "$REG/home.state"
 
+echo "== the scratch reaper runs off the supervisor loop =="
+# A reaper that takes 5s: before, the loop waited it out; now it is in the background, so the
+# supervisor still sees tmux go within a tick or two.
+cat > "$FAKE/bin/slow-reap" <<'EOF'
+#!/usr/bin/env bash
+echo start >> "$FAKE/reap.calls"; sleep 5; echo end >> "$FAKE/reap.calls"
+EOF
+chmod +x "$FAKE/bin/slow-reap"
+sup_until_tmux_goes() {  # run the full supervise loop; tmux "goes" 1.5s in. Prints seconds taken.
+    local t0; t0="$(date +%s)"; touch "$FAKE/tm/alive"
+    ( sleep 1.5; rm -f "$FAKE/tm/alive" ) &
+    CLAUDE_SCRATCH_REAP_BIN="$FAKE/bin/slow-reap" CLAUDE_SESSIONS_TICK=1 CLAUDE_RC_WATCHDOG=0 \
+        "$CS" supervise > "$TMPD/sup.out" 2>&1
+    wait "$!" 2>/dev/null
+    echo $(( $(date +%s) - t0 ))
+}
+rm -f "$FAKE/reap.calls"
+took="$(sup_until_tmux_goes)"
+check "a slow reaper does not hold the loop (the supervisor saw tmux go after ${took}s)" test "$took" -lt 4
+for _ in $(seq 40); do grep -qx end "$FAKE/reap.calls" 2>/dev/null && break; sleep 0.2; done
+check "the reaper ran to its end, in the background" bash -c "grep -qx start '$FAKE/reap.calls' && grep -qx end '$FAKE/reap.calls'"
+rm -f "$FAKE/reap.calls"; mkdir -p "$TMPD/run"
+flock "$TMPD/run/scratch-reap.lock" sleep 4 & KILL+=($!)
+sleep 0.3
+sup_until_tmux_goes >/dev/null; sleep 0.5
+check "a pass still running (its lock held) is not started twice" bash -c "! test -e '$FAKE/reap.calls'"
+touch "$FAKE/tm/alive"
+
 echo "== the entrypoint caps library thread pools =="
 TB="$(awk '/^# Library thread pools/{f=1} f{print} f&&/^unset _tpp$/{exit}' "$(ep_section 12)")"
 tp() {  # tp <env...>: run the extracted block, print the resulting values and the profile file

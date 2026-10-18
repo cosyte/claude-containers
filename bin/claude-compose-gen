@@ -67,6 +67,9 @@
 #                       back to the CLAUDE_MODEL env var, else opus (best
 #                       available). Set a fleet-wide default by exporting
 #                       CLAUDE_MODEL (or putting it in .env) before `up`.
+#                       An empty MODEL (REPO=) is the container's own default
+#                       (opus) for that repo, whatever CLAUDE_MODEL says, as
+#                       `claude-launch --model ""` is.
 #     --browser <repos> enable the chrome-devtools MCP (frontend debugging) for
 #                       these repos (repeatable; comma/space lists ok). Their
 #                       service uses CLAUDE_IMAGE_BROWSER (default
@@ -372,7 +375,9 @@ for tok in "${MEM_RAW[@]:-}"; do
     MEM["$(sanitize "${tok%%=*}")"]="$mmv"
 done
 # Per-repo model override: svc -> model alias/id. Repos with no entry inherit the
-# CLAUDE_MODEL env var at run time, falling back to opus (the best available).
+# CLAUDE_MODEL env var at run time, falling back to opus (the best available). An entry with
+# an empty model (REPO=) is the container's own default: the service gets an empty
+# CLAUDE_MODEL, which the entrypoint turns into opus, as `claude-launch --model ""` does.
 declare -A MODEL=()
 for tok in "${MODEL_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
@@ -874,10 +879,10 @@ for row in "${FINAL[@]}"; do
     else
         svc_auth_lines=$'\n      - claude-auth:/auth'
     fi
-    # Per-repo --model override emits a literal; otherwise emit a compose
-    # interpolation so a fleet-wide CLAUDE_MODEL (env/.env) wins, defaulting to
-    # opus, the best available model, when nothing is set.
-    if [[ -n "${MODEL[$svc]:-}" ]]; then svc_model="${MODEL[$svc]}"
+    # Per-repo --model override emits a literal (an empty one: the entrypoint's default);
+    # otherwise emit a compose interpolation so a fleet-wide CLAUDE_MODEL (env/.env) wins,
+    # defaulting to opus, the best available model, when nothing is set.
+    if [[ -v "MODEL[$svc]" ]]; then svc_model="${MODEL[$svc]}"
     else svc_model='${CLAUDE_MODEL:-opus}'; fi
     # Image selection: Chromium is baked, not mounted, so a --browser service needs the
     # browser image.
@@ -1221,7 +1226,7 @@ for r in "${FINAL[@]}"; do
     [[ -n "${BROWSER[$s]:-}" ]] && extra="$extra +browser"
     [[ -n "${GPU[$s]:-}" ]] && extra="$extra +gpu"
     [[ -n "${CONTAINERS[$s]:-}" ]] && extra="$extra +containers"
-    [[ -n "${MODEL[$s]:-}" ]] && extra="$extra +model(${MODEL[$s]})"
+    [[ -v "MODEL[$s]" ]] && extra="$extra +model(${MODEL[$s]:-container default})"
     if [[ -n "${MKTS[$s]:-}" ]]; then
         n_mkts="$(awk -F, '{print NF}' <<<"${MKTS[$s]}")"
         extra="$extra +mkts($n_mkts)"

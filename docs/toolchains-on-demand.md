@@ -32,8 +32,13 @@ shims it linked), and `claude-mise-shims` rebuilds it on demand. Neither ever ch
 shared dir: other containers resolve other versions from it. A tool `mise` resolves only
 inside one repo is linked for the whole container; outside that repo its shim falls through
 to the next one on `PATH` (a system `python3`, say), as before. A version a config pins but
-that is not installed yet is not linked either (mise reports no bin dir for it): run
-`mise install`, then `claude-mise-shims`.
+that is not installed yet is linked too, by the commands the tool's other installed versions
+in `/cache` provide: the shared shim then installs the pinned version on first use (mise's
+`not_found_auto_install`, which decides on that same rule), so a repo's `node = "20"` runs
+node 20 and never falls through to the image's own node. Building the view downloads
+nothing: it reads the missing versions with `MISE_OFFLINE=1`, and names them in its summary.
+A tool with no version anywhere in `/cache` has no shared shim to link: the summary says to
+run `mise install` in that repo, then `claude-mise-shims`.
 
 **Shared, persistent tool cache.** mise's install store **and** the
 `cargo`/`go`/`npm`/`uv`/`pip` caches live on **one shared docker volume**
