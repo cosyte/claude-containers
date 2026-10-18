@@ -20,7 +20,13 @@
 # refresh) is what tells "the operator switched accounts" apart from "nothing
 # to do here".
 CJSON="$CLAUDE_CONFIG_DIR/.claude.json"
-[[ -s "$CJSON" ]] || echo '{}' > "$CJSON"
+# The config dir is the agent's: a symlink at .claude.json is not one of its files, so it is
+# replaced, and the merge below goes through a fresh temp file renamed onto the name (mv -T).
+[[ -L "$CJSON" ]] && rm -f "$CJSON"
+if [[ ! -s "$CJSON" ]]; then
+    CJSON_TMP="$(mktemp "$CJSON.XXXXXX")"
+    echo '{}' > "$CJSON_TMP" && mv -fT "$CJSON_TMP" "$CJSON"
+fi
 OAUTH_ACCOUNT='{}'
 [[ -s "$AUTH_DIR/.claude.json" ]] && \
     OAUTH_ACCOUNT="$(jq -c '.oauthAccount // {}' "$AUTH_DIR/.claude.json" 2>/dev/null || echo '{}')"
@@ -29,6 +35,7 @@ FRESH_UUID="$(jq -r '.accountUuid // empty' <<<"$OAUTH_ACCOUNT" 2>/dev/null || t
 if [[ -n "$FRESH_UUID" && -n "$CACHED_UUID" && "$FRESH_UUID" != "$CACHED_UUID" ]]; then
     log "Cached account       : SELF-HEALED (was accountUuid ${CACHED_UUID:0:8}…, mounted auth is now ${FRESH_UUID:0:8}…): refreshing the cached identity to match"
 fi
+CJSON_TMP="$(mktemp "$CJSON.XXXXXX")"
 jq --argjson oauth "$OAUTH_ACCOUNT" \
    --arg cached_uuid "$CACHED_UUID" --arg fresh_uuid "$FRESH_UUID" '
     .hasCompletedOnboarding = (.hasCompletedOnboarding // true)
@@ -44,5 +51,6 @@ jq --argjson oauth "$OAUTH_ACCOUNT" \
         hasClaudeMdExternalIncludesApproved: true,
         hasClaudeMdExternalIncludesWarningShown: true
     })
-' "$CJSON" > "$CJSON.tmp" && mv -f "$CJSON.tmp" "$CJSON"
-chown "$CLAUDE_UID:$CLAUDE_GID" "$CJSON"
+' "$CJSON" > "$CJSON_TMP" && mv -fT "$CJSON_TMP" "$CJSON" || rm -f "$CJSON_TMP"
+unset CJSON_TMP
+chown -h "$CLAUDE_UID:$CLAUDE_GID" "$CJSON"

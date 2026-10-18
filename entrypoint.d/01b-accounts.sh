@@ -17,14 +17,21 @@ if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
     done
     mkdir -p "$CLAUDE_CONFIG_DIR"
     ACTIVE_FILE="$CLAUDE_CONFIG_DIR/.active-account"
-    [[ -s "$ACTIVE_FILE" ]] || echo "${ACCOUNT_NAMES[0]}" > "$ACTIVE_FILE"
+    # The config dir is the agent's: write through a fresh temp file renamed onto the name itself
+    # (mv -T), never `>` onto a name that may be a symlink. 644: the usage watchdog reads it.
+    _write_active() {
+        local t; t="$(mktemp "$CLAUDE_CONFIG_DIR/.active-account.XXXXXX")" || return 1
+        { printf '%s\n' "$1" > "$t" && chmod 644 "$t" && mv -fT "$t" "$ACTIVE_FILE"; } || { rm -f "$t"; return 1; }
+    }
+    [[ -s "$ACTIVE_FILE" && ! -L "$ACTIVE_FILE" ]] || _write_active "${ACCOUNT_NAMES[0]}"
     ACTIVE_ACCOUNT="$(cat "$ACTIVE_FILE")"
     case ",${CLAUDE_ACCOUNTS}," in
         *",${ACTIVE_ACCOUNT},"*) ;;
         *) log "WARNING: previously-active account '$ACTIVE_ACCOUNT' is no longer in CLAUDE_ACCOUNTS: falling back to '${ACCOUNT_NAMES[0]}'"
            ACTIVE_ACCOUNT="${ACCOUNT_NAMES[0]}"
-           echo "$ACTIVE_ACCOUNT" > "$ACTIVE_FILE" ;;
+           _write_active "$ACTIVE_ACCOUNT" ;;
     esac
+    unset -f _write_active
     # shellcheck disable=SC2034  # read by §2 and §6
     AUTH_DIR="/auth-accounts/$ACTIVE_ACCOUNT"
     log "Multi-account mode  : ${#ACCOUNT_NAMES[@]} account(s) (${CLAUDE_ACCOUNTS}); active=$ACTIVE_ACCOUNT"

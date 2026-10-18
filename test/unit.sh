@@ -2008,24 +2008,23 @@ ms_8b_missing=()
 for _needle in 'permissions: { defaultMode: $pm }' 'skipDangerousModePermissionPrompt: true' \
                'includeCoAuthoredBy: true' \
                'del(.DISABLE_TELEMETRY,.DO_NOT_TRACK,.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)' \
-               'STALE_HOOK_CMD' 'mv -f "$SETTINGS_TMP" "$SETTINGS_DST"'; do
+               'STALE_HOOK_CMD' 'mv -fT "$SETTINGS_TMP" "$SETTINGS_DST"'; do
     grep -qF "$_needle" <<<"$MS_8B" || ms_8b_missing+=("$_needle")
 done
 [[ ${#ms_8b_missing[@]} -eq 0 ]] \
     && ok  "§8b still composes the same settings, still strips the telemetry kills, still self-heals the stale hook" \
     || bad "§8b lost something managed policy does not replace: ${ms_8b_missing[*]}"
-# settings.json is written into a mktemp in the config dir and renamed over, never with a bare
-# `>`: a session can leave a symlink at that agent-owned path, and `> settings.json` as root
-# would truncate and write the link's target. mktemp is O_EXCL and mv replaces a link without
-# following it.
+# settings.json is written into a mktemp in the config dir and renamed onto its own name, never
+# with a bare `>`: root must not write through a symlink at that agent-owned path. mktemp is
+# O_EXCL, and mv -T renames onto the name itself rather than into whatever it points at.
 if grep -qF 'SETTINGS_TMP="$(mktemp "$CLAUDE_CONFIG_DIR/.settings.json.XXXXXX")"' <<<"$MS_8B" \
-   && grep -qF 'mv -f "$SETTINGS_TMP" "$SETTINGS_DST"' <<<"$MS_8B" \
+   && grep -qF 'mv -fT "$SETTINGS_TMP" "$SETTINGS_DST"' <<<"$MS_8B" \
    && ! grep -qF '> "$CLAUDE_CONFIG_DIR/settings.json"' <<<"$MS_8B"; then
     ok  "§8b writes settings.json via a mktemp + mv, never a bare redirect through a possible symlink"
 else
     bad "§8b still writes settings.json with a bare '> settings.json' (root would follow a symlink the agent planted there)"
 fi
-grep -qF 'chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"' "$ENTRYPOINT" \
+grep -qF 'chown -h "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"' "$ENTRYPOINT" \
     && ok  "§8b still hands settings.json to the agent user (managed policy did not take it away)" \
     || bad "settings.json is no longer chowned to the agent user"
 grep -qF 'Merged baked-in plugin marketplaces/plugins into settings.json' "$ENTRYPOINT" \
@@ -2149,8 +2148,8 @@ echo "== §6a: the account-switch listener outlives a failed step =="
 # It runs in the background under the boot's `set -euo pipefail`. A write that failed (a full
 # config volume) used to end it with no word in the log, and every later usage-limit rotation
 # then timed out until a restart. The real section, sourced as the loader does, with the §6
-# helpers stubbed and its poll shortened; a directory where the answer's temp file goes makes
-# that write fail.
+# helpers stubbed and its poll shortened; a directory at the answer's own name makes that write
+# fail (the answer is renamed onto the name with mv -T, which refuses a directory).
 AS_DIR="$(mktemp -d)"; AS_CFG="$AS_DIR/config"; mkdir -p "$AS_CFG"
 (
     set -euo pipefail
@@ -2171,17 +2170,18 @@ as_ask() {  # as_ask <name>: send a request as the watchdog does, print the answ
     rm -f "$AS_CFG/.account-switch-done"; echo "$1" > "$AS_CFG/.account-switch-request"
     local i
     for ((i = 0; i < 30; i++)); do
-        [[ -s "$AS_CFG/.account-switch-done" ]] && { cat "$AS_CFG/.account-switch-done"; return 0; }
+        [[ -f "$AS_CFG/.account-switch-done" && -s "$AS_CFG/.account-switch-done" ]] \
+            && { cat "$AS_CFG/.account-switch-done"; return 0; }
         sleep 0.1
     done
 }
 as_alive() { [[ -n "$as_pid" ]] && kill -0 "$as_pid" 2>/dev/null; }
-mkdir "$AS_CFG/.account-switch-done.tmp"
+mkdir "$AS_CFG/.account-switch-done"
 as_ask nosuch >/dev/null
 as_alive && grep -q "WARNING: account switch: could not write the answer 'ERROR:unknown-account:nosuch'" "$AS_DIR/log" 2>/dev/null \
     && ok  "an answer that cannot be written is logged, and the listener keeps running" \
     || bad "a failed answer write ended the listener or went unlogged (pid ${as_pid:-none}): $(cat "$AS_DIR/log" 2>/dev/null)"
-rmdir "$AS_CFG/.account-switch-done.tmp"
+rmdir "$AS_CFG/.account-switch-done"
 [[ "$(as_ask nosuch)" == "ERROR:unknown-account:nosuch" ]] \
     && ok  "once the write works again, the next request is answered" \
     || bad "the listener did not answer after a failed write"
@@ -2194,8 +2194,126 @@ touch "$AS_DIR/publish-ok"
 [[ "$(as_ask work)" == "work" && "$(cat "$AS_CFG/.active-account" 2>/dev/null)" == "work" ]] \
     && ok  "a switch that works is answered with the account and recorded as active" \
     || bad "a working switch was not answered or not recorded"
+# Its two writes land in the agent's config dir: a symlink at either name is replaced with the
+# listener's own file, and what it pointed at is untouched.
+echo outside > "$AS_DIR/outside-a"; echo outside > "$AS_DIR/outside-d"
+ln -sfn "$AS_DIR/outside-a" "$AS_CFG/.active-account"
+rm -f "$AS_CFG/.account-switch-done"; ln -s "$AS_DIR/outside-d" "$AS_CFG/.account-switch-done"
+echo home > "$AS_CFG/.account-switch-request"
+for ((i = 0; i < 30; i++)); do [[ -f "$AS_CFG/.account-switch-done" && ! -L "$AS_CFG/.account-switch-done" ]] && break; sleep 0.1; done
+[[ "$(cat "$AS_DIR/outside-a")" == outside && "$(cat "$AS_DIR/outside-d")" == outside \
+   && ! -L "$AS_CFG/.active-account" && "$(cat "$AS_CFG/.active-account")" == home \
+   && ! -L "$AS_CFG/.account-switch-done" && "$(cat "$AS_CFG/.account-switch-done")" == home ]] \
+    && ok  "§6a replaces a symlink at .active-account or the answer file, never writing through it" \
+    || bad "§6a wrote through a symlink in the config dir, or left it in place"
 as_alive && kill "$as_pid" 2>/dev/null
 rm -rf "$AS_DIR"
+
+echo "== root's writes in the config dir never follow a symlink (§1b, §6, §7, §8a, §8c to §8e) =="
+# The config dir is the agent's. Each block below is the real code, run unprivileged against a
+# sandbox with a symlink at every name root writes: the link is replaced by root's own file (or
+# left alone where root has nothing to put there) and whatever it pointed at is untouched.
+NF="$(mktemp -d)"; NFC="$NF/config"; NFO="$NF/outside"; mkdir -p "$NFC" "$NFO"
+nf_outside() { printf 'outside\n' > "$NFO/$1"; printf '%s' "$NFO/$1"; }   # a file the link points at
+nf_intact()  { [[ "$(cat "$NFO/$1" 2>/dev/null)" == outside ]]; }
+nf_regular() { [[ -f "$1" && ! -L "$1" ]]; }
+
+# §1b: .active-account is written through mktemp and renamed onto its name, never with `>`.
+S1B="$(ep_section 1b)"
+grep -qF 'mv -fT "$t" "$ACTIVE_FILE"' "$S1B" && ! grep -qE '^[^#]*> "\$ACTIVE_FILE"' "$S1B" \
+    && ok  "§1b writes .active-account through a fresh temp file, never a bare redirect" \
+    || bad "§1b still writes .active-account with a bare '>'"
+
+# §6: the helpers the reconcile loop and the listener call while sessions run.
+S6="$(ep_section 6)"
+S6_FNS=""
+for fn in master_dir set_local_account refresh_cached_account write_switch_file; do
+    S6_FNS+="$(awk -v f="$fn" '$0 ~ "^"f"\\(\\) \\{"{p=1} p{print} p&&/^\}/{exit}' "$S6")"$'\n'
+done
+(
+    set -euo pipefail
+    CLAUDE_CONFIG_DIR="$NFC" CLAUDE_UID="$(id -u)" CLAUDE_GID="$(id -g)"
+    ACCT_FILE="$NFC/.credentials-account" SWITCH_FILE="$NFC/.account-changed"
+    # shellcheck disable=SC2034  # read by the eval'd §6 functions
+    { CLAUDE_ACCOUNTS="work,home"; ACCOUNT_NAMES=(work home); }
+    eval "$S6_FNS"
+    mkdir -p "$NF/master"; echo '{"oauthAccount":{"accountUuid":"u-new"}}' > "$NF/master/.claude.json"
+    ln -s "$(nf_outside acct)" "$ACCT_FILE"; ln -s "$(nf_outside acct-tmp)" "$ACCT_FILE.tmp"
+    ln -s "$(nf_outside switch)" "$SWITCH_FILE"; ln -s "$(nf_outside switch-tmp)" "$SWITCH_FILE.tmp"
+    echo '{"oauthAccount":{"accountUuid":"u-old"}}' > "$NFC/.claude.json"
+    set_local_account u-new
+    write_switch_file 123 u-new
+    refresh_cached_account "$NF/master"
+    printf '%s\n' "../elsewhere" > "$NFC/.active-account"; master_dir > "$NF/md-bad"
+    printf '%s\n' "home" > "$NFC/.active-account";         master_dir > "$NF/md-good"
+) >/dev/null 2>&1
+nf_intact acct && nf_intact acct-tmp && nf_intact switch && nf_intact switch-tmp \
+   && nf_regular "$NFC/.credentials-account" && [[ "$(cat "$NFC/.credentials-account")" == u-new ]] \
+   && nf_regular "$NFC/.account-changed" && [[ "$(cat "$NFC/.account-changed")" == "123 u-new" ]] \
+    && ok  "§6 replaces a symlink at its account files (and ignores the old fixed temp names), never writing through one" \
+    || bad "§6 wrote through a symlink in the config dir, or did not write its own file"
+[[ "$(jq -r '.oauthAccount.accountUuid' "$NFC/.claude.json" 2>/dev/null)" == u-new ]] \
+   && ! compgen -G "$NFC/.claude.json.acct.*" >/dev/null \
+    && ok  "§6 refreshes .claude.json through a fresh temp file and leaves none behind" \
+    || bad "§6's .claude.json refresh did not land, or left a temp file"
+[[ "$(cat "$NF/md-bad" 2>/dev/null)" == /auth-accounts/work && "$(cat "$NF/md-good" 2>/dev/null)" == /auth-accounts/home ]] \
+    && ok  "§6 uses .active-account only when it names a configured account" \
+    || bad "§6's master_dir took an unconfigured name from .active-account (bad=$(cat "$NF/md-bad" 2>/dev/null), good=$(cat "$NF/md-good" 2>/dev/null))"
+
+# §7: .claude.json seeded and merged through fresh temp files.
+rm -rf "$NFC"; mkdir -p "$NFC" "$NF/auth"
+ln -s "$(nf_outside cjson)" "$NFC/.claude.json"
+S7_RUN="$(awk '/^# --- 7\. Seed/{f=1} f && /^# --- 7a\./{exit} f{print}' "$(ep_section 7)")"
+(
+    set -euo pipefail
+    CLAUDE_CONFIG_DIR="$NFC" AUTH_DIR="$NF/auth" WORKSPACE=/workspace CLAUDE_UID="$(id -u)" CLAUDE_GID="$(id -g)"
+    log() { :; }
+    eval "$S7_RUN"
+) >/dev/null 2>&1
+nf_intact cjson && nf_regular "$NFC/.claude.json" \
+   && [[ "$(jq -r '.projects["/workspace"].hasTrustDialogAccepted' "$NFC/.claude.json" 2>/dev/null)" == true ]] \
+   && ! compgen -G "$NFC/.claude.json.*" >/dev/null \
+    && ok  "§7 replaces a symlink at .claude.json, seeds trust in its own file, leaves no temp file" \
+    || bad "§7 wrote through a symlink at .claude.json, or did not seed it"
+
+# §8a, §8c, §8d, §8e: the baked files, from a sandbox BAKE_DIR.
+rm -rf "$NFC"; mkdir -p "$NFC" "$NF/bake/commands" "$NF/bake/skills/demo" "$NF/bake/plugins" "$NFO/cmds" "$NFO/skills"
+echo '# baked' > "$NF/bake/CLAUDE.md"; echo '# cmd' > "$NF/bake/commands/hello.md"
+printf -- '---\nname: demo\n---\n' > "$NF/bake/skills/demo/SKILL.md"
+echo '{"enabledPlugins":{"p@m":true}}' > "$NF/bake/plugins/plugins.json"
+ln -s "$(nf_outside gmd)" "$NFC/CLAUDE.md"
+ln -s "$(nf_outside settings)" "$NFC/settings.json"
+ln -s "$NFO/cmds" "$NFC/commands"; ln -s "$NFO/skills" "$NFC/skills"
+(
+    set -euo pipefail
+    # shellcheck disable=SC2034  # read by the sourced §8 sections
+    CLAUDE_CONFIG_DIR="$NFC" BAKE_DIR="$NF/bake" CLAUDE_UID="$(id -u)" CLAUDE_GID="$(id -g)" BROWSER_MCP=off
+    log() { :; }
+    for s in 8a 8c 8d 8e; do
+        # shellcheck source=/dev/null
+        source "$(ep_section "$s")"
+    done
+) >/dev/null 2>&1
+nf_intact gmd && nf_regular "$NFC/CLAUDE.md" && [[ "$(cat "$NFC/CLAUDE.md")" == '# baked' ]] \
+    && ok  "§8a replaces a symlink at the global CLAUDE.md with the image's copy" \
+    || bad "§8a installed through a symlink at CLAUDE.md, or left it in place"
+nf_intact settings && nf_regular "$NFC/settings.json" \
+   && [[ "$(jq -r '.enabledPlugins["p@m"]' "$NFC/settings.json" 2>/dev/null)" == true ]] \
+    && ok  "§8c merges the baked plugins into its own settings.json, never through a symlink" \
+    || bad "§8c wrote through a symlink at settings.json, or did not merge"
+[[ -z "$(ls -A "$NFO/cmds")" && -z "$(ls -A "$NFO/skills")" ]] \
+   && [[ -d "$NFC/commands" && ! -L "$NFC/commands" && -f "$NFC/commands/hello.md" ]] \
+   && [[ -d "$NFC/skills" && ! -L "$NFC/skills" && -f "$NFC/skills/demo/SKILL.md" ]] \
+    && ok  "§8d and §8e replace a symlink at commands/ or skills/ and install into real directories" \
+    || bad "§8d or §8e installed through a symlinked directory in the config dir"
+rm -rf "$NF"
+# Root's temp files and directories never live in TMPDIR (in a session that is /scratch, which
+# the agent owns): every mktemp in what root runs names its own location.
+NF_BARE="$(grep -nE '^[^#]*mktemp( -d)?( 2>/dev/null)?\)' "$EP_D"/*.sh "$REPO_ROOT/entrypoint.sh" \
+    "$REPO_ROOT/bin/claude-egress-firewall" "$REPO_ROOT/bin/claude-healthcheck" 2>/dev/null || true)"
+[[ -z "$NF_BARE" ]] \
+    && ok  "root's temp files and directories are made in a named, root-safe location, never in TMPDIR" \
+    || bad "a bare mktemp in a root-run path would use TMPDIR (the agent's /scratch): $NF_BARE"
 
 echo
 echo "== $PASS passed, $FAIL failed =="

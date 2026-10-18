@@ -129,6 +129,15 @@ rm -f "$SMD"; printf '#!/bin/sh\nexit 1\n' > "$TMPD/fail-facts"; chmod +x "$TMPD
 out="$(FACTS="$TMPD/fail-facts" run_7c 0)"; rc=$?
 (( rc == 0 )) && grep -qF 'container facts' "$SMD" && grep -qF 'probe (claude-container-facts) failed' "$SMD" \
     && ok "a failed probe never stops the boot, and says it failed" || bad "§7c probe failure (rc=$rc): $out"
+# Root's temp file for the managed memory is made beside it, never in TMPDIR (in a container
+# that is /scratch, which the agent owns), and none is left behind: with a TMPDIR that does
+# not exist the block still writes the file.
+rm -f "$SMD"
+out="$(TMPDIR="$TMPD/no-such-tmpdir" run_7c 0)"; rc=$?
+(( rc == 0 )) && grep -qF 'container facts' "$SMD" && [[ ! -e "$TMPD/no-such-tmpdir" ]] \
+   && ! compgen -G "${SMD%/*}/.CLAUDE.md.*" >/dev/null \
+    && ok "§7c makes its temp file beside the root-owned file, never in TMPDIR, and leaves none" \
+    || bad "§7c used TMPDIR for root's temp file, or left one behind (rc=$rc): $out"
 
 # ======================================================================================
 echo "== entrypoint.sh §8a: the global CLAUDE.md at every start =="

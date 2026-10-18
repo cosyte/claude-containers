@@ -98,7 +98,11 @@ cmd_settings() {
     [[ -n "$file" ]] || die "usage: claude-kit settings FILE"
     parse; report_errs
     declared_p || return 0
-    [[ -s "$file" ]] || echo '{}' > "$file"
+    # Root runs this (entrypoint §8c) on a file in the agent's config dir: read what is there,
+    # then write through a fresh temp file renamed onto the name itself (mv -T), never `>` onto
+    # a name that may be a symlink. A symlink there is not the agent's settings: start from {}.
+    local cur='{}' tmp
+    [[ -s "$file" && ! -L "$file" ]] && cur="$(cat "$file")"
     local mkt='{}' pin='{}' plg='{}' i p
     for i in "${!MK_NAME[@]}"; do
         if [[ -n "${MK_REF[$i]}" ]]; then
@@ -115,10 +119,11 @@ cmd_settings() {
     # Marketplaces: the declaration wins for every name it carries (pinned or not), so adding,
     # moving or dropping #ref takes effect. Plugins: an existing value wins (a plugin switched
     # off by hand stays off).
+    tmp="$(mktemp "$(dirname -- "$file")/.$(basename -- "$file").XXXXXX")" || die "could not create a temp file beside $file"
     jq --argjson mkt "$mkt" --argjson pin "$pin" --argjson plg "$plg" '
         .extraKnownMarketplaces = ((.extraKnownMarketplaces // {}) + $mkt + $pin)
         | .enabledPlugins       = ($plg + (.enabledPlugins // {}))
-    ' "$file" > "$file.tmp.$$" && mv -f "$file.tmp.$$" "$file" || { rm -f "$file.tmp.$$"; die "could not merge into $file"; }
+    ' <<<"$cur" > "$tmp" && mv -fT "$tmp" "$file" || { rm -f "$tmp"; die "could not merge into $file"; }
     say "settings: ${#MK_NAME[@]} marketplace(s), ${#PLUGINS[@]} plugin(s) merged into $file"
 }
 

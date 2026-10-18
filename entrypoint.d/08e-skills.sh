@@ -10,11 +10,15 @@ _skill_usable() {  # _skill_usable <name>
     esac
 }
 if [[ -d "$BAKE_DIR/skills" ]]; then
+    # The config dir is the agent's: a symlink where the skills dir goes is replaced, and a
+    # skill name that is a symlink is left alone, never copied into or removed through.
+    [[ -L "$CLAUDE_CONFIG_DIR/skills" ]] && rm -f "$CLAUDE_CONFIG_DIR/skills"
     install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/skills"
     for d in "$BAKE_DIR"/skills/*/; do
         [[ -f "$d/SKILL.md" ]] || continue
         name="$(basename "$d")"
         t="$CLAUDE_CONFIG_DIR/skills/$name"
+        [[ -L "$t" ]] && continue
         if ! _skill_usable "$name"; then
             if [[ -d "$t" ]] && diff -rq "$d" "$t" >/dev/null 2>&1; then
                 rm -rf "$t"
