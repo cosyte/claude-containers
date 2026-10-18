@@ -5,6 +5,8 @@
 #   - kept: a session id found only in a fake environ, a folder held by a fake fd or cwd, one
 #     modified within 6 hours, the caller's own
 #   - report (the default) and --dry-run remove nothing and log; off does nothing
+#   - report names each gone folder once (no second du), forgets one that changed or came back,
+#     and --dry-run lists every one without touching that record
 #   - the warning above CLAUDE_SCRATCH_WARN_PCT names the largest folders
 #   - claude-sessions' supervise loop runs it, and the image ships it
 # shellcheck source=test/lib/prelude.sh
@@ -21,7 +23,11 @@ ok()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 check() { local d="$1"; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 
-S="$TMPD/scratch" P="$TMPD/proc" C="$TMPD/config"
+S="$TMPD/scratch" P="$TMPD/proc" C="$TMPD/config" STATE="$TMPD/reported"
+# A du that counts its calls, so a test can tell a repeat walk from none.
+mkdir -p "$TMPD/bin"
+printf '#!/usr/bin/env bash\necho x >> "%s"\nexec /usr/bin/du "$@"\n' "$TMPD/du.calls" > "$TMPD/bin/du"
+chmod +x "$TMPD/bin/du"
 GONE=11111111-1111-4111-8111-111111111111
 ENVIRON=22222222-2222-4222-8222-222222222222
 FD=33333333-3333-4333-8333-333333333333
@@ -36,7 +42,7 @@ DEEP=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
 # setup: one folder per case under /scratch/claude-1000/-workspace-x/, all old but FRESH, and a
 # fake /proc with a process holding each kept one.
 setup() {
-    rm -rf "$S" "$P" "$C" "$TMPD/outside"
+    rm -rf "$S" "$P" "$C" "$TMPD/outside" "$STATE"
     local id d
     for id in $GONE $ENVIRON $FD $CWD $FRESH $OWN $IDLE $CMDLINE $DEADJSON $DEEP; do
         d="$S/claude-1000/-workspace-x/$id"
@@ -61,7 +67,9 @@ setup() {
     mkdir -p "$TMPD/outside/$GONE"; touch -d '7 hours ago' "$TMPD/outside/$GONE" "$TMPD/outside"
     ln -s "$TMPD/outside" "$S/claude-1000/-workspace-link"
 }
-run() { CLAUDE_CONFIG_DIR="$C" CLAUDE_SCRATCH_ROOT="$S" CLAUDE_SCRATCH_PROC="$P" CLAUDE_CODE_SESSION_ID="$OWN" "$REAP" "$@"; }
+run() { CLAUDE_CONFIG_DIR="$C" CLAUDE_SCRATCH_ROOT="$S" CLAUDE_SCRATCH_PROC="$P" CLAUDE_CODE_SESSION_ID="$OWN" \
+    CLAUDE_SCRATCH_REAP_STATE="$STATE" PATH="$TMPD/bin:$PATH" "$REAP" "$@"; }
+du_calls() { local n; n="$(wc -l < "$TMPD/du.calls" 2>/dev/null)"; echo "${n:-0}"; }
 has() { [[ -d "$S/claude-1000/-workspace-x/$1" ]]; }
 
 echo "== on: removes only the gone session's folder =="
@@ -94,6 +102,34 @@ check "--dry-run keeps the folder even with the mode on" has "$GONE"
 check "--dry-run logs" grep -q "would remove .*$GONE" <<<"$out"
 out="$(CLAUDE_SCRATCH_REAP=bogus CLAUDE_SCRATCH_USE_PCT_OVERRIDE=10 run)"
 check "an unknown mode reports only, and says so" bash -c "test -d '$S/claude-1000/-workspace-x/$GONE' && grep -q 'reporting only' <<<'$out'"
+
+echo "== report names each gone folder once =="
+setup; rm -f "$TMPD/du.calls"
+out1="$(CLAUDE_SCRATCH_USE_PCT_OVERRIDE=10 run)"; du1="$(du_calls)"
+out2="$(CLAUDE_SCRATCH_USE_PCT_OVERRIDE=10 run)"; du2="$(du_calls)"
+check "the first pass names the gone folders" test "$(grep -c 'would remove' <<<"$out1")" -eq 2
+check "the second pass names none again, and prints no summary" \
+    bash -c "! grep -qE 'would remove|report only' <<<'$out2'"
+check "the second pass runs no du on them" test "$du2" -eq "$du1"
+check "what was named is recorded" grep -qF "$S/claude-1000/-workspace-x/$GONE"$'\t' "$STATE"
+G="$S/claude-1000/-workspace-x/$GONE"
+touch -d '8 hours ago' "$G"   # its own times change (ctime now), and it is still old
+out="$(CLAUDE_SCRATCH_USE_PCT_OVERRIDE=10 run)"
+check "a folder whose own times changed is named again" grep -q "would remove .*$GONE" <<<"$out"
+check "the summary counts the ones already reported" grep -q 'report only: 1 gone .*plus 1 already reported' <<<"$out"
+printf 'CLAUDE_CODE_SESSION_ID=%s\0' "$GONE" > "$P/100/environ"   # the session came back
+CLAUDE_SCRATCH_USE_PCT_OVERRIDE=10 run >/dev/null
+check "a folder whose session came back is forgotten" bash -c "! grep -qF '$G' '$STATE'"
+: > "$P/100/environ"
+out="$(CLAUDE_SCRATCH_USE_PCT_OVERRIDE=10 run)"
+check "gone again later, it is named again" grep -q "would remove .*$GONE" <<<"$out"
+rm -rf "$G"
+CLAUDE_SCRATCH_USE_PCT_OVERRIDE=10 run >/dev/null
+check "a folder no longer in /scratch is forgotten" bash -c "! grep -qF '$G' '$STATE'"
+before="$(cat "$STATE")"
+out="$(CLAUDE_SCRATCH_USE_PCT_OVERRIDE=10 run --dry-run)"
+check "--dry-run lists every gone folder, already reported or not" grep -q "would remove .*$DEADJSON" <<<"$out"
+check "--dry-run leaves the record alone" test "$(cat "$STATE")" = "$before"
 
 echo "== off disables it =="
 setup

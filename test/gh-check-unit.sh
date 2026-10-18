@@ -3,7 +3,8 @@
 # Unit tests for the GitHub token check: NO docker, NO root, NO network.
 #
 #   - bin/claude-gh-check against a fake curl on PATH returning scripted codes: every
-#     permission held, each one missing, offline (skipped, exit 0), no GH_TOKEN (no call),
+#     permission held, each one missing, a rate limit (403 or 429, primary or secondary) read
+#     as ?rate-limited and never NO, offline (skipped, exit 0), no GH_TOKEN (no call),
 #     the repos it finds (ssh and https remotes, a non-GitHub one skipped, duplicates once)
 #   - by source: it never names a merge endpoint, never sends a body, never puts the token
 #     in argv, never calls gh
@@ -25,8 +26,10 @@ PASS=0 FAIL=0
 ok()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 
-# The fake curl: logs "<METHOD> <URL> | <argv>" per call and prints the code a FAKE_* env
-# var scripts for that probe (default: the "held" code).
+# The fake curl: logs "<METHOD> <URL> | <argv>" per call and answers like `curl -i -w
+# '\n%{http_code}'`: the response (headers, a blank line, a body), then the code on the last
+# line. A FAKE_<probe> env var scripts the code (default: the "held" one) and FAKE_<probe>_RESP
+# the whole response (default: an ordinary one, with rate limit to spare).
 FAKE="$TMPD/fake"; mkdir -p "$FAKE"; CALLS="$TMPD/calls"
 cat > "$FAKE/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -38,14 +41,20 @@ for ((i=0; i<${#args[@]}; i++)); do
 done
 echo "$m $url | $*" >> "$FAKE_CALLS"
 case "$m $url" in
-    "GET "*/check-runs*) printf '%s' "${FAKE_CHECKS:-200}" ;;
-    "PUT "*/contents/*)  printf '%s' "${FAKE_PUT:-400}" ;;
-    "POST "*/pulls)      printf '%s' "${FAKE_POST:-422}" ;;
-    "GET "*)             printf '%s' "${FAKE_READ:-200}" ;;
-    *)                   printf '000' ;;
+    "GET "*/check-runs*) c="${FAKE_CHECKS:-200}" r="${FAKE_CHECKS_RESP-}" ;;
+    "PUT "*/contents/*)  c="${FAKE_PUT:-400}"    r="${FAKE_PUT_RESP-}" ;;
+    "POST "*/pulls)      c="${FAKE_POST:-422}"   r="${FAKE_POST_RESP-}" ;;
+    "GET "*)             c="${FAKE_READ:-200}"   r="${FAKE_READ_RESP-}" ;;
+    *)                   c=000 r="" ;;
 esac
+[[ "$c" == 000 ]] && { printf '\n000'; exit 28; }
+[[ -n "$r" ]] || r=$'HTTP/2 '"$c"$'\r\nx-ratelimit-remaining: 4999\r\n\r\n{"message":"Resource not accessible by personal access token"}'
+printf '%s\n%s' "$r" "$c"
 EOF
 chmod +x "$FAKE/curl"
+RL_PRIMARY=$'HTTP/2 403\r\nx-ratelimit-limit: 5000\r\nx-ratelimit-remaining: 0\r\n\r\n{"message":"API rate limit exceeded for user ID 1."}'
+RL_SECONDARY=$'HTTP/2 403\r\nx-ratelimit-remaining: 4000\r\n\r\n{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}'
+RL_RETRY=$'HTTP/2 429\r\nretry-after: 60\r\n\r\n{}'
 
 # A /workspace with: an ssh remote, an https remote, the ssh one's twin, a non-GitHub one,
 # and a plain directory.
@@ -99,7 +108,25 @@ run FAKE_READ=404
     && ! grep -q '^PUT\|^POST' "$CALLS" \
     && ok "no read access: read NO, and no further probe" || bad "read 404: $out / $(cat "$CALLS")"
 run FAKE_PUT=429
-grep -qF 'contents-write ?429' <<<"$out" && ok "a rate limit (429) reads ?429, never ok" || bad "contents 429: $out"
+grep -qF 'contents-write ?429' <<<"$out" && ok "a 429 with no rate-limit marker reads ?429, never ok" || bad "contents 429: $out"
+
+# GitHub's rate limits answer 403 as often as 429: never read one as a missing permission.
+run FAKE_PUT=403 FAKE_PUT_RESP="$RL_PRIMARY"
+grep -qxF 'github me/alpha: read ok, contents-write ?rate-limited, pr ok, checks ok' <<<"$out" \
+    && ok "a primary rate limit (403, x-ratelimit-remaining 0) reads ?rate-limited, not NO" || bad "primary 403: $out"
+run FAKE_POST=403 FAKE_POST_RESP="$RL_SECONDARY"
+grep -qxF 'github me/alpha: read ok, contents-write ok, pr ?rate-limited, checks ok' <<<"$out" \
+    && ok "a secondary rate limit (403, 'secondary rate limit') reads ?rate-limited, not NO" || bad "secondary 403: $out"
+run FAKE_CHECKS=429 FAKE_CHECKS_RESP="$RL_RETRY"
+grep -qxF 'github me/alpha: read ok, contents-write ok, pr ok, checks ?rate-limited' <<<"$out" \
+    && ok "a 429 with retry-after reads ?rate-limited" || bad "retry-after 429: $out"
+run FAKE_PUT=403
+grep -qxF 'github me/alpha: read ok, contents-write NO, pr ok, checks ok' <<<"$out" \
+    && ok "a plain 403 with rate limit to spare is still NO" || bad "plain 403: $out"
+run FAKE_READ=403 FAKE_READ_RESP="$RL_PRIMARY"
+(( rc == 0 )) && [[ "$out" == "github: skipped (rate limited by GitHub, HTTP 403, at me/alpha: not a permission answer; run claude-gh-check later)" ]] \
+    && [[ "$(wc -l < "$CALLS")" == 1 ]] && ! grep -q ' NO' <<<"$out" \
+    && ok "a rate-limited read: skipped, no NO, no further call" || bad "rate-limited read (rc=$rc): $out / $(cat "$CALLS")"
 run FAKE_PUT=422 FAKE_POST=400
 grep -qxF 'github me/alpha: read ok, contents-write ok, pr ok, checks ok' <<<"$out" \
     && ok "contents 422 and pulls 400 also read held" || bad "422/400: $out"
@@ -155,6 +182,8 @@ out="$(run_12f tok 'github me/alpha: read ok, contents-write ok, pr ok, checks o
 out="$(run_12f tok 'github me/alpha: read ok, contents-write NO, pr NO, checks ok')"
 [[ "$(grep -c 'WARNING: GH_TOKEN is missing a permission: github me/alpha' <<<"$out")" == 1 ]] \
     && ok "a missing permission: one WARNING line for the repo" || bad "§12f warn: $out"
+out="$(run_12f tok 'github me/alpha: read ok, contents-write ?rate-limited, pr ok, checks ok')"
+! grep -q WARNING <<<"$out" && ok "a rate-limited probe: no missing-permission WARNING" || bad "§12f rate limit: $out"
 out="$(run_12f "" 'unused')"; rc=$?
 (( rc == 0 )) && [[ ! -e "$GHF" ]] && ok "no GH_TOKEN: stale result removed, nothing runs" || bad "§12f no token: $out"
 

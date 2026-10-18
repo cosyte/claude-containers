@@ -720,14 +720,18 @@ capacity_watch() {  # log, at most every 10 minutes, while pids or memory is nea
 }
 
 # Free the /scratch folders of gone sessions every CLAUDE_SCRATCH_REAP_MIN minutes (claude-scratch-reap;
-# CLAUDE_SCRATCH_REAP=report, the default, only logs what it would remove).
+# CLAUDE_SCRATCH_REAP=report, the default, only logs what it would remove). In the background: its
+# walks and du of a big /scratch on a busy disk can take minutes, and this loop is what records
+# conversation ids and restarts RC watchdogs. A lock keeps it to one at a time (a pass still
+# running when the next is due is not doubled), and timeout bounds each one.
 LAST_REAP=0
 scratch_reap() {
     local every="${CLAUDE_SCRATCH_REAP_MIN:-15}" now
     [[ "$every" =~ ^[0-9]+$ ]] && (( every > 0 )) || every=15
     now="$(date +%s)"; (( now - LAST_REAP >= every * 60 )) || return 0
     LAST_REAP="$now"
-    timeout 300 nice "$REAP_BIN" 2>&1
+    mkdir -p "$RUN_DIR" 2>/dev/null || true
+    ( flock -n 9 || exit 0; timeout 300 nice "$REAP_BIN" 2>&1 ) 9>"$RUN_DIR/scratch-reap.lock" &
     return 0
 }
 

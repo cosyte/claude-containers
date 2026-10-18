@@ -518,7 +518,9 @@ MODEL_RAW=() EXPOSE_RAW=() DEVCMD_RAW=() STARTCMD_RAW=() BROWSER_RAW=() GPU_RAW=
 PLUGINS_RAW=() ACCOUNTS_RAW=() SESSION_RAW=() ENV_RAW=() CACHE_RAW=() CONTAINERS_RAW=()
 shared_flag_row() {   # shared_flag_row <flag>: "arg sep check target format", or status 1
     case "$1" in
-        --model)       echo "value = nonempty MODEL MODEL" ;;
+        # An empty MODEL is allowed: it means the container's own default (opus), over a
+        # CLAUDE_MODEL from the environment or .env.
+        --model)       echo "value = - MODEL MODEL" ;;
         --expose)      echo "value : expose EXPOSE HOSTPORT:CONTAINERPORT" ;;
         --dev-cmd)     echo "value = - DEVCMD COMMAND" ;;
         --start-cmd)   echo "value = start_cmd STARTCMD COMMAND" ;;
