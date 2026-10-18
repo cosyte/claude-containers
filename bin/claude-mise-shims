@@ -11,6 +11,13 @@
 # /workspace), and not the shared dir: a tool with no version reads "command not found". The shared dir is only read, never changed: other containers resolve other versions
 # from it.
 #
+# A version a config pins but /cache does not hold yet is linked too, by the commands the
+# tool's other installed versions provide: through the shared shim mise installs the pinned
+# version on first use (not_found_auto_install, on that same rule), where without the link the
+# command fell through to the image's own (node 24 for a pinned node 20) with no error. Nothing
+# is downloaded here: the missing versions are read with MISE_OFFLINE=1. A tool none of whose
+# versions is in /cache has no shared shim to link; the summary names it, for a `mise install`.
+#
 # The entrypoint (§9b) runs it at every start; run it again after a `mise use`.
 #   -q   print nothing on success
 # The view is $CLAUDE_STATE_DIR/mise-shims, else ~/.local/share/claude-mise-shims (both on the
@@ -45,11 +52,21 @@ CONFIG_MATCH=(-name mise.toml -o -name .mise.toml -o -name 'mise.*.toml' -o -nam
 # $HOME), then each dir under the workspace that holds a mise config. One `mise bin-paths` per
 # dir; a shim resolves here exactly when one of these dirs has its executable.
 declare -A BINS=()
+# The versions a config pins that are not installed: "<tool>@<version>" -> its install path
+# (which does not exist yet; its parent holds the tool's other versions). `mise ls --missing`
+# reads the configs only; MISE_OFFLINE keeps it from asking a registry anything.
+declare -A MISSING=()
 add_bins() {  # add_bins <dir>
-    local p
+    local p t
     while IFS= read -r p; do
         [[ -n "$p" ]] && BINS["$p"]=1
     done < <(cd "$1" 2>/dev/null && timeout 30 mise bin-paths 2>/dev/null)
+    command -v jq >/dev/null 2>&1 || return 0
+    while IFS=$'\t' read -r t p; do
+        [[ -n "$t" && -n "$p" ]] && MISSING["$t"]="$p"
+    done < <(cd "$1" 2>/dev/null && MISE_OFFLINE=1 timeout 30 mise ls --missing --json 2>/dev/null \
+        | jq -r 'to_entries[] | .key as $t | .value[]
+                 | select(.install_path) | "\($t)@\(.requested_version // .version)\t\(.install_path)"' 2>/dev/null)
 }
 if command -v mise >/dev/null 2>&1; then
     add_bins "$HOME"
@@ -63,7 +80,25 @@ if command -v mise >/dev/null 2>&1; then
     fi
 fi
 
-# The wanted links: each shared shim whose tool one of those bin dirs provides.
+# The commands a missing version will provide, taken from the tool's installed versions next to
+# it (their bin dirs: <ver>/bin, <ver>/*/bin, or <ver> itself), as mise's own install-on-first-use
+# decides. Missing versions with no installed sibling have no shim anywhere: NO_SHIM names them.
+declare -A PENDING=()
+pending=() no_shim=()
+for m in "${!MISSING[@]}"; do
+    tooldir="${MISSING[$m]%/*}"
+    found=0
+    for v in "$tooldir"/*/; do
+        [[ -d "$v" && ! -L "${v%/}" ]] || continue
+        for f in "$v"bin/* "$v"*/bin/* "$v"*; do
+            if [[ -f "$f" && -x "$f" ]]; then PENDING["${f##*/}"]=1; found=1; fi
+        done
+    done
+    if (( found )); then pending+=("$m"); else no_shim+=("$m"); fi
+done
+
+# The wanted links: each shared shim whose tool one of those bin dirs provides, or that a pinned
+# but missing version will provide.
 declare -A WANT=()
 total=0
 if [[ -d "$SHARED" ]]; then
@@ -71,6 +106,7 @@ if [[ -d "$SHARED" ]]; then
         [[ -e "$s" || -L "$s" ]] || continue
         total=$((total + 1))
         t="${s##*/}"
+        if [[ -n "${PENDING[$t]:-}" ]]; then WANT["$t"]=1; continue; fi
         for b in "${!BINS[@]}"; do
             if [[ -x "$b/$t" && ! -d "$b/$t" ]]; then WANT["$t"]=1; break; fi
         done
@@ -87,4 +123,7 @@ for t in "${!WANT[@]}"; do
     [[ "$(readlink "$VIEW/$t" 2>/dev/null)" == "$SHARED/$t" ]] || ln -sfn "$SHARED/$t" "$VIEW/$t"
 done
 
-(( QUIET )) || echo "claude-mise-shims: ${#WANT[@]} of $total shared shims linked into $VIEW"
+msg="${#WANT[@]} of $total shared shims linked into $VIEW"
+(( ${#pending[@]} )) && msg+="; not installed yet, installs on first use: $(printf '%s\n' "${pending[@]}" | sort | paste -sd' ')"
+(( ${#no_shim[@]} )) && msg+="; not installed and no version in /cache (run mise install): $(printf '%s\n' "${no_shim[@]}" | sort | paste -sd' ')"
+(( QUIET )) || echo "claude-mise-shims: $msg"

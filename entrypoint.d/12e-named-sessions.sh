@@ -17,8 +17,9 @@ asclaude /usr/local/bin/claude-sessions supervise &
 # shellcheck disable=SC2034  # stopped by shutdown() (§13)
 SESSIONS_PID=$!
 # The kit's optional start command (CLAUDE_EXTRA_START_CMD), once per container start, in the
-# background, after the sessions are up. Never fatal.
-if [[ -n "${CLAUDE_EXTRA_START_CMD:-}" ]]; then
-    asclaude /usr/local/bin/claude-kit start \
-        || log "WARNING: claude-kit start failed; CLAUDE_EXTRA_START_CMD did not run (claude-kit status)"
-fi
+# background, after the sessions are up. Never fatal. Run even with no command set: start first
+# clears the last boot's kit-start.pid (on the config volume), which claude-orphan-reaper reads.
+# Left behind after an operator drops the command, its session id could name a session this boot
+# gave to something else, whose orphans the reaper would then never end.
+asclaude /usr/local/bin/claude-kit start \
+    || log "WARNING: claude-kit start failed; CLAUDE_EXTRA_START_CMD did not run (claude-kit status)"

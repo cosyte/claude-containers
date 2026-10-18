@@ -30,7 +30,10 @@ a token. Keep those in `/state`, the container's own `claude-state-<proj>` volum
 - `claude-compose-gen --mount` refuses another container's `claude-state-*` (or
   `claude-config-*`) volume, so one container's state is never mounted into another.
 - The entrypoint keeps it owned by the agent user, mode 700, and logs at boot whether it
-  is a volume. A container created before `/state` existed (an older compose file, or a
+  is a volume. The boot owns `/state` and its top level only; the rest of the tree (the
+  worktrees under `/state/wt`, say) is checked in the background once the sessions are up,
+  as the workspace is, so a deep `/state` never holds the boot. Until that pass reaches it, a
+  deeper file with a foreign owner is read-only to the agent. A container created before `/state` existed (an older compose file, or a
   `claude-launch` container that was only restarted) has no volume there: regenerate and
   recreate it, or `claude-rm` and relaunch.
 - An app should keep its files in `$CLAUDE_STATE_DIR/<app>` and fall back to its old path

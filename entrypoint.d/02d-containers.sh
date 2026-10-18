@@ -15,7 +15,8 @@
 CONTAINERS_RUNTIME_DIR="/run/user/$CLAUDE_UID"
 CONTAINERS_SOCK="$CONTAINERS_RUNTIME_DIR/podman/podman.sock"
 CONTAINERS_STORE_DIR="$CLAUDE_HOME/.local/share/containers"
-CONTAINERS_SUBID_START=100000 CONTAINERS_SUBID_COUNT=65536
+# CONTAINERS_SUBID_START and CONTAINERS_SUBID_COUNT are the loader's (entrypoint.sh), which
+# also derives own_tree's keep range from them before §2's first ownership pass.
 CONTAINERS_SUBIDS="$CLAUDE_USER:$CONTAINERS_SUBID_START:$CONTAINERS_SUBID_COUNT"
 CONTAINERS_LOG_DIR=/var/log/claude-containers
 CONTAINERS_PROFILE_D=/etc/profile.d/claude-containers.sh
@@ -27,9 +28,8 @@ if [[ "${CLAUDE_CONTAINERS:-0}" =~ ^(1|true|yes|on)$ ]]; then
         chmod 644 "$_f.tmp" && mv -f "$_f.tmp" "$_f"
     done
     unset _f
-    # The workspace ownership passes (§9, §12g) leave the nested containers' ids alone.
-    # shellcheck disable=SC2034  # own_tree (entrypoint.sh) reads it
-    OWN_TREE_KEEP_IDS="$CONTAINERS_SUBID_START $((CONTAINERS_SUBID_START + CONTAINERS_SUBID_COUNT - 1))"
+    # The ownership passes (§2, §2c, §9, §12g) leave the nested containers' ids alone: the
+    # loader set OWN_TREE_KEEP_IDS from this range before §2.
     # The store's top directory only: what is inside belongs to the mapped ids.
     # These live under the agent's own home, so create them AS THE AGENT: a root `install -d`
     # would follow a symlink a session may have left at ~/.local or ~/.local/share and chown

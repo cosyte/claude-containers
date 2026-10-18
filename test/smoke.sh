@@ -128,9 +128,12 @@ echo "== 4. boots with bind-mounted workspace =="
 # + minimal caps + no-new-privileges), so the whole suite proves boot, config
 # merge, SSH login, and git all work hardened. Sourced from _common.sh to avoid
 # drift. GH_TOKEN also exercises the git credential-helper wiring (asserted §8).
+# --init as claude-launch and claude-compose-gen run it: PID 1 an init, not the entrypoint, which
+# is what the orphan reaper needs (without one it skips every pass, by design) and what the
+# fleet runs.
 HARDEN_FLAGS="$(source "$REPO_ROOT/bin/_common.sh"; harden_run_args)"
 # shellcheck disable=SC2086  # HARDEN_FLAGS is intentionally word-split
-docker run -d --name "$CN" \
+docker run -d --name "$CN" --init \
     $HARDEN_FLAGS \
     -e CLAUDE_SKIP_AUTH_CHECK=1 \
     -e CLAUDE_PROJECT_NAME=smoke \
@@ -155,11 +158,15 @@ asclaude_x() { docker exec "$CN" gosu claude env CLAUDE_CONFIG_DIR=/home/claude/
 
 check "entrypoint reached tmux launch" \
     'grep -q "started in tmux" <<<"$(docker logs "$CN" 2>&1)"'
-# The loader announces each section of entrypoint.d/ as it sources it: all of them, once, in the
-# order the sections ran in when they were one file.
-EP_ORDER="0 0b 1 1b 2 2a 2b 2c 2d 3 4 5 6 6a 7 7a 7b 7c 8a 8b 8c 8d 8e 9 9b 10 10b 11 12 12a 12b 12c 12d 12e 12f 12g 13"
+# The loader announces each section of entrypoint.d/ as it sources it: all of them, once, in
+# number order. The expected list is read from the repo's entrypoint.d/ (test/lib/entrypoint.sh
+# ep_order, which entrypoint-unit pins to the loader's own naming), never kept by hand: a
+# hand-kept list went stale the day a section was added (12h, #108).
+# shellcheck source=test/lib/entrypoint.sh
+source "$REPO_ROOT/test/lib/entrypoint.sh"
+EP_ORDER="$(ep_order)"
 check "the boot log announces the sections in their order ($EP_ORDER)" \
-    '[[ "$(docker logs "$CN" 2>&1 | sed -n "s/^\[entrypoint\] §\([0-9][0-9a-z]*\) .*/\1/p" | tr "\n" " ")" == "$EP_ORDER " ]]'
+    '[[ -n "$EP_ORDER" && "$(docker logs "$CN" 2>&1 | sed -n "s/^\[entrypoint\] §\([0-9][0-9a-z]*\) .*/\1/p" | tr "\n" " ")" == "$EP_ORDER " ]]'
 check "the session launch ran from its own file (§12b session-launch, then its tmux line)" \
     'docker logs "$CN" 2>&1 | grep -A50 -m1 "^\[entrypoint\] §12b session-launch$" | grep -q "started in tmux"'
 check "tmux session 'claude' is alive" \
@@ -1176,6 +1183,10 @@ docker volume create "$STVOL" >/dev/null 2>&1 || true
 docker volume create "$STCACHE" >/dev/null 2>&1 || true
 docker run --rm --user 0 --entrypoint sh -v "$STCACHE:/cache" "$IMAGE" \
     -c 'mkdir -p /cache/app/statesmoke && : > /cache/app/statesmoke/app.db' >/dev/null 2>&1 || true
+# A deep tree in /state with a foreign owner (a restored backup, a worktree another uid wrote):
+# the boot owns only the top level, and the background pass reaches the rest.
+docker run --rm --user 0 --entrypoint sh -v "$STVOL:/state" "$IMAGE" \
+    -c 'mkdir -p /state/wt/r/sub && : > /state/wt/r/sub/f && chown -R 4242:4242 /state/wt' >/dev/null 2>&1 || true
 # Another container's pytest shim in the shared cache (mise makes each one a link to itself).
 docker run --rm --user 1000 --entrypoint sh -v "$STCACHE:/cache" "$IMAGE" \
     -c 'mkdir -p /cache/mise/shims && ln -sf /usr/local/bin/mise /cache/mise/shims/pytest' >/dev/null 2>&1 || true
@@ -1191,6 +1202,9 @@ check "the entrypoint reports /state as this container's own volume" \
     'docker logs "$STCN" 2>&1 | grep -q "Private state       : /state"'
 check "/state is owned by the agent user, mode 700" \
     '[ "$(docker exec "$STCN" stat -c "%U %a" /state)" = "claude 700" ]'
+check "the full /state ownership pass ran in the background and reached a deep foreign file" \
+    '( for _ in $(seq 1 30); do grep -q "State ownership     : checked in .*(background)" <<<"$(docker logs "$STCN" 2>&1)" \
+        && [ "$(docker exec "$STCN" stat -c %u:%g /state/wt/r/sub/f)" = 1000:1000 ] && exit 0; sleep 1; done; exit 1 )'
 check "the agent's CLAUDE_STATE_DIR is /state" \
     '[ "$(docker exec "$STCN" gosu claude sh -c "echo \$CLAUDE_STATE_DIR")" = "/state" ]'
 check "an SSH-style login shell (cleared env) also gets CLAUDE_STATE_DIR" \

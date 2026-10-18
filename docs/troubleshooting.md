@@ -79,6 +79,13 @@ container, and the RC watchdog (below) restarts each session to reload it: no
 manual per-container action needed. Confirm the token landed:
 `docker exec <name> node -e 'const o=require("/home/claude/.claude/.credentials.json").claudeAiOauth; console.log(!!o.accessToken, new Date(o.expiresAt))'`.
 
+**A usage-limit rotation (`--accounts`) times out.** The usage watchdog asks the
+root-side account-switch listener (§6a) for the next account and waits 10 s for its
+answer. A step the listener could not finish is in `claude-logs <name>` as `WARNING:
+account switch: ...`: `could not write the answer` or `could not publish its credentials`
+almost always means the config volume is full (`df` the volume, free space). The
+listener keeps running through these, so the next rotation works once the write does.
+
 ## GitHub
 
 **`gh pr create` (or `gh pr checks`, a merge) fails with 403 "Resource not accessible by

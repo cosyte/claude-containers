@@ -132,8 +132,19 @@ SHIMS="$REPO_ROOT/bin/claude-mise-shims"
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/home" "$T/ws/repo" "$T/data/shims" "$T/inst/node/bin" "$T/inst/sc"
-# The fake answers `mise bin-paths` from the dir it is asked in: $PWD/.fake-bins, one dir per line.
-printf '#!/bin/sh\n[ "$1" = bin-paths ] || exit 1\n[ -f .fake-bins ] && cat .fake-bins\nexit 0\n' > "$T/bin/mise"
+# The fake answers `mise bin-paths` from the dir it is asked in: $PWD/.fake-bins, one dir per line;
+# and `mise ls --missing --json` from $PWD/.fake-missing, but only offline (MISE_OFFLINE=1): the
+# view must never make mise ask a registry at boot.
+cat > "$T/bin/mise" <<'FAKE'
+#!/bin/sh
+case "$1" in
+    bin-paths) [ -f .fake-bins ] && cat .fake-bins; exit 0 ;;
+    ls) [ "$2 $3" = "--missing --json" ] || exit 1
+        [ "${MISE_OFFLINE:-}" = 1 ] || { echo "fake mise: ls without MISE_OFFLINE=1" >&2; exit 3; }
+        if [ -f .fake-missing ]; then cat .fake-missing; else echo '{}'; fi; exit 0 ;;
+esac
+exit 1
+FAKE
 chmod +x "$T/bin/mise"
 for t in node pytest shellcheck; do ln -s "$T/bin/mise" "$T/data/shims/$t"; done
 for x in "$T/inst/node/bin/node" "$T/inst/sc/shellcheck"; do printf '#!/bin/sh\necho real\n' > "$x"; chmod +x "$x"; done
@@ -178,6 +189,36 @@ run_shims >/dev/null
 [[ -L "$T/home/.local/share/claude-mise-shims/shellcheck" ]] \
   && ok "without CLAUDE_STATE_DIR the view is ~/.local/share/claude-mise-shims" \
   || bad "no fallback view under HOME"
+
+# A version a config pins that /cache does not hold yet (a repo's node 20 while only node 22 is
+# installed) is linked by the commands its installed sibling provides, so the shared shim installs
+# and runs 20 on first use instead of the command falling through to the image's own node.
+mkdir -p "$T/data/installs/node/22.1.0/bin" "$T/ws/web"
+for b in node npm; do
+  printf '#!/bin/sh\necho v22\n' > "$T/data/installs/node/22.1.0/bin/$b"; chmod +x "$T/data/installs/node/22.1.0/bin/$b"
+done
+ln -s 22.1.0 "$T/data/installs/node/22"   # mise's alias link: not a version of its own
+ln -s "$T/bin/mise" "$T/data/shims/npm"
+: > "$T/ws/web/mise.toml"
+cat > "$T/ws/web/.fake-missing" <<EOF
+{"node":[{"version":"20","requested_version":"20","install_path":"$T/data/installs/node/20","installed":false}],
+ "jq":[{"version":"1.7","requested_version":"1.7","install_path":"$T/data/installs/jq/1.7","installed":false}]}
+EOF
+BEFORE="$(shared_state)"
+out="$(run_shims CLAUDE_STATE_DIR="$T/state2")"
+V2="$T/state2/mise-shims"
+[[ "$(readlink "$V2/node" 2>/dev/null)" == "$T/data/shims/node" && -L "$V2/npm" ]] \
+  && ok "a pinned but not installed version (node@20) links the shims its installed sibling provides (node, npm), asked offline" \
+  || bad "node@20 (missing) did not link node and npm into $V2 (out: $out)"
+[[ ! -e "$V2/pytest" && ! -L "$V2/pytest" ]] \
+  && ok "a versionless tool (pytest) is still not linked" || bad "pytest was linked although no config names it"
+[[ "$out" == *"; not installed yet, installs on first use: node@20"* ]] \
+  && ok "the summary names the version that installs on first use" || bad "summary does not name node@20: $out"
+[[ "$out" == *"; not installed and no version in /cache (run mise install): jq@1.7"* && ! -e "$V2/jq" ]] \
+  && ok "a missing tool with no version anywhere in /cache is named for a mise install, nothing linked" \
+  || bad "summary does not name jq@1.7 as needing a mise install: $out"
+[[ "$(shared_state)" == "$BEFORE" ]] \
+  && ok "the shared dir is still unchanged" || bad "the shared shims dir changed: $(diff <(echo "$BEFORE") <(shared_state))"
 
 echo
 echo "mise-unit: $PASS passed, $FAIL failed"
