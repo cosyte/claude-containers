@@ -65,8 +65,12 @@ lines.
 Every probe is read-only: a GET, or a write call with no body, which GitHub refuses as invalid
 (400 or 422) once it has checked the permission, before it could change anything. It never
 probes the merge endpoint, where an empty body merges an open PR. `?<code>` is an answer it did
-not expect (a 5xx, a rate limit); `github: skipped (...)` means it could not ask (offline, a
-timeout, no `GH_TOKEN`, no github.com repo).
+not expect (a 5xx, say). `?rate-limited` is GitHub's rate limit, which often answers 403 like a
+missing permission: a 403 or 429 with `x-ratelimit-remaining: 0`, a `retry-after` header or a
+"rate limit" message (primary or secondary limit, as when a stack sharing one token boots at
+once). It never reads as `NO` and logs no warning; run `claude-gh-check` again later.
+`github: skipped (...)` means it could not ask (offline, a timeout, no `GH_TOKEN`, no github.com
+repo, or the first call already rate limited, so nothing was checked).
 
 On a public repo `read` and `checks` answer 200 to any token, so there they say only that the
 call works, not that the token holds the permission; the two write probes are exact everywhere.
