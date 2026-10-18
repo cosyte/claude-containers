@@ -32,15 +32,23 @@ asclaude() { gosu "$CLAUDE_USER" env CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME
 # the workspace pass runs while the agent is up (§12g), and -h guards only the last component,
 # so a parent directory swapped for a symlink between find and chown would hand the agent a
 # root file. -execdir chowns ./name from inside the directory find already holds.
-# OWN_TREE_KEEP_IDS="LO HI" (set by §2d on a --containers session) leaves files owned by a uid
-# in that range alone: they belong to a nested container (postgres's 999 is 100998 here), and
-# handing them to the agent breaks that container's bind-mounted data on the next boot.
+# OWN_TREE_KEEP_IDS="LO HI" (a --containers session) leaves files whose owner or group is in
+# that range alone: they belong to a nested container (postgres's 999 is 100998 here; a file its
+# root writes with the postgres group is 1000:100998), and handing them to the agent breaks that
+# container's bind-mounted data on the next boot. Set here, before any section runs, because
+# the first passes (§2's config volume, §2c's /state) come before §2d, which gives the agent
+# this same range in /etc/subuid and /etc/subgid.
+CONTAINERS_SUBID_START=100000 CONTAINERS_SUBID_COUNT=65536
 OWN_TREE_KEEP_IDS=""
+if [[ "${CLAUDE_CONTAINERS:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    OWN_TREE_KEEP_IDS="$CONTAINERS_SUBID_START $((CONTAINERS_SUBID_START + CONTAINERS_SUBID_COUNT - 1))"
+fi
 own_tree() {
     local keep=() _lo _hi
     if [[ -n "${OWN_TREE_KEEP_IDS:-}" ]]; then
         read -r _lo _hi <<<"$OWN_TREE_KEEP_IDS"
-        keep=(! \( -uid "+$((_lo - 1))" -uid "-$((_hi + 1))" \))
+        keep=(! \( -uid "+$((_lo - 1))" -uid "-$((_hi + 1))" \)
+              ! \( -gid "+$((_lo - 1))" -gid "-$((_hi + 1))" \))
     fi
     find "$@" \( ! -uid "$CLAUDE_UID" -o ! -gid "$CLAUDE_GID" \) "${keep[@]}" \
         -execdir chown -h "$CLAUDE_UID:$CLAUDE_GID" {} +

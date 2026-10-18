@@ -15,7 +15,11 @@ STATE_SHARED_CACHE=/cache
 export CLAUDE_STATE_DIR="$STATE_DIR"
 # The isolation is the volume itself (no other container mounts it), so a directory that
 # cannot be prepared degrades loudly instead of stopping the boot.
-if ! { mkdir -p "$STATE_DIR" && own_tree "$STATE_DIR" && chmod 700 "$STATE_DIR"; } 2>/dev/null; then
+# Only the root and its top level here, as §9 does for the workspace: worktrees and working
+# folders live under /state (/state/wt, /state/tmp), and even a pass that changes nothing
+# reads every inode, minutes on a spinning disk before sshd or any session. The rest of the
+# tree is checked in the background once the sessions are up (§12g).
+if ! { mkdir -p "$STATE_DIR" && own_tree "$STATE_DIR" -maxdepth 1 && chmod 700 "$STATE_DIR"; } 2>/dev/null; then
     log "WARNING: could not prepare $STATE_DIR (owner $CLAUDE_USER, mode 700): apps cannot keep private state there."
 elif awk -v d="$STATE_DIR" '$5 == d { found = 1 } END { exit !found }' "$STATE_MOUNTINFO" 2>/dev/null; then
     log "Private state       : $STATE_DIR (this container's own volume; CLAUDE_STATE_DIR)"
