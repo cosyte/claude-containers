@@ -2097,6 +2097,7 @@ AS_DIR="$(mktemp -d)"; AS_CFG="$AS_DIR/config"; mkdir -p "$AS_CFG"
     publish_creds() { [[ -e "$AS_DIR/publish-ok" ]]; }
     set_local_account() { :; }
     account_of() { :; }
+    # shellcheck disable=SC2034  # read by the sourced §6a
     CLAUDE_CONFIG_DIR="$AS_CFG" CLAUDE_ACCOUNTS="work,home"
     # shellcheck source=/dev/null
     source "$(ep_section 6a)"
