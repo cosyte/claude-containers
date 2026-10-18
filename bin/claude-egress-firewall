@@ -108,6 +108,9 @@ fi
 # a later refresh narrow its own allowlist. Written ONLY when a refresh interval is
 # configured, so an unconfigured container touches no new path at all.
 STATE_DIR="${CLAUDE_EGRESS_STATE_DIR:-/run/claude-egress}"
+# Where this root process makes its work directories: /tmp (root-owned, sticky), never TMPDIR,
+# which in a session is /scratch, a directory the agent owns.
+ROOT_TMP=/tmp
 
 # NOTE: the `iptables`/`iptables-restore` availability check is deferred until AFTER the
 # CLAUDE_EGRESS_PRINT_HOSTS dry-run seam below: the dry run is a pure host dump that needs neither
@@ -547,7 +550,7 @@ refresh_family() {
 # One full cycle: resolve once for both families, then decide per family.
 refresh_pass() {
     local w
-    w="$(mktemp -d 2>/dev/null)" || { refresh_retain "no work directory could be created for this cycle"; return 0; }
+    w="$(mktemp -d "$ROOT_TMP/claude-egress.XXXXXX" 2>/dev/null)" || { refresh_retain "no work directory could be created for this cycle"; return 0; }
     reset_nets
     resolve_wave "$w"
 
@@ -610,7 +613,7 @@ esac
 command -v iptables         >/dev/null 2>&1 || fail_open "iptables not installed"
 command -v iptables-restore >/dev/null 2>&1 || fail_open "iptables-restore not installed"
 
-ghdir="$(mktemp -d)"
+ghdir="$(mktemp -d "$ROOT_TMP/claude-egress.XXXXXX")"
 if gh_fetch "$ghdir/4" "$ghdir/6"; then
     while IFS= read -r cidr;  do add_net  "$cidr";  done < "$ghdir/4"
     while IFS= read -r cidr6; do add_net6 "$cidr6"; done < "$ghdir/6"
@@ -619,7 +622,7 @@ else
     log "WARNING: could not fetch any published ranges from api.github.com/meta, relying on per-host DNS for GitHub"
 fi
 
-rdir="$(mktemp -d)"
+rdir="$(mktemp -d "$ROOT_TMP/claude-egress.XXXXXX")"
 resolve_wave "$rdir"
 for h in $HOSTS; do
     [[ -z "$h" ]] && continue

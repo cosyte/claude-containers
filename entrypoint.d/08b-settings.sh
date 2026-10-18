@@ -22,7 +22,8 @@ BASE_SETTINGS="$(jq -n --arg pm "$PERM_MODE" '{
 [[ -f "$BAKE_DIR/settings.json" ]] && \
     BASE_SETTINGS="$(jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") "$BAKE_DIR/settings.json")"
 EXISTING_SETTINGS='{}'
-[[ -s "$CLAUDE_CONFIG_DIR/settings.json" ]] && \
+# A symlink at settings.json is not the agent's settings: start from {}, never read through it.
+[[ -s "$CLAUDE_CONFIG_DIR/settings.json" && ! -L "$CLAUDE_CONFIG_DIR/settings.json" ]] && \
     EXISTING_SETTINGS="$(cat "$CLAUDE_CONFIG_DIR/settings.json")"
 # Self-heal 1: strip the Remote-Control-breaking telemetry kills from the final
 # settings (covers per-container volumes created by an older image). If any
@@ -68,17 +69,24 @@ jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") <(echo "$EXISTING_SETTINGS") \
         | (if (.hooks | type) == "object" and ((.hooks | length) == 0)
            then del(.hooks) else . end)' \
     > "$SETTINGS_TMP"
-mv -f "$SETTINGS_TMP" "$SETTINGS_DST"
+# -T: rename onto settings.json's own name, never into a directory or link found there.
+mv -fT "$SETTINGS_TMP" "$SETTINGS_DST"
 if echo "$EXISTING_SETTINGS" \
     | jq -e --arg stale "$STALE_HOOK_CMD" \
         '[.hooks.SessionStart // [] | .[] | .hooks // [] | .[] | select((.command // "") == $stale)] | length > 0' \
         >/dev/null 2>&1; then
     log "Migrated settings.json: removed the stale '$STALE_HOOK_CMD' SessionStart hook (CLAUDE.d fragment loader, since removed)"
 fi
-chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
+chown -h "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
 if echo "$EXISTING_SETTINGS" | jq -e '.env // {} | (.DISABLE_TELEMETRY // .DO_NOT_TRACK // .CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) != null' >/dev/null 2>&1; then
     log "Migrated settings.json: removed telemetry kills that block Remote Control; clearing stale feature-flag cache"
-    [[ -s "$CJSON" ]] && jq 'del(.cachedGrowthBookFeatures,.cachedExperimentFeatures)' "$CJSON" > "$CJSON.tmp" \
-        && mv -f "$CJSON.tmp" "$CJSON" && chown "$CLAUDE_UID:$CLAUDE_GID" "$CJSON"
+    # .claude.json is in the same agent-owned dir: the same fresh-temp-and-rename rule.
+    if [[ -s "$CJSON" && ! -L "$CJSON" ]]; then
+        CJSON_TMP="$(mktemp "$CJSON.XXXXXX")"
+        jq 'del(.cachedGrowthBookFeatures,.cachedExperimentFeatures)' "$CJSON" > "$CJSON_TMP" \
+            && mv -fT "$CJSON_TMP" "$CJSON" && chown -h "$CLAUDE_UID:$CLAUDE_GID" "$CJSON" \
+            || rm -f "$CJSON_TMP"
+        unset CJSON_TMP
+    fi
     rm -rf "$CLAUDE_CONFIG_DIR/statsig" 2>/dev/null || true
 fi

@@ -5,15 +5,24 @@
 # (the runtime kit below installs what IT declares). We union the
 # two plugin keys into existing settings; existing entries win on conflict.
 if [[ -f "$BAKE_DIR/plugins/plugins.json" ]]; then
+    # settings.json is in the agent-owned config dir: a fresh temp file renamed onto its own
+    # name (mv -T), as §8b does, never a fixed temp name.
+    # A symlink there is not the agent's settings: read it as {}, never through the link.
+    PLUGINS_TMP="$(mktemp "$CLAUDE_CONFIG_DIR/.settings.json.XXXXXX")"
+    PLUGINS_CUR='{}'
+    [[ -s "$CLAUDE_CONFIG_DIR/settings.json" && ! -L "$CLAUDE_CONFIG_DIR/settings.json" ]] \
+        && PLUGINS_CUR="$(cat "$CLAUDE_CONFIG_DIR/settings.json")"
     jq -s '
         .[0] as $cur | .[1] as $plug |
         $cur
         | .extraKnownMarketplaces = (($plug.extraKnownMarketplaces // {}) + ($cur.extraKnownMarketplaces // {}))
         | .enabledPlugins         = (($plug.enabledPlugins // {})         + ($cur.enabledPlugins // {}))
-    ' "$CLAUDE_CONFIG_DIR/settings.json" "$BAKE_DIR/plugins/plugins.json" \
-        > "$CLAUDE_CONFIG_DIR/settings.json.tmp" \
-        && mv -f "$CLAUDE_CONFIG_DIR/settings.json.tmp" "$CLAUDE_CONFIG_DIR/settings.json"
-    chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
+    ' <(printf '%s\n' "$PLUGINS_CUR") "$BAKE_DIR/plugins/plugins.json" \
+        > "$PLUGINS_TMP" \
+        && mv -fT "$PLUGINS_TMP" "$CLAUDE_CONFIG_DIR/settings.json" \
+        || rm -f "$PLUGINS_TMP"
+    unset PLUGINS_TMP PLUGINS_CUR
+    chown -h "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
     log "Merged baked-in plugin marketplaces/plugins into settings.json"
 fi
 
@@ -31,5 +40,5 @@ if kit_declared; then
     else
         log "WARNING: claude-kit could not merge CLAUDE_EXTRA_MARKETPLACES / CLAUDE_EXTRA_PLUGINS into settings.json"
     fi
-    chown "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
+    chown -h "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
 fi

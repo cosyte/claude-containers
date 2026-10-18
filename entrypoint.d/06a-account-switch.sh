@@ -18,9 +18,17 @@ account_switch_listener() {
     set +e
     local req_file="$CLAUDE_CONFIG_DIR/.account-switch-request"
     local done_file="$CLAUDE_CONFIG_DIR/.account-switch-done"
+    # Both files this writes sit in the agent's config dir, so each goes through a fresh temp
+    # file renamed onto the target's own name (mv -T), never a fixed temp name and never into
+    # whatever the target points at. 644: the watchdog reads them.
+    _switch_write() {  # _switch_write <dst> <text>
+        local t; t="$(mktemp "$1.XXXXXX" 2>/dev/null)" || return 1
+        { printf '%s\n' "$2" > "$t" && chmod 644 "$t" && mv -fT "$t" "$1"; } 2>/dev/null && return 0
+        rm -f "$t" 2>/dev/null
+        return 1
+    }
     _switch_answer() {
-        { echo "$1" > "$done_file.tmp" && mv -f "$done_file.tmp" "$done_file"; } 2>/dev/null && return 0
-        rm -f "$done_file.tmp" 2>/dev/null
+        _switch_write "$done_file" "$1" && return 0
         log "WARNING: account switch: could not write the answer '$1' to $done_file (is the config volume full?): the watchdog's request will time out"
         return 0
     }
@@ -42,8 +50,7 @@ account_switch_listener() {
             fi
             # The watchdog respawns what it rotates; this is not an operator's account change.
             set_local_account "$(account_of "/auth-accounts/$req")"
-            { echo "$req" > "$CLAUDE_CONFIG_DIR/.active-account.tmp" \
-                && mv -f "$CLAUDE_CONFIG_DIR/.active-account.tmp" "$CLAUDE_CONFIG_DIR/.active-account"; } 2>/dev/null \
+            _switch_write "$CLAUDE_CONFIG_DIR/.active-account" "$req" \
                 || log "WARNING: account switch to '$req': could not record it in .active-account"
             _switch_answer "$req"
         else

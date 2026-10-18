@@ -16,6 +16,8 @@ if [[ ! -s "$AUTH_DIR/.credentials.json" ]]; then
     fi
 fi
 if [[ -s "$AUTH_DIR/.credentials.json" && ! -s "$CLAUDE_CONFIG_DIR/.credentials.json" ]]; then
+    # The config dir is the agent's: never install through a symlink at that name.
+    [[ -L "$CLAUDE_CONFIG_DIR/.credentials.json" ]] && rm -f "$CLAUDE_CONFIG_DIR/.credentials.json"
     install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 \
         "$AUTH_DIR/.credentials.json" "$CLAUDE_CONFIG_DIR/.credentials.json"
 fi
@@ -59,10 +61,11 @@ creds_have_token() {  # creds_have_token <file>  -> 0 if it holds a non-empty ac
 publish_creds() {  # publish_creds <src> <dst>
     local src="$1" dst="$2" t
     t="$(mktemp "$dst.XXXXXX")" || return 1
+    # mv -T: rename onto DST's own name, never into a directory or symlink found there.
     if [[ "$dst" == "$CLAUDE_CONFIG_DIR/.credentials.json" ]]; then
-        { install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 "$src" "$t" && mv -f "$t" "$dst"; } || { rm -f "$t"; return 1; }
+        { install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 "$src" "$t" && mv -fT "$t" "$dst"; } || { rm -f "$t"; return 1; }
     else
-        { install -m 600 "$src" "$t" && mv -f "$t" "$dst"; } || { rm -f "$t"; return 1; }
+        { install -m 600 "$src" "$t" && mv -fT "$t" "$dst"; } || { rm -f "$t"; return 1; }
     fi
 }
 
@@ -82,7 +85,14 @@ CLAUDE_BIN_RE="${CLAUDE_BIN_RE:-^/opt/claude-code/bin/claude$}"
 SWITCH_AT=0
 master_dir() {
     if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
-        echo "/auth-accounts/$(cat "$CLAUDE_CONFIG_DIR/.active-account" 2>/dev/null || echo "${ACCOUNT_NAMES[0]}")"
+        # .active-account sits in the agent's config dir: use it only when it names a configured
+        # account, as the account-switch listener (§6a) requires of a request.
+        local a; a="$(cat "$CLAUDE_CONFIG_DIR/.active-account" 2>/dev/null || true)"
+        case "$a" in
+            ""|*,*) a="${ACCOUNT_NAMES[0]}" ;;
+            *) case ",${CLAUDE_ACCOUNTS}," in *",${a},"*) ;; *) a="${ACCOUNT_NAMES[0]}" ;; esac ;;
+        esac
+        echo "/auth-accounts/$a"
     else
         echo "$AUTH_DIR"
     fi
@@ -90,32 +100,38 @@ master_dir() {
 account_of() { jq -r '.oauthAccount.accountUuid // empty' "$1/.claude.json" 2>/dev/null || true; }
 email_of()   { jq -r '.oauthAccount.emailAddress // empty' "$1/.claude.json" 2>/dev/null || true; }
 local_account() {  # the account the container's own credential came from
-    local a; a="$(cat "$ACCT_FILE" 2>/dev/null || true)"
+    local a=""; [[ -L "$ACCT_FILE" ]] || a="$(cat "$ACCT_FILE" 2>/dev/null || true)"
     [[ -n "$a" ]] || a="$(account_of "$CLAUDE_CONFIG_DIR")"
     printf '%s' "$a"
 }
+# These write into the agent's config dir while sessions run, so each goes through a fresh
+# temp file (mktemp: a new name, never an existing one) renamed onto the target's own name
+# (mv -T); a fixed or guessable temp name, or a bare `>`, could be a symlink there.
 set_local_account() {
-    printf '%s\n' "$1" > "$ACCT_FILE.tmp" || return 0
-    chown "$CLAUDE_UID:$CLAUDE_GID" "$ACCT_FILE.tmp" 2>/dev/null || true
-    chmod 644 "$ACCT_FILE.tmp" 2>/dev/null || true
-    mv -f "$ACCT_FILE.tmp" "$ACCT_FILE" || true
+    local t; t="$(mktemp "$ACCT_FILE.XXXXXX" 2>/dev/null)" || return 0
+    printf '%s\n' "$1" > "$t" || { rm -f "$t"; return 0; }
+    chown "$CLAUDE_UID:$CLAUDE_GID" "$t" 2>/dev/null || true
+    chmod 644 "$t" 2>/dev/null || true
+    mv -fT "$t" "$ACCT_FILE" || rm -f "$t"
 }
 refresh_cached_account() {  # the container's .claude.json oauthAccount := the master's
-    local cj="$CLAUDE_CONFIG_DIR/.claude.json" acct
+    local cj="$CLAUDE_CONFIG_DIR/.claude.json" acct t
     acct="$(jq -c '.oauthAccount // empty' "$1/.claude.json" 2>/dev/null)" || return 0
-    [[ -n "$acct" && -s "$cj" ]] || return 0
-    if jq --argjson a "$acct" '.oauthAccount = $a' "$cj" > "$cj.acct.$$" 2>/dev/null && [[ -s "$cj.acct.$$" ]]; then
-        chown "$CLAUDE_UID:$CLAUDE_GID" "$cj.acct.$$" 2>/dev/null || true
-        mv -f "$cj.acct.$$" "$cj" || rm -f "$cj.acct.$$"
+    [[ -n "$acct" && -s "$cj" && ! -L "$cj" ]] || return 0
+    t="$(mktemp "$cj.acct.XXXXXX" 2>/dev/null)" || return 0
+    if jq --argjson a "$acct" '.oauthAccount = $a' "$cj" > "$t" 2>/dev/null && [[ -s "$t" ]]; then
+        chown "$CLAUDE_UID:$CLAUDE_GID" "$t" 2>/dev/null || true
+        mv -fT "$t" "$cj" || rm -f "$t"
     else
-        rm -f "$cj.acct.$$"
+        rm -f "$t"
     fi
     return 0
 }
 write_switch_file() {  # write_switch_file <epoch> <account>: the request claude-sessions acts on
-    printf '%s %s\n' "$1" "$2" > "$SWITCH_FILE.tmp" || return 0
-    chown "$CLAUDE_UID:$CLAUDE_GID" "$SWITCH_FILE.tmp" 2>/dev/null || true
-    mv -f "$SWITCH_FILE.tmp" "$SWITCH_FILE" || true
+    local t; t="$(mktemp "$SWITCH_FILE.XXXXXX" 2>/dev/null)" || return 0
+    printf '%s %s\n' "$1" "$2" > "$t" || { rm -f "$t"; return 0; }
+    chown "$CLAUDE_UID:$CLAUDE_GID" "$t" 2>/dev/null || true
+    mv -fT "$t" "$SWITCH_FILE" || rm -f "$t"
 }
 # A Claude process that started before the switch (so it still runs the previous account).
 # Exact, not `ps` elapsed seconds: each process's start comes from /proc (boot time + starttime
