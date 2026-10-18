@@ -28,13 +28,15 @@ ep_boot() {
 }
 
 # The loader's own naming: the C-locale sort of [0-9]*.sh, the name up to its first '-', one
-# leading 0 dropped (00b-x.sh is §0b, 12h-x.sh is §12h).
+# leading 0 dropped (00b-x.sh is §0b, 12h-x.sh is §12h). The array has a name of its own: the
+# suites that source this file use `out` and the like as strings, and shellcheck reads the
+# sourced file into each of them.
 ep_order() {
-    local f n out=()
+    local f n _ep_nums=()
     while IFS= read -r f; do
         [[ -f "$f" ]] || continue
         n="${f##*/}"; n="${n%.sh}"; n="${n%%-*}"
-        out+=("${n#0}")
+        _ep_nums+=("${n#0}")
     done < <(printf '%s\n' "$EP_D"/[0-9]*.sh | LC_ALL=C sort)
-    printf '%s\n' "${out[*]}"
+    printf '%s\n' "${_ep_nums[*]}"
 }
