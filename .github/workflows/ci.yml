@@ -10,7 +10,7 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # The nightly run, 05:29 UTC: off the hour, when GitHub delays scheduled runs at high load.
+    # The nightly run, 05:29 UTC: off the hour, as GitHub delays scheduled runs on the hour.
     - cron: "29 5 * * *"
   workflow_dispatch:
 
