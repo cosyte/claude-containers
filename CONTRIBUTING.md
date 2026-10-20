@@ -35,7 +35,8 @@ vulnerabilities go through private reporting rather than an issue.
    container. CI's `smoke` job runs it when a PR touches the Dockerfile,
    `entrypoint.sh`, `entrypoint.d/`, `sshd_config`, `bash_profile`, `bin/`, `claude-config/`,
    `scripts/`, `containers/`, `test/smoke.sh`, the Makefile, `docker-compose.yml` or `ci.yml`,
-   and on every push to `main`; on any other PR it is skipped and reports success.
+   on every push to `main`, on the nightly run (05:29 UTC) and on a manual run
+   (`gh workflow run ci.yml`); on any other PR it is skipped and reports success.
    It takes about 3 minutes with a warm layer cache, 8 cold, and the parts that
    need a GPU, routable IPv6 or a firewall report SKIP on a hosted runner.
    `make smoke` locally stays optional.

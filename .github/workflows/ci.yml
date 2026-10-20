@@ -1,13 +1,18 @@
 name: ci
 
 # Lint + unit tests on every PR. The image smoke test (test/smoke.sh) builds the image and
-# runs it, so it only runs when an image-affecting path changes, and on every push to main.
+# runs it, so on a PR it only runs when an image-affecting path changes; it runs on every
+# push to main, every nightly run and every manual (workflow_dispatch) run.
 # No workflow-level paths filter: a skipped `smoke` job (job-level `if:`) reports success, so
 # it can be a required check without sitting Pending on a docs-only PR.
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # The nightly run, 05:29 UTC: off the hour, as GitHub delays scheduled runs on the hour.
+    - cron: "29 5 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -31,7 +36,10 @@ jobs:
       - name: unit tests (npm test, every test/unit.sh and test/*-unit.sh in parallel)
         run: npm test
 
+  # Only a PR or a push has a change set to filter: a nightly or manual run tests main as a
+  # whole, so the filter is skipped there and smoke runs.
   changes:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -62,9 +70,10 @@ jobs:
   smoke:
     needs: changes
     # A failed `changes` job runs smoke rather than skipping it: a skip would report success.
+    # Every run but a PR's (a push to main, the nightly, a manual run) runs smoke.
     if: >-
       !cancelled() && (needs.changes.result != 'success'
-      || needs.changes.outputs.image == 'true' || github.event_name == 'push')
+      || needs.changes.outputs.image == 'true' || github.event_name != 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
