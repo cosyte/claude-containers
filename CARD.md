@@ -11,8 +11,9 @@ The Docker image, launchers and session tools that run isolated Claude Code sess
   `claude-account-login`, `claude-disk-gc`.
 - In-container tools in `bin/`: `claude-sessions` (several sessions per container),
   `claude-kit` (installs a plugin marketplace at boot), `claude-gpu` + `claude-blender-install`
-  (GPU guard), `claude-deps-check` (pin linter), `claude-autopilot` + `claude-enqueue`
-  (unattended mode, its queue), `claude-egress-firewall`, `claude-secret-guard`.
+  (GPU guard), `claude-build-slot` (heavy builds take turns container-wide), `claude-deps-check`
+  (pin linter), `claude-autopilot` + `claude-enqueue` (unattended mode, its queue),
+  `claude-egress-firewall`, `claude-secret-guard`.
 - Baked-in config every session gets: `claude-config/` (global `CLAUDE.md`, `CLAUDE.gpu.md`,
   `settings.json`, `skills/`, `commands/`, `mcp/`, `plugins/`).
 - Operator docs: `README.md` (load-bearing) and `docs/*.md`.

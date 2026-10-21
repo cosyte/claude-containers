@@ -1,0 +1,178 @@
+#!/bin/bash
+# claude-build-slot: heavy builds take turns, container-wide. Runs inside the container.
+#
+#   claude-build-slot [--name LABEL] -- <command> [args...]
+#       Wait for one of CLAUDE_BUILD_SLOTS slots, run the command holding it, and exit
+#       with the command's own status (128+N when a signal ended it). Prints one line
+#       only when it had to wait: "build slot: waited 3m12s behind <labels>". The slot
+#       is freed when the command ends or this wrapper is killed (the lock dies with it).
+#       Waiters go in arrival order. LABEL defaults to "<dir>: <command>".
+#   claude-build-slot status
+#       The slots, their holders (PID, label, since) and the waiters.
+#
+# Several sessions in one container share its CPU quota: Gradle gates, R8 and nightly
+# check-alls started together all slow down and hit their tool-call timeouts, while in
+# turn the set finishes sooner. Wrap a heavy build in it; a light command needs nothing.
+#
+#   CLAUDE_BUILD_SLOTS=2        slots; 0 never waits (runs at once)
+#   CLAUDE_BUILD_SLOT_DIR       the lock files; default $CLAUDE_STATE_DIR/build-slots (this
+#                               container's own volume), else $TMPDIR. Never /cache: other
+#                               containers share it, and the quota is this container's.
+#   CLAUDE_BUILD_SLOT_HELD      set in the command's env; a nested call sees it and runs at
+#                               once instead of waiting behind itself.
+#   CLAUDE_BUILD_SLOT_POLL=2    seconds between tries while waiting
+set -uo pipefail
+
+SLOTS="${CLAUDE_BUILD_SLOTS:-2}"
+POLL="${CLAUDE_BUILD_SLOT_POLL:-2}"
+DIR="${CLAUDE_BUILD_SLOT_DIR:-}"
+if [[ -z "$DIR" ]]; then
+    if [[ -n "${CLAUDE_STATE_DIR:-}" ]]; then DIR="$CLAUDE_STATE_DIR/build-slots"
+    else DIR="${TMPDIR:-/tmp}/claude-build-slots"; fi
+fi
+
+say()   { echo "claude-build-slot: $*" >&2; }
+die()   { say "$*"; exit 64; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+int()   { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+# dur <seconds>: 45s, 3m12s, 1h02m
+dur() {
+    local s=$1
+    if (( s >= 3600 )); then printf '%dh%02dm' $((s / 3600)) $((s % 3600 / 60))
+    elif (( s >= 60 )); then printf '%dm%02ds' $((s / 60)) $((s % 60))
+    else printf '%ds' "$s"; fi
+}
+
+int "$SLOTS" || die "CLAUDE_BUILD_SLOTS must be a whole number (0 turns waiting off), not '$SLOTS'"
+[[ "$POLL" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "CLAUDE_BUILD_SLOT_POLL must be seconds, not '$POLL'"
+case "$DIR/" in /cache/*) die "CLAUDE_BUILD_SLOT_DIR is under /cache, which other containers share: use \$CLAUDE_STATE_DIR or \$TMPDIR" ;; esac
+
+# holder <n>: true when slot n is held right now (its lock is taken), whatever its info says.
+holder() {
+    local f="$DIR/slot.$1" fd
+    [[ -e "$f" ]] || return 1
+    exec {fd}>>"$f" || return 1
+    if flock -n "$fd"; then exec {fd}>&-; return 1; fi
+    exec {fd}>&-
+    return 0
+}
+
+# info <n>: "pid since label" of slot n's holder, or nothing.
+info() { [[ -r "$DIR/slot.$1.info" ]] && head -n1 "$DIR/slot.$1.info"; }
+
+# waiters: "since pid label" of every live waiter, oldest first. A waiter file whose pid is
+# gone (a SIGKILLed wrapper) is removed.
+waiters() {
+    local f pid line
+    for f in "$DIR"/wait.*; do
+        [[ -e "$f" ]] || continue
+        pid="${f##*.}"
+        if ! kill -0 "$pid" 2>/dev/null; then rm -f "$f"; continue; fi
+        line="$(head -n1 "$f" 2>/dev/null)" || continue
+        printf '%s %s %s\n' "${line%% *}" "$pid" "${line#* }"
+    done | sort -n -k1,1 -k2,2
+}
+
+status() {
+    local n i since pid label now=$EPOCHSECONDS held=0
+    if (( SLOTS == 0 )); then echo "build slots: off (CLAUDE_BUILD_SLOTS=0, every build runs at once)"; return 0; fi
+    echo "build slots: $SLOTS in $DIR"
+    echo "holders:"
+    for (( n = 0; n < SLOTS; n++ )); do
+        holder "$n" || continue
+        held=$((held + 1))
+        i="$(info "$n")"
+        if [[ -n "$i" ]]; then
+            read -r pid since label <<<"$i"
+            printf '  slot %d  pid %s  since %s (%s)  %s\n' "$n" "$pid" \
+                "$(date -d "@$since" +%H:%M:%S)" "$(dur $((now - since)))" "$label"
+        else
+            printf '  slot %d  (held, no label yet)\n' "$n"
+        fi
+    done
+    (( held )) || echo "  none"
+    echo "waiters:"
+    i="$(waiters)"
+    if [[ -z "$i" ]]; then echo "  none"; return 0; fi
+    while read -r since pid label; do
+        printf '  pid %s  since %s (%s)  %s\n' "$pid" "$(date -d "@$since" +%H:%M:%S)" "$(dur $((now - since)))" "$label"
+    done <<<"$i"
+}
+
+# --- arguments -----------------------------------------------------------------------------
+LABEL=""
+case "${1:-}" in
+    status) shift; (( $# == 0 )) || die "status takes no arguments"; mkdir -p "$DIR" 2>/dev/null; status; exit 0 ;;
+    -h|--help|help) usage 0 ;;
+    "") usage 64 ;;
+esac
+while (( $# )); do
+    case "$1" in
+        --name) (( $# >= 2 )) || die "--name needs a label"; LABEL="$2"; shift 2 ;;
+        --name=*) LABEL="${1#--name=}"; shift ;;
+        --) shift; break ;;
+        *) die "unknown argument '$1' (usage: claude-build-slot [--name LABEL] -- <command> [args...])" ;;
+    esac
+done
+(( $# )) || die "no command after --"
+
+# Off, or already inside a slot (a gate that calls a wrapped sub-build): run at once.
+if (( SLOTS == 0 )) || [[ -n "${CLAUDE_BUILD_SLOT_HELD:-}" ]]; then exec "$@"; fi
+
+[[ -n "$LABEL" ]] || LABEL="${PWD##*/}: $*"
+LABEL="${LABEL//$'\n'/ }"; LABEL="${LABEL:0:80}"
+mkdir -p "$DIR" || die "cannot create $DIR"
+
+# --- take a slot -----------------------------------------------------------------------------
+# Every slot is a lock file; a waiter tries them only when no older live waiter is ahead of it,
+# so builds start in arrival order. The lock is held on an fd of this wrapper, never of the
+# command: a daemon the build leaves behind (Gradle's) must not keep the slot.
+FD="" SLOT="" WAITFILE="$DIR/wait.$$" START=$EPOCHSECONDS WAITED=0 BEHIND=""
+cleanup() {
+    rm -f "$WAITFILE"
+    [[ -n "$SLOT" ]] && rm -f "$DIR/slot.$SLOT.info"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+
+try() {
+    local n fd
+    for (( n = 0; n < SLOTS; n++ )); do
+        exec {fd}>>"$DIR/slot.$n" || continue
+        if flock -n "$fd"; then FD=$fd SLOT=$n; return 0; fi
+        exec {fd}>&-
+    done
+    return 1
+}
+
+if ! try; then
+    WAITED=1
+    for (( n = 0; n < SLOTS; n++ )); do
+        i="$(info "$n")" && [[ -n "$i" ]] && holder "$n" && BEHIND+="${BEHIND:+, }${i#* * }"
+    done
+    printf '%s %s\n' "$START" "$LABEL" >"$WAITFILE"
+    while :; do
+        first="$(waiters | head -n1)"; first="${first#* }"; first="${first%% *}"
+        if [[ -z "$first" || "$first" == "$$" ]] && try; then break; fi
+        sleep "$POLL"
+    done
+    rm -f "$WAITFILE"
+fi
+printf '%s %s %s\n' "$$" "$EPOCHSECONDS" "$LABEL" >"$DIR/slot.$SLOT.info"
+(( WAITED )) && echo "build slot: waited $(dur $((EPOCHSECONDS - START))) behind ${BEHIND:-another build}" >&2
+
+# --- run it ------------------------------------------------------------------------------------
+# In the background so a signal to this wrapper is passed on at once (a foreground child would
+# defer the trap); SIGINT/SIGQUIT are reset and stdin kept, which an async command loses.
+export CLAUDE_BUILD_SLOT_HELD="$SLOT"
+( trap - INT QUIT; exec {FD}>&-; exec "$@" ) <&0 &
+CHILD=$!
+trap 'kill -HUP "$CHILD" 2>/dev/null' HUP
+trap 'kill -INT "$CHILD" 2>/dev/null' INT
+trap 'kill -TERM "$CHILD" 2>/dev/null' TERM
+while :; do
+    wait "$CHILD"; rc=$?
+    kill -0 "$CHILD" 2>/dev/null || break
+done
+exit "$rc"

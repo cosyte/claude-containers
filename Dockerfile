@@ -679,6 +679,8 @@ COPY bin/claude-healthcheck /usr/local/bin/claude-healthcheck
 # how to install it. Wrapped rather than symlinked so the message names the fix.
 COPY bin/claude-gpu /usr/local/bin/claude-gpu
 COPY bin/claude-blender-install /usr/local/bin/claude-blender-install
+# Heavy builds take turns container-wide (CLAUDE_BUILD_SLOTS slots, flock in $CLAUDE_STATE_DIR).
+COPY bin/claude-build-slot /usr/local/bin/claude-build-slot
 RUN printf '%s\n' \
       '#!/usr/bin/env bash' \
       '# blender: runs the pinned Blender that claude-blender-install put in the shared cache.' \
@@ -725,6 +727,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude /usr/local/bin/c
         /usr/local/bin/claude-healthcheck \
         /usr/local/bin/claude-gpu \
         /usr/local/bin/claude-blender-install \
+        /usr/local/bin/claude-build-slot \
         /usr/local/bin/claude-disk-gc \
         /usr/local/bin/claude-deps-check \
         /usr/local/bin/claude-container-facts \
