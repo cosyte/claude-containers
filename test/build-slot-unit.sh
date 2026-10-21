@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Unit tests for bin/claude-build-slot: NO docker, NO root. Real flock on a temp slot dir.
 #   - with slots=2, a third concurrent call waits until one ends, then runs, and says so once
-#   - waiters start in arrival order
+#   - waiters start in arrival order, a newcomer queues behind them, a stale waiter is dropped
 #   - a killed holder (the wrapper SIGKILLed) frees its slot; a TERMed wrapper ends its command
 #   - a nested call runs at once (CLAUDE_BUILD_SLOT_HELD), no deadlock
 #   - slots=0 never waits; exit codes pass through; a daemon the build leaves does not keep it
@@ -67,6 +67,20 @@ grep -Eq '^build slot: waited [0-9]+s behind (alpha, beta|beta, alpha)$' "$TMPD/
 kill -KILL "$pb"; wait "$pb" 2>/dev/null
 until_ 5 test -e "$TMPD/d.started" && ok "a killed holder frees its slot" || bad "the slot stayed taken after SIGKILL"
 touch "$TMPD/b.go" "$TMPD/c.go" "$TMPD/d.go"; wait "$pc" "$pd"
+
+# --- a newcomer never takes a freed slot ahead of a waiter -----------------------------------
+CLAUDE_BUILD_SLOTS=1 "$BS" -- bash -c "$(gate h)" & PIDS+=($!); ph=$!
+until_ 5 test -e "$TMPD/h.started"
+CLAUDE_BUILD_SLOTS=1 CLAUDE_BUILD_SLOT_POLL=2 "$BS" -- bash -c "echo w >>$TMPD/q" 2>/dev/null & PIDS+=($!); pw=$!
+until_ 5 test -e "$CLAUDE_BUILD_SLOT_DIR/wait.$pw"
+sleep 0.3; touch "$TMPD/h.go"; wait "$ph"
+CLAUDE_BUILD_SLOTS=1 "$BS" -- bash -c "echo n >>$TMPD/q" 2>/dev/null; wait "$pw"
+[[ "$(tr -d '\n' <"$TMPD/q")" == wn ]] && ok "a newcomer queues behind a waiter" || bad "order: $(tr '\n' ' ' <"$TMPD/q")"
+
+# --- a dead waiter whose pid was reused does not block the queue -----------------------------
+echo "1.0 999999 ghost" >"$CLAUDE_BUILD_SLOT_DIR/wait.$$"
+out="$(timeout 5 "$BS" -- echo past 2>&1)"
+[[ "$out" == past && ! -e "$CLAUDE_BUILD_SLOT_DIR/wait.$$" ]] && ok "a stale waiter on a reused pid is dropped" || bad "stale waiter: $out"
 
 # --- TERM to the wrapper ends the command and frees the slot ---------------------------------
 "$BS" -- bash -c "echo \$\$ >$TMPD/e.pid; $(gate e)" & PIDS+=($!); pe=$!

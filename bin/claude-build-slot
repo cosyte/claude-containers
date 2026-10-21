@@ -61,17 +61,27 @@ holder() {
 # info <n>: "pid since label" of slot n's holder, or nothing.
 info() { [[ -r "$DIR/slot.$1.info" ]] && head -n1 "$DIR/slot.$1.info"; }
 
-# waiters: "since pid label" of every live waiter, oldest first. A waiter file whose pid is
-# gone (a SIGKILLed wrapper) is removed.
+# started <pid>: the process's start time in clock ticks (/proc/<pid>/stat field 22), which
+# tells a live waiter from a new process that reused a dead one's pid.
+started() {
+    local s
+    s="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+    s="${s##*) }"
+    read -ra s <<<"$s"
+    echo "${s[19]}"
+}
+
+# waiters: "since pid label" of every live waiter, oldest first (since: $EPOCHREALTIME). A
+# waiter file whose process is gone (a SIGKILLed wrapper, its pid maybe reused) is removed.
 waiters() {
-    local f pid line
+    local f pid since st label
     for f in "$DIR"/wait.*; do
         [[ -e "$f" ]] || continue
         pid="${f##*.}"
-        if ! kill -0 "$pid" 2>/dev/null; then rm -f "$f"; continue; fi
-        line="$(head -n1 "$f" 2>/dev/null)" || continue
-        printf '%s %s %s\n' "${line%% *}" "$pid" "${line#* }"
-    done | sort -n -k1,1 -k2,2
+        read -r since st label <"$f" 2>/dev/null || continue
+        if [[ "$(started "$pid")" != "$st" ]]; then rm -f "$f"; continue; fi
+        printf '%s %s %s\n' "$since" "$pid" "$label"
+    done | LC_ALL=C sort -n -k1,1 -k2,2
 }
 
 status() {
@@ -96,6 +106,7 @@ status() {
     i="$(waiters)"
     if [[ -z "$i" ]]; then echo "  none"; return 0; fi
     while read -r since pid label; do
+        since="${since%.*}"
         printf '  pid %s  since %s (%s)  %s\n' "$pid" "$(date -d "@$since" +%H:%M:%S)" "$(dur $((now - since)))" "$label"
     done <<<"$i"
 }
@@ -125,8 +136,8 @@ LABEL="${LABEL//$'\n'/ }"; LABEL="${LABEL:0:80}"
 mkdir -p "$DIR" || die "cannot create $DIR"
 
 # --- take a slot -----------------------------------------------------------------------------
-# Every slot is a lock file; a waiter tries them only when no older live waiter is ahead of it,
-# so builds start in arrival order. The lock is held on an fd of this wrapper, never of the
+# Every slot is a lock file; a caller tries them only when no older live waiter is ahead of it
+# (a newcomer joins the queue when there is one), so builds start in arrival order. The lock is held on an fd of this wrapper, never of the
 # command: a daemon the build leaves behind (Gradle's) must not keep the slot.
 FD="" SLOT="" WAITFILE="$DIR/wait.$$" START=$EPOCHSECONDS WAITED=0 BEHIND=""
 cleanup() {
@@ -146,12 +157,12 @@ try() {
     return 1
 }
 
-if ! try; then
+if [[ -n "$(waiters)" ]] || ! try; then
     WAITED=1
     for (( n = 0; n < SLOTS; n++ )); do
         i="$(info "$n")" && [[ -n "$i" ]] && holder "$n" && BEHIND+="${BEHIND:+, }${i#* * }"
     done
-    printf '%s %s\n' "$START" "$LABEL" >"$WAITFILE"
+    printf '%s %s %s\n' "$EPOCHREALTIME" "$(started $$)" "$LABEL" >"$WAITFILE"
     while :; do
         first="$(waiters | head -n1)"; first="${first#* }"; first="${first%% *}"
         if [[ -z "$first" || "$first" == "$$" ]] && try; then break; fi
@@ -164,13 +175,17 @@ printf '%s %s %s\n' "$$" "$EPOCHSECONDS" "$LABEL" >"$DIR/slot.$SLOT.info"
 
 # --- run it ------------------------------------------------------------------------------------
 # In the background so a signal to this wrapper is passed on at once (a foreground child would
-# defer the trap); SIGINT/SIGQUIT are reset and stdin kept, which an async command loses.
+# defer the trap); SIGINT/SIGQUIT are reset and stdin kept, which an async command loses. A
+# signal that lands while it starts is kept and passed on once its pid is known.
 export CLAUDE_BUILD_SLOT_HELD="$SLOT"
+SIG=""
+trap 'SIG=HUP' HUP; trap 'SIG=INT' INT; trap 'SIG=TERM' TERM
 ( trap - INT QUIT; exec {FD}>&-; exec "$@" ) <&0 &
 CHILD=$!
 trap 'kill -HUP "$CHILD" 2>/dev/null' HUP
 trap 'kill -INT "$CHILD" 2>/dev/null' INT
 trap 'kill -TERM "$CHILD" 2>/dev/null' TERM
+[[ -n "$SIG" ]] && kill "-$SIG" "$CHILD" 2>/dev/null
 while :; do
     wait "$CHILD"; rc=$?
     kill -0 "$CHILD" 2>/dev/null || break
