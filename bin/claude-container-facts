@@ -82,9 +82,12 @@ gradle() {
     [[ "$n" =~ ^[0-9]+$ ]] || n=0
     w="${CLAUDE_GRADLE_WORKERS-$(( n / 3 > 2 ? n / 3 : 2 ))}"   # §12's default
     i="${CLAUDE_GRADLE_IDLE_MS-1800000}"
+    # An operator's own -D in GRADLE_OPTS is the one §12 keeps.
+    [[ " ${GRADLE_OPTS:-} " == *" -Dorg.gradle.workers.max="* ]] && { w="${GRADLE_OPTS##*-Dorg.gradle.workers.max=}"; w="${w%% *}"; }
+    [[ " ${GRADLE_OPTS:-} " == *" -Dorg.gradle.daemon.idletimeout="* ]] && { i="${GRADLE_OPTS##*-Dorg.gradle.daemon.idletimeout=}"; i="${i%% *}"; }
     if [[ "$w" =~ ^[1-9][0-9]*$ ]]; then w="builds capped at $w workers"; else w="workers not capped"; fi
     if [[ "$i" =~ ^[1-9][0-9]*$ ]]; then
-        i="daemons stop after $(( i / 60000 )) min idle"
+        if (( i % 60000 )); then i="daemons stop after $(( i / 1000 )) s idle"; else i="daemons stop after $(( i / 60000 )) min idle"; fi
     else
         i="daemons keep Gradle's 3 h idle timeout"
     fi

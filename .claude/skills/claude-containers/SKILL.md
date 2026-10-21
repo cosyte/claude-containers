@@ -303,7 +303,9 @@ pids: OpenMP/OpenBLAS size pools to the HOST (56 here), so the entrypoint caps t
 (`CLAUDE_THREADS_PER_PROCESS`, 4; the image's `nproc` prints the cgroup quota, not that cap) and test runners must not size workers from the quota
 unchecked (2026-09-30: two `pytest -n 28` runs held ~8,000 of 8,192 pids and crashed four
 sessions). A crashed Claude relaunches and resumes (`CLAUDE_SESSION_CRASH_RESTARTS`); 0/130/143
-are deliberate exits. The supervisor logs `WARNING: capacity:` near the pid/memory limit.
+are deliberate exits. The supervisor logs `WARNING: capacity:` near the pid/memory limit. Gradle gets a
+third of the quota in workers and 30 min daemon idle via `GRADLE_OPTS` (`CLAUDE_GRADLE_WORKERS`,
+`CLAUDE_GRADLE_IDLE_MS`; its `-D` beats a repo's gradle.properties).
 
 **GPU sessions (`--gpu`, NVIDIA only):** `compose-gen --gpu REPO` (repeatable; the repo
 must be in the stack) or `claude-launch --gpu` / `CLAUDE_GPU=1` gives the service the CDI

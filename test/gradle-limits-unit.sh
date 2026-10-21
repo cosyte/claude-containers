@@ -24,7 +24,7 @@ for n in 28 4; do
     mkdir -p "$TMPD/n$n"; printf '#!/bin/sh\necho %s\n' "$n" > "$TMPD/n$n/nproc"; chmod +x "$TMPD/n$n/nproc"
 done
 PROFILE="$TMPD/gradle.sh"
-GB="$(awk '/^# Gradle builds\./{f=1} f{print} f&&/^unset _gw /{exit}' "$(ep_section 12)")"
+GB="$(awk '/^# Gradle builds\./{f=1} f{print} f&&/^unset _n _gw /{exit}' "$(ep_section 12)")"
 [[ -n "$GB" ]] && ok "extracted §12's Gradle block" || bad "could not extract §12's Gradle block"
 gb() {  # gb <cpus> <env...>: run the block, print GRADLE_OPTS and the log
     local n="$1"; shift
@@ -52,6 +52,11 @@ out="$(login "-Xmx2g -Dorg.gradle.workers.max=3")"
 out="$(login "-Dorg.gradle.workers.max=9 -Dorg.gradle.daemon.idletimeout=1800000")"
 [[ "$out" == "opts=-Dorg.gradle.workers.max=9 -Dorg.gradle.daemon.idletimeout=1800000" ]] \
     && ok "a second login shell adds nothing twice" || bad "login twice: $out"
+mkdir -p "$TMPD/n0"; printf '#!/bin/sh\nexit 1\n' > "$TMPD/n0/nproc"
+chmod +x "$TMPD/n0/nproc"
+out="$(gb 0)"
+[[ "$out" == *"opts=-Dorg.gradle.workers.max=2 -Dorg.gradle.daemon.idletimeout=1800000"* ]] \
+    && ok "a failing nproc: 2 workers, and the boot goes on" || bad "nproc fails: $out"
 out="$(gb 4)"
 [[ "$out" == *"opts=-Dorg.gradle.workers.max=2 -Dorg.gradle.daemon.idletimeout=1800000"* ]] \
     && ok "4-CPU quota: at least 2 workers" || bad "4: $out"
@@ -65,13 +70,16 @@ out="$(gb 28 GRADLE_OPTS="-Xmx2g")"
     && ok "appended to an operator's GRADLE_OPTS" || bad "append: $out"
 out="$(gb 28 GRADLE_OPTS="-Dorg.gradle.workers.max=20")"
 [[ "$out" == *"opts=-Dorg.gradle.workers.max=20 -Dorg.gradle.daemon.idletimeout=1800000"* \
-    && "$out" == *"org.gradle.workers.max the operator's (GRADLE_OPTS)"* ]] \
+    && "$out" == *"org.gradle.workers.max=20 (the operator's GRADLE_OPTS)"* ]] \
     && ok "an explicit -Dorg.gradle.workers.max wins, and the log says whose" || bad "no override: $out"
 out="$(gb 28 GRADLE_OPTS="-Dorg.gradle.daemon.idletimeout=60000")"
 [[ "$out" == *"opts=-Dorg.gradle.daemon.idletimeout=60000 -Dorg.gradle.workers.max=9"* ]] \
     && ok "an explicit -Dorg.gradle.daemon.idletimeout wins" || bad "no override idle: $out"
-[[ "$(login -)" == "opts=-Dorg.gradle.workers.max=9" ]] \
-    && ok "the profile file holds only what §12 added" || bad "profile: $(cat "$PROFILE")"
+[[ "$(login -)" == "opts=-Dorg.gradle.workers.max=9 -Dorg.gradle.daemon.idletimeout=60000" ]] \
+    && ok "an SSH login gets the operator's value, not none" || bad "profile: $(cat "$PROFILE")"
+out="$(gb 28 GRADLE_OPTS='-Dorg.gradle.workers.max=$(touch /x)')"
+grep -q touch "$PROFILE" && bad "a non-number operator value reached the profile file" \
+    || ok "a non-number operator value stays out of the profile file"
 
 echo "== §12: the opt-out =="
 out="$(gb 28 CLAUDE_GRADLE_WORKERS=0 CLAUDE_GRADLE_IDLE_MS=)"
@@ -97,6 +105,9 @@ out="$(facts 4)"
 out="$(facts 28 CLAUDE_GRADLE_WORKERS=0 CLAUDE_GRADLE_IDLE_MS=0)"
 [[ "$out" == *"workers not capped, daemons keep Gradle's 3 h idle timeout"* ]] \
     && ok "facts: the opt-out says not capped" || bad "facts off: '$out'"
+out="$(facts 28 GRADLE_OPTS="-Xmx1g -Dorg.gradle.workers.max=20" CLAUDE_GRADLE_IDLE_MS=30000)"
+[[ "$out" == *"capped at 20 workers, daemons stop after 30 s idle"* ]] \
+    && ok "facts: the operator's -D, and seconds under a minute" || bad "facts operator: '$out'"
 
 echo "== docs =="
 for v in CLAUDE_GRADLE_WORKERS CLAUDE_GRADLE_IDLE_MS; do
