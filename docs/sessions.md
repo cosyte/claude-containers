@@ -80,7 +80,11 @@ sessions honest:
   Raise `--mem` / `CLAUDE_MEM_LIMIT` with the session count. Pids too: threads count as pids,
   so give a multi-session container thousands per session (`CLAUDE_PIDS_LIMIT`). Library thread
   pools are capped per process (`CLAUDE_THREADS_PER_PROCESS`, default 4) because they size
-  themselves to the host, and the supervisor warns in `claude-logs` near either limit.
+  themselves to the host, and the supervisor warns in `claude-logs` near either limit. GNU
+  `nproc` would print that cap (it honours `OMP_NUM_THREADS`), so the image's `nproc` prints
+  the container's CPU quota (`/sys/fs/cgroup/cpu.max`) instead; `nproc --all` is the host's
+  count, and `$OMP_NUM_THREADS` is the cap. A container started before this keeps GNU's
+  until it restarts.
 - **A crashed session comes back.** If Claude exits abnormally (an abort, a segfault, an OOM
   kill, a failed thread create), its window relaunches it after a backoff, resuming the same
   conversation, up to 5 times in 15 minutes. `/exit`, Ctrl-C and `claude-sessions stop` still

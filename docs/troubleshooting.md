@@ -327,7 +327,7 @@ shell in that window), `down` (no window) or `stopped` (stopped by hand).
   container's quota, so on a 56-thread host each Python test worker carried ~100 threads, and
   two `pytest -n 28` runs held ~8,000 of 8,192 pids. At the limit a Claude process cannot start
   a thread and crashes. The image caps those pools per process (`CLAUDE_THREADS_PER_PROCESS`,
-  default 4), crashed sessions relaunch and resume (`CLAUDE_SESSION_CRASH_RESTARTS`), and the
+  default 4; `nproc` prints the CPU quota, not that cap), crashed sessions relaunch and resume (`CLAUDE_SESSION_CRASH_RESTARTS`), and the
   supervisor warns before the limit. Also: cap test parallelism for suites that size it from
   the quota (a suite's own worker variable, `pytest -n`), run one heavy suite at a time, and size `pids_limit`
   for the session count (the boot log warns under 1024 per session). To recover by hand: find
