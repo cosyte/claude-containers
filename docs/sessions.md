@@ -85,6 +85,9 @@ sessions honest:
   the container's CPU quota (`/sys/fs/cgroup/cpu.max`) instead; `nproc --all` is the host's
   count, and `$OMP_NUM_THREADS` is the cap. A container started before this keeps GNU's
   until it restarts.
+  Gradle builds get a third of the quota in workers (at least 2) and daemons stop after 30
+  minutes idle, through `GRADLE_OPTS` (`CLAUDE_GRADLE_WORKERS`, `CLAUDE_GRADLE_IDLE_MS`), so
+  several sessions' builds at once no longer throttle the whole container.
 - **A crashed session comes back.** If Claude exits abnormally (an abort, a segfault, an OOM
   kill, a failed thread create), its window relaunches it after a backoff, resuming the same
   conversation, up to 5 times in 15 minutes. `/exit`, Ctrl-C and `claude-sessions stop` still

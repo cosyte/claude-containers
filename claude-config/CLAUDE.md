@@ -33,6 +33,9 @@ Keep this short. Project-specific guidance belongs in the repo's own
   `mise reshim && claude-mise-shims` so it is on `PATH`. A version a repo pins that is
   not installed yet installs on first use; if a tool still reports the image's version
   instead of the pinned one, run `mise install` in that repo, then `claude-mise-shims`.
+- Gradle builds are capped at N workers (the "Gradle" line of this container's facts), and
+  daemons stop after 30 min idle. Both are in `GRADLE_OPTS`, which beats a repo's
+  `gradle.properties`; `--max-workers=N` on the command line beats it.
 - Need a different toolchain version or a CLI that isn't baked in? Use `mise`,
   rootless, no `sudo`: `mise use node@22` / `python@3.12` / `go@1.23` / `rust`
   for languages, or `mise use aqua:owner/tool` / `github:owner/tool` for prebuilt

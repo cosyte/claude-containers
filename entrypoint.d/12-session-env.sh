@@ -115,6 +115,43 @@ else
 fi
 unset _tpp
 
+# Gradle builds.
+# Every Gradle JVM sizes its workers to the whole CPU quota, so three sessions' builds at once
+# ask for three times the quota and the cgroup throttles the whole container in bursts (load 43
+# on 28 CPUs on 2026-10-21, a 2-minute gate taking 20+). Idle daemons sit for Gradle's 3 hours,
+# 1-5 GB each. GRADLE_OPTS holds whatever GRADLE_USER_HOME a repo picks; its -D beats a repo's
+# gradle.properties, and a command-line --max-workers or -D beats it. Appended to the
+# operator's GRADLE_OPTS, never over a -D of the same name there. Unset: a third of the quota
+# (at least 2) and 30 minutes; 0 or empty leaves Gradle's own default. claude-container-facts
+# repeats the worker formula. The effective values go to /etc/profile.d as well, for SSH logins.
+GRADLE_PROFILE_D="/etc/profile.d/claude-gradle.sh"
+_n="$(nproc 2>/dev/null)" || true
+[[ "$_n" =~ ^[0-9]+$ ]] || _n=0
+_gw="${CLAUDE_GRADLE_WORKERS-$(( _n / 3 > 2 ? _n / 3 : 2 ))}"
+_gi="${CLAUDE_GRADLE_IDLE_MS-1800000}"
+: > "$GRADLE_PROFILE_D.tmp" 2>/dev/null || true
+_glog=()
+for _p in "org.gradle.workers.max=$_gw" "org.gradle.daemon.idletimeout=$_gi"; do
+    _k="${_p%%=*}"
+    if [[ ! "${_p#*=}" =~ ^[1-9][0-9]*$ ]]; then
+        _glog+=("$_k Gradle's default")
+        continue
+    elif [[ " ${GRADLE_OPTS:-} " == *" -D$_k="* ]]; then
+        # The operator's own: SSH logins (a fresh environment) get that value, not ours.
+        _p="${GRADLE_OPTS##*-D"$_k"=}"; _p="$_k=${_p%% *}"
+        _glog+=("$_p (the operator's GRADLE_OPTS)")
+        [[ "${_p#*=}" =~ ^[0-9]+$ ]] || continue   # only a number goes into a shell file
+    else
+        export GRADLE_OPTS="${GRADLE_OPTS:+$GRADLE_OPTS }-D$_p"
+        _glog+=("$_p")
+    fi
+    printf 'case " ${GRADLE_OPTS-} " in *" -D%s="*) ;; *) export GRADLE_OPTS="${GRADLE_OPTS:+$GRADLE_OPTS }-D%s" ;; esac\n' \
+        "$_k" "$_p" >> "$GRADLE_PROFILE_D.tmp" 2>/dev/null || true
+done
+mv -f "$GRADLE_PROFILE_D.tmp" "$GRADLE_PROFILE_D" 2>/dev/null && chmod 644 "$GRADLE_PROFILE_D" 2>/dev/null || true
+log "Gradle              : ${_glog[0]}, ${_glog[1]} (CLAUDE_GRADLE_WORKERS, CLAUDE_GRADLE_IDLE_MS; 0 = Gradle's default)"
+unset _n _gw _gi _glog _p _k
+
 # Native Claude Code CLI tuning knobs (real upstream env vars the `claude`
 # binary reads directly, see .env.example). Nothing to translate here, just
 # surface non-default values in the boot log for operator visibility; a

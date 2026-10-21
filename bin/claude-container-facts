@@ -13,6 +13,8 @@
 #     `claude-gpu status --oneline` on a --gpu session, else "none"
 #   - the CPUs: the cgroup quota (bin/nproc, the shim; CLAUDE_FACTS_NPROC names it) and the
 #     per-process thread-pool cap §12 sets (OMP_NUM_THREADS, else CLAUDE_THREADS_PER_PROCESS)
+#   - Gradle: the worker cap and daemon idle timeout §12 puts in GRADLE_OPTS (it runs after
+#     this, so they are worked out here from CLAUDE_GRADLE_WORKERS and CLAUDE_GRADLE_IDLE_MS)
 #   - toolchains with versions: git gh python3 uv node pnpm mise ("none" when absent)
 #   - /cache and /scratch with free space (CLAUDE_FACTS_DIRS overrides the list), and TMPDIR
 #   - how to install more
@@ -74,6 +76,24 @@ cpus() {
     fi
 }
 
+gradle() {
+    local n w i
+    n="$(timeout "$PROBE_TIMEOUT" "${CLAUDE_FACTS_NPROC:-nproc}" 2>/dev/null)"
+    [[ "$n" =~ ^[0-9]+$ ]] || n=0
+    w="${CLAUDE_GRADLE_WORKERS-$(( n / 3 > 2 ? n / 3 : 2 ))}"   # §12's default
+    i="${CLAUDE_GRADLE_IDLE_MS-1800000}"
+    # An operator's own -D in GRADLE_OPTS is the one §12 keeps.
+    [[ " ${GRADLE_OPTS:-} " == *" -Dorg.gradle.workers.max="* ]] && { w="${GRADLE_OPTS##*-Dorg.gradle.workers.max=}"; w="${w%% *}"; }
+    [[ " ${GRADLE_OPTS:-} " == *" -Dorg.gradle.daemon.idletimeout="* ]] && { i="${GRADLE_OPTS##*-Dorg.gradle.daemon.idletimeout=}"; i="${i%% *}"; }
+    if [[ "$w" =~ ^[1-9][0-9]*$ ]]; then w="builds capped at $w workers"; else w="workers not capped"; fi
+    if [[ "$i" =~ ^[1-9][0-9]*$ ]]; then
+        if (( i % 60000 )); then i="daemons stop after $(( i / 1000 )) s idle"; else i="daemons stop after $(( i / 60000 )) min idle"; fi
+    else
+        i="daemons keep Gradle's 3 h idle timeout"
+    fi
+    echo "$w, $i (GRADLE_OPTS: beats a repo's gradle.properties; \`--max-workers=N\` on the command line beats it)"
+}
+
 toolchains() {
     local t v out=()
     for t in git gh python3 uv node pnpm mise; do
@@ -115,6 +135,7 @@ cat <<EOF
 - GPU: $(gpu)
 - Containers: $(containers)
 - CPUs: $(cpus)
+- Gradle: $(gradle)
 - Toolchains: $(toolchains)
 - Space: $(space); TMPDIR is \`${TMPDIR:-/tmp}\`
 - Install more: \`mise use <tool>@<version>\` first, then that language's own manager:

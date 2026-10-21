@@ -45,6 +45,8 @@ vars override `.env`. Full reference: `.env.example`.
 | `CLAUDE_SSH_HOST` | this host's name | Hostname shown in the connect line |
 | `CLAUDE_SSH_BIND` |: | Bind the SSH port to one host interface (e.g. `127.0.0.1`); empty = all |
 | `CLAUDE_CPU_LIMIT`/`CLAUDE_MEM_LIMIT` | `2`/`4g` | Per-container resource caps |
+| `CLAUDE_GRADLE_WORKERS` | a third of the CPU quota, at least 2 (9 at 28) | Gradle workers per build: the entrypoint appends `-Dorg.gradle.workers.max=N` to `GRADLE_OPTS` (so it holds for any `GRADLE_USER_HOME`), unless `GRADLE_OPTS` already names it. `0` or empty = Gradle's own default (the whole quota). The `-D` beats a repo's `gradle.properties`; `--max-workers=N` or `-D` on the command line beats it |
+| `CLAUDE_GRADLE_IDLE_MS` | `1800000` (30 min) | Gradle daemon idle timeout, appended the same way as `-Dorg.gradle.daemon.idletimeout`. `0` or empty = Gradle's 3 hours |
 | `CLAUDE_MEM_RESERVATION` | 75% of `CLAUDE_MEM_LIMIT` | Soft memory floor (`--memory-reservation`) |
 | `CLAUDE_PIDS_LIMIT` | `2048` | Fork-bomb guard (`--pids-limit`) |
 | `CLAUDE_SHM_SIZE` | `2g` | `/dev/shm` size |
