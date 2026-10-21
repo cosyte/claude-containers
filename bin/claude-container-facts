@@ -11,6 +11,8 @@
 #     (CLAUDE_FACTS_BROWSER_MCP=on|off; anything else reads as off)
 #   - the GPU: the boot probe's line (CLAUDE_FACTS_GPU_STATE, the file §2b wrote), else
 #     `claude-gpu status --oneline` on a --gpu session, else "none"
+#   - the CPUs: the cgroup quota (bin/nproc, the shim; CLAUDE_FACTS_NPROC names it) and the
+#     per-process thread-pool cap §12 sets (OMP_NUM_THREADS, else CLAUDE_THREADS_PER_PROCESS)
 #   - toolchains with versions: git gh python3 uv node pnpm mise ("none" when absent)
 #   - /cache and /scratch with free space (CLAUDE_FACTS_DIRS overrides the list), and TMPDIR
 #   - how to install more
@@ -59,6 +61,19 @@ gpu() {
     fi
 }
 
+cpus() {
+    local n q tpp
+    n="$(timeout "$PROBE_TIMEOUT" "${CLAUDE_FACTS_NPROC:-nproc}" 2>/dev/null)"
+    read -r q _ 2>/dev/null < "${CLAUDE_NPROC_CPU_MAX:-/sys/fs/cgroup/cpu.max}"
+    if [[ "${q:-}" =~ ^[0-9]+$ ]]; then q="cgroup cpu.max"; else q="no cgroup quota"; fi
+    tpp="${OMP_NUM_THREADS:-${CLAUDE_THREADS_PER_PROCESS:-4}}"
+    if [[ "$tpp" =~ ^[1-9][0-9]*$ ]]; then
+        echo "${n:-?} ($q); thread pools capped at $tpp per process (OMP_NUM_THREADS etc.; plain \`/usr/bin/nproc\` would show the cap)"
+    else
+        echo "${n:-?} ($q); thread pools not capped (CLAUDE_THREADS_PER_PROCESS=$tpp)"
+    fi
+}
+
 toolchains() {
     local t v out=()
     for t in git gh python3 uv node pnpm mise; do
@@ -99,6 +114,7 @@ cat <<EOF
 - chrome-devtools MCP: $mcp
 - GPU: $(gpu)
 - Containers: $(containers)
+- CPUs: $(cpus)
 - Toolchains: $(toolchains)
 - Space: $(space); TMPDIR is \`${TMPDIR:-/tmp}\`
 - Install more: \`mise use <tool>@<version>\` first, then that language's own manager:

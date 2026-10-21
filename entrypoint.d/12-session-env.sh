@@ -97,7 +97,8 @@ fi
 # Claude session that then needed a thread crashed. Cap each process's pools unless the
 # operator (or the image) already set a variable; CLAUDE_THREADS_PER_PROCESS=0 leaves them
 # alone. A repo's own .claude/settings.json env still overrides these for its session.
-# Written to /etc/profile.d as well, since an SSH login gets a fresh environment.
+# Written to /etc/profile.d as well, since an SSH login gets a fresh environment. GNU nproc
+# honours OMP_NUM_THREADS, so the image's nproc (bin/nproc) reads the cgroup quota instead.
 THREADS_PROFILE_D="/etc/profile.d/claude-threads.sh"
 _tpp="${CLAUDE_THREADS_PER_PROCESS:-4}"
 if [[ "$_tpp" =~ ^[1-9][0-9]*$ ]]; then
@@ -110,7 +111,7 @@ if [[ "$_tpp" =~ ^[1-9][0-9]*$ ]]; then
     log "Thread pools        : OMP/OpenBLAS/MKL/numexpr/vecLib ${OMP_NUM_THREADS} per process (CLAUDE_THREADS_PER_PROCESS; 0 = leave them alone)"
 else
     rm -f "$THREADS_PROFILE_D" 2>/dev/null || true
-    log "Thread pools        : NOT capped (CLAUDE_THREADS_PER_PROCESS=${_tpp}); libraries size them to the host's $(nproc) CPUs"
+    log "Thread pools        : NOT capped (CLAUDE_THREADS_PER_PROCESS=${_tpp}); libraries size them to the host's $(nproc --all) CPUs, not this container's $(nproc) (its cgroup quota)"
 fi
 unset _tpp
 

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# nproc: the CPUs this container may use, not the per-process thread-pool cap.
+#
+# GNU nproc honours OMP_NUM_THREADS and OMP_THREAD_LIMIT, and the entrypoint (§12) sets
+# OMP_NUM_THREADS to CLAUDE_THREADS_PER_PROCESS (4) for every session, so /usr/bin/nproc prints
+# 4 everywhere. Agents read that as the CPU count: on 2026-10-20 a session with a 28-CPU quota
+# reported "4 CPUs" and advised on it. This shim sits ahead of /usr/bin on PATH.
+#
+#   nproc               the cgroup quota (cpu.max: quota / period, rounded up), at most the CPUs
+#                       this process may run on (its affinity, the cpuset); with no quota
+#                       ("max", or no cpu.max), that affinity count. OMP_* is never read.
+#   nproc --all, --ignore=N, --version, any other argument: /usr/bin/nproc, unchanged
+#   nproc --help        why this exists, then /usr/bin/nproc's own help
+#
+# For tests: CLAUDE_NPROC_CPU_MAX (the cpu.max file) and CLAUDE_NPROC_REAL (the real nproc).
+set -uo pipefail
+CPU_MAX="${CLAUDE_NPROC_CPU_MAX:-/sys/fs/cgroup/cpu.max}"
+REAL="${CLAUDE_NPROC_REAL:-/usr/bin/nproc}"
+
+case "${1-}" in
+    "") ;;
+    --help)
+        cat <<'EOF'
+nproc (claude-containers shim): with no arguments, prints the CPUs this container may use,
+from its cgroup quota (/sys/fs/cgroup/cpu.max), capped by the CPUs it may run on. GNU nproc
+would print OMP_NUM_THREADS instead, and every session sets that to its per-process
+thread-pool cap (CLAUDE_THREADS_PER_PROCESS), not its CPU count. Any argument goes to
+/usr/bin/nproc unchanged: --all is the host's count. The thread cap is in $OMP_NUM_THREADS.
+
+EOF
+        exec "$REAL" --help ;;
+    *) exec "$REAL" "$@" ;;
+esac
+
+# The CPUs this process may run on: the real nproc with the OMP variables out of the way.
+avail="$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT "$REAL")" || exit
+n="$avail"
+if read -r quota period _ 2>/dev/null < "$CPU_MAX" \
+        && [[ "$quota" =~ ^[0-9]+$ && "$period" =~ ^[1-9][0-9]*$ ]] && (( quota > 0 )); then
+    n=$(( (quota + period - 1) / period ))
+    (( n > avail )) && n="$avail"
+fi
+echo "$n"

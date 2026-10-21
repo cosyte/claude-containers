@@ -112,7 +112,7 @@ rm:    ## make rm ARGS="myproj --purge"
 logs:  ## make logs ARGS="myproj"
 	@./bin/claude-logs $(ARGS)
 
-LINT_SH := entrypoint.sh $(wildcard entrypoint.d/*.sh) bin/_common.sh $(wildcard bin/claude-*) $(wildcard scripts/*.sh) $(wildcard test/*.sh) $(wildcard test/lib/*.sh) bash_profile
+LINT_SH := entrypoint.sh $(wildcard entrypoint.d/*.sh) bin/_common.sh bin/nproc $(wildcard bin/claude-*) $(wildcard scripts/*.sh) $(wildcard test/*.sh) $(wildcard test/lib/*.sh) bash_profile
 
 lint: ## bash -n, then shellcheck -S warning over the scripts, then hadolint the Dockerfile (pinned in mise.toml)
 	@fail=0; for f in $(LINT_SH); do \

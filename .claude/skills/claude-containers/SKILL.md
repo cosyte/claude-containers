@@ -300,7 +300,7 @@ starts); never `pkill -f remote-control` (kill the pane's tree); never `--contin
 shared dir; tmux `-F` prints a TAB as `_` (split on `|`); never pipe tmux into `grep -q`
 under pipefail (capture first). Size memory for 300-600 MiB per Claude process. Threads are
 pids: OpenMP/OpenBLAS size pools to the HOST (56 here), so the entrypoint caps them per process
-(`CLAUDE_THREADS_PER_PROCESS`, 4) and test runners must not size workers from the quota
+(`CLAUDE_THREADS_PER_PROCESS`, 4; the image's `nproc` prints the cgroup quota, not that cap) and test runners must not size workers from the quota
 unchecked (2026-09-30: two `pytest -n 28` runs held ~8,000 of 8,192 pids and crashed four
 sessions). A crashed Claude relaunches and resumes (`CLAUDE_SESSION_CRASH_RESTARTS`); 0/130/143
 are deliberate exits. The supervisor logs `WARNING: capacity:` near the pid/memory limit.

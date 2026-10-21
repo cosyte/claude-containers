@@ -699,6 +699,9 @@ COPY bin/claude-disk-gc /usr/local/bin/claude-disk-gc
 COPY bin/claude-deps-check /usr/local/bin/claude-deps-check
 # Writes the "This container" section of the session's managed memory at every start (§7c).
 COPY bin/claude-container-facts /usr/local/bin/claude-container-facts
+# nproc ahead of /usr/bin: the cgroup quota, since GNU nproc prints OMP_NUM_THREADS (the
+# per-process thread cap §12 sets) and agents read that as the CPU count.
+COPY --chmod=755 bin/nproc /usr/local/bin/nproc
 # This container's view of the shared mise shims, rebuilt at every start (§9b) and after a
 # `mise use`: see the PATH note in the ENV block.
 COPY bin/claude-mise-shims /usr/local/bin/claude-mise-shims
