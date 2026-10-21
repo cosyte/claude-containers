@@ -81,7 +81,7 @@ On the host (`bin/`), full flags in [docs/launcher-commands.md](docs/launcher-co
 | `claude-image-rebuild [--check]` | is the image behind `main`; without `--check`, pull and rebuild |
 | `claude-tui` | a menu over all of the above |
 
-Inside a container: `claude-sessions`, `claude-gpu`, `claude-kit status`,
+Inside a container: `claude-sessions`, `claude-gpu`, `claude-build-slot`, `claude-kit status`,
 `claude-enqueue`.
 
 ## Most-used variables
