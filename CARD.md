@@ -20,7 +20,8 @@ The Docker image, launchers and session tools that run isolated Claude Code sess
 
 ## Hand it work
 
-`goals task add claude-containers "<title>" --project <id> --body-file <spec>`
+`harness task add claude-containers "<title>" --body-file <spec>`, or a task for this repo in a
+harness plan.
 
 A spec for this repo must contain:
 
