@@ -41,6 +41,9 @@ agent_path="$(grep -E '^ +CLAUDE_AGENT_PATH=' "$DF" | head -n 1 | sed -E 's/^ +C
 [[ "$agent_path" == /state/mise-shims:*':${PATH}:/opt/claude-code/bin:/home/${CLAUDE_USER}/.local/bin' && "$agent_path" == *:/cache/cargo/bin:* ]] \
     && ok "CLAUDE_AGENT_PATH keeps the agent's PATH: the shims views, cargo/go bin, the system dirs, /opt/claude-code/bin, ~/.local/bin" \
     || bad "CLAUDE_AGENT_PATH is not the agent's full PATH (got '$agent_path')"
+[[ "$(grep -o '\.local/bin' <<<"$agent_path" | wc -l)" -eq 1 ]] \
+    && ok "CLAUDE_AGENT_PATH has ~/.local/bin once, at its end: nothing installed there shadows a system or mise tool" \
+    || bad "CLAUDE_AGENT_PATH must have ~/.local/bin once, at its end (got '$agent_path')"
 
 echo "== the entrypoint sets root's PATH first, and hands the agent its own =="
 EP="$REPO_ROOT/entrypoint.sh"

@@ -62,8 +62,8 @@ installed and are not updated by the hook.
 
 The start command runs with the agent user's privileges and environment, like `--dev-cmd`:
 it is part of the container's declaration, not something a session can set. It runs in a login
-shell on the sessions' PATH (the mise shims, `claude` and `~/.local/bin`, where `uv tool
-install` puts a CLI, on it), set again after the shell's
+shell on the sessions' PATH (with the mise shims, `claude` and `~/.local/bin`, where `uv tool
+install` puts a CLI), set again after the shell's
 profile, which would reset it to the system default. Keep it
 idempotent (it runs on every start) and quick to return (start a long-lived service in the
 background or in a tmux window of its own). References: Claude Code's
