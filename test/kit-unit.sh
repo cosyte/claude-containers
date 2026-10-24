@@ -218,15 +218,18 @@ check "its output is in the log, under a dated header, run from the workspace" \
     bash -c "grep -q '^== .*Z start command ==\$' '$LOG' && grep -qxF 'started in $TMPD/ws' '$LOG'"
 # A login shell's profile resets PATH (Debian's /etc/profile does), which dropped the sessions'
 # mise shims and /opt/claude-code/bin; the command still runs on the caller's PATH.
-mkdir -p "$TMPD/home" "$TMPD/shims"
+# A space and a ';' in it: the PATH is quoted into the command line, so it must come through whole.
+mkdir -p "$TMPD/home"
 printf 'PATH=/usr/bin:/bin\n' > "$TMPD/home/.bash_profile"
-KENV=(HOME="$TMPD/home" PATH="$TMPD/shims:$PATH" CLAUDE_KIT_START_LOG="$LOG"
+want="$TMPD/my shims;x:$PATH"
+KENV=(HOME="$TMPD/home" PATH="$want" CLAUDE_KIT_START_LOG="$LOG"
       CLAUDE_WORKSPACE="$TMPD/ws" MARK="$TMPD/path"
-      CLAUDE_EXTRA_START_CMD='echo "$PATH" > "$MARK.tmp" && mv "$MARK.tmp" "$MARK"')
+      CLAUDE_EXTRA_START_CMD='printf "%s" "$PATH" > "$MARK.tmp" && mv "$MARK.tmp" "$MARK"')
 kit start >/dev/null 2>&1
 for _ in $(seq 1 50); do [[ -e "$TMPD/path" ]] && break; sleep 0.1; done
-check "the command runs on the caller's PATH, though the login profile resets it" \
-    bash -c "[[ \"\$(cat '$TMPD/path')\" == '$TMPD/shims:'* ]]"
+[[ "$(cat "$TMPD/path" 2>/dev/null)" == "$want" ]] \
+    && ok "the command runs on the caller's whole PATH, though the login profile resets it" \
+    || bad "the command's PATH: '$(cat "$TMPD/path" 2>/dev/null)', not '$want'"
 out="$("$KIT" start 2>&1; echo "rc=$?")"
 check "no start command: nothing runs, exit 0" test "$out" = "rc=0"
 head -c 1200000 /dev/zero | tr '\0' 'x' > "$LOG"
