@@ -11,7 +11,8 @@
 #   - install: against a fake `claude` CLI: a marketplace is added once (url#ref), a plugin
 #     installed once at user scope, nothing repeated on the next boot, a moved pin warned
 #     about and left alone, a failing CLI is a warning and exit 0 (it never fails a boot)
-#   - start: the command runs once, detached, as given, with its output in the log
+#   - start: the command runs once, detached, as given, on the caller's PATH even though a login
+#     profile resets it, with its output in the log
 #   - the wiring: the entrypoint calls settings -> install (before sessions) -> start (after
 #     them), each non-fatal; the image bakes the script; the generator and the launcher emit
 #     and validate the values (--marketplace with #ref, --plugin, --start-cmd, --pids)
@@ -215,6 +216,17 @@ my_sid="$(ps -o sid= -p $$ | tr -d ' ')"
     && ok "the command runs in a session of its own (setsid): it does not die with the boot script" || bad "start command shares the caller's session ($my_sid): $(cat "$TMPD/mark.sid" 2>/dev/null)"
 check "its output is in the log, under a dated header, run from the workspace" \
     bash -c "grep -q '^== .*Z start command ==\$' '$LOG' && grep -qxF 'started in $TMPD/ws' '$LOG'"
+# A login shell's profile resets PATH (Debian's /etc/profile does), which dropped the sessions'
+# mise shims and /opt/claude-code/bin; the command still runs on the caller's PATH.
+mkdir -p "$TMPD/home" "$TMPD/shims"
+printf 'PATH=/usr/bin:/bin\n' > "$TMPD/home/.bash_profile"
+KENV=(HOME="$TMPD/home" PATH="$TMPD/shims:$PATH" CLAUDE_KIT_START_LOG="$LOG"
+      CLAUDE_WORKSPACE="$TMPD/ws" MARK="$TMPD/path"
+      CLAUDE_EXTRA_START_CMD='echo "$PATH" > "$MARK.tmp" && mv "$MARK.tmp" "$MARK"')
+kit start >/dev/null 2>&1
+for _ in $(seq 1 50); do [[ -e "$TMPD/path" ]] && break; sleep 0.1; done
+check "the command runs on the caller's PATH, though the login profile resets it" \
+    bash -c "[[ \"\$(cat '$TMPD/path')\" == '$TMPD/shims:'* ]]"
 out="$("$KIT" start 2>&1; echo "rc=$?")"
 check "no start command: nothing runs, exit 0" test "$out" = "rc=0"
 head -c 1200000 /dev/zero | tr '\0' 'x' > "$LOG"
