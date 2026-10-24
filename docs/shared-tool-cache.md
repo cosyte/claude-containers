@@ -57,7 +57,8 @@ claude-compose-gen --out stack.yml --no-cache …            # per-container ins
    the tools that resolve here, built by `claude-mise-shims`), so the agent resolves
    mise-installed tools with no shell activation; the shared `/cache/mise/shims` is not on it.
    It also prepends `/cache/cargo/bin` and `/cache/go/bin` (so `cargo install` / `go install`
-   CLIs resolve too).
+   CLIs resolve too), and ends with `~/.local/bin`, where `uv tool install` puts a CLI (in
+   the agent's home, so per container).
 
 3. **Interactive shells stay consistent (`~/.bashrc`).** An SSH login normally attaches to
    the tmux session the entrypoint started, which already carries the image ENV. A *fresh*

@@ -825,8 +825,10 @@ RUN set -eux; \
 #    with no shell activation. The shared /cache/mise/shims holds a shim for every tool any
 #    container installed, and one with no version set here answers `command -v` and then
 #    fails, so it is NOT on PATH: a tool with no version reads "command not found". Also
-#    prepend cargo/go bin so `cargo install` / `go install` CLIs resolve, and end with
-#    /opt/claude-code/bin (the claude-owned npm prefix). Interactive shells get full `mise activate` via
+#    prepend cargo/go bin so `cargo install` / `go install` CLIs resolve, then
+#    /opt/claude-code/bin (the claude-owned npm prefix), and end with ~/.local/bin so a CLI
+#    installed with `uv tool install` resolves by name; last, so nothing installed there
+#    shadows a system or mise tool. Interactive shells get full `mise activate` via
 #    ~/.bashrc (which re-exports these dirs, see the bashrc block). The dirs need
 #    not be populated yet: mise creates + fills them (as UID 1000) on first `mise use`.
 #    A `docker exec -u claude` starts with the system PATH; run a tool from these dirs
@@ -853,7 +855,7 @@ ENV CLAUDE_USER=${CLAUDE_USER} \
     npm_config_cache=/cache/npm \
     UV_CACHE_DIR=/cache/uv \
     PIP_CACHE_DIR=/cache/pip \
-    CLAUDE_AGENT_PATH=/state/mise-shims:/home/${CLAUDE_USER}/.local/share/claude-mise-shims:/cache/cargo/bin:/cache/go/bin:${PATH}:/opt/claude-code/bin
+    CLAUDE_AGENT_PATH=/state/mise-shims:/home/${CLAUDE_USER}/.local/share/claude-mise-shims:/cache/cargo/bin:/cache/go/bin:${PATH}:/opt/claude-code/bin:/home/${CLAUDE_USER}/.local/bin
 # Root's PATH (the first PATH note above), its own instruction so `${PATH}` in CLAUDE_AGENT_PATH
 # is plainly the base image's.
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
