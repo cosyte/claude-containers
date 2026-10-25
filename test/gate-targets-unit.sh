@@ -4,6 +4,7 @@
 #   - gate-full runs exactly what gate-quick runs
 #   - a failing lint stops gate-quick before the tests start
 #   - make help lists both; CI's ci job calls make gate-full; the docs name the targets
+#   - every workflow file parses as YAML (GitHub skips a workflow it can't parse: no check runs)
 # Never runs gate-quick or gate-full for real past lint: test/run-all.sh runs this suite, so a
 # real gate here would recurse. Only `make -n` and the lint-fails case are safe.
 # shellcheck source=test/lib/prelude.sh
@@ -94,6 +95,27 @@ test_docs_name_gate_targets() {
     [[ -z "$miss" ]] && ok "CLAUDE.md, CARD.md and README.md name the gate targets" || bad "docs miss:$miss"
 }
 
+# yaml_ok <file>: PyYAML if python3 has it, else yq (both on GitHub's ubuntu runners)
+yaml_ok() {
+    if python3 -c 'import yaml' 2>/dev/null; then
+        python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$1"
+    elif command -v yq >/dev/null; then
+        yq -e 'true' "$1" >/dev/null
+    else
+        echo "no YAML parser (python3 yaml or yq)"; return 1
+    fi
+}
+
+test_workflows_parse_as_yaml() {
+    local f out bads="" n=0
+    out="$(yaml_ok /dev/stdin 2>&1 <<<'- name: a: b')" && bads+=" (the parser accepts 'name: a: b')"
+    for f in "$REPO_ROOT"/.github/workflows/*.yml; do
+        n=$((n+1))
+        out="$(yaml_ok "$f" 2>&1)" || bads+=" $(basename "$f"): $out"
+    done
+    [[ $n -gt 0 && -z "$bads" ]] && ok "all $n workflow files parse as YAML" || bad "workflow YAML:$bads"
+}
+
 test_gate_quick_runs_lint_then_emdash_then_tests
 test_gate_full_runs_the_same_as_gate_quick
 test_gate_quick_stops_when_lint_fails
@@ -101,6 +123,7 @@ test_help_lists_gate_targets
 test_ci_job_calls_gate_full
 test_run_all_unit_accepts_gate_full_ci
 test_docs_name_gate_targets
+test_workflows_parse_as_yaml
 
 echo
 echo "gate-targets-unit: $PASS passed, $FAIL failed"

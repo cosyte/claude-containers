@@ -33,7 +33,7 @@ jobs:
       # One step, the same target the harness runs: make lint, then the em-dash scan of every
       # tracked file, then test/run-all.sh, which finds every suite by glob and runs them in
       # parallel, so there is no list here to drift. Its summary names each suite.
-      - name: gate (make gate-full: lint, no-emdash file scan, unit tests)
+      - name: "gate (make gate-full: lint, no-emdash file scan, unit tests)"
         run: make gate-full
 
   # Only a PR or a push has a change set to filter: a nightly or manual run tests main as a
