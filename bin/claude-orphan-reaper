@@ -71,8 +71,9 @@ max_age_seconds() {
 }
 
 # A bad regex makes [[ =~ ]] return 2, which would read as "not kept" for tmux and claude too.
+# The probe's own error is dropped: some bash versions print one, and the warning says it.
 if [[ -n "$EXTRA_KEEP" ]]; then
-    rc=0; bash -c '[[ x =~ $1 ]]' _ "$EXTRA_KEEP" || rc=$?
+    rc=0; bash -c '[[ x =~ $1 ]]' _ "$EXTRA_KEEP" 2>/dev/null || rc=$?
     if (( rc == 2 )); then
         say "WARNING: CLAUDE_ORPHAN_KEEP='$EXTRA_KEEP' is not an extended regex: ignored"
         EXTRA_KEEP=""
