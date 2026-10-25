@@ -5,8 +5,12 @@
 # to edit. They run concurrently, at most TEST_JOBS at a time (default: nproc), each writing to
 # its own log. Each log is printed whole, in the fixed order above, as soon as it and every
 # suite before it have finished, so output never interleaves. Then one summary line per suite
-# (PASS or FAIL, seconds) and the elapsed total. Exits nonzero if any suite failed; every suite
-# still runs.
+# (PASS, FAIL or TIMEOUT, seconds) and the elapsed total. Exits nonzero if any suite failed or
+# timed out; every suite still runs.
+#
+# TEST_SUITE_TIMEOUT (seconds, default 300) caps each suite: past it the suite gets TERM, then
+# KILL 10 s later, its log ends with "run-all: <suite> timed out after <N> s", and its summary
+# line reads TIMEOUT, so a hung suite fails fast and names itself.
 #
 # TEST_DIR points it at another directory of suites (test/run-all-unit.sh uses fakes).
 set -uo pipefail
@@ -14,6 +18,8 @@ set -uo pipefail
 DIR="${TEST_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 JOBS="${TEST_JOBS:-$(nproc 2>/dev/null || echo 2)}"
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || { echo "run-all: TEST_JOBS must be a positive integer, got '$JOBS'" >&2; exit 2; }
+TIMEOUT="${TEST_SUITE_TIMEOUT:-300}"
+[[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo "run-all: TEST_SUITE_TIMEOUT must be a positive integer, got '$TIMEOUT'" >&2; exit 2; }
 
 suites=()
 [[ -f "$DIR/unit.sh" ]] && suites+=("$DIR/unit.sh")
@@ -45,8 +51,14 @@ for i in "${!suites[@]}"; do
     done
     (
         s=$SECONDS
-        "${suites[$i]}" </dev/null >"$LOGS/$i.log" 2>&1
+        # timeout runs the suite in its own process group, out of reach of a Ctrl-C: pass a TERM on
+        timeout --kill-after=10 "$TIMEOUT" "${suites[$i]}" </dev/null >"$LOGS/$i.log" 2>&1 &
+        tpid=$!
+        trap 'kill -TERM "$tpid" 2>/dev/null; exit 143' TERM
+        wait "$tpid"
         rc=$?
+        (( rc == 124 || rc == 137 )) \
+            && echo "run-all: $(basename "${suites[$i]}") timed out after $TIMEOUT s" >>"$LOGS/$i.log"
         echo "$rc $((SECONDS - s))" >"$LOGS/$i.rc.tmp" && mv "$LOGS/$i.rc.tmp" "$LOGS/$i.rc"
     ) &
 done
@@ -68,6 +80,9 @@ for i in "${!suites[@]}"; do
         failed=$((failed + 1))
     elif (( rc == 0 )); then
         printf '  PASS  %-28s %4ss\n' "$(basename "${suites[$i]}")" "$secs"
+    elif (( rc == 124 || rc == 137 )); then
+        printf '  TIMEOUT %-26s %4ss  (over %s s)\n' "$(basename "${suites[$i]}")" "$secs" "$TIMEOUT"
+        failed=$((failed + 1))
     else
         printf '  FAIL  %-28s %4ss  (exit %s)\n' "$(basename "${suites[$i]}")" "$secs" "$rc"
         failed=$((failed + 1))
