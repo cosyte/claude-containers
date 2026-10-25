@@ -54,7 +54,7 @@ BUILD_ARGS = \
   --build-arg BUILD_DATE=$(BUILD_DATE)
 
 .DEFAULT_GOAL := help
-.PHONY: help builder build build-all build-browser push login accounts-login accounts-list launch list attach stop rm logs clean lint smoke
+.PHONY: help builder build build-all build-browser push login accounts-login accounts-list launch list attach stop rm logs clean lint gate-quick gate-full smoke
 
 help: ## Show this help
 	@# Grep only this Makefile, not all of MAKEFILE_LIST: `-include .env` adds
@@ -123,6 +123,13 @@ lint: ## bash -n, then shellcheck -S warning over the scripts, then hadolint the
 	done
 	shellcheck -S warning $(LINT_SH)
 	hadolint Dockerfile
+
+# The standard gates: the harness and CI's `ci` job run these. No Docker, so smoke stays CI-only.
+gate-quick: lint ## The per-change gate: lint, the em-dash scan of tracked files, every unit suite
+	bash scripts/check-no-emdash.sh
+	test/run-all.sh
+
+gate-full: gate-quick ## The full gate: the same as gate-quick (CI's ci job runs it)
 
 smoke: build ## Build the image, then run the automated smoke test against it
 	IMAGE=$(CLAUDE_IMAGE) test/smoke.sh

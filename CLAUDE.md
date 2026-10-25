@@ -8,12 +8,14 @@ what this repo offers to sibling repos.
 
 ## Gate
 
-From the repo root, in this order. The required checks `ci` and `no-emdash` run the same.
+From the repo root. The required checks `ci` and `no-emdash` run the same.
 
 1. `mise install`: once, for the `shellcheck` and `hadolint` that `make lint` needs (`mise.toml`).
-2. `npm run lint`: `make lint` (`bash -n`, `shellcheck -S warning`, `hadolint`), then
-   `scripts/check-no-emdash.sh` over every tracked file.
-3. `npm test`: `test/run-all.sh` runs every unit suite in parallel, no Docker.
+2. `make gate-quick`: per change. `make lint` (`bash -n`, `shellcheck -S warning`, `hadolint`),
+   then `scripts/check-no-emdash.sh` over every tracked file, then `test/run-all.sh`, which runs
+   every unit suite in parallel, no Docker. A failing step stops it.
+3. `make gate-full`: the same thing (CI's `ci` job runs it). `npm run lint` and `npm test` still
+   run the lint and test halves on their own.
 
 `no-emdash` also reads the PR title, body and commit messages: before pushing, pipe them through
 `bash scripts/check-no-emdash.sh --stdin "PR text"`.

@@ -1,8 +1,9 @@
 name: ci
 
-# Lint + unit tests on every PR. The image smoke test (test/smoke.sh) builds the image and
-# runs it, so on a PR it only runs when an image-affecting path changes; it runs on every
-# push to main, every nightly run and every manual (workflow_dispatch) run.
+# The gate (make gate-full: lint, em-dash scan, unit tests) on every PR. The image smoke test
+# (test/smoke.sh) builds the image and runs it, so on a PR it only runs when an image-affecting
+# path changes; it runs on every push to main, every nightly run and every manual
+# (workflow_dispatch) run.
 # No workflow-level paths filter: a skipped `smoke` job (job-level `if:`) reports success, so
 # it can be a required check without sitting Pending on a docs-only PR.
 on:
@@ -29,12 +30,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: install the linters at the mise.toml pins (shellcheck, hadolint)
         uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
-      - name: lint (bash -n, shellcheck -S warning, hadolint)
-        run: make lint
-      # One step: test/run-all.sh finds every suite by glob and runs them in parallel, so there
-      # is no list here to drift from package.json. Its summary names each suite.
-      - name: unit tests (npm test, every test/unit.sh and test/*-unit.sh in parallel)
-        run: npm test
+      # One step, the same target the harness runs: make lint, then the em-dash scan of every
+      # tracked file, then test/run-all.sh, which finds every suite by glob and runs them in
+      # parallel, so there is no list here to drift. Its summary names each suite.
+      - name: gate (make gate-full: lint, no-emdash file scan, unit tests)
+        run: make gate-full
 
   # Only a PR or a push has a change set to filter: a nightly or manual run tests main as a
   # whole, so the filter is skipped there and smoke runs.

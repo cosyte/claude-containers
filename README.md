@@ -134,7 +134,8 @@ and `.env.example`.
 ## Contributing, security, licence
 
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md), the gates are
-  `make lint` + `npm test` (both Docker-free, both what CI runs); the image smoke
+  `make gate-quick` per change and `make gate-full` (the same commands: lint, the
+  em-dash scan, the unit tests; Docker-free, what CI's `ci` job runs); the image smoke
   test runs in CI's `smoke` job when an image path changes and nightly (`make smoke`
   locally is optional).
 - **Security:** [SECURITY.md](SECURITY.md). Report privately, never in an issue.

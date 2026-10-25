@@ -49,7 +49,8 @@ Compat: <old containers / .env behaviour>
 - Claude Code version pin: `Makefile` `CLAUDE_CODE_VERSION` and its other declarations, kept equal
   by `test/cli-version-unit.sh`.
 - Baked global `CLAUDE.md` content contract: `test/pkg-install-guide-unit.sh`.
-- Gate: `npm run lint` + `npm test` (CI checks `ci`, `no-emdash`); `make smoke` locally.
+- Gate: `make gate-quick` per change, `make gate-full` the same (CI checks `ci`, `no-emdash`);
+  `make smoke` locally.
 
 ## Not here
 
