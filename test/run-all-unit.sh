@@ -5,6 +5,7 @@
 #   - logs print whole and in the fixed order, whatever order the suites finish in
 #   - the summary names every suite with PASS/FAIL and seconds, and the elapsed total
 #   - TEST_JOBS caps how many run at once; a bad TEST_JOBS refuses
+#   - TEST_SUITE_TIMEOUT (default 300) ends a hung suite as TIMEOUT, by name; a bad value refuses
 # shellcheck source=test/lib/prelude.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
@@ -48,7 +49,8 @@ order="$(grep -E '^(=== |out of)' <<<"$out" | head -4 | tr '\n' '|')"
 # --- a suite whose runner dies leaves no result: FAIL, never the previous suite's PASS -------
 D="$TMPD/dies"; mkdir "$D"
 fake "$D" a-unit.sh 0 0
-printf '#!/usr/bin/env bash\necho "out of b-unit.sh"\nkill -9 $PPID\n' >"$D/b-unit.sh"; chmod +x "$D/b-unit.sh"
+# its parent is timeout; the runner is timeout's parent
+printf '#!/usr/bin/env bash\necho "out of b-unit.sh"\nread -r _ _ _ runner _ </proc/$PPID/stat\nkill -9 "$runner"\n' >"$D/b-unit.sh"; chmod +x "$D/b-unit.sh"
 fake "$D" c-unit.sh 0 0
 out="$(TEST_DIR="$D" "$RUN" 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && grep -q '^  FAIL  b-unit.sh .*no result' <<<"$out" \
@@ -76,6 +78,39 @@ out="$(TEST_DIR="$D" TEST_JOBS=0 "$RUN" 2>&1)"; rc=$?
 mkdir "$TMPD/empty"
 TEST_DIR="$TMPD/empty" "$RUN" >/dev/null 2>&1; rc=$?
 [[ $rc -eq 2 ]] && ok "no suites at all refuses" || bad "empty dir rc=$rc"
+
+# --- TEST_SUITE_TIMEOUT --------------------------------------------------------------------
+test_sleeping_suite_times_out_by_name() {
+    local D="$TMPD/slow" out rc t0
+    mkdir "$D"
+    printf '#!/usr/bin/env bash\nsleep 60\n' >"$D/slow-unit.sh"; chmod +x "$D/slow-unit.sh"
+    fake "$D" ok-unit.sh 0 0
+    t0=$SECONDS
+    out="$(TEST_DIR="$D" TEST_SUITE_TIMEOUT=1 "$RUN" 2>&1)"; rc=$?
+    (( rc != 0 && SECONDS - t0 < 15 )) \
+        && grep -q '^run-all: slow-unit.sh timed out after 1 s$' <<<"$out" \
+        && grep -q '^  TIMEOUT slow-unit.sh' <<<"$out" \
+        && grep -q '^  PASS  ok-unit.sh' <<<"$out" \
+        && ok "test_sleeping_suite_times_out_by_name" || bad "test_sleeping_suite_times_out_by_name (rc=$rc, $((SECONDS - t0))s): $out"
+}
+test_bad_timeout_value_is_refused() {
+    local out rc
+    out="$(TEST_DIR="$TMPD/two" TEST_SUITE_TIMEOUT=abc "$RUN" 2>&1)"; rc=$?
+    [[ $rc -eq 2 ]] && grep -q "^run-all: TEST_SUITE_TIMEOUT must be a positive integer, got 'abc'$" <<<"$out" \
+        && ok "test_bad_timeout_value_is_refused" || bad "test_bad_timeout_value_is_refused (rc=$rc): $out"
+}
+test_default_timeout_is_300() {
+    local D="$TMPD/default" out rc
+    mkdir "$D"
+    fake "$D" sleep-unit.sh 0 2
+    out="$(unset TEST_SUITE_TIMEOUT; TEST_DIR="$D" "$RUN" 2>&1)"; rc=$?
+    [[ $rc -eq 0 ]] && grep -q '^  PASS  sleep-unit.sh' <<<"$out" \
+        && grep -qF 'TIMEOUT="${TEST_SUITE_TIMEOUT:-300}"' "$RUN" \
+        && ok "test_default_timeout_is_300" || bad "test_default_timeout_is_300 (rc=$rc): $out"
+}
+test_sleeping_suite_times_out_by_name
+test_bad_timeout_value_is_refused
+test_default_timeout_is_300
 
 # --- the real tree --------------------------------------------------------------------------
 noexec=""
