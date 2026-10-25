@@ -84,8 +84,11 @@ for s in "$REPO_ROOT"/test/unit.sh "$REPO_ROOT"/test/*-unit.sh; do
 done
 [[ -z "$noexec" ]] && ok "every real suite is executable" || bad "not executable, run-all would fail them:$noexec"
 grep -q '"test": "test/run-all.sh"' "$REPO_ROOT/package.json" && ok "npm test is test/run-all.sh" || bad "package.json test script"
-grep -q 'run: npm test' "$REPO_ROOT/.github/workflows/ci.yml" && ! grep -Eq 'run: test/[a-z-]*unit\.sh' "$REPO_ROOT/.github/workflows/ci.yml" \
-    && ok "CI runs npm test, no per-suite list" || bad "ci.yml still lists suites"
+CI="$REPO_ROOT/.github/workflows/ci.yml"
+grep -Eq '^[[:space:]]*run: make gate-full[[:space:]]*$' "$CI" \
+    && (cd "$REPO_ROOT" && make -n --no-print-directory gate-quick 2>/dev/null) | grep -qx 'test/run-all.sh' \
+    && ! grep -Eq 'run: test/[a-z-]*unit\.sh' "$CI" \
+    && ok "CI runs make gate-full, gate-quick runs test/run-all.sh, no per-suite list" || bad "ci.yml or the gate-quick target"
 
 echo
 echo "run-all-unit: $PASS passed, $FAIL failed"
