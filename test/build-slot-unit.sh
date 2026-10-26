@@ -6,6 +6,7 @@
 #   - a nested call runs at once (CLAUDE_BUILD_SLOT_HELD), no deadlock
 #   - slots=0 never waits; exit codes pass through; a daemon the build leaves does not keep it
 #   - status lists holders and waiters; bad settings and /cache refuse
+#   - a $DIR/slots file beats CLAUDE_BUILD_SLOTS and is re-read on every try
 #   - the image ships it, the docs name its variables
 # shellcheck source=test/lib/prelude.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
@@ -116,7 +117,72 @@ CLAUDE_BUILD_SLOT_DIR=/cache/x "$BS" -- true 2>/dev/null; [[ $? -eq 64 ]] && ok 
 "$BS" true 2>/dev/null; [[ $? -eq 64 ]] && ok "a command without -- refuses" || bad "no -- accepted"
 "$BS" --help | grep -q 'claude-build-slot status' && ok "--help prints the usage" || bad "--help"
 d="$(env -u CLAUDE_BUILD_SLOT_DIR CLAUDE_STATE_DIR="$TMPD/state" "$BS" status | head -1)"
-[[ "$d" == *"$TMPD/state/build-slots" ]] && ok "the default dir is under CLAUDE_STATE_DIR" || bad "default dir: $d"
+[[ "$d" == *"$TMPD/state/build-slots "* ]] && ok "the default dir is under CLAUDE_STATE_DIR" || bad "default dir: $d"
+
+# --- the slots file ---------------------------------------------------------------------------
+SF="$CLAUDE_BUILD_SLOT_DIR/slots"
+[[ ! -e "$SF" && "$("$BS" status | head -1)" == "build slots: 2 in $CLAUDE_BUILD_SLOT_DIR (from CLAUDE_BUILD_SLOTS)" ]] \
+    && [[ "$(env -u CLAUDE_BUILD_SLOTS "$BS" status | head -1)" == *" (default)" ]] \
+    && ok "test_no_file_keeps_env_behaviour: the cases above ran with no file; status names the source" \
+    || bad "test_no_file_keeps_env_behaviour: $("$BS" status | head -1)"
+
+printf '3\n' >"$SF"
+for x in s1 s2 s3; do CLAUDE_BUILD_SLOTS=1 "$BS" --name "$x" -- bash -c "$(gate "$x")" & PIDS+=($!); done
+if until_ 5 test -e "$TMPD/s1.started" -a -e "$TMPD/s2.started" -a -e "$TMPD/s3.started" \
+    && [[ -e "$CLAUDE_BUILD_SLOT_DIR/slot.0.info" && -e "$CLAUDE_BUILD_SLOT_DIR/slot.1.info" && -e "$CLAUDE_BUILD_SLOT_DIR/slot.2.info" ]] \
+    && [[ "$(CLAUDE_BUILD_SLOTS=1 "$BS" status | head -1)" == "build slots: 3 in $CLAUDE_BUILD_SLOT_DIR (from $SF)" ]]; then
+    ok "test_slots_file_beats_env: three hold slots 0 to 2 at once with CLAUDE_BUILD_SLOTS=1"
+else bad "test_slots_file_beats_env: $("$BS" status)"; fi
+
+# test_status_lists_holder_beyond_count: s1..s3 hold slots 0..2; free slot 1, keep 2
+h1="$(awk '{print $3}' "$CLAUDE_BUILD_SLOT_DIR/slot.1.info")"
+touch "$TMPD/$h1.go"
+until_ 5 test ! -e "$CLAUDE_BUILD_SLOT_DIR/slot.1.info"
+echo 1 >"$SF"
+st="$("$BS" status)"
+"$BS" -- touch "$TMPD/beyond.ran" 2>/dev/null & PIDS+=($!); pn=$!
+until_ 5 test -e "$CLAUDE_BUILD_SLOT_DIR/wait.$pn"; sleep 0.4
+if grep -Eq '^  slot 2  pid [0-9]+  since .*  \(beyond the count\)$' <<<"$st" && ! grep -q '^  slot 1 ' <<<"$st" \
+    && [[ ! -e "$TMPD/beyond.ran" && -e "$CLAUDE_BUILD_SLOT_DIR/wait.$pn" ]]; then
+    ok "test_status_lists_holder_beyond_count: slot 2 is beyond the count and a new call waits"
+else bad "test_status_lists_holder_beyond_count: $st"; fi
+touch "$TMPD/s1.go" "$TMPD/s2.go" "$TMPD/s3.go"; wait "$pn"
+for x in s1 s2 s3; do until_ 5 grep -qx "$x" "$TMPD/order"; done
+
+# test_waiter_sees_raised_count
+echo 1 >"$SF"
+"$BS" -- bash -c "$(gate r1)" & PIDS+=($!); pr1=$!
+until_ 5 test -e "$TMPD/r1.started"
+CLAUDE_BUILD_SLOT_POLL=0.5 "$BS" -- bash -c "echo \$CLAUDE_BUILD_SLOT_HELD >$TMPD/r2.slot" 2>/dev/null & PIDS+=($!); pr2=$!
+until_ 5 test -e "$CLAUDE_BUILD_SLOT_DIR/wait.$pr2"; sleep 0.3
+echo 2 >"$SF"
+if until_ 1 test -s "$TMPD/r2.slot" && [[ "$(cat "$TMPD/r2.slot")" == 1 ]] && kill -0 "$pr1" 2>/dev/null; then
+    ok "test_waiter_sees_raised_count: the waiter takes slot 1 within 2 polls"
+else bad "test_waiter_sees_raised_count: $(cat "$TMPD/r2.slot" 2>/dev/null)"; fi
+wait "$pr2"
+
+# test_waiter_runs_when_file_says_zero (r1 still holds slot 0)
+echo 1 >"$SF"
+"$BS" -- bash -c "echo \${CLAUDE_BUILD_SLOT_HELD:-unset} >$TMPD/z.held" 2>/dev/null & PIDS+=($!); pz=$!
+until_ 5 test -e "$CLAUDE_BUILD_SLOT_DIR/wait.$pz"; sleep 0.3
+echo 0 >"$SF"
+if until_ 2 test -s "$TMPD/z.held" && [[ "$(cat "$TMPD/z.held")" == unset && ! -e "$CLAUDE_BUILD_SLOT_DIR/wait.$pz" ]] \
+    && kill -0 "$pr1" 2>/dev/null; then
+    ok "test_waiter_runs_when_file_says_zero: it runs at once, no wait file, no CLAUDE_BUILD_SLOT_HELD"
+else bad "test_waiter_runs_when_file_says_zero: $(cat "$TMPD/z.held" 2>/dev/null) $(ls "$CLAUDE_BUILD_SLOT_DIR")"; fi
+wait "$pz"; touch "$TMPD/r1.go"; wait "$pr1"
+
+# test_bad_slots_file_falls_back
+printf 'abc' >"$SF"
+out="$(CLAUDE_BUILD_SLOTS=1 "$BS" -- bash -c 'echo "held=$CLAUDE_BUILD_SLOT_HELD"' 2>"$TMPD/bad.err")"; rc=$?
+if [[ $rc -eq 0 && "$out" == held=0 && "$(cat "$TMPD/bad.err")" == "claude-build-slot: ignoring $SF ('abc'): not a whole number" ]]; then
+    ok "test_bad_slots_file_falls_back: runs in slot 0 and names the bad file once"
+else bad "test_bad_slots_file_falls_back: rc=$rc out=$out err=$(cat "$TMPD/bad.err")"; fi
+for c in '' '-1' '3 4'; do
+    printf '%s' "$c" >"$SF"
+    out="$(CLAUDE_BUILD_SLOTS=1 "$BS" -- echo ran 2>/dev/null)" && [[ "$out" == ran ]] || bad "test_bad_slots_file_falls_back: '$c'"
+done
+rm -f "$SF"
 
 # --- surfaces ---------------------------------------------------------------------------------
 grep -q 'COPY bin/claude-build-slot /usr/local/bin/claude-build-slot' "$REPO_ROOT/Dockerfile" \
