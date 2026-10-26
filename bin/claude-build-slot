@@ -15,6 +15,7 @@
 # turn the set finishes sooner. Wrap a heavy build in it; a light command needs nothing.
 #
 #   CLAUDE_BUILD_SLOTS=2        slots; 0 never waits (runs at once)
+#   $CLAUDE_BUILD_SLOT_DIR/slots  one whole number that beats CLAUDE_BUILD_SLOTS, re-read on every try
 #   CLAUDE_BUILD_SLOT_DIR       the lock files; default $CLAUDE_STATE_DIR/build-slots (this
 #                               container's own volume), else $TMPDIR. Never /cache: other
 #                               containers share it, and the quota is this container's.
@@ -23,7 +24,6 @@
 #   CLAUDE_BUILD_SLOT_POLL=2    seconds between tries while waiting
 set -uo pipefail
 
-SLOTS="${CLAUDE_BUILD_SLOTS:-2}"
 POLL="${CLAUDE_BUILD_SLOT_POLL:-2}"
 DIR="${CLAUDE_BUILD_SLOT_DIR:-}"
 if [[ -z "$DIR" ]]; then
@@ -33,7 +33,7 @@ fi
 
 say()   { echo "claude-build-slot: $*" >&2; }
 die()   { say "$*"; exit 64; }
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 int()   { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 # dur <seconds>: 45s, 3m12s, 1h02m
@@ -44,9 +44,30 @@ dur() {
     else printf '%ds' "$s"; fi
 }
 
-int "$SLOTS" || die "CLAUDE_BUILD_SLOTS must be a whole number (0 turns waiting off), not '$SLOTS'"
 [[ "$POLL" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "CLAUDE_BUILD_SLOT_POLL must be seconds, not '$POLL'"
 case "$DIR/" in /cache/*) die "CLAUDE_BUILD_SLOT_DIR is under /cache, which other containers share: use \$CLAUDE_STATE_DIR or \$TMPDIR" ;; esac
+
+# count: set SLOTS and FROM (file, env or default). The $DIR/slots file beats CLAUDE_BUILD_SLOTS,
+# so a tool in the container can change the count without a relaunch; every call re-reads it on
+# each try, so all of them agree. A bad file is named once per call and ignored, never fatal.
+SLOTS="" FROM="" WARNED=""
+count() {
+    local f="$DIR/slots" c=""
+    if [[ -e "$f" ]]; then
+        read -r -d '' c 2>/dev/null <"$f"
+        c="${c#"${c%%[![:space:]]*}"}"; c="${c%"${c##*[![:space:]]}"}"
+        if int "$c"; then SLOTS=$((10#$c)) FROM=file; return 0; fi
+        [[ -n "$WARNED" ]] || say "ignoring $f ('${c:0:20}'): not a whole number"
+        WARNED=1
+    fi
+    if [[ -n "${CLAUDE_BUILD_SLOTS:-}" ]]; then
+        int "$CLAUDE_BUILD_SLOTS" || die "CLAUDE_BUILD_SLOTS must be a whole number (0 turns waiting off), not '$CLAUDE_BUILD_SLOTS'"
+        SLOTS=$((10#$CLAUDE_BUILD_SLOTS)) FROM=env
+    else
+        SLOTS=2 FROM=default
+    fi
+}
+count
 
 # holder <n>: true when slot n is held right now (its lock is taken), whatever its info says.
 holder() {
@@ -84,21 +105,39 @@ waiters() {
     done | LC_ALL=C sort -n -k1,1 -k2,2
 }
 
+# beyond: the n >= SLOTS of every slot.<n> file, in order (held ones were taken at a higher count).
+beyond() {
+    local f n
+    for f in "$DIR"/slot.*; do
+        n="${f##*/slot.}"
+        int "$n" && (( 10#$n >= SLOTS )) && echo "$((10#$n))"
+    done | sort -n
+}
+
 status() {
-    local n i since pid label now=$EPOCHSECONDS held=0
-    if (( SLOTS == 0 )); then echo "build slots: off (CLAUDE_BUILD_SLOTS=0, every build runs at once)"; return 0; fi
-    echo "build slots: $SLOTS in $DIR"
+    local n i since pid label now=$EPOCHSECONDS held=0 more
+    if (( SLOTS == 0 )); then
+        if [[ "$FROM" == file ]]; then echo "build slots: off (0 from $DIR/slots, every build runs at once)"
+        else echo "build slots: off (CLAUDE_BUILD_SLOTS=0, every build runs at once)"; fi
+        return 0
+    fi
+    case "$FROM" in
+        file) echo "build slots: $SLOTS in $DIR (from $DIR/slots)" ;;
+        env)  echo "build slots: $SLOTS in $DIR (from CLAUDE_BUILD_SLOTS)" ;;
+        *)    echo "build slots: $SLOTS in $DIR (default)" ;;
+    esac
     echo "holders:"
-    for (( n = 0; n < SLOTS; n++ )); do
+    for n in $(seq 0 $((SLOTS - 1))) $(beyond); do
         holder "$n" || continue
+        more=""; (( n >= SLOTS )) && more="  (beyond the count)"
         held=$((held + 1))
         i="$(info "$n")"
         if [[ -n "$i" ]]; then
             read -r pid since label <<<"$i"
             printf '  slot %d  pid %s  since %s (%s)  %s\n' "$n" "$pid" \
-                "$(date -d "@$since" +%H:%M:%S)" "$(dur $((now - since)))" "$label"
+                "$(date -d "@$since" +%H:%M:%S)" "$(dur $((now - since)))" "$label$more"
         else
-            printf '  slot %d  (held, no label yet)\n' "$n"
+            printf '  slot %d  (held, no label yet)%s\n' "$n" "$more"
         fi
     done
     (( held )) || echo "  none"
@@ -149,6 +188,7 @@ trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 
 try() {
     local n fd
+    count
     for (( n = 0; n < SLOTS; n++ )); do
         exec {fd}>>"$DIR/slot.$n" || continue
         if flock -n "$fd"; then FD=$fd SLOT=$n; return 0; fi
@@ -164,6 +204,9 @@ if [[ -n "$(waiters)" ]] || ! try; then
     done
     printf '%s %s %s\n' "$EPOCHREALTIME" "$(started $$)" "$LABEL" >"$WAITFILE"
     while :; do
+        # The count turned 0 while waiting: run at once, as a call that started at 0 does.
+        count
+        if (( SLOTS == 0 )); then rm -f "$WAITFILE"; exec "$@"; fi
         first="$(waiters | head -n1)"; first="${first#* }"; first="${first%% *}"
         if [[ -z "$first" || "$first" == "$$" ]] && try; then break; fi
         sleep "$POLL"
