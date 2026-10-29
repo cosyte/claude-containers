@@ -7,7 +7,7 @@
 
 # Throwaway stage: just re-exports the uv/uvx binaries (BuildKit forbids
 # variable expansion directly in COPY --from=, so it goes through a stage).
-FROM ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.6@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 AS uv
 
 # --- Base image ---------------------------------------------------------------
 #
