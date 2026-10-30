@@ -100,6 +100,11 @@
 #                       systempaths unconfined, /dev/net/tun and its own image-store
 #                       volume (claude-containers-<repo>); cap_drop ALL and
 #                       no-new-privileges stay. See docs/containers-in-sessions.md.
+#     --kvm <repos>     give these repos the host's KVM device (repeatable; comma/space
+#                       lists ok; each must be a repo in this stack), for a hardware-
+#                       accelerated emulator. The service gets the host's /dev/kvm and
+#                       CLAUDE_KVM=1; the entrypoint (§2e) adds the agent to the group
+#                       that owns the device. cap_drop ALL and no-new-privileges stay.
 #     --scratch-size <map>  the /scratch RAM tmpfs size for one --browser or --gpu
 #                       service, over the stack-wide CLAUDE_BROWSER_SCRATCH_TMPFS /
 #                       CLAUDE_GPU_SCRATCH_TMPFS. Format REPO=SIZE, e.g. render=8g
@@ -259,7 +264,7 @@ NETWORK=""
 BUILD_CONTEXT=""
 DORMANT_PROFILE="dormant"
 INCLUDE=() EXCLUDE=() REPO_ARGS=() ACTIVE_RAW=() PIDS_RAW=() CPU_RAW=() MEM_RAW=() GROUP_RAW=() MOUNTS_RAW=()
-SCRATCH_RAW=() XNET_RAW=()
+SCRATCH_RAW=() XNET_RAW=() KVM_RAW=()
 # Scenario flags (from --scenario, expanded above) go FIRST; the real CLI args
 # follow so they override scalars (--out/--org/--port-base) and append to
 # repeatables (--active/--expose/…). --scenario/--env-file were consumed in the
@@ -282,6 +287,7 @@ while [[ $# -gt 0 ]]; do
         --group)           GROUP_RAW+=("$2"); shift 2 ;;
         --mount)           MOUNTS_RAW+=("$2"); shift 2 ;;
         --scratch-size)    SCRATCH_RAW+=("$2"); shift 2 ;;
+        --kvm)             KVM_RAW+=("$2"); shift 2 ;;
         --extra-network)   XNET_RAW+=("$2"); shift 2 ;;
         --build-context)   BUILD_CONTEXT="$2"; shift 2 ;;
         --dormant-profile) DORMANT_PROFILE="$2"; shift 2 ;;
@@ -410,6 +416,15 @@ for tok in "${CONTAINERS_RAW[@]:-}"; do
         CONTAINERS["$(sanitize "$one")"]=1
     done
 done
+# KVM sessions: the host's /dev/kvm (CLAUDE_KVM=1, entrypoint §2e). Checked against the final
+# repo list below, like --gpu.
+declare -A KVM=()
+for tok in "${KVM_RAW[@]:-}"; do
+    [[ -n "$tok" ]] || continue
+    for one in $(echo "$tok" | tr ',' ' '); do
+        KVM["$(sanitize "$one")"]=1
+    done
+done
 # Per-service /scratch tmpfs size: svc -> SIZE. Only a --browser or --gpu service has a
 # tmpfs /scratch to size; that is checked against the final repo list below.
 declare -A SCRATCH=()
@@ -525,7 +540,7 @@ done
 
 # Extra environment per service: svc -> newline-separated KEY=VALUE. A key this generator
 # already writes has its own flag, and a second copy would be a duplicate YAML key.
-GENERATED_ENV_RE='^(CLAUDE_PROJECT_NAME|CLAUDE_MODEL|CLAUDE_PERMISSION_MODE|CLAUDE_MANAGED_POLICY|CLAUDE_SECRET_GUARD|CLAUDE_BROKER_GIT_KEY|CLAUDE_EGRESS_[A-Z_]+|CLAUDE_OTEL_[A-Z_]+|OTEL_[A-Z_]+|CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION|BASH_DEFAULT_TIMEOUT_MS|BASH_MAX_TIMEOUT_MS|API_TIMEOUT_MS|GIT_REPO_URL|GIT_REPOS|GIT_REPO_BRANCH|CLAUDE_DEV_CMD|CLAUDE_BROWSER|CLAUDE_GPU[A-Z_]*|CLAUDE_ACCOUNTS|TMPDIR|CLAUDE_STATE_DIR|CLAUDE_EXTRA_MARKETPLACES|CLAUDE_EXTRA_PLUGINS|CLAUDE_EXTRA_START_CMD|GIT_AUTHOR_[A-Z]+|GIT_COMMITTER_[A-Z]+|GH_TOKEN|CLAUDE_SESSIONS)$'
+GENERATED_ENV_RE='^(CLAUDE_PROJECT_NAME|CLAUDE_MODEL|CLAUDE_PERMISSION_MODE|CLAUDE_MANAGED_POLICY|CLAUDE_SECRET_GUARD|CLAUDE_BROKER_GIT_KEY|CLAUDE_EGRESS_[A-Z_]+|CLAUDE_OTEL_[A-Z_]+|OTEL_[A-Z_]+|CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION|BASH_DEFAULT_TIMEOUT_MS|BASH_MAX_TIMEOUT_MS|API_TIMEOUT_MS|GIT_REPO_URL|GIT_REPOS|GIT_REPO_BRANCH|CLAUDE_DEV_CMD|CLAUDE_BROWSER|CLAUDE_GPU[A-Z_]*|CLAUDE_KVM|CLAUDE_ACCOUNTS|TMPDIR|CLAUDE_STATE_DIR|CLAUDE_EXTRA_MARKETPLACES|CLAUDE_EXTRA_PLUGINS|CLAUDE_EXTRA_START_CMD|GIT_AUTHOR_[A-Z]+|GIT_COMMITTER_[A-Z]+|GH_TOKEN|CLAUDE_SESSIONS)$'
 declare -A ENVS=()
 for tok in "${ENV_RAW[@]:-}"; do
     [[ -n "$tok" ]] || continue
@@ -713,6 +728,10 @@ done
 for g in "${!CONTAINERS[@]}"; do
     [[ -n "${SEEN[$g]:-}" ]] \
         || die "--containers names '$g', which is not a repo in this stack (repos: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
+done
+for g in "${!KVM[@]}"; do
+    [[ -n "${SEEN[$g]:-}" ]] \
+        || die "--kvm names '$g', which is not a repo in this stack (repos: $(printf '%s\n' "${FINAL[@]}" | cut -f1 | tr '\n' ' '))"
 done
 for g in "${!SESSIONS[@]}" "${!ENVS[@]}"; do
     [[ -n "${SEEN[$g]:-}" ]] \
@@ -946,10 +965,13 @@ EOF
     # line, no extra capability, no privilege. The image ships only the vendor-neutral
     # glvnd side.
     # --containers adds /dev/net/tun for pasta, podman's rootless network.
-    if [[ -n "${GPU[$svc]:-}${CONTAINERS[$svc]:-}" ]]; then
+    # --kvm adds the host's /dev/kvm; §2e puts the agent in its group (no group_add: gosu and
+    # SSH logins take groups from the container's /etc/group).
+    if [[ -n "${GPU[$svc]:-}${CONTAINERS[$svc]:-}${KVM[$svc]:-}" ]]; then
         echo "    devices:"
         [[ -z "${GPU[$svc]:-}" ]] || echo "      - nvidia.com/gpu=all"
         [[ -z "${CONTAINERS[$svc]:-}" ]] || echo "      - $CONTAINERS_TUN_DEV"
+        [[ -z "${KVM[$svc]:-}" ]] || echo "      - /dev/kvm"
     fi
     # Escape hardening (mirrors claude-launch via _common.sh): no-new-privileges
     # always; drop ALL caps + re-add the minimal set unless CLAUDE_HARDEN_CAPS=0;
@@ -1028,6 +1050,7 @@ EOF
         done
     fi
     [[ -n "${CONTAINERS[$svc]:-}" ]] && echo '      CLAUDE_CONTAINERS: "1"'
+    [[ -n "${KVM[$svc]:-}" ]] && echo '      CLAUDE_KVM: "1"'
     # Account names come only from sanitize() (charset [a-z0-9._-]), so no
     # quoting hazard, unlike CLAUDE_DEV_CMD/MKTS/PLUGINS: no escaping needed.
     [[ -n "${ACCOUNTS[$svc]:-}" ]] && echo "      CLAUDE_ACCOUNTS: \"${ACCOUNTS[$svc]}\""
@@ -1226,6 +1249,7 @@ for r in "${FINAL[@]}"; do
     [[ -n "${BROWSER[$s]:-}" ]] && extra="$extra +browser"
     [[ -n "${GPU[$s]:-}" ]] && extra="$extra +gpu"
     [[ -n "${CONTAINERS[$s]:-}" ]] && extra="$extra +containers"
+    [[ -n "${KVM[$s]:-}" ]] && extra="$extra +kvm"
     [[ -v "MODEL[$s]" ]] && extra="$extra +model(${MODEL[$s]:-container default})"
     if [[ -n "${MKTS[$s]:-}" ]]; then
         n_mkts="$(awk -F, '{print NF}' <<<"${MKTS[$s]}")"
@@ -1273,6 +1297,12 @@ fi
 if (( ${#CONTAINERS[@]} > 0 )); then
     containers_problem="$(containers_host_problem)"
     [[ -z "$containers_problem" ]] || warn "--containers services will not run containers until this is fixed: $containers_problem"
+fi
+
+# --kvm needs the host's /dev/kvm at `up` time: say so now. CLAUDE_KVM_DEV is a test seam for
+# this check only; the service always gets /dev/kvm.
+if (( ${#KVM[@]} > 0 )) && [[ ! -c "${CLAUDE_KVM_DEV:-/dev/kvm}" ]]; then
+    warn "this host has no /dev/kvm: --kvm services will fail to start until it exists (KVM enabled in the BIOS, the kvm_intel or kvm_amd module loaded)"
 fi
 
 docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 || warn "auth volume '$AUTH_VOLUME' missing: run 'make login'"
