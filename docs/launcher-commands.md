@@ -77,6 +77,7 @@ claude-compose-gen --org ORG --out FILE [--active REPOS]... [--dormant-profile N
                    [--dev-cmd REPO=COMMAND]...
                    [--cpu REPO=N]... [--mem REPO=SIZE]... [--pids REPO=N]... [--model REPO=MODEL]...
                    [--browser REPOS]... [--gpu REPOS]... [--containers REPOS]...
+                   [--kvm REPOS]...
                    [--group NAME=REPO[:BRANCH],REPO[:BRANCH],...]...
                    [--marketplace REPO=NAME=URL]... [--plugin REPO=PLUGIN[,...]]...
                    [--include GLOB] [--exclude GLOB] [--forks] [--archived]
@@ -196,6 +197,12 @@ so a repo keeps its port whether active or dormant.
   `systempaths=unconfined`, `/dev/net/tun` and its own image-store volume
   (`claude-containers-<repo>`); `cap_drop: ALL` and `no-new-privileges` stay. What each option
   costs, and the host settings it needs: [containers-in-sessions.md](containers-in-sessions.md).
+- `--kvm REPOS`: the session can run a hardware-accelerated emulator as the agent. The service gets
+  the host's `/dev/kvm` and `CLAUDE_KVM=1`, and at boot the entrypoint (§2e) adds the agent to
+  the group that owns the device, never root's group 0. There is no `group_add`: `gosu` and SSH
+  logins take their groups from the container's `/etc/group`, which §2e writes. The host needs
+  `/dev/kvm` (VT-x or AMD-V enabled in the BIOS, the `kvm_intel` or `kvm_amd` module loaded); the
+  generator warns when it is missing. `cap_drop: ALL` and `no-new-privileges` are unchanged.
 - `--scratch-size REPO=SIZE`: the RAM `/scratch` size of one `--gpu` or `--browser` service, over
   `CLAUDE_GPU_SCRATCH_TMPFS` / `CLAUDE_BROWSER_SCRATCH_TMPFS`. Refused for any other service:
   its `/scratch` is a disk volume. See [temp-space.md](temp-space.md).
