@@ -6,11 +6,14 @@ Report privately: **do not open a public issue**.
 
 Use [GitHub private vulnerability reporting](https://github.com/cosyte/claude-containers/security/advisories/new)
 (Security → Report a vulnerability). If it is unavailable to you, email
-`hello@cosyte.com` with `SECURITY: claude-containers` in the subject.
+[security@cosyte.com](mailto:security@cosyte.com) with `SECURITY: claude-containers`
+in the subject.
 
 Please include the commit, your host OS and Docker/runc versions, the flags or
-env vars in play, and the smallest reproduction you can manage. A first
-response should come within a few working days.
+env vars in play, and the smallest reproduction you can manage. We aim to
+acknowledge a report within **5 business days**, and we keep you posted as we
+confirm and fix it. We credit you in the advisory unless you would rather stay
+anonymous.
 
 Report to the right party: a flaw in **Claude Code itself**, in the Claude
 mobile app, or in the Anthropic API belongs to
