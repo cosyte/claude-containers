@@ -1,50 +1,44 @@
 # Contributing to claude-containers
 
-Thanks for considering a contribution. This is a small, opinionated stack built
-for one job: running isolated, long-lived Claude Code sessions on a self-hosted
-box, so the most useful contributions are usually a reproduction, a host/runtime
-combination we have not tried, or a narrow fix.
+The org-wide guide applies here: https://github.com/cosyte/.github/blob/main/CONTRIBUTING.md. This
+file adds only what is specific to claude-containers. This repo is bash, `make`, and Docker, not a
+pnpm package, so where the two differ, follow this file: the org guide's pnpm pipeline and its
+changeset step do not apply here, and the gate below replaces them.
 
-Please read [SECURITY.md](./SECURITY.md) before filing anything
-security-shaped. Several plausible reports are documented non-goals, and
-vulnerabilities go through private reporting rather than an issue.
+The most useful contributions are a reproduction, a host and runtime combination we have not
+tried, or a narrow fix. Read [SECURITY.md](./SECURITY.md) before filing anything security-shaped:
+several plausible reports are documented non-goals, and vulnerabilities go through private
+reporting rather than an issue.
 
 ## Filing an issue
 
-1. Search existing issues first.
-2. Include your host OS, `docker version` and `runc --version`; a surprising
-   number of failures here are host-runtime issues.
-3. Include the exact `claude-launch` / `claude-compose-gen` command, the relevant
-   env vars, and `docker logs <container>` around the failure.
-4. **Redact before pasting.** Logs from this stack can contain tokens, OAuth
-   credentials, and repo contents. `GH_TOKEN`, `.credentials.json` and SSH key
-   material must never appear in an issue.
-5. Say which mode you were in: interactive, autopilot, queue, or SCM observer.
-   They fail differently.
+1. Include your host OS, `docker version`, and `runc --version`; a surprising number of failures
+   here are host-runtime issues.
+2. Include the exact `claude-launch` or `claude-compose-gen` command, the relevant env vars, and
+   `docker logs <container>` around the failure.
+3. **Redact before pasting.** Logs from this stack can contain tokens, OAuth credentials, and repo
+   contents. `GH_TOKEN`, `.credentials.json`, and SSH key material must never appear in an issue.
+4. Say which mode you were in: interactive, autopilot, queue, or SCM observer. They fail
+   differently.
 
-## Opening a PR
+## Opening a pull request
 
-1. Fork and branch from `main`.
-2. **Run the gates locally before pushing:**
+1. **Run the gates locally before pushing:**
    ```bash
    npm run lint   # make lint (bash -n, shellcheck -S warning, hadolint; `mise install` once) plus the no-em-dash check
    npm test       # every unit suite, in parallel (no Docker required); TEST_JOBS caps it
    ```
    Both must be clean. CI runs exactly these (the required checks `ci` and `no-emdash`).
-3. The image smoke test (`test/smoke.sh`) builds the image and exercises a real
-   container. CI's `smoke` job runs it when a PR touches the Dockerfile,
-   `entrypoint.sh`, `entrypoint.d/`, `sshd_config`, `bash_profile`, `bin/`, `claude-config/`,
-   `scripts/`, `containers/`, `test/smoke.sh`, the Makefile, `docker-compose.yml` or `ci.yml`,
-   on every push to `main`, on the nightly run (05:29 UTC) and on a manual run
-   (`gh workflow run ci.yml`); on any other PR it is skipped and reports success.
-   It takes about 3 minutes with a warm layer cache, 8 cold, and the parts that
-   need a GPU, routable IPv6 or a firewall report SKIP on a hosted runner.
+2. The image smoke test (`test/smoke.sh`) builds the image and exercises a real container. CI's
+   `smoke` job runs it when a PR touches the Dockerfile, `entrypoint.sh`, `entrypoint.d/`,
+   `sshd_config`, `bash_profile`, `bin/`, `claude-config/`, `scripts/`, `containers/`,
+   `test/smoke.sh`, the Makefile, `docker-compose.yml`, or `ci.yml`, on every push to `main`, on
+   the nightly run (05:29 UTC), and on a manual run (`gh workflow run ci.yml`); on any other PR it
+   is skipped and reports success. It takes about 3 minutes with a warm layer cache, 8 cold, and
+   the parts that need a GPU, routable IPv6, or a firewall report SKIP on a hosted runner.
    `make smoke` locally stays optional.
-4. Keep PRs focused: one logical change. Large reworks should start as an issue.
-5. Imperative commit subjects (`fix(entrypoint): …`, `feat(launch): …`) are
-   encouraged, not enforced. No Conventional-Commits tooling.
-6. Update the docs in the same PR. `README.md` is **load-bearing operator
-   documentation**: if a command in it fails on a fresh clone, that is a bug.
+3. Update the docs in the same PR. `README.md` is **load-bearing operator documentation**: if a
+   command in it fails on a fresh clone, that is a bug.
 
 ## What this repo is made of
 
@@ -58,7 +52,7 @@ task runner. Do not add a dependency without a strong reason.
   `shared_flag_row` there (parsed and validated once, the same message in both tools);
   `test/flags-unit.sh` holds them to it.
 - `entrypoint.sh` and `entrypoint.d/`: the container boot path, in numbered sections.
-  Most behaviour lives here. `entrypoint.sh` is the loader: it sources `entrypoint.d/NN[x]-name.sh`
+  Most behavior lives here. `entrypoint.sh` is the loader: it sources `entrypoint.d/NN[x]-name.sh`
   in number order (the files are listed in `docs/architecture.md`); the sections not yet
   moved there are still inline below its loop. `test/lib/entrypoint.sh` gives a suite a
   section's file (`ep_section 7a`), the whole boot path in run order (`ep_boot`), or the
@@ -89,7 +83,7 @@ task runner. Do not add a dependency without a strong reason.
   and note that bumping it changes which *model* the `opus` alias resolves to,
   not just which CLI ships.
 
-## Licence
+## License
 
 By contributing you agree your contribution is licensed under the
 [MIT License](./LICENSE) that covers this project.

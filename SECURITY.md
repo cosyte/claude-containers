@@ -5,14 +5,12 @@
 Report privately: **do not open a public issue**.
 
 Use [GitHub private vulnerability reporting](https://github.com/cosyte/claude-containers/security/advisories/new)
-(Security → Report a vulnerability), that is the channel that reaches the
-maintainer directly. If it is unavailable to you, email `hello@cosyte.com` with
-`SECURITY: claude-containers` in the subject.
+(Security → Report a vulnerability). If it is unavailable to you, email
+`hello@cosyte.com` with `SECURITY: claude-containers` in the subject.
 
-Please include the version or commit, your host OS and Docker/runc versions, the
-flags or env vars in play, and the smallest reproduction you can manage. A first
-response should come within a few working days; this is a small project, so
-please allow for that.
+Please include the commit, your host OS and Docker/runc versions, the flags or
+env vars in play, and the smallest reproduction you can manage. A first
+response should come within a few working days.
 
 Report to the right party: a flaw in **Claude Code itself**, in the Claude
 mobile app, or in the Anthropic API belongs to
@@ -85,7 +83,7 @@ What the stack does enforce, and therefore what a bypass of *is* a valid report:
   the ruleset already in force exactly as it is, and are logged. A report that a
   refresh failed to tighten an allowlist is therefore not a vulnerability;
   narrowing a live container's egress on a transient DNS failure would be the
-  worse outcome and is the behaviour being deliberately avoided.
+  worse outcome and is the behavior being deliberately avoided.
 - **Private state per container.** Each container gets its own
   `claude-state-<name>` volume at `/state` (`CLAUDE_STATE_DIR`) for an app's
   databases, keys and tokens; `claude-launch` and `claude-compose-gen` mount it

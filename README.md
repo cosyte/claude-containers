@@ -131,7 +131,7 @@ and `.env.example`.
 | The retired Sysbox broker | [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md) |
 | Containers in sessions (`--containers`: rootless podman, docker and compose) | [docs/containers-in-sessions.md](docs/containers-in-sessions.md) |
 
-## Contributing, security, licence
+## Contributing, security, license
 
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md), the gates are
   `make gate-quick` per change and `make gate-full` (the same commands: lint, the
@@ -141,7 +141,7 @@ and `.env.example`.
 - **Security:** [SECURITY.md](SECURITY.md). Report privately, never in an issue.
   Read the model first: **a container is not a security boundary against a fully
   weaponized agent**, and several plausible reports are documented non-goals.
-- **Licence:** [MIT](LICENSE).
+- **License:** [MIT](LICENSE).
 - **Support:** none promised. This is self-hosted infrastructure published as-is
   in case it is useful; issues are read, but there is no SLA and no release
   cadence: `main` is the version.

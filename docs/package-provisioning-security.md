@@ -111,7 +111,7 @@ scripts commits its own `/workspace/.npmrc` with `ignore-scripts=false`: a proje
 overrides the user one, an explicit per-repo opt-in.
 
 This directly targets §1 step 2: if the hook never runs, it never reads secrets or phones home. But it
-is **one layer, not a guarantee**: documented bypasses remain, so it is defence-in-depth *underneath*
+is **one layer, not a guarantee**: documented bypasses remain, so it is defense-in-depth *underneath*
 the egress and credential layers, never the thing that makes provisioning safe on its own:⁸
 - **Native builds.** A `binding.gyp` / node-gyp native compile still runs: `ignore-scripts` governs
   lifecycle scripts, not gyp builds.

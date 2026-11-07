@@ -107,7 +107,7 @@
   `Deploy key readable :` line saying in plain language whether the agent user
   can read the key right now. **Upgrading:** an existing `.env` copied from an
   older `.env.example` carries a literal `CLAUDE_BROKER_GIT_KEY=0` line, which is
-  read as the explicit opt-out and keeps the old readable-file behaviour: delete
+  read as the explicit opt-out and keeps the old readable-file behavior: delete
   that line to pick up brokering. The shared **`claude-auth` credential master is always**
   locked to `root` (`/auth`, mode 700), so the agent can't reach the token that
   backs the rest of the fleet; it only ever holds its **own** per-container
@@ -160,7 +160,7 @@
   or `0`. `strict` is contained only as well as the ruleset underneath it: on a
   host or image where the IPv6 pass cannot run, the boot log still says `IPv6
   UNRESTRICTED` and the container still starts, because the IPv4 lockdown DID
-  apply. A value that is neither an off value nor a recognised on/`strict`
+  apply. A value that is neither an off value nor a recognized on/`strict`
   spelling boots with egress unrestricted and is reported in the boot log with the
   posture it produced, so a mistyped `strict` cannot read as an intentional "off".
 - **Package-registry egress (opt-in, additive).** `CLAUDE_EGRESS_PACKAGES=1`

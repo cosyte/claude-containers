@@ -6,20 +6,13 @@ library: bash, `make` and Docker, no runtime dependencies (`package.json` is onl
 `README.md` is the operator's documentation, `docs/` holds the long sections, and `CARD.md` says
 what this repo offers to sibling repos.
 
+@AGENTS.md
+
 ## Gate
 
-From the repo root. The required checks `ci` and `no-emdash` run the same.
-
-1. `mise install`: once, for the `shellcheck` and `hadolint` that `make lint` needs (`mise.toml`).
-2. `make gate-quick`: per change. `make lint` (`bash -n`, `shellcheck -S warning`, `hadolint`),
-   then `scripts/check-no-emdash.sh` over every tracked file, then `test/run-all.sh`, which runs
-   every unit suite in parallel, no Docker. A failing step stops it.
-3. `make gate-full`: the same thing (CI's `ci` job runs it). `npm run lint` and `npm test` still
-   run the lint and test halves on their own.
-
-`no-emdash` also reads the PR title, body and commit messages: before pushing, pipe them through
-`bash scripts/check-no-emdash.sh --stdin "PR text"`. A change to `.github/workflows/` also passes
-`actionlint`, which `actionlint.yml` runs in CI (not required).
+AGENTS.md holds the gate: `make gate-quick` per change, from the repo root, after `mise install`
+once. `make gate-full` is the same thing, and CI's `ci` job runs it; `npm run lint` and `npm test`
+run the lint and test halves on their own. `actionlint.yml` runs `actionlint` in CI (not required).
 
 CI's `smoke` job builds the image and runs `test/smoke.sh` when a PR touches an image path (the
 list is in `.github/workflows/ci.yml`). Sessions have no Docker, so it runs only in CI: on such a

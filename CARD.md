@@ -27,7 +27,7 @@ spec below.
 A spec for this repo must contain:
 
 - **Why**: the problem, in one or two lines.
-- **Change**: the exact behaviour, flag, variable or file, with its name and default.
+- **Change**: the exact behavior, flag, variable, or file, with its name and default.
 - **Surfaces**: which of image, `entrypoint.sh`, `bin/<tool>`, `claude-config/`, docs it touches.
 - **Done when**: the observable result, and the unit suite (`test/<area>-unit.sh`) that proves it.
 - **Compat**: what happens to existing containers and `.env` files (a removed flag must refuse).
@@ -37,7 +37,7 @@ Why: <problem>
 Change: <flag/variable/file, name, default>
 Surfaces: <image | entrypoint | bin/... | claude-config | docs>
 Done when: <observable result>; test/<area>-unit.sh covers it
-Compat: <old containers / .env behaviour>
+Compat: <old containers / .env behavior>
 ```
 
 ## Interfaces

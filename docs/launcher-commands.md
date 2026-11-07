@@ -38,7 +38,7 @@ image's provenance labels: `behind` is the commits on `origin/main` past the ima
 revision, `null` when the image has no revision label (an older build) or the commit is not
 in the checkout. Exit 2 when the image does not exist. The default refuses a checkout that
 has changes or is not on `main` (exit 3), runs `git pull --ff-only`, then `make build`, or
-`make build-browser` when the image is labelled `claude.browser=1`, for the same tag
+`make build-browser` when the image is labeled `claude.browser=1`, for the same tag
 (`--image`, default the Makefile's `CLAUDE_IMAGE`), and prints the old and new revision and
 CLI version. It only builds: it never recreates or touches a container and never cleans up
 images, so running sessions keep the old image until something recreates them. Run it when
