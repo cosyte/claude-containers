@@ -10,12 +10,17 @@
 # enforces that those declarations agree. Bumping it is a deliberate act with a
 # model-selection consequence: from CLI 2.1.219 the `opus` alias resolves to
 # Opus 5, so the pin decides which model every session runs. Bump it by hand.
+#
+# Each ecosystem comes as one grouped pull request a week, and the cooldown waits a
+# day after a release before proposing it (the org's Dependabot standard).
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 1
     groups:
       actions:
         patterns: ['*']
@@ -31,6 +36,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 1
+    groups:
+      docker:
+        patterns: ['*']
     ignore:
       - dependency-name: node
         update-types: ['version-update:semver-major']

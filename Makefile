@@ -124,7 +124,7 @@ lint: ## bash -n, then shellcheck -S warning over the scripts, then hadolint the
 	shellcheck -S warning $(LINT_SH)
 	hadolint Dockerfile
 
-# The standard gates: the harness and CI's `ci` job run these. No Docker, so smoke stays CI-only.
+# The standard gates: CI's `ci` job runs these, and so does a session before it pushes. No Docker, so smoke stays CI-only.
 gate-quick: lint ## The per-change gate: lint, the em-dash scan of tracked files, every unit suite
 	bash scripts/check-no-emdash.sh
 	test/run-all.sh

@@ -18,7 +18,8 @@ From the repo root. The required checks `ci` and `no-emdash` run the same.
    run the lint and test halves on their own.
 
 `no-emdash` also reads the PR title, body and commit messages: before pushing, pipe them through
-`bash scripts/check-no-emdash.sh --stdin "PR text"`.
+`bash scripts/check-no-emdash.sh --stdin "PR text"`. A change to `.github/workflows/` also passes
+`actionlint`, which `actionlint.yml` runs in CI (not required).
 
 CI's `smoke` job builds the image and runs `test/smoke.sh` when a PR touches an image path (the
 list is in `.github/workflows/ci.yml`). Sessions have no Docker, so it runs only in CI: on such a
