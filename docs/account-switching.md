@@ -27,7 +27,7 @@ The old account cannot come back by accident. A session still running on it refr
 account's token into the container's own credential file; until every session has moved, the
 sync never copies that file up to the shared volume. And a container that was stopped across the
 change (a dormant service) replaces its own stale credential at boot, before any session starts.
-`CLAUDE_AUTH_FOLLOW=0` turns the whole behaviour off (a new login then needs a container
+`CLAUDE_AUTH_FOLLOW=0` turns the whole behavior off (a new login then needs a container
 restart, as before). The health line shows `moving to a new account (N sessions to go)` while a
 switch is in progress.
 

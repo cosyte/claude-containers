@@ -11,7 +11,7 @@ So every container gets a **disk-backed `claude-scratch-<name>` volume mounted a
 `/scratch`, and `TMPDIR` points at it**. Temp writes land on disk, where the space actually
 is; `/tmp` stays a small, fast tmpfs for what a tmpfs is good at. Every process inherits
 `TMPDIR` from the entrypoint, and `bash_profile` re-exports it, so an SSH login gets
-the same behaviour as the agent (sshd builds a fresh environment and would otherwise fall
+the same behavior as the agent (sshd builds a fresh environment and would otherwise fall
 back to `/tmp`).
 
 It is scratch, not state: the entrypoint **clears it on every boot**. A volume: unlike a

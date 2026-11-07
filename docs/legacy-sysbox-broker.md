@@ -145,7 +145,7 @@ hardening, prototyped in CI), see [containers-in-sessions.md](containers-in-sess
 - **Coordinator ⇄ worker was one-way with the broker, two-way with subagents.**
   Mid-flight guidance was impossible over the broker spool; native with
   `SendMessage` on a subagent's `agentId`.
-- **The workload isn't a fleet.** Solo founder + one controller + mobile
+- **The workload isn't a fleet.** One owner, one controller, and mobile
   Remote Control ≠ the multi-tenant unattended-fleet scale the broker was
   designed for.
 
