@@ -20,8 +20,9 @@ The Docker image, launchers and session tools that run isolated Claude Code sess
 
 ## Hand it work
 
-`harness task add claude-containers "<title>" --body-file <spec>`, or a task for this repo in a
-harness plan.
+Make the change directly: a branch, a pull request against `main`, and a squash merge once the
+required checks pass (`ci` and `no-emdash`, and `smoke` when it runs). The pull request body is the
+spec below.
 
 A spec for this repo must contain:
 
@@ -54,8 +55,8 @@ Compat: <old containers / .env behaviour>
 
 ## Not here
 
-- Goal programs, task queues and the planning harness: an outside kit, installed through the
-  kit hook. Ask that repo.
+- Goal programs, task queues and planning tools: an outside kit, installed through the kit hook.
+  Ask that kit's repo.
 - Project code, deployment scenario `.conf` files and stack `.env` files: the owner's deployment
   repos, never this public one.
 - Reusable library code: the shared-code repo, not this one (bash + make + Docker, no deps).
