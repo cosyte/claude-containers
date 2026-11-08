@@ -12,7 +12,7 @@ what this repo offers to sibling repos.
 
 AGENTS.md holds the gate: `make gate-quick` per change, from the repo root, after `mise install`
 once. `make gate-full` is the same thing, and CI's `ci` job runs it; `npm run lint` and `npm test`
-run the lint and test halves on their own. In CI, not required: `actionlint.yml` runs `actionlint`,
+run the lint and test halves on their own. Also required in CI: `actionlint.yml` runs `actionlint`,
 and `pr-title.yml` checks the PR title is Conventional Commits (a squash merge makes it the commit).
 
 CI's `smoke` job builds the image and runs `test/smoke.sh` when a PR touches an image path (the
