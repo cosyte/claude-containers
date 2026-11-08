@@ -11,9 +11,11 @@ on:
     # `edited` is load-bearing: a title changed after the last push is the title that lands.
     types: [opened, synchronize, reopened, edited]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+# No concurrency group. A push and a title edit can arrive together (Dependabot
+# does both), and a run a group cancels, even a queued one under
+# `cancel-in-progress: false`, can count as a failed check and block the merge
+# until someone re-runs it. Each run takes seconds, so every one finishes and the
+# newest result stands.
 
 permissions:
   contents: read
