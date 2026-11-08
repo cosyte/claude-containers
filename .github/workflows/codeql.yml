@@ -51,6 +51,6 @@ jobs:
     # deliver every later change made in cosyte/.github on that repository's clock
     # rather than this one's, reviewed by nobody here. A published reference names
     # one commit and never moves.
-    uses: cosyte/.github/.github/workflows/codeql.yml@f29e9cc83cac4bd5fc73a68cefa22f136cd39608 # workflows-2026-09-04-f29e9cc83cac
+    uses: cosyte/.github/.github/workflows/codeql.yml@workflows-2026-11-07-498c7c13c886
     with:
       languages: '["actions"]'

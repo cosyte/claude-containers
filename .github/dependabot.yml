@@ -12,7 +12,9 @@
 # Opus 5, so the pin decides which model every session runs. Bump it by hand.
 #
 # Each ecosystem comes as one grouped pull request a week, and the cooldown waits a
-# day after a release before proposing it (the org's Dependabot standard).
+# day after a release before proposing it (the org's Dependabot standard). Commit
+# messages take the chore prefix and the dependency scope, so a Dependabot title is
+# a Conventional Commits title and passes pr-title.yml.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -24,8 +26,14 @@ updates:
     groups:
       actions:
         patterns: ['*']
+    # From v1.75.0 reviewdog/action-actionlint installs actionlint from a fork with
+    # `curl | bash`. actionlint.yml runs rhysd/actionlint's own release, checked by
+    # SHA-256, so this action is never proposed here.
+    ignore:
+      - dependency-name: reviewdog/action-actionlint
     commit-message:
-      prefix: ci
+      prefix: chore
+      include: scope
 
   # The Dockerfile's two FROM lines, both a literal tag pinned by digest
   # (node:24-trixie-slim@sha256:..., ghcr.io/astral-sh/uv:X.Y.Z@sha256:...):
@@ -45,4 +53,5 @@ updates:
       - dependency-name: node
         update-types: ['version-update:semver-major']
     commit-message:
-      prefix: build
+      prefix: chore
+      include: scope
