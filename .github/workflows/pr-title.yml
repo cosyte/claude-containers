@@ -1,0 +1,25 @@
+name: PR title
+
+# The pull request title must follow Conventional Commits: squash-merged, it is the
+# commit that lands on main. The rule lives in the shared workflow in cosyte/.github,
+# called at the published reference every Cosyte repository uses, never @main. Its
+# one context is `pr-title / conventional-commits`.
+
+on:
+  pull_request:
+    branches: [main]
+    # `edited` is load-bearing: a title changed after the last push is the title that lands.
+    types: [opened, synchronize, reopened, edited]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr-title:
+    permissions:
+      contents: read
+    uses: cosyte/.github/.github/workflows/pr-title.yml@workflows-2026-11-07-498c7c13c886

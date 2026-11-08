@@ -40,4 +40,4 @@ jobs:
       id-token: write # publish results to the OpenSSF API (for the badge)
     # A PUBLISHED REFERENCE, never @main. See the same note in codeql.yml: a
     # reference at the default branch moves under this repo on someone else's clock.
-    uses: cosyte/.github/.github/workflows/scorecard.yml@f29e9cc83cac4bd5fc73a68cefa22f136cd39608 # workflows-2026-09-04-f29e9cc83cac
+    uses: cosyte/.github/.github/workflows/scorecard.yml@workflows-2026-11-07-498c7c13c886
