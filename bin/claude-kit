@@ -24,7 +24,7 @@
 #       installer or a supervisor it ships), on the sessions' PATH. Its output goes to
 #       ~/.claude/kit-start.log.
 #
-# Commands (the entrypoint runs the first three, in this order):
+# Commands (the entrypoint runs the first four, in this order; warm only in umbrella mode):
 #   claude-kit settings FILE   merge the marketplaces and plugins into settings.json FILE.
 #                              A declared marketplace replaces the entry of that name (the
 #                              container's declaration is what the operator last said: adding,
@@ -40,6 +40,16 @@
 #                              own add drops the key). Bounded by CLAUDE_KIT_TIMEOUT per CLI
 #                              call (default 120 s). A failure is a warning: it never fails a
 #                              boot.
+#   claude-kit warm DIR        as the agent user, before any session starts: when DIR's project
+#                              settings (.claude/settings.json) declare extraKnownMarketplaces
+#                              that the config's plugins/known_marketplaces.json does not list
+#                              yet, make one throwaway start in DIR, which registers them. On a
+#                              fresh config the first session in DIR lists those marketplaces'
+#                              plugins without loading their agents, skills or hooks, and the
+#                              next start loads them: this start is that first one. It sends no
+#                              prompt (no model call, no login needed), runs no hook and no MCP
+#                              server, and keeps no transcript. Bounded by CLAUDE_KIT_TIMEOUT. A
+#                              failure is a warning: it never fails a boot.
 #   claude-kit start           run CLAUDE_EXTRA_START_CMD in the background.
 #   claude-kit check           validate the three values and print what they declare.
 #   claude-kit status          what is declared, known to the CLI and installed.
@@ -204,6 +214,81 @@ cmd_install() {
     return 0
 }
 
+# --- warm ---------------------------------------------------------------------------------------
+# The config's plugins/known_marketplaces.json lists the marketplaces the CLI has registered. A
+# marketplace that only a workspace's project settings declare is registered by the first start
+# in that workspace, and that first session lists its plugins without their agents, skills or
+# hooks; every later start, or /reload-plugins, loads them (Claude Code 2.1.319, checked). The
+# cheapest start that registers them is print mode with stream-json input and nothing on stdin:
+# it sends no prompt, so there is no model call and no login is needed. `plugin list`,
+# `plugin marketplace list` and `plugin marketplace update` do not read the project settings, so
+# they register nothing. --settings turns every hook off (a SessionStart or SessionEnd hook must
+# not see a session that is not one), --strict-mcp-config starts no MCP server, and
+# --no-session-persistence keeps no transcript.
+WARM_ARGS=(-p --input-format stream-json --output-format stream-json --verbose
+           --no-session-persistence --strict-mcp-config --settings '{"disableAllHooks":true}')
+
+# The names in a settings file's extraKnownMarketplaces, one per line: "ok NAME" for a marketplace
+# name, "bad NAME" (control characters shown as ?) for any other key. Fails when the file is not
+# JSON or the key is not an object.
+declared_marketplaces() {  # declared_marketplaces <settings file>
+    jq -r --arg re "$NAME_RE" '
+        (.extraKnownMarketplaces // {})
+        | if type == "object" then keys[] else error("extraKnownMarketplaces is not an object") end
+        | if test($re) then "ok " + . else "bad " + gsub("[[:cntrl:]]"; "?") end' "$1" 2>/dev/null
+}
+# Those of the names given that the config has not registered, one per line.
+unregistered() {  # unregistered <name>...
+    local known n
+    known="$(jq -r 'if type == "object" then keys[] else empty end' "$CONFIG_DIR/plugins/known_marketplaces.json" 2>/dev/null)" || known=""
+    for n in "$@"; do grep -qxF -- "$n" <<<"$known" || printf '%s\n' "$n"; done
+}
+
+cmd_warm() {
+    local dir="${1:-}" file lines line out rc=0
+    local -a names=() missing=() left=()
+    [[ -n "$dir" ]] || die "usage: claude-kit warm DIR"
+    file="$dir/.claude/settings.json"
+    [[ -f "$file" ]] || return 0
+    if ! lines="$(declared_marketplaces "$file")"; then
+        warn "warm: $file cannot be read as settings with an object of extraKnownMarketplaces: no warm-up"
+        return 0
+    fi
+    while IFS= read -r line; do
+        case "$line" in
+            "ok "*)  names+=("${line#ok }") ;;
+            "bad "*) warn "warm: '${line#bad }' is not a marketplace name in $file (skipped)" ;;
+        esac
+    done <<<"$lines"
+    if (( ${#names[@]} == 0 )); then
+        say "warm: $dir declares no plugin marketplace"
+        return 0
+    fi
+    mapfile -t missing < <(unregistered "${names[@]}")
+    if (( ${#missing[@]} == 0 )); then
+        say "warm: ${names[*]} already registered"
+        return 0
+    fi
+    if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
+        warn "warm: no '$CLAUDE_BIN' on PATH: ${missing[*]} not registered, so the first session may lack their plugins' agents, skills and hooks"
+        return 0
+    fi
+    say "warm: ${missing[*]} not registered yet: one throwaway start in $dir first, so the first session loads their plugins whole"
+    out="$(cd "$dir" && cli "${WARM_ARGS[@]}" </dev/null 2>&1)" || rc=$?
+    if (( rc == 124 || rc == 137 )); then
+        warn "warm: the throwaway start took over ${KIT_TIMEOUT}s and was stopped"
+    elif (( rc != 0 )); then
+        warn "warm: the throwaway start failed (exit $rc): $(tail -n 1 <<<"$out")"
+    fi
+    mapfile -t left < <(unregistered "${missing[@]}")
+    if (( ${#left[@]} )); then
+        warn "warm: still not registered after the start: ${left[*]}. The first session may lack their plugins' agents, skills and hooks; /reload-plugins in it loads them"
+    else
+        say "warm: ${missing[*]} registered"
+    fi
+    return 0
+}
+
 # --- the start command --------------------------------------------------------------------------
 cmd_start() {
     local cmd="${CLAUDE_EXTRA_START_CMD:-}"
@@ -261,9 +346,10 @@ cmd_status() {
 case "${1:-}" in
     settings) shift; cmd_settings "$@" ;;
     install)  cmd_install ;;
+    warm)     shift; cmd_warm "$@" ;;
     start)    cmd_start ;;
     check)    cmd_check ;;
     status)   cmd_status ;;
     -h|--help|help|"") sed -n '2,/^set -uo pipefail$/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//' ;;
-    *) die "unknown command '$1' (settings, install, start, check, status)" ;;
+    *) die "unknown command '$1' (settings, install, warm, start, check, status)" ;;
 esac

@@ -11,11 +11,17 @@
 #   - install: against a fake `claude` CLI: a marketplace is added once (url#ref), a plugin
 #     installed once at user scope, nothing repeated on the next boot, a moved pin warned
 #     about and left alone, a failing CLI is a warning and exit 0 (it never fails a boot)
+#   - warm: against the same fake CLI: when a workspace's project settings declare marketplaces
+#     the config has not registered, one throwaway start in the workspace (no prompt, no hook,
+#     no MCP server, no transcript) registers them; nothing when every one is registered or none
+#     is declared; unreadable settings, a failing, silent or hung start, and no CLI are
+#     warnings and exit 0
 #   - start: the command runs once, detached, as given, on the caller's PATH even though a login
 #     profile resets it, with its output in the log
-#   - the wiring: the entrypoint calls settings -> install (before sessions) -> start (after
-#     them), each non-fatal; the image bakes the script; the generator and the launcher emit
-#     and validate the values (--marketplace with #ref, --plugin, --start-cmd, --pids)
+#   - the wiring: the entrypoint calls settings -> install (before sessions) -> warm (umbrella
+#     mode only) -> start (after them), each non-fatal; the image bakes the script; the
+#     generator and the launcher emit and validate the values (--marketplace with #ref,
+#     --plugin, --start-cmd, --pids)
 # shellcheck source=test/lib/prelude.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
@@ -135,6 +141,18 @@ case "$1 $2 ${3:-}" in
     "plugin update "*)
         [[ -n "${FAKE_FAIL_INSTALL:-}" ]] && { echo "Failed to update plugin" >&2; exit 1; }
         jq --arg p "$3" 'map(if .id == $p then .version = "2.0.0" else . end)' "$FAKE/pl.json" > "$FAKE/pl.tmp" && mv "$FAKE/pl.tmp" "$FAKE/pl.json" ;;
+    "-p "*)
+        # warm's throwaway start. Like the real CLI (checked on 2.1.319), a start in a directory
+        # whose project settings declare extraKnownMarketplaces registers each of them in the
+        # config's plugins/known_marketplaces.json, and with stream-json input and nothing on
+        # stdin it sends no prompt. It records its directory and what it read on stdin.
+        printf '%s\n' "$PWD" > "$FAKE/warm-cwd"; cat > "$FAKE/warm-stdin"
+        [[ -n "${FAKE_FAIL_WARM:-}" ]] && { echo "Error: the settings could not be loaded" >&2; exit 1; }
+        [[ -n "${FAKE_WARM_NOREG:-}" ]] && exit 0
+        K="$CLAUDE_CONFIG_DIR/plugins/known_marketplaces.json"; mkdir -p "${K%/*}"; [[ -s "$K" ]] || echo '{}' > "$K"
+        jq --slurpfile s "$PWD/.claude/settings.json" \
+            '. + (($s[0].extraKnownMarketplaces // {}) | map_values({source: .source, installLocation: "/x"}))' \
+            "$K" > "$K.t" && mv "$K.t" "$K" ;;
 esac
 exit 0
 EOF
@@ -203,6 +221,76 @@ kit install >/dev/null 2>&1
 check "nothing declared: the CLI is never called" test ! -e "$FAKE/calls"
 
 # ======================================================================================
+echo "== warm: a fresh config and the workspace's own marketplaces =="
+# On a fresh config the first session lists a plugin from a marketplace the workspace's project
+# settings declare, but loads none of its agents, skills or hooks; the next start does (Claude
+# Code 2.1.319, checked). warm makes that first start a throwaway one, before any session.
+WWS="$TMPD/wws"; mkdir -p "$WWS/.claude"
+KREG="$CLAUDE_CONFIG_DIR/plugins/known_marketplaces.json"
+WARM_ARGS='-p --input-format stream-json --output-format stream-json --verbose --no-session-persistence --strict-mcp-config --settings {"disableAllHooks":true}'
+wset()   { printf '%s\n' "$1" > "$WWS/.claude/settings.json"; }
+wcalls() { if [[ -f "$FAKE/calls" ]]; then grep -c -- '^-p ' "$FAKE/calls"; else echo 0; fi; }
+wfresh() { reset_fake; rm -rf "${KREG%/*}" "$FAKE/warm-cwd" "$FAKE/warm-stdin"; }
+TWO='{"extraKnownMarketplaces":{"tools":{"source":{"source":"directory","path":"./tools"}},"more":{"source":{"source":"git","url":"https://git.example.com/org/more.git"}}},"enabledPlugins":{"helper@tools":true}}'
+wfresh; wset "$TWO"; KENV=(PATH="$FAKE/bin:$PATH")
+out="$(kit warm "$WWS" 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$(wcalls)" == 1 && "$(jq -c 'keys' "$KREG" 2>/dev/null)" == '["more","tools"]' ]] \
+    && ok "a fresh config: one throwaway start registers every marketplace the workspace declares" \
+    || bad "fresh config (rc=$rc): $out / calls: $(cat "$FAKE/calls" 2>/dev/null)"
+grep -qxF -- "$WARM_ARGS" "$FAKE/calls" 2>/dev/null \
+    && ok "the start sends no prompt and runs no hook, no MCP server, and keeps no transcript" \
+    || bad "warm-up arguments: $(cat "$FAKE/calls" 2>/dev/null)"
+[[ "$(cat "$FAKE/warm-cwd" 2>/dev/null)" == "$WWS" && -e "$FAKE/warm-stdin" && ! -s "$FAKE/warm-stdin" ]] \
+    && ok "it starts in the workspace (where the project settings are read), with nothing on stdin" \
+    || bad "warm-up cwd/stdin: '$(cat "$FAKE/warm-cwd" 2>/dev/null)' / '$(cat "$FAKE/warm-stdin" 2>/dev/null)'"
+[[ "$out" == *"warm: more tools registered"* ]] && ok "the boot log names what it registered" || bad "warm output: $out"
+out="$(kit warm "$WWS" 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$(wcalls)" == 1 && "$out" == *"already registered"* ]] \
+    && ok "the next boot: every declared marketplace is registered, so no start at all" || bad "second warm (rc=$rc): $out"
+wset '{"extraKnownMarketplaces":{"tools":{"source":{"source":"directory","path":"./tools"}},"more":{"source":{"source":"git","url":"https://git.example.com/org/more.git"}},"new":{"source":{"source":"directory","path":"./new"}}}}'
+out="$(kit warm "$WWS" 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$(wcalls)" == 2 && "$out" == *"warm: new registered"* ]] \
+    && ok "a marketplace declared since: one more start, for it" || bad "newly declared (rc=$rc): $out"
+for s in '{"enabledPlugins":{"a@b":true}}' '{"extraKnownMarketplaces":{}}' '{"extraKnownMarketplaces":null}'; do
+    wfresh; wset "$s"
+    out="$(kit warm "$WWS" 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$(wcalls)" == 0 && "$out" == *"declares no plugin marketplace"* ]] \
+        && ok "no marketplace declared ($s): no start" || bad "none declared $s (rc=$rc): $out"
+done
+wfresh; rm -f "$WWS/.claude/settings.json"
+out="$(kit warm "$WWS" 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$(wcalls)" == 0 ]] && ok "no project settings at all: no start" || bad "no settings (rc=$rc): $out"
+for s in '{not json' '{"extraKnownMarketplaces":["tools"]}'; do
+    wfresh; wset "$s"
+    out="$(kit warm "$WWS" 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$(wcalls)" == 0 && "$out" == *"WARNING: warm: "*"cannot be read"* ]] \
+        && ok "unreadable project settings ($s): a warning, no start, exit 0" || bad "bad settings $s (rc=$rc): $out"
+done
+wfresh; wset '{"extraKnownMarketplaces":{"bad name":{"source":{"source":"directory","path":"./x"}},"tools":{"source":{"source":"directory","path":"./tools"}}}}'
+out="$(kit warm "$WWS" 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$(wcalls)" == 1 && "$out" == *"WARNING: warm: 'bad name' is not a marketplace name"* && "$out" == *"warm: tools registered"* ]] \
+    && ok "a key that is not a marketplace name is skipped with a warning; the rest are warmed" || bad "bad name (rc=$rc): $out"
+wfresh; wset "$TWO"; KENV=(PATH="$FAKE/bin:$PATH" FAKE_FAIL_WARM=1)
+out="$(kit warm "$WWS" 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$out" == *"WARNING: warm: the throwaway start failed (exit 1): Error: the settings could not be loaded"* ]] \
+    && ok "a start that fails: a warning with its exit and last line, exit 0 (it never fails a boot)" || bad "failed start (rc=$rc): $out"
+wfresh; wset "$TWO"; KENV=(PATH="$FAKE/bin:$PATH" FAKE_WARM_NOREG=1)
+out="$(kit warm "$WWS" 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$out" == *"WARNING: warm: still not registered after the start: more tools"* ]] \
+    && ok "a start that registers nothing: a warning naming what is still missing, exit 0" || bad "no registration (rc=$rc): $out"
+wfresh; wset "$TWO"; KENV=(PATH="$FAKE/bin:$PATH" FAKE_SLEEP=5 CLAUDE_KIT_TIMEOUT=1)
+s=$SECONDS; out="$(kit warm "$WWS" 2>&1)"; rc=$?
+[[ $rc -eq 0 && $((SECONDS - s)) -lt 15 && "$out" == *"WARNING: warm: the throwaway start took over 1s"* ]] \
+    && ok "a hung start is cut off by CLAUDE_KIT_TIMEOUT, with a warning" || bad "warm timeout: rc=$rc took $((SECONDS - s))s: $out"
+wfresh; wset "$TWO"; KENV=(PATH="/usr/bin:/bin" CLAUDE_KIT_CLAUDE_BIN=no-such-claude)
+out="$(kit warm "$WWS" 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$out" == *"WARNING: warm: no 'no-such-claude' on PATH"* ]] && ok "no CLI on PATH: a warning, exit 0" || bad "warm without CLI (rc=$rc): $out"
+KENV=(PATH="$FAKE/bin:$PATH")
+out="$(kit warm 2>&1)"; rc=$?
+[[ $rc -ne 0 && "$out" == *"usage: claude-kit warm DIR"* ]] && ok "warm without a directory: usage, exit 1" || bad "warm usage (rc=$rc): $out"
+"$KIT" help | grep -q '^  claude-kit warm DIR' && ok "claude-kit help documents warm" || bad "claude-kit help does not document warm"
+
+# ======================================================================================
 echo "== start: the optional start command =="
 LOG="$TMPD/kit-start.log"; mkdir -p "$TMPD/ws"
 KENV=(CLAUDE_KIT_START_LOG="$LOG" CLAUDE_WORKSPACE="$TMPD/ws" MARK="$TMPD/mark"
@@ -245,6 +333,29 @@ check "the entrypoint merges settings, installs before any session exists, start
     bash -c "(( ${set_l:-0} > 0 && ${set_l:-0} < ${ins_l:-0} && ${ins_l:-0} < ${prep_l:-0} && ${boot_l:-0} < ${sta_l:-0} ))"
 check "install and start run as the agent user and can never fail the boot" \
     bash -c "grep -q 'asclaude /usr/local/bin/claude-kit install \\\\$' '$EP' && grep -q 'asclaude /usr/local/bin/claude-kit start \\\\$' '$EP' && [[ \$(grep -c 'WARNING: claude-kit' '$EP') -ge 3 ]]"
+warm_l="$(ln_of 'claude-kit warm')"
+check "the entrypoint warms after the kit install and before any session exists" \
+    bash -c "(( ${ins_l:-0} > 0 && ${ins_l:-0} < ${warm_l:-0} && ${warm_l:-0} < ${prep_l:-0} ))"
+# §12b's warm-up block, run under the entrypoint's options with a stub asclaude.
+WBLK="$(awk '/^# Umbrella mode \(§9\): warm/{f=1} f{print} f&&/^fi$/{exit}' "$(ep_section 12b)")"
+# shellcheck disable=SC2034  # the block run with eval reads WORKSPACE and ws_umbrella
+warm12b() {  # warm12b <ws_umbrella, or "unset"> <the stub's exit code>
+    ( log() { echo "[entrypoint] $*"; }; asclaude() { echo "asclaude $*"; return "$STUB_RC"; }
+      set -euo pipefail; WORKSPACE=/workspace; STUB_RC="$2"
+      [[ "$1" == unset ]] || ws_umbrella="$1"
+      eval "$WBLK"; echo "block done" ) 2>&1
+}
+out="$(warm12b 1 0)"
+[[ -n "$WBLK" && "$out" == *"asclaude /usr/local/bin/claude-kit warm /workspace"* && "$out" == *"block done"* && "$out" != *WARNING* ]] \
+    && ok "umbrella mode (§9's ws_umbrella): §12b runs claude-kit warm on the workspace, as the agent user" || bad "§12b warm, umbrella: $out"
+out="$(warm12b 1 1)"
+[[ "$out" == *"WARNING: claude-kit warm failed"* && "$out" == *"block done"* ]] \
+    && ok "a warm-up that fails is a WARNING, never a failed boot" || bad "§12b warm failure: $out"
+for u in 0 unset; do
+    out="$(warm12b "$u" 0)"
+    [[ -n "$WBLK" && "$out" != *asclaude* && "$out" == *"block done"* ]] \
+        && ok "not umbrella mode (ws_umbrella $u): no warm-up" || bad "§12b warm, ws_umbrella $u: $out"
+done
 check "the entrypoint keeps one mechanism: no second jq merge of the two variables" \
     bash -c "! grep -q '_MKT_ENTRIES' '$EP' '$EP_D'/*.sh"
 check "the image bakes claude-kit and makes it executable" \

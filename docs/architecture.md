@@ -99,7 +99,7 @@ rationale: the sections below.
   | `11-sshd.sh` | §11: start sshd |
   | `12-session-env.sh` | §12: the session's environment: model, mode, OpenTelemetry, thread pools |
   | `12a-egress.sh` | §12a: egress lockdown and its refresh |
-  | `12b-session-launch.sh` | §12b: the kit's plugins, the tmux session, dev and SCM windows |
+  | `12b-session-launch.sh` | §12b: the kit's plugins, an umbrella's plugin warm-up, the tmux session, dev and SCM windows |
   | `12c-rc-watchdog.sh` | §12c: the Remote Control watchdog |
   | `12d-usage-watchdog.sh` | §12d: the usage-limit watchdog |
   | `12e-named-sessions.sh` | §12e: named sessions and their supervisor |
@@ -302,6 +302,14 @@ How, and why:
   on anyway.
 - **One layout at a time.** `GIT_UMBRELLA` with `GIT_REPOS` refuses to boot, as does
   `GIT_UMBRELLA` on a workspace with no repo at its root, or a value that is not on or off.
+- **The umbrella's own plugins load from the first session.** An umbrella's project settings
+  can declare plugin marketplaces (`extraKnownMarketplaces`), and on a fresh config the first
+  session lists their plugins without loading their agents, skills or hooks: that start is
+  what registers the marketplace in the config, and only later starts load the plugin whole.
+  So in umbrella mode §12b runs `claude-kit warm /workspace` before any session: when the
+  config's `plugins/known_marketplaces.json` does not list each declared marketplace, it makes
+  one throwaway start in the workspace (no prompt, no hook, no MCP server, no transcript),
+  bounded, and a failure is a `WARNING` ([kits.md](kits.md)).
 
 ## Decision: several sessions share one container as tmux windows
 

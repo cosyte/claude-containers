@@ -14,6 +14,18 @@ if kit_declared; then
         || log "WARNING: claude-kit install failed; declared plugins may be missing (claude-kit status)"
 fi
 
+# Umbrella mode (§9): warm a fresh config for the plugin marketplaces the workspace's own
+# project settings declare. On a fresh config the first session there lists their plugins
+# without loading their agents, skills or hooks; the next start loads them. When the config has
+# not registered each of them yet, claude-kit warm makes one throwaway start in the workspace
+# first (no prompt, no hook, no MCP server, no transcript), as the agent user, bounded by
+# CLAUDE_KIT_TIMEOUT. Here, after §12a, so it runs under the same egress rules as the sessions.
+# Never fatal.
+if (( ${ws_umbrella:-0} )); then
+    asclaude /usr/local/bin/claude-kit warm "$WORKSPACE" \
+        || log "WARNING: claude-kit warm failed; the first session may lack the workspace plugins' agents, skills and hooks (/reload-plugins in it loads them)"
+fi
+
 asclaude /usr/local/bin/claude-sessions prepare \
     || log "WARNING: claude-sessions prepare failed; named sessions may be missing (claude-sessions ls)"
 
