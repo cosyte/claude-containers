@@ -37,7 +37,7 @@ agent immediately: no `sudo`, no image rebuild.
    - **Node** (the base image): `FROM node:24-trixie-slim@sha256:...`, a literal tag and digest.
      Dependabot bumps the digest; a Node major is a hand edit (ignored in `.github/dependabot.yml`).
    - **uv**: `FROM ghcr.io/astral-sh/uv:0.13.1@sha256:... AS uv`, bumped by Dependabot.
-   - **pnpm**: `ARG PNPM_VERSION=12.14.0`, matched by the Makefile and compose defaults; bumped by
+   - **pnpm**: `ARG PNPM_VERSION=10.34.5`, matched by the Makefile and compose defaults; bumped by
      hand, still overridable per build.
    - **just** and **yq**: `ARG JUST_VERSION` / `ARG YQ_VERSION` with per-arch SHA256 digests, the
      same download-and-verify as mise; bumped by hand with both digests.

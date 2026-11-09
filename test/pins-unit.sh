@@ -4,7 +4,8 @@
 #   - both FROM lines are a literal tag plus @sha256 digest, never built from an ARG
 #     (Dependabot cannot rewrite those, dependabot-core#2057);
 #   - PNPM_VERSION is an exact version, the same in the Dockerfile, Makefile, docker-compose.yml,
-#     claude-compose-gen and .env.example;
+#     claude-compose-gen and .env.example, and in the two docs that state it
+#     (docs/environment-variables.md, docs/toolchain-provisioning.md);
 #   - the Makefile refuses NODE_VERSION / UV_VERSION from .env or the command line, and not from
 #     the environment (every node image exports NODE_VERSION);
 #   - the Dependabot docker entry ignores node majors.
@@ -41,7 +42,9 @@ else bad "PNPM_VERSION is not an exact X.Y.Z (got '${pnpm:-<unset>}')"; fi
 for spec in "Makefile:^PNPM_VERSION +\?= $pnpm$" \
             "docker-compose.yml:PNPM_VERSION: \\$\\{PNPM_VERSION:-$pnpm\\}" \
             "bin/claude-compose-gen:PNPM_VERSION: \"\\\\\\$\\{PNPM_VERSION:-$pnpm\\}\"" \
-            ".env.example:^PNPM_VERSION=$pnpm$"; do
+            ".env.example:^PNPM_VERSION=$pnpm$" \
+            "docs/environment-variables.md:^\| \`PNPM_VERSION\` \| \`$pnpm\` \|" \
+            "docs/toolchain-provisioning.md:\`ARG PNPM_VERSION=$pnpm\`"; do
     f="${spec%%:*}" re="${spec#*:}"
     grep -Eq "$re" "$REPO_ROOT/$f" && ok "$f: PNPM_VERSION default is $pnpm" || bad "$f: PNPM_VERSION default is not $pnpm"
 done
