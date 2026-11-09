@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
-# claude-gh-check: what GH_TOKEN can do on each GitHub repo this container works on.
+# claude-gh-check: what GH_TOKEN can do on each GitHub repo this container works on, and
+# whether the token holds a scope a session must never have.
 #
 #   claude-gh-check
 #
 # The entrypoint (§12f) runs it in the background at every start when GH_TOKEN is set and
-# writes its output to /run/claude/gh-check.txt; run it by hand any time. One line per repo
-# under /workspace (its own repo, or each /workspace/<dir>) whose origin is on github.com,
-# at most 30:
+# writes its output to /run/claude/gh-check.txt; run it by hand any time. First one line for
+# the token itself, then one line per repo under /workspace (its own repo, or each
+# /workspace/<dir>) whose origin is on github.com, at most 30:
 #
+#   github token: scopes ok (<scopes>) | FAIL (holds <scope>, ...; ...) | ?not-classic (...) | ?<code>
 #   github <owner>/<repo>: read ok, contents-write ok|NO, pr ok|NO, checks ok|NO
+#
+# The token line reads the X-OAuth-Scopes header GitHub puts on every answer to a classic
+# token (GET / on the API, the call `gh auth status` makes). A session's token must never hold
+# delete_repo or admin:org: with either a session could delete a repository or change the
+# org's settings, members and rulesets. Either one is a FAIL line and exit 1. A token with no
+# such header (a fine-grained or app token) has permissions, not scopes, and reads
+# ?not-classic, never FAIL.
 #
 # Every probe is read-only by construction: a GET, or a PUT/POST with NO body, which GitHub
 # validates (and so reports the permission) before it could change anything:
+#   scopes          GET  /                                                  the header, any code
 #   read            GET  /repos/{o}/{r}                                     200 = ok
 #   contents-write  PUT  /repos/{o}/{r}/contents/.claude-gh-check (no body) 403/404 = NO, 400/409/422 = ok
 #   pr              POST /repos/{o}/{r}/pulls (no body)                     403/404 = NO, 400/422 = ok
@@ -22,7 +32,9 @@
 # stops the check ("github: skipped (rate limited ...)"), since every later call would be too.
 # It NEVER probes a merge endpoint: an empty body there merges
 # an open PR. It uses curl (never gh) with a 5s cap per call. Offline or a timeout: it prints
-# "github: skipped (...)" and stops. Always exits 0: it reports, it never fails a boot.
+# "github: skipped (...)" and stops. Exits 1 when the token holds a forbidden scope (after
+# every line it could print), otherwise 0: a probe it could not make is reported, never a
+# failure. It never fails a boot either way (§12f runs it in the background).
 # The repo's own `permissions` field is the user's role, not the token's, so it is not read.
 # contents-write is the token's: git push may use the SSH key and work regardless.
 # Which permissions a session needs, and why: docs/github-token.md.
@@ -43,20 +55,24 @@ gh_slug() {
     echo "$o/$r"
 }
 
-# HTTP status of one request, "000" on a network failure or timeout, with " rl" after it when
-# GitHub says the answer is a rate limit. The token goes in through a header file descriptor,
-# never argv (where `ps` would show it). No -d/--data: every call has an empty body. -i puts
-# the response's headers and body (never the request's) in the output, the code last.
-code() {  # code <METHOD> <path>
-    local out c
-    out="$(curl -s -i -w '\n%{http_code}' --max-time 5 -X "$1" \
+# One request: the response's headers and body (never the request's: that is what -i puts in
+# the output), then its HTTP code on the last line, "000" on a network failure or timeout. The
+# token goes in through a header file descriptor, never argv (where `ps` would show it). No
+# -d/--data: every call has an empty body.
+request() {  # request <METHOD> <path>
+    curl -s -i -w '\n%{http_code}' --max-time 5 -X "$1" \
         -H @<(printf 'Authorization: Bearer %s\n' "$GH_TOKEN") \
         -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "$API$2" 2>/dev/null)" || true
-    c="${out##*$'\n'}"
-    [[ "$c" =~ ^[0-9]{3}$ ]] || c=000
-    if [[ "$c" == 403 || "$c" == 429 ]] && rate_limited "$out"; then echo "$c rl"; else echo "$c"; fi
+        "$API$2" 2>/dev/null || true
 }
+# The HTTP status of a response from request(), with " rl" after it when GitHub says the
+# answer is a rate limit.
+status() {  # status <response>
+    local c="${1##*$'\n'}"
+    [[ "$c" =~ ^[0-9]{3}$ ]] || c=000
+    if [[ "$c" == 403 || "$c" == 429 ]] && rate_limited "$1"; then echo "$c rl"; else echo "$c"; fi
+}
+code() { status "$(request "$1" "$2")"; }  # code <METHOD> <path>
 rate_limited() {  # rate_limited <response>: GitHub's primary or secondary rate-limit markers
     grep -qiE '^x-ratelimit-remaining:[[:space:]]*0[[:space:]]*$|^retry-after:|rate limit' <<<"${1//$'\r'/}"
 }
@@ -71,6 +87,48 @@ verdict() {  # verdict <code> <held code>...
     echo "?$c"
 }
 
+# The X-OAuth-Scopes value of a response, each scope trimmed and joined with ", ", or "-" when
+# the header is absent. An empty header (a classic token with no scopes) is an empty line.
+scopes_of() {  # scopes_of <response>
+    local h s list=() out=()
+    h="$(grep -im1 '^x-oauth-scopes:' <<<"${1//$'\r'/}")" || { echo -; return; }
+    IFS=',' read -ra list <<<"${h#*:}"
+    for s in "${list[@]}"; do
+        s="${s//[[:space:]]/}"
+        [[ -z "$s" ]] || out+=("$s")
+    done
+    s="$(printf '%s, ' "${out[@]}")"; echo "${s%, }"
+}
+
+# The token's scopes first, whatever repos there are: they are the token's, not a repo's.
+FORBIDDEN_SCOPES=(delete_repo admin:org)
+rc=0
+resp="$(request GET /)"
+tok_c="$(status "$resp")"
+scopes="$(scopes_of "$resp")"
+if [[ "$tok_c" == 000 ]]; then echo "github: skipped (offline or timeout)"; exit 0; fi
+if [[ "$scopes" != - ]]; then
+    held=()
+    for f in "${FORBIDDEN_SCOPES[@]}"; do
+        [[ ", $scopes, " == *", $f, "* ]] && held+=("$f")
+    done
+    if (( ${#held[@]} )); then
+        held_list="${held[*]}"
+        echo "github token: scopes FAIL (holds ${held_list// /, }; narrow the token: docs/github-token.md)"
+        rc=1
+    else
+        echo "github token: scopes ok (${scopes:-none})"
+    fi
+elif [[ "$tok_c" == 200 ]]; then
+    echo "github token: scopes ?not-classic (no X-OAuth-Scopes header: a fine-grained or app token)"
+elif [[ "$tok_c" != *" rl" ]]; then
+    echo "github token: scopes ?$tok_c"
+fi
+if [[ "$tok_c" == *" rl" ]]; then
+    echo "github: skipped (rate limited by GitHub, HTTP ${tok_c% rl}, at the token check: not a permission answer; run claude-gh-check later)"
+    exit "$rc"
+fi
+
 repos=()
 for d in "$ROOT" "$ROOT"/*/; do
     d="${d%/}"
@@ -80,14 +138,14 @@ for d in "$ROOT" "$ROOT"/*/; do
     [[ " ${repos[*]} " == *" $slug "* ]] || repos+=("$slug")
     (( ${#repos[@]} < MAX_REPOS )) || break
 done
-(( ${#repos[@]} )) || { echo "github: skipped (no github.com repo under $ROOT)"; exit 0; }
+(( ${#repos[@]} )) || { echo "github: skipped (no github.com repo under $ROOT)"; exit "$rc"; }
 
 for slug in "${repos[@]}"; do
     read_c="$(code GET "/repos/$slug")"
-    if [[ "$read_c" == 000 ]]; then echo "github: skipped (offline or timeout)"; exit 0; fi
+    if [[ "$read_c" == 000 ]]; then echo "github: skipped (offline or timeout)"; exit "$rc"; fi
     if [[ "$read_c" == *" rl" ]]; then
         echo "github: skipped (rate limited by GitHub, HTTP ${read_c% rl}, at $slug: not a permission answer; run claude-gh-check later)"
-        exit 0
+        exit "$rc"
     fi
     if [[ "$read_c" != 200 ]]; then
         echo "github $slug: read NO (HTTP $read_c)"; continue
@@ -96,9 +154,9 @@ for slug in "${repos[@]}"; do
     pr_c="$(code POST "/repos/$slug/pulls")"
     chk_c="$(code GET "/repos/$slug/commits/HEAD/check-runs?per_page=1")"
     if [[ "$put_c" == 000 || "$pr_c" == 000 || "$chk_c" == 000 ]]; then
-        echo "github: skipped (offline or timeout)"; exit 0
+        echo "github: skipped (offline or timeout)"; exit "$rc"
     fi
     echo "github $slug: read ok, contents-write $(verdict "$put_c" 400 409 422)," \
         "pr $(verdict "$pr_c" 400 422), checks $(verdict "$chk_c" 200)"
 done
-exit 0
+exit "$rc"

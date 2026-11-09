@@ -94,6 +94,12 @@ personal access token" while `git push` works.** The push uses the SSH deploy ke
 the repo's. `cat /run/claude/gh-check.txt` (or run `claude-gh-check`) names what the token can
 do on each repo; [github-token.md](github-token.md) lists what it needs and the fix.
 
+**The boot log says `ERROR: GH_TOKEN holds a scope a session must never have`.** The token has
+`delete_repo` or `admin:org`, which let a session delete a repository or change an org's
+settings and rulesets. Edit the classic token on GitHub, untick both, and save: its value stays
+the same, and `claude-gh-check` reads the new scopes at once
+([github-token.md](github-token.md)).
+
 ## Remote Control session not in the mobile app
 
 ### "Remote Control is not yet enabled for your account" (most common)
