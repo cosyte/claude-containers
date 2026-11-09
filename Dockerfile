@@ -239,7 +239,11 @@ FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf37
 ARG CLAUDE_CODE_VERSION=2.1.302
 # PNPM_VERSION: pnpm baked into the image, an exact version for reproducible
 # builds (the Makefile default matches; still overridable with --build-arg).
-ARG PNPM_VERSION=12.14.0
+# 10.34.5 is the version the repos these sessions work on pin in `packageManager`.
+# pnpm does not switch to a repo's pin here (manage-package-manager-versions=false,
+# below), so the baked version is the one that writes their lockfiles: it must be
+# theirs, not a newer major.
+ARG PNPM_VERSION=10.34.5
 ARG CLAUDE_USER=claude
 ARG CLAUDE_UID=1000
 ARG CLAUDE_GID=1000
