@@ -6,11 +6,16 @@
 #
 # The entrypoint (§12f) runs it in the background at every start when GH_TOKEN is set and
 # writes its output to /run/claude/gh-check.txt; run it by hand any time. First one line for
-# the token itself, then one line per repo under /workspace (its own repo, or each
-# /workspace/<dir>) whose origin is on github.com, at most 30:
+# the token itself, then one line per repo under /workspace (its own repo, and each
+# /workspace/<dir>: an umbrella and each of its submodules) whose origin is on github.com, at
+# most CLAUDE_GH_CHECK_MAX_REPOS of them (default 100; 4 calls each):
 #
 #   github token: scopes ok (<scopes>) | FAIL (holds <scope>, ...; ...) | ?not-classic (...) | ?<code>
 #   github <owner>/<repo>: read ok, contents-write ok|NO, pr ok|NO, checks ok|NO
+#
+# Repos past the cap are never dropped silently: one line before the repo lines names how many
+# (`github: not probed: N more github.com repos under ROOT, past CLAUDE_GH_CHECK_MAX_REPOS=M`),
+# and a cap that is not a positive integer is a line too, and the default applies.
 #
 # The token line reads the X-OAuth-Scopes header GitHub puts on every answer to a classic
 # token (GET / on the API, the call `gh auth status` makes). A session's token must never hold
@@ -42,7 +47,13 @@ set -uo pipefail
 
 ROOT="${CLAUDE_GH_CHECK_ROOT:-/workspace}"
 API="https://api.github.com"
-MAX_REPOS=30
+MAX_REPOS_DEFAULT=100
+MAX_REPOS="${CLAUDE_GH_CHECK_MAX_REPOS:-$MAX_REPOS_DEFAULT}"
+cap_note=""
+if [[ ! "$MAX_REPOS" =~ ^[1-9][0-9]{0,5}$ ]]; then
+    cap_note="github: CLAUDE_GH_CHECK_MAX_REPOS='$MAX_REPOS' is not a positive integer: the default, $MAX_REPOS_DEFAULT, applies"
+    MAX_REPOS=$MAX_REPOS_DEFAULT
+fi
 
 [[ -n "${GH_TOKEN:-}" ]] || { echo "github: skipped (no GH_TOKEN)"; exit 0; }
 
@@ -129,6 +140,7 @@ if [[ "$tok_c" == *" rl" ]]; then
     exit "$rc"
 fi
 
+[[ -z "$cap_note" ]] || echo "$cap_note"
 repos=()
 for d in "$ROOT" "$ROOT"/*/; do
     d="${d%/}"
@@ -136,9 +148,12 @@ for d in "$ROOT" "$ROOT"/*/; do
     url="$(git -C "$d" remote get-url origin 2>/dev/null)" || continue
     slug="$(gh_slug "$url")" || continue
     [[ " ${repos[*]} " == *" $slug "* ]] || repos+=("$slug")
-    (( ${#repos[@]} < MAX_REPOS )) || break
 done
 (( ${#repos[@]} )) || { echo "github: skipped (no github.com repo under $ROOT)"; exit "$rc"; }
+if (( ${#repos[@]} > MAX_REPOS )); then
+    echo "github: not probed: $(( ${#repos[@]} - MAX_REPOS )) more github.com repos under $ROOT, past CLAUDE_GH_CHECK_MAX_REPOS=$MAX_REPOS"
+    repos=("${repos[@]:0:MAX_REPOS}")
+fi
 
 for slug in "${repos[@]}"; do
     read_c="$(code GET "/repos/$slug")"

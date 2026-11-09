@@ -6,6 +6,9 @@
 #     permission held, each one missing, a rate limit (403 or 429, primary or secondary) read
 #     as ?rate-limited and never NO, offline (skipped, exit 0), no GH_TOKEN (no call),
 #     the repos it finds (ssh and https remotes, a non-GitHub one skipped, duplicates once)
+#   - how many: an umbrella with 31 submodules is probed whole by default (32 repos);
+#     CLAUDE_GH_CHECK_MAX_REPOS caps it, and a line names the repos past the cap; a value that
+#     is not a positive integer is a line, and the default applies
 #   - the token's own scopes (X-OAuth-Scopes on the API root): a narrowed classic token is ok;
 #     delete_repo or admin:org is a FAIL line and exit 1, with every repo line still printed;
 #     a token with no scopes header (fine-grained) is ?not-classic, never a FAIL
@@ -13,7 +16,8 @@
 #     in argv, never calls gh
 #   - entrypoint.sh §12f: writes the result world-readable, warns per missing permission,
 #     logs an ERROR for a forbidden scope and keeps the result although the check exits 1,
-#     removes a stale result without GH_TOKEN
+#     removes a stale result without GH_TOKEN, and warns when repos went unprobed past the cap
+#     or the cap is not a number
 # shellcheck source=test/lib/prelude.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
 set -uo pipefail
@@ -211,6 +215,39 @@ run FAKE_TOKEN=403 FAKE_TOKEN_RESP=$'HTTP/2 403\r\nx-oauth-scopes: repo, admin:o
     && ok "a rate-limited answer still names the scopes: FAIL, exit 1, then skipped" || bad "rate limit with scopes (rc=$rc): $out"
 
 # ======================================================================================
+echo "== how many repos it probes =="
+# An umbrella and its submodules are one repo at the root and one per submodule (a .git file,
+# not a directory): 32 here, past the old fixed cap of 30. Every one is probed by default.
+UMB="$TMPD/umbrella"
+git init -q "$UMB" && git -C "$UMB" remote add origin git@github.com:me/umbrella.git && mkdir -p "$UMB/.git/modules"
+for i in $(seq -w 1 31); do
+    git init -q --separate-git-dir "$UMB/.git/modules/sub$i" "$UMB/sub$i"
+    git -C "$UMB/sub$i" remote add origin "https://github.com/me/sub$i.git"
+done
+nrepos() { grep -cE '^github [^ :]+/[^ :]+: ' <<<"$out"; }
+run CLAUDE_GH_CHECK_ROOT="$UMB"
+(( rc == 0 )) && [[ "$(nrepos)" == 32 ]] && grep -qxF 'github me/umbrella: read ok, contents-write ok, pr ok, checks ok' <<<"$out" \
+    && grep -qxF 'github me/sub31: read ok, contents-write ok, pr ok, checks ok' <<<"$out" && ! grep -q 'not probed' <<<"$out" \
+    && ok "an umbrella with 31 submodules: all 32 repos probed by default (the umbrella and each .git-file submodule)" \
+    || bad "umbrella, default cap (rc=$rc): $(nrepos) repo lines: $(tail -3 <<<"$out")"
+run CLAUDE_GH_CHECK_ROOT="$UMB" CLAUDE_GH_CHECK_MAX_REPOS=3
+(( rc == 0 )) && [[ "$(nrepos)" == 3 ]] && grep -q '^github me/umbrella: ' <<<"$out" && grep -q '^github me/sub02: ' <<<"$out" \
+    && [[ "$(grep -c '^GET https://api.github.com/repos/' "$CALLS")" == 6 ]] \
+    && grep -qxF "github: not probed: 29 more github.com repos under $UMB, past CLAUDE_GH_CHECK_MAX_REPOS=3" <<<"$out" \
+    && ok "CLAUDE_GH_CHECK_MAX_REPOS=3: the first 3 probed, and one line names how many were not" \
+    || bad "cap 3 (rc=$rc): $out"
+for v in abc 0 -5 ' '; do
+    run CLAUDE_GH_CHECK_ROOT="$UMB" CLAUDE_GH_CHECK_MAX_REPOS="$v"
+    (( rc == 0 )) && [[ "$(nrepos)" == 32 ]] \
+        && grep -qxF "github: CLAUDE_GH_CHECK_MAX_REPOS='$v' is not a positive integer: the default, 100, applies" <<<"$out" \
+        && ok "CLAUDE_GH_CHECK_MAX_REPOS='$v': a line says so, and the default applies" \
+        || bad "bad cap '$v' (rc=$rc): $(nrepos) repo lines: $(grep '^github: ' <<<"$out")"
+done
+run CLAUDE_GH_CHECK_ROOT="$UMB" CLAUDE_GH_CHECK_MAX_REPOS=
+(( rc == 0 )) && [[ "$(nrepos)" == 32 ]] && ! grep -q '^github: ' <<<"$out" \
+    && ok "an empty CLAUDE_GH_CHECK_MAX_REPOS is the default, with no line about it" || bad "empty cap (rc=$rc): $out"
+
+# ======================================================================================
 echo "== claude-gh-check by source =="
 if command -v rg >/dev/null 2>&1; then GREP=(rg -n); else GREP=(grep -nE); fi
 "${GREP[@]}" '/merge' "$CHECK" >/dev/null && bad "names /merge (an empty-body merge call merges)" \
@@ -243,6 +280,15 @@ out="$(run_12f tok 'github me/alpha: read ok, contents-write NO, pr NO, checks o
     && ok "a missing permission: one WARNING line for the repo" || bad "§12f warn: $out"
 out="$(run_12f tok 'github me/alpha: read ok, contents-write ?rate-limited, pr ok, checks ok')"
 ! grep -q WARNING <<<"$out" && ok "a rate-limited probe: no missing-permission WARNING" || bad "§12f rate limit: $out"
+CAPLINE='github: not probed: 29 more github.com repos under /workspace, past CLAUDE_GH_CHECK_MAX_REPOS=3'
+out="$(run_12f tok "github me/alpha: read ok, contents-write ok, pr ok, checks ok
+$CAPLINE")"
+[[ "$(grep -c "WARNING: $CAPLINE" <<<"$out")" == 1 ]] && grep -qxF "$CAPLINE" "$GHF" \
+    && ok "repos past the cap: one WARNING line in the boot log, and the line in the result" || bad "§12f cap: $out"
+BADCAP="github: CLAUDE_GH_CHECK_MAX_REPOS='abc' is not a positive integer: the default, 100, applies"
+out="$(run_12f tok "$BADCAP")"
+[[ "$(grep -c "WARNING: $BADCAP" <<<"$out")" == 1 ]] \
+    && ok "a CLAUDE_GH_CHECK_MAX_REPOS that is not a number: one WARNING line" || bad "§12f bad cap: $out"
 FAILLINE='github token: scopes FAIL (holds delete_repo; narrow the token: docs/github-token.md)'
 out="$(run_12f tok "$FAILLINE
 github me/alpha: read ok, contents-write ok, pr ok, checks ok" 1)"; rc=$?
