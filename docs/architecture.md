@@ -102,7 +102,7 @@ rationale: the sections below.
   | `12c-rc-watchdog.sh` | §12c: the Remote Control watchdog |
   | `12d-usage-watchdog.sh` | §12d: the usage-limit watchdog |
   | `12e-named-sessions.sh` | §12e: named sessions and their supervisor |
-  | `12f-gh-check.sh` | §12f: the `GH_TOKEN` permission check |
+  | `12f-gh-check.sh` | §12f: the `GH_TOKEN` scope and permission check |
   | `12g-workspace-owner.sh` | §12g: workspace and `/state` ownership, the deep passes |
   | `12h-orphan-reaper.sh` | §12h: the orphan reaper (agent processes left to PID 1, `CLAUDE_ORPHAN_MAX_AGE`) |
   | `13-stay-alive.sh` | §13: the boot summary, the liveness loop, shutdown |

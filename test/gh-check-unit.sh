@@ -6,9 +6,13 @@
 #     permission held, each one missing, a rate limit (403 or 429, primary or secondary) read
 #     as ?rate-limited and never NO, offline (skipped, exit 0), no GH_TOKEN (no call),
 #     the repos it finds (ssh and https remotes, a non-GitHub one skipped, duplicates once)
+#   - the token's own scopes (X-OAuth-Scopes on the API root): a narrowed classic token is ok;
+#     delete_repo or admin:org is a FAIL line and exit 1, with every repo line still printed;
+#     a token with no scopes header (fine-grained) is ?not-classic, never a FAIL
 #   - by source: it never names a merge endpoint, never sends a body, never puts the token
 #     in argv, never calls gh
 #   - entrypoint.sh §12f: writes the result world-readable, warns per missing permission,
+#     logs an ERROR for a forbidden scope and keeps the result although the check exits 1,
 #     removes a stale result without GH_TOKEN
 # shellcheck source=test/lib/prelude.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/prelude.sh"
@@ -29,7 +33,9 @@ bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 # The fake curl: logs "<METHOD> <URL> | <argv>" per call and answers like `curl -i -w
 # '\n%{http_code}'`: the response (headers, a blank line, a body), then the code on the last
 # line. A FAKE_<probe> env var scripts the code (default: the "held" one) and FAKE_<probe>_RESP
-# the whole response (default: an ordinary one, with rate limit to spare).
+# the whole response (default: an ordinary one, with rate limit to spare). The API root answers
+# the token probe: FAKE_SCOPES is its X-OAuth-Scopes value (default: a narrowed classic token),
+# and FAKE_SCOPES=- leaves the header out, as GitHub does for a fine-grained token.
 FAKE="$TMPD/fake"; mkdir -p "$FAKE"; CALLS="$TMPD/calls"
 cat > "$FAKE/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -40,7 +46,11 @@ for ((i=0; i<${#args[@]}; i++)); do
     [[ "${args[i]}" == https://* ]] && url="${args[i]}"
 done
 echo "$m $url | $*" >> "$FAKE_CALLS"
+h=""
 case "$m $url" in
+    "GET https://api.github.com/")
+        c="${FAKE_TOKEN:-200}" r="${FAKE_TOKEN_RESP-}" s="${FAKE_SCOPES-repo, workflow, read:org}"
+        [[ "$s" == - ]] || h=$'x-oauth-scopes: '"$s"$'\r\n' ;;
     "GET "*/check-runs*) c="${FAKE_CHECKS:-200}" r="${FAKE_CHECKS_RESP-}" ;;
     "PUT "*/contents/*)  c="${FAKE_PUT:-400}"    r="${FAKE_PUT_RESP-}" ;;
     "POST "*/pulls)      c="${FAKE_POST:-422}"   r="${FAKE_POST_RESP-}" ;;
@@ -48,7 +58,7 @@ case "$m $url" in
     *)                   c=000 r="" ;;
 esac
 [[ "$c" == 000 ]] && { printf '\n000'; exit 28; }
-[[ -n "$r" ]] || r=$'HTTP/2 '"$c"$'\r\nx-ratelimit-remaining: 4999\r\n\r\n{"message":"Resource not accessible by personal access token"}'
+[[ -n "$r" ]] || r=$'HTTP/2 '"$c"$'\r\nx-ratelimit-remaining: 4999\r\n'"$h"$'\r\n{"message":"Resource not accessible by personal access token"}'
 printf '%s\n%s' "$r" "$c"
 EOF
 chmod +x "$FAKE/curl"
@@ -77,7 +87,11 @@ run() {  # run [ENV=VAL ...]: claude-gh-check against the sandbox; output in $ou
 echo "== claude-gh-check =="
 run
 (( rc == 0 )) && ok "exits 0" || bad "exit $rc"
-[[ "$(grep -c '^github ' <<<"$out")" == 3 ]] \
+[[ "$(head -1 <<<"$out")" == 'github token: scopes ok (repo, workflow, read:org)' ]] \
+    && [[ "$(head -1 "$CALLS")" == 'GET https://api.github.com/ |'* ]] \
+    && ok "the token's scopes come first: one read-only GET of the API root, one line" \
+    || bad "token line: $out / $(head -1 "$CALLS")"
+[[ "$(grep -cE '^github [^ :]+/[^ :]+: ' <<<"$out")" == 3 ]] \
     && grep -qxF 'github me/alpha: read ok, contents-write ok, pr ok, checks ok' <<<"$out" \
     && grep -qxF 'github myorg/beta: read ok, contents-write ok, pr ok, checks ok' <<<"$out" \
     && grep -qxF 'github me/gamma: read ok, contents-write ok, pr ok, checks ok' <<<"$out" \
@@ -124,8 +138,8 @@ run FAKE_PUT=403
 grep -qxF 'github me/alpha: read ok, contents-write NO, pr ok, checks ok' <<<"$out" \
     && ok "a plain 403 with rate limit to spare is still NO" || bad "plain 403: $out"
 run FAKE_READ=403 FAKE_READ_RESP="$RL_PRIMARY"
-(( rc == 0 )) && [[ "$out" == "github: skipped (rate limited by GitHub, HTTP 403, at me/alpha: not a permission answer; run claude-gh-check later)" ]] \
-    && [[ "$(wc -l < "$CALLS")" == 1 ]] && ! grep -q ' NO' <<<"$out" \
+(( rc == 0 )) && [[ "${out##*$'\n'}" == "github: skipped (rate limited by GitHub, HTTP 403, at me/alpha: not a permission answer; run claude-gh-check later)" ]] \
+    && [[ "$(wc -l < "$CALLS")" == 2 ]] && ! grep -q ' NO' <<<"$out" \
     && ok "a rate-limited read: skipped, no NO, no further call" || bad "rate-limited read (rc=$rc): $out / $(cat "$CALLS")"
 run FAKE_PUT=422 FAKE_POST=400
 grep -qxF 'github me/alpha: read ok, contents-write ok, pr ok, checks ok' <<<"$out" \
@@ -133,12 +147,16 @@ grep -qxF 'github me/alpha: read ok, contents-write ok, pr ok, checks ok' <<<"$o
 run FAKE_POST=500
 grep -qF 'pr ?500' <<<"$out" && ok "an unexpected code reads ?<code>, not ok" || bad "pulls 500: $out"
 
-run FAKE_READ=000
+run FAKE_TOKEN=000
 (( rc == 0 )) && [[ "$out" == "github: skipped (offline or timeout)" ]] \
     && [[ "$(wc -l < "$CALLS")" == 1 ]] \
     && ok "offline: skipped, exit 0, stops after the first call" || bad "offline (rc=$rc): $out"
+run FAKE_READ=000
+(( rc == 0 )) && [[ "${out##*$'\n'}" == "github: skipped (offline or timeout)" ]] \
+    && [[ "$(wc -l < "$CALLS")" == 2 ]] \
+    && ok "offline at the first repo: skipped, exit 0, no further call" || bad "offline at a repo (rc=$rc): $out"
 run FAKE_CHECKS=000
-(( rc == 0 )) && [[ "$out" == "github: skipped (offline or timeout)" ]] \
+(( rc == 0 )) && [[ "${out##*$'\n'}" == "github: skipped (offline or timeout)" ]] \
     && ok "a timeout mid-way: skipped, exit 0" || bad "timeout (rc=$rc): $out"
 
 : > "$CALLS"
@@ -148,8 +166,49 @@ out="$(env -u GH_TOKEN PATH="$FAKE:$PATH" FAKE_CALLS="$CALLS" CLAUDE_GH_CHECK_RO
 
 EMPTY="$TMPD/empty"; mkdir -p "$EMPTY"
 run CLAUDE_GH_CHECK_ROOT="$EMPTY"
-(( rc == 0 )) && grep -qF 'skipped (no github.com repo' <<<"$out" && [[ ! -s "$CALLS" ]] \
-    && ok "no github.com repo: skipped, no call" || bad "empty root: $out"
+(( rc == 0 )) && grep -qF 'skipped (no github.com repo' <<<"$out" && [[ "$(wc -l < "$CALLS")" == 1 ]] \
+    && grep -qxF 'github token: scopes ok (repo, workflow, read:org)' <<<"$out" \
+    && ok "no github.com repo: the token's scopes still checked, no repo probed" || bad "empty root: $out / $(cat "$CALLS")"
+
+# ======================================================================================
+echo "== the token's scopes =="
+# A session's token must never hold delete_repo or admin:org: with either, a session could delete a
+# repository or change the org's settings and rulesets, and nothing in the container stops it.
+FAIL_TAIL='; narrow the token: docs/github-token.md)'
+run FAKE_SCOPES="repo, workflow, read:org, delete_repo"
+(( rc == 1 )) && grep -qxF "github token: scopes FAIL (holds delete_repo$FAIL_TAIL" <<<"$out" \
+    && [[ "$(grep -cE '^github [^ :]+/[^ :]+: read ok' <<<"$out")" == 3 ]] \
+    && ok "delete_repo: a FAIL line, exit 1, and every repo still probed" || bad "delete_repo (rc=$rc): $out"
+run FAKE_SCOPES="admin:org, repo"
+(( rc == 1 )) && grep -qxF "github token: scopes FAIL (holds admin:org$FAIL_TAIL" <<<"$out" \
+    && ok "admin:org: a FAIL line, exit 1" || bad "admin:org (rc=$rc): $out"
+run FAKE_SCOPES="delete_repo,admin:org,repo"
+(( rc == 1 )) && grep -qxF "github token: scopes FAIL (holds delete_repo, admin:org$FAIL_TAIL" <<<"$out" \
+    && ok "both, comma-separated without spaces: both named, exit 1" || bad "both (rc=$rc): $out"
+run FAKE_SCOPES="repo, admin:org_hook, write:org, read:org"
+(( rc == 0 )) && grep -qxF 'github token: scopes ok (repo, admin:org_hook, write:org, read:org)' <<<"$out" \
+    && ok "admin:org_hook and write:org are other scopes: no partial match, ok" || bad "near names (rc=$rc): $out"
+run FAKE_SCOPES=""
+(( rc == 0 )) && grep -qxF 'github token: scopes ok (none)' <<<"$out" \
+    && ok "a classic token with no scopes: ok (none)" || bad "no scopes (rc=$rc): $out"
+run FAKE_SCOPES=-
+(( rc == 0 )) && grep -qxF 'github token: scopes ?not-classic (no X-OAuth-Scopes header: a fine-grained or app token)' <<<"$out" \
+    && [[ "$(grep -cE '^github [^ :]+/[^ :]+: read ok' <<<"$out")" == 3 ]] \
+    && ok "no scopes header (fine-grained): ?not-classic, never a FAIL, repos still probed" || bad "fine-grained (rc=$rc): $out"
+run FAKE_SCOPES=- FAKE_TOKEN=401
+(( rc == 0 )) && grep -qxF 'github token: scopes ?401' <<<"$out" \
+    && ok "an unexpected answer with no scopes header: ?<code>, never a FAIL" || bad "token 401 (rc=$rc): $out"
+run FAKE_SCOPES=delete_repo FAKE_READ=000
+(( rc == 1 )) && grep -qF 'scopes FAIL (holds delete_repo' <<<"$out" && [[ "${out##*$'\n'}" == "github: skipped (offline or timeout)" ]] \
+    && ok "a forbidden scope then an offline repo: still exit 1" || bad "FAIL then offline (rc=$rc): $out"
+run FAKE_TOKEN=403 FAKE_TOKEN_RESP="$RL_PRIMARY"
+(( rc == 0 )) && [[ "$out" == "github: skipped (rate limited by GitHub, HTTP 403, at the token check: not a permission answer; run claude-gh-check later)" ]] \
+    && [[ "$(wc -l < "$CALLS")" == 1 ]] \
+    && ok "a rate-limited token check with no scopes header: skipped, exit 0, no further call" || bad "token rate limit (rc=$rc): $out"
+run FAKE_TOKEN=403 FAKE_TOKEN_RESP=$'HTTP/2 403\r\nx-oauth-scopes: repo, admin:org\r\nx-ratelimit-remaining: 0\r\n\r\n{}'
+(( rc == 1 )) && grep -qF 'scopes FAIL (holds admin:org' <<<"$out" && [[ "$(wc -l < "$CALLS")" == 1 ]] \
+    && grep -qF 'skipped (rate limited by GitHub, HTTP 403, at the token check' <<<"$out" \
+    && ok "a rate-limited answer still names the scopes: FAIL, exit 1, then skipped" || bad "rate limit with scopes (rc=$rc): $out"
 
 # ======================================================================================
 echo "== claude-gh-check by source =="
@@ -168,8 +227,8 @@ grep -qE '^GH_CHECK_FILE=' <<<"$B12F" && grep -qE '^GH_CHECK_CMD=' <<<"$B12F" \
     && ok "§12f names GH_CHECK_FILE and GH_CHECK_CMD on their own lines" \
     || bad "§12f must assign GH_CHECK_FILE and GH_CHECK_CMD on their own lines"
 GHF="$TMPD/run/claude/gh-check.txt"
-run_12f() {  # run_12f <GH_TOKEN> <fake check output>
-    printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$2" > "$TMPD/fake-check"; chmod +x "$TMPD/fake-check"
+run_12f() {  # run_12f <GH_TOKEN> <fake check output> [its exit code]
+    printf '#!/bin/sh\nprintf "%%s\\n" "%s"\nexit %s\n' "$2" "${3:-0}" > "$TMPD/fake-check"; chmod +x "$TMPD/fake-check"
     local blk; blk="$(sed -e "s#^GH_CHECK_FILE=.*#GH_CHECK_FILE=\"$GHF\"#" \
         -e "s#^GH_CHECK_CMD=.*#GH_CHECK_CMD=\"$TMPD/fake-check\"#" <<<"$B12F")"
     ( log() { echo "[entrypoint] $*"; }; asclaude() { "$@"; }; set -euo pipefail
@@ -184,6 +243,16 @@ out="$(run_12f tok 'github me/alpha: read ok, contents-write NO, pr NO, checks o
     && ok "a missing permission: one WARNING line for the repo" || bad "§12f warn: $out"
 out="$(run_12f tok 'github me/alpha: read ok, contents-write ?rate-limited, pr ok, checks ok')"
 ! grep -q WARNING <<<"$out" && ok "a rate-limited probe: no missing-permission WARNING" || bad "§12f rate limit: $out"
+FAILLINE='github token: scopes FAIL (holds delete_repo; narrow the token: docs/github-token.md)'
+out="$(run_12f tok "$FAILLINE
+github me/alpha: read ok, contents-write ok, pr ok, checks ok" 1)"; rc=$?
+(( rc == 0 )) && grep -qxF "$FAILLINE" "$GHF" && grep -qxF 'github me/alpha: read ok, contents-write ok, pr ok, checks ok' "$GHF" \
+    && [[ "$(grep -c "ERROR: GH_TOKEN holds a scope a session must never have: $FAILLINE" <<<"$out")" == 1 ]] \
+    && ! grep -q 'WARNING' <<<"$out" \
+    && ok "a forbidden scope: the check's exit 1 keeps its result, and one ERROR line" || bad "§12f scope FAIL (rc=$rc): $out / $(cat "$GHF")"
+out="$(run_12f tok '' 3)"; rc=$?
+(( rc == 0 )) && grep -qxF 'github: skipped (claude-gh-check failed, exit 3)' "$GHF" \
+    && ok "a check that fails with no output: skipped, with its exit code" || bad "§12f empty failure (rc=$rc): $out / $(cat "$GHF")"
 out="$(run_12f "" 'unused')"; rc=$?
 (( rc == 0 )) && [[ ! -e "$GHF" ]] && ok "no GH_TOKEN: stale result removed, nothing runs" || bad "§12f no token: $out"
 

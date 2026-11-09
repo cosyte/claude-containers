@@ -141,7 +141,7 @@ small descriptive commits as you change things.
 | `bin/claude-secret-guard` | Global git pre-commit hook refusing obvious secrets in every repo (`CLAUDE_SECRET_GUARD=1`, `CLAUDE_SECRET_GUARD_EXTRA`). |
 | `bin/claude-deps-check` | Advisory linter: flags unpinned or `latest` specs in `mise.toml` and `package.json`. |
 | `bin/claude-container-facts` | Prints the "This container" section (browser, chrome-devtools MCP, GPU, toolchain versions, `/cache` and `/scratch` free space) the entrypoint writes into each session's managed memory. |
-| `bin/claude-gh-check` | At boot, when `GH_TOKEN` is set: what the token can do on each repo, written to `/run/claude/gh-check.txt`. |
+| `bin/claude-gh-check` | At boot, when `GH_TOKEN` is set: the token's scopes (it fails on `delete_repo` or `admin:org`) and what it can do on each repo, written to `/run/claude/gh-check.txt`. |
 | `bin/claude-image-rebuild` | Host: `--check` prints how far the image is behind main (JSON); otherwise pulls main on a clean checkout and rebuilds. |
 | `bin/claude-launcher` | Installed as `/usr/local/bin/claude`: runs the npm-installed CLI from `/opt/claude-code`, repairing it first if a self-update broke it. |
 | `bin/claude-account-list` / `claude-account-login` | Host: list the credential volumes and who uses each; log a named account in. |

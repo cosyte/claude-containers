@@ -41,7 +41,7 @@ vars override `.env`. Full reference: `.env.example`.
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` |: | Clone source (or use `--repo`/`--branch`/`--depth`) |
 | `GIT_REPOS` |: | Several repos in one container: whitespace-separated `URL[#BRANCH]`, each cloned into `/workspace/<repo>` (set by `claude-compose-gen --group` or several `--repo`). Not together with `GIT_REPO_URL` |
 | `GIT_AUTHOR_NAME`/`_EMAIL` (+`COMMITTER`) | host git config | Commit identity |
-| `GH_TOKEN` | unset | GitHub token for `gh` and HTTPS git in every session. It needs Contents RW, Pull requests RW and Checks R on each repo; a stack whose repos span your user and an org needs a classic token. At each start `claude-gh-check` writes what it can do to `/run/claude/gh-check.txt`: see [docs/github-token.md](github-token.md) |
+| `GH_TOKEN` | unset | GitHub token for `gh` and HTTPS git in every session: a classic token with `repo`, `workflow` and `read:org`, never `delete_repo` or `admin:org`. At each start `claude-gh-check` writes its scopes and what it can do on each repo to `/run/claude/gh-check.txt`, and fails on either forbidden scope: see [docs/github-token.md](github-token.md) |
 | `GIT_SSH_KEY` | `~/.ssh/claude-git-key` | Host SSH key for git, mounted read-only and brokered. For git alone: never in `SSH_AUTHORIZED_KEYS` (the launch tools refuse that, and sshd in the container refuses it for logins) |
 | `SSH_AUTHORIZED_KEYS` | `~/.ssh/authorized_keys` | Your own public keys allowed to SSH in (read-only), never the git key's |
 | `SSH_PORT_RANGE_START`/`_END` | `2200`/`2299` | Auto-assigned host SSH port range |
