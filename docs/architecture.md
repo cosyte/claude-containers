@@ -298,6 +298,9 @@ How, and why:
 - **A failed submodule warns; it does not stop the boot.** A clone of the umbrella itself that
   fails stops the boot, as any `GIT_REPO_URL` clone does. A submodule that cannot be fetched (a
   token without access, a network blip) is a `WARNING` naming it, and the next boot tries again.
+  Each submodule is fetched on its own, bounded by `GIT_SUBMODULE_TIMEOUT` (300 s by default):
+  git sets no transfer timeout of its own, so a stalled connection would hold the boot, and every
+  session, for as long as it stalled. A fetch stopped at the bound is a `WARNING` too.
   Stopping the boot there would only loop: the restart finds the workspace populated and goes
   on anyway.
 - **One layout at a time.** `GIT_UMBRELLA` with `GIT_REPOS` refuses to boot, as does

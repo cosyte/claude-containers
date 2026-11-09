@@ -42,6 +42,8 @@ and its submodules') goes over HTTPS with `GH_TOKEN`, since a deploy key reaches
 only, so set a `GH_TOKEN` that reaches every submodule ([github-token.md](github-token.md)).
 Each boot checks out the submodules not checked out yet (a pin added since, or one that could
 not be fetched before, which the boot log names in a `WARNING`) and never touches one that is.
+Each submodule's fetch is bounded by `GIT_SUBMODULE_TIMEOUT` (300 s by default); one stopped
+there is a `WARNING` too, and the boot goes on.
 `GIT_UMBRELLA` cannot be combined with `GIT_REPOS`. The decision and its reasons are in
 [architecture.md](architecture.md).
 

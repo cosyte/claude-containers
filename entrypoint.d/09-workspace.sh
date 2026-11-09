@@ -104,6 +104,11 @@ fi
 # fresh clone's, a pin added since, or one an earlier boot could not fetch), the same as
 # `git clone --recurse-submodules` the first time. One that cannot be fetched is a WARNING,
 # never a failed boot: the next boot tries again, and a session can fetch it itself.
+# Each submodule (with its own nested ones) is fetched on its own, bounded by
+# GIT_SUBMODULE_TIMEOUT seconds (default 300): git sets no transfer timeout of its own, so a
+# stalled connection held the boot, and every session, for as long as it stalled. A fetch
+# stopped at the bound is a WARNING naming it; the others still run, and the next boot tries
+# it again (timeout's TERM lets git clone remove what it had written).
 ws_unfetched() {
     asclaude git -C "$WORKSPACE" submodule status 2>/dev/null | sed -n 's/^-[0-9a-f]* //p' || true
 }
@@ -111,10 +116,22 @@ if (( ws_umbrella )); then
     [[ -e "$WORKSPACE/.git" ]] \
         || die "GIT_UMBRELLA is set, but $WORKSPACE holds no repo at its root. Set GIT_REPO_URL to the
        umbrella, or bind-mount its checkout onto $WORKSPACE."
+    ws_sub_timeout="${GIT_SUBMODULE_TIMEOUT:-300}"
+    if [[ ! "$ws_sub_timeout" =~ ^[1-9][0-9]{0,5}$ ]]; then
+        log "WARNING: GIT_SUBMODULE_TIMEOUT='${GIT_SUBMODULE_TIMEOUT}' is not a positive number of seconds: 300 applies"
+        ws_sub_timeout=300
+    fi
     mapfile -t ws_missing < <(ws_unfetched)
     if (( ${#ws_missing[@]} )); then
         log "Umbrella            : checking out ${#ws_missing[@]} submodules not checked out yet (${ws_missing[*]})"
-        asclaude git -C "$WORKSPACE" submodule update --init --recursive -- "${ws_missing[@]}" || true
+        for ws_sub in "${ws_missing[@]}"; do
+            ws_rc=0
+            asclaude timeout -k 10 "$ws_sub_timeout" \
+                git -C "$WORKSPACE" submodule update --init --recursive -- "$ws_sub" || ws_rc=$?
+            if (( ws_rc == 124 || ws_rc == 137 )); then
+                log "WARNING: umbrella submodule $ws_sub: the fetch took over ${ws_sub_timeout}s and was stopped (GIT_SUBMODULE_TIMEOUT; the next boot tries again)"
+            fi
+        done
         mapfile -t ws_missing < <(ws_unfetched)
         (( ${#ws_missing[@]} == 0 )) \
             || log "WARNING: umbrella submodules still not checked out: ${ws_missing[*]} (GH_TOKEN must reach them; the next boot tries again)"
@@ -124,7 +141,7 @@ if (( ws_umbrella )); then
         && chmod 644 "$UMBRELLA_PROFILE_D.tmp" && mv -f "$UMBRELLA_PROFILE_D.tmp" "$UMBRELLA_PROFILE_D"; } 2>/dev/null \
         || log "WARNING: could not write $UMBRELLA_PROFILE_D: an SSH login shell will not see COSYTE_UMBRELLA"
     log "Umbrella            : COSYTE_UMBRELLA=$COSYTE_UMBRELLA"
-    unset ws_missing
+    unset ws_missing ws_sub ws_rc ws_sub_timeout
 else
     rm -f "$UMBRELLA_PROFILE_D" 2>/dev/null || true
 fi

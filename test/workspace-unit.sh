@@ -10,8 +10,10 @@
 #   - entrypoint.sh section 9, GIT_UMBRELLA: the repo at /workspace comes with its submodules,
 #     github.com SSH URLs are rewritten to HTTPS in the agent's global git config, every boot
 #     checks out only the submodules not checked out yet, a submodule that cannot be fetched is
-#     a WARNING (never a failed boot), COSYTE_UMBRELLA is exported and written for SSH logins,
-#     and GIT_REPOS, a workspace with no repo at its root, and an unrecognised value are refused
+#     a WARNING (never a failed boot), a submodule fetch that hangs is stopped at
+#     GIT_SUBMODULE_TIMEOUT with a WARNING and fetched on the next boot, COSYTE_UMBRELLA is
+#     exported and written for SSH logins, and GIT_REPOS, a workspace with no repo at its root,
+#     and an unrecognised value are refused
 #   - claude-compose-gen --group: one service with GIT_REPOS, per-repo flags applied to it,
 #     single-repo siblings untouched, bad groups refused
 #   - claude-launch with several --repo: GIT_REPOS, the label, and the refusals
@@ -191,6 +193,35 @@ out="$(um9 "$TMPD/um7" GIT_UMBRELLA=0 GIT_REPO_URL="$B/umbrella.git" "${FILEOK[@
     && grep -qxF 'COSYTE_UMBRELLA=<unset>' <<<"$out" && [[ -z "$(insteadof)" ]] && [[ ! -e "$UM_PROFILE" ]] \
     && ok "GIT_UMBRELLA=0: a plain clone, no submodules, no rewrite, no COSYTE_UMBRELLA, a stale profile file removed" \
     || bad "umbrella off (rc=$rc): $out / $(insteadof)"
+
+# A submodule fetch that hangs (a stalled connection: git sets no transfer timeout of its own).
+# The 3d submodule's URL is rewritten to an ext:: command that never answers, so its clone
+# waits until the command exits, 20 s later; home's fetch is untouched.
+HANG=(GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always
+      GIT_CONFIG_KEY_1=protocol.ext.allow GIT_CONFIG_VALUE_1=always
+      "GIT_CONFIG_KEY_2=url.ext::sleep 20.insteadOf" "GIT_CONFIG_VALUE_2=$B/3d.git")
+rm -rf "$UMH"; mkdir -p "$UMH"
+s=$SECONDS
+out="$(um9 "$TMPD/um8" GIT_UMBRELLA=1 GIT_REPO_URL="$B/umbrella.git" GH_TOKEN=x GIT_SUBMODULE_TIMEOUT=2 "${HANG[@]}")"; rc=$?
+took=$((SECONDS - s))
+(( rc == 0 && took < 15 )) && [[ "$(cat "$TMPD/um8/home/README" 2>/dev/null)" == "home on main" && ! -e "$TMPD/um8/3d/README" ]] \
+    && grep -qF 'WARNING: umbrella submodule 3d: the fetch took over 2s and was stopped' <<<"$out" \
+    && grep -qF 'WARNING: umbrella submodules still not checked out: 3d' <<<"$out" \
+    && grep -qxF "COSYTE_UMBRELLA=$TMPD/um8" <<<"$out" \
+    && ok "a hung submodule fetch is stopped at GIT_SUBMODULE_TIMEOUT: a WARNING naming it, the others fetched, the boot goes on" \
+    || bad "hung submodule (rc=$rc, ${took}s): $out"
+out="$(um9 "$TMPD/um8" GIT_UMBRELLA=1 GIT_REPO_URL="$B/umbrella.git" GH_TOKEN=x "${FILEOK[@]}")"; rc=$?
+(( rc == 0 )) && [[ "$(cat "$TMPD/um8/3d/README" 2>/dev/null)" == "3d on main" ]] && ! grep -q WARNING <<<"$out" \
+    && ok "the next boot fetches the submodule that was stopped (nothing half-cloned is left in its way)" \
+    || bad "after a stopped fetch (rc=$rc): $out"
+for v in abc 0 ' '; do
+    rm -rf "$UMH"; mkdir -p "$UMH"
+    out="$(um9 "$TMPD/um9-$RANDOM" GIT_UMBRELLA=1 GIT_REPO_URL="$B/umbrella.git" GH_TOKEN=x GIT_SUBMODULE_TIMEOUT="$v" "${FILEOK[@]}")"; rc=$?
+    (( rc == 0 )) && grep -qF "WARNING: GIT_SUBMODULE_TIMEOUT='$v' is not a positive number of seconds: 300 applies" <<<"$out" \
+        && grep -qF 'checking out 2 submodules' <<<"$out" && ! grep -q 'still not checked out' <<<"$out" \
+        && ok "GIT_SUBMODULE_TIMEOUT='$v': a WARNING, the default applies, the boot goes on" \
+        || bad "bad GIT_SUBMODULE_TIMEOUT '$v' (rc=$rc): $out"
+done
 
 # --- claude-compose-gen --group --------------------------------------------------------
 echo "== claude-compose-gen --group =="
