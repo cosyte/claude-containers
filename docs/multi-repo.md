@@ -23,3 +23,25 @@ container passes the list as `GIT_REPOS`; it cannot be combined with a single-re
 workspace (a repo at `/workspace` itself), so a multi-repo service starts from a fresh
 workspace volume.
 
+## An umbrella repo with submodules
+
+When one repo already pins the others as git submodules (an umbrella), clone that one and let
+its submodules come with it, rather than listing the repos as siblings:
+
+```
+# a standalone container
+claude-launch acme --repo git@github.com:acme/umbrella.git --env GIT_UMBRELLA=1
+# a stack service (scenario .conf, or the generator's command line): the service is the repo's name
+acme/umbrella
+--env umbrella=GIT_UMBRELLA=1
+```
+
+`/workspace` is the umbrella, each submodule is checked out at its pinned commit inside it,
+and every session sees `COSYTE_UMBRELLA=/workspace`. Every github.com SSH URL (the umbrella's
+and its submodules') goes over HTTPS with `GH_TOKEN`, since a deploy key reaches one repo
+only, so set a `GH_TOKEN` that reaches every submodule ([github-token.md](github-token.md)).
+Each boot checks out the submodules not checked out yet (a pin added since, or one that could
+not be fetched before, which the boot log names in a `WARNING`) and never touches one that is.
+`GIT_UMBRELLA` cannot be combined with `GIT_REPOS`. The decision and its reasons are in
+[architecture.md](architecture.md).
+

@@ -78,6 +78,8 @@ services:
       GIT_REPO_URL: ${GIT_REPO_URL:-}
       GIT_REPO_BRANCH: ${GIT_REPO_BRANCH:-}
       GIT_REPO_DEPTH: ${GIT_REPO_DEPTH:-}
+      # 1: GIT_REPO_URL is an umbrella, cloned with its submodules over HTTPS (docs/multi-repo.md).
+      GIT_UMBRELLA: ${GIT_UMBRELLA:-}
       GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME:-}
       GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-}
       GIT_COMMITTER_NAME: ${GIT_COMMITTER_NAME:-}

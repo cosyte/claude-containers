@@ -7,6 +7,11 @@
 #     directory, honours URL#BRANCH, clones only what is missing on the next boot, and
 #     refuses a name collision, GIT_REPOS with GIT_REPO_URL, and nesting into a
 #     single-repo workspace; the single-repo path is unchanged
+#   - entrypoint.sh section 9, GIT_UMBRELLA: the repo at /workspace comes with its submodules,
+#     github.com SSH URLs are rewritten to HTTPS in the agent's global git config, every boot
+#     checks out only the submodules not checked out yet, a submodule that cannot be fetched is
+#     a WARNING (never a failed boot), COSYTE_UMBRELLA is exported and written for SSH logins,
+#     and GIT_REPOS, a workspace with no repo at its root, and an unrecognised value are refused
 #   - claude-compose-gen --group: one service with GIT_REPOS, per-repo flags applied to it,
 #     single-repo siblings untouched, bad groups refused
 #   - claude-launch with several --repo: GIT_REPOS, the label, and the refusals
@@ -43,18 +48,24 @@ mkbare home; mkbare 3d; mkbare keys dev
 # --- entrypoint section 9, extracted and run -------------------------------------------
 # shellcheck source=test/lib/entrypoint.sh
 source "$REPO_ROOT/test/lib/entrypoint.sh"
-BLOCK="$(awk '/^# --- 9\. Workspace/{f=1} f{print}' "$(ep_section 9)")"
+# Its one root-only path (the SSH-login profile file) is redirected into the sandbox, so no
+# case can write to the real /etc/profile.d; the redirect is asserted below.
+UM_PROFILE="$TMPD/profile.d/claude-umbrella.sh"; mkdir -p "${UM_PROFILE%/*}"
+BLOCK="$(awk '/^# --- 9\. Workspace/{f=1} f{print}' "$(ep_section 9)" \
+    | sed "s#^UMBRELLA_PROFILE_D=.*#UMBRELLA_PROFILE_D=\"$UM_PROFILE\"#")"
 run9() {  # run9 <workspace> <env...>: section 9 as the entrypoint runs it, sandboxed
     local ws="$1"; shift
     # shellcheck disable=SC2163  # "$@" is VAR=VAL pairs, exported as given
-    ( export "$@" 2>/dev/null
+    ( unset GIT_UMBRELLA COSYTE_UMBRELLA
+      export "$@" 2>/dev/null
       log()  { echo "[entrypoint] $*"; }
       die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
       asclaude() { "$@"; }
       set -euo pipefail
       WORKSPACE="$ws" CLAUDE_UID="$(id -u)" CLAUDE_GID="$(id -g)"
       mkdir -p "$WORKSPACE"
-      eval "$BLOCK" ) 2>&1
+      eval "$BLOCK"
+      echo "COSYTE_UMBRELLA=${COSYTE_UMBRELLA-<unset>}" ) 2>&1
 }
 B="file://$TMPD/bare"
 echo "== entrypoint section 9: GIT_REPOS =="
@@ -98,6 +109,88 @@ else
     (( rc == 0 )) && [[ -d "$TMPD/ws6/.git" ]] && [[ "$(cat "$TMPD/ws6/README")" == "3d on main" ]] \
         && ok "the single-repo path is unchanged (and a blank GIT_REPOS is ignored)" || bad "single repo (rc=$rc): $out"
 fi
+
+# --- entrypoint section 9: an umbrella with its submodules ------------------------------
+# The umbrella pins home and 3d as submodules by file:// URLs. git refuses that transport for a
+# submodule unless protocol.file.allow says otherwise, so the cases that must fetch pass it in
+# through GIT_CONFIG_* (FILEOK), and leaving it out is how a case makes a fetch fail. HOME is a
+# sandbox in every case: the block writes the agent's global git config.
+echo "== entrypoint section 9: GIT_UMBRELLA =="
+UMSRC="$TMPD/src/umbrella"
+git init -q -b main "$UMSRC"
+git -C "$UMSRC" -c protocol.file.allow=always submodule --quiet add "$B/home.git" home
+git -C "$UMSRC" -c protocol.file.allow=always submodule --quiet add "$B/3d.git" 3d
+GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t git -C "$UMSRC" commit -qm pins
+git clone -q --bare "$UMSRC" "$TMPD/bare/umbrella.git"
+UMH="$TMPD/umhome"; mkdir -p "$UMH"
+FILEOK=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always)
+um9() {  # um9 <workspace> <env...>: run9 with the sandboxed HOME
+    local ws="$1"; shift
+    run9 "$ws" HOME="$UMH" XDG_CONFIG_HOME="$UMH/.config" "$@"
+}
+insteadof() { HOME="$UMH" XDG_CONFIG_HOME="$UMH/.config" git config --global --get-all url.https://github.com/.insteadOf 2>/dev/null; }
+geturl()    { HOME="$UMH" XDG_CONFIG_HOME="$UMH/.config" git ls-remote --get-url "$1" 2>/dev/null; }
+
+! grep -q '/etc/profile.d' <<<"$BLOCK" && grep -qF "UMBRELLA_PROFILE_D=\"$UM_PROFILE\"" <<<"$BLOCK" \
+    && ok "section 9's profile file is redirected into the sandbox (no case writes /etc)" \
+    || bad "section 9 did not extract, or UMBRELLA_PROFILE_D did not redirect: these cases would write to /etc"
+
+WS="$TMPD/um1"
+out="$(um9 "$WS" GIT_UMBRELLA=1 GIT_REPO_URL="$B/umbrella.git" GH_TOKEN=x "${FILEOK[@]}")"; rc=$?
+(( rc == 0 )) && [[ -d "$WS/.git" ]] && [[ "$(cat "$WS/home/README" 2>/dev/null)" == "home on main" ]] \
+    && [[ "$(cat "$WS/3d/README" 2>/dev/null)" == "3d on main" ]] \
+    && ok "GIT_UMBRELLA=1: the umbrella is cloned into /workspace with its submodules checked out" \
+    || bad "umbrella clone (rc=$rc): $out"
+grep -qxF "COSYTE_UMBRELLA=$WS" <<<"$out" && grep -qxF "export COSYTE_UMBRELLA=$WS" "$UM_PROFILE" 2>/dev/null \
+    && [[ "$(stat -c %a "$UM_PROFILE")" == 644 ]] \
+    && ok "COSYTE_UMBRELLA is exported for the sessions and written (644) for SSH logins" \
+    || bad "COSYTE_UMBRELLA: $out / $(cat "$UM_PROFILE" 2>&1)"
+! grep -q 'WARNING' <<<"$out" && ok "with GH_TOKEN and every submodule fetched: no warning" || bad "unexpected warning: $out"
+[[ "$(insteadof)" == $'git@github.com:\nssh://git@github.com/' ]] \
+    && [[ "$(geturl git@github.com:me/x.git)" == https://github.com/me/x.git ]] \
+    && [[ "$(geturl ssh://git@github.com/me/x.git)" == https://github.com/me/x.git ]] \
+    && [[ "$(geturl git@gitlab.com:me/x.git)" == git@gitlab.com:me/x.git ]] \
+    && ok "the agent's git rewrites github.com SSH URLs (scp and ssh:// forms) to HTTPS, and nothing else" \
+    || bad "insteadOf: $(insteadof | tr '\n' ' ') / $(geturl git@github.com:me/x.git)"
+
+echo "local work" > "$WS/home/WIP"
+git -C "$WS" submodule --quiet deinit -f 3d
+out="$(um9 "$WS" GIT_UMBRELLA=1 GIT_REPO_URL="$B/umbrella.git" GH_TOKEN=x "${FILEOK[@]}")"; rc=$?
+(( rc == 0 )) && [[ -f "$WS/home/WIP" ]] && [[ "$(cat "$WS/3d/README" 2>/dev/null)" == "3d on main" ]] \
+    && grep -qF 'checking out 1 submodules not checked out yet (3d)' <<<"$out" \
+    && ok "a later boot checks out only the submodule not checked out, and leaves the others' work alone" \
+    || bad "re-boot (rc=$rc): $out"
+[[ "$(insteadof | wc -l)" == 2 ]] && ok "a later boot adds no duplicate insteadOf line" || bad "insteadOf duplicated: $(insteadof | tr '\n' ' ')"
+
+out="$(um9 "$TMPD/um2" GIT_UMBRELLA=1 GIT_REPO_URL="$B/umbrella.git" GH_TOKEN= "${FILEOK[@]}")"; rc=$?
+(( rc == 0 )) && grep -qF 'WARNING: GIT_UMBRELLA without GH_TOKEN' <<<"$out" \
+    && ok "no GH_TOKEN: a WARNING (private submodules need it over HTTPS), and the boot goes on" \
+    || bad "no token (rc=$rc): $out"
+
+out="$(um9 "$TMPD/um3" GIT_UMBRELLA=yes GIT_REPO_URL="$B/umbrella.git" GH_TOKEN=x)"; rc=$?
+(( rc == 0 )) && [[ -d "$TMPD/um3/.git" && ! -e "$TMPD/um3/home/README" ]] \
+    && grep -qF 'WARNING: umbrella submodules still not checked out: 3d home' <<<"$out" \
+    && grep -qxF "COSYTE_UMBRELLA=$TMPD/um3" <<<"$out" \
+    && ok "a submodule that cannot be fetched: a WARNING naming it, the boot goes on, COSYTE_UMBRELLA still set" \
+    || bad "fetch failure (rc=$rc): $out"
+
+out="$(um9 "$TMPD/um4" GIT_UMBRELLA=1 GIT_REPOS="$B/home.git")"; rc=$?
+(( rc != 0 )) && grep -qF 'GIT_UMBRELLA and GIT_REPOS are both set' <<<"$out" && [[ ! -e "$TMPD/um4/home" ]] \
+    && ok "GIT_UMBRELLA with GIT_REPOS is refused, before any clone" || bad "with GIT_REPOS (rc=$rc): $out"
+mkdir -p "$TMPD/um5"; echo notes > "$TMPD/um5/notes.txt"
+out="$(um9 "$TMPD/um5" GIT_UMBRELLA=1)"; rc=$?
+(( rc != 0 )) && grep -qF 'holds no repo at its root' <<<"$out" \
+    && ok "GIT_UMBRELLA on a workspace with no repo at its root is refused" || bad "no repo (rc=$rc): $out"
+out="$(um9 "$TMPD/um6" GIT_UMBRELLA=maybe GIT_REPO_URL="$B/umbrella.git")"; rc=$?
+(( rc != 0 )) && grep -qF "GIT_UMBRELLA='maybe' is not a recognised value" <<<"$out" && [[ ! -e "$TMPD/um6/.git" ]] \
+    && ok "an unrecognised GIT_UMBRELLA is refused, quoted back, before any clone" || bad "typo (rc=$rc): $out"
+
+rm -rf "$UMH"; mkdir -p "$UMH"; echo stale > "$UM_PROFILE"
+out="$(um9 "$TMPD/um7" GIT_UMBRELLA=0 GIT_REPO_URL="$B/umbrella.git" "${FILEOK[@]}")"; rc=$?
+(( rc == 0 )) && [[ -d "$TMPD/um7/.git" && ! -e "$TMPD/um7/home/README" ]] \
+    && grep -qxF 'COSYTE_UMBRELLA=<unset>' <<<"$out" && [[ -z "$(insteadof)" ]] && [[ ! -e "$UM_PROFILE" ]] \
+    && ok "GIT_UMBRELLA=0: a plain clone, no submodules, no rewrite, no COSYTE_UMBRELLA, a stale profile file removed" \
+    || bad "umbrella off (rc=$rc): $out / $(insteadof)"
 
 # --- claude-compose-gen --group --------------------------------------------------------
 echo "== claude-compose-gen --group =="

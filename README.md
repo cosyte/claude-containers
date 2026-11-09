@@ -97,6 +97,7 @@ and `.env.example`.
 | `CLAUDE_MODEL` | `opus` | Model the session runs, passed to `--model` verbatim (`opus` is the latest Opus on the pinned CLI). Per-container via `claude-launch --model` |
 | `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | `acceptEdits`/`auto`/`bypassPermissions`/`manual`/`dontAsk`/`plan`; `acceptEdits` is the safer fleet posture |
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` |: | Clone source (or use `--repo`/`--branch`/`--depth`) |
+| `GIT_UMBRELLA` | off | `1`: the repo at `/workspace` is an umbrella, cloned with its submodules over HTTPS (`GH_TOKEN`); sets `COSYTE_UMBRELLA`. See [docs/multi-repo.md](docs/multi-repo.md) |
 | `GIT_AUTHOR_NAME`/`_EMAIL` (+`COMMITTER`) | host git config | Commit identity |
 | `GH_TOKEN` | unset | GitHub token for `gh` and HTTPS git in every session: [docs/github-token.md](docs/github-token.md) |
 | `GIT_SSH_KEY` | `~/.ssh/claude-git-key` | Host SSH key for git, mounted read-only and brokered. For git alone: never in `SSH_AUTHORIZED_KEYS` (the launch tools refuse that, and sshd in the container refuses it for logins) |
