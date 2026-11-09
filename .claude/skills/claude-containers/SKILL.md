@@ -76,9 +76,11 @@ small descriptive commits as you change things.
   defaults false and Remote Control fails with "not yet enabled for your
   account": even on an eligible account. RC is the point of this image.
   `DISABLE_AUTOUPDATER=1` is safe (unrelated to flags) but is NOT set by
-  default: auto-update is on by default now, so a running container's Claude
-  Code binary can self-update past the pinned CLAUDE_CODE_VERSION unless an
-  operator sets `DISABLE_AUTOUPDATER=1` themselves. The entrypoint
+  default: auto-update is on by default now, and every start installs npm's
+  latest before any session runs (§7d), so a container's Claude Code runs past
+  the pinned CLAUDE_CODE_VERSION unless an operator sets `DISABLE_AUTOUPDATER=1`
+  themselves. Managed settings refuse a CLI older than 2.1.295
+  (`requiredMinimumVersion`). The entrypoint
   self-heals older config volumes (strips these keys + clears the stale flag
   cache). This was a real, shipped-then-fixed defect: see
   docs/troubleshooting.md "Remote Control".

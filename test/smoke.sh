@@ -73,6 +73,17 @@ bad()  { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 # docker logs, still writing, dies of SIGPIPE, which pipefail would turn into a false FAIL.
 check(){ local r=0; set +o pipefail; eval "$2" || r=1; set -o pipefail; if (( r == 0 )); then ok "$1"; else bad "$1"; fi; }
 
+# Every container here boots with the start-time Claude Code update off (entrypoint §7d):
+# otherwise each of the two dozen would download npm's latest CLI, and the checks below that
+# read the image's own CLI would read whatever npm served that day. `docker run` gets
+# -e DISABLE_AUTOUPDATER=1 first, so a container that tests the update passes
+# -e DISABLE_AUTOUPDATER=0 later in its own command, and the later one wins (the main
+# container does).
+docker() {
+    if [[ "${1:-}" == run ]]; then shift; command docker run -e DISABLE_AUTOUPDATER=1 "$@"
+    else command docker "$@"; fi
+}
+
 echo "== image: $IMAGE =="
 docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "image missing: build first"; exit 1; }
 # Its size, so a run's log shows what a change to the image costs.
@@ -137,6 +148,7 @@ docker run -d --name "$CN" --init \
     $HARDEN_FLAGS \
     -e CLAUDE_SKIP_AUTH_CHECK=1 \
     -e CLAUDE_PROJECT_NAME=smoke \
+    -e DISABLE_AUTOUPDATER=0 \
     -e GH_TOKEN=ghp_smoketestdummy \
     -p 127.0.0.1::22 \
     -v "$TMP/repo:/workspace" \
@@ -144,8 +156,9 @@ docker run -d --name "$CN" --init \
     -v "$TMP/plugins.json:/opt/claude-config/plugins/plugins.json:ro" \
     "$IMAGE" >/dev/null
 
-# wait for the entrypoint to reach its last section, past the tmux launch (or die)
-for _ in $(seq 1 60); do
+# wait for the entrypoint to reach its last section, past the tmux launch (or die); this one
+# installs npm's latest Claude Code on the way (§7d), so it gets longer than a minute or two
+for _ in $(seq 1 150); do
     log="$(docker logs "$CN" 2>&1 || true)"
     grep -q '^\[entrypoint\] §13 stay-alive$' <<<"$log" && break
     [[ "$(docker inspect -f '{{.State.Running}}' "$CN" 2>/dev/null)" == "true" ]] \
@@ -234,8 +247,19 @@ check "entrypoint defaults the model to opus (best available)" \
 # silently resolving to Opus 4.7: with every other gate green.
 PINNED_VER="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=\(.*\)$/\1/p' "$(dirname "${BASH_SOURCE[0]}")/../Dockerfile")"
 OPUS48_FLOOR=2.1.154
+# The IMAGE's own CLI, read from the image rather than this container: the container below
+# updated itself to npm's latest at start (§7d), which is checked next.
 check "image ships the pinned Claude Code CLI ($PINNED_VER)" \
-    '[[ "$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")" == "$PINNED_VER" ]]'
+    '[[ "$(docker run --rm --entrypoint /opt/claude-code/bin/claude "$IMAGE" --version 2>/dev/null | awk "{print \$1}")" == "$PINNED_VER" ]]'
+# The start-time update (§7d): the boot log names the version it left, and that is the CLI the
+# sessions run. npm's latest, as this host reads it, is printed for the run's log.
+CC_BOOT="$(docker logs "$CN" 2>&1 | sed -n 's/^\[entrypoint\] Claude Code  *: \([0-9][0-9.]*\)\( (updated from .*)\|, npm.s latest\|, newer than .*\)$/\1/p' | tail -n 1)"
+echo "  Claude Code at start: ${CC_BOOT:-<no version line>}; npm's latest from this host: $(timeout 30 npm view @anthropic-ai/claude-code@latest version 2>/dev/null || echo '?')"
+check "the start-time update reports a version, with no WARNING, and the sessions run that CLI" \
+    '[[ -n "$CC_BOOT" ]] && ! docker logs "$CN" 2>&1 | grep -qE "WARNING: (Claude Code|the update to Claude Code)" \
+     && [[ "$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")" == "$CC_BOOT" ]]'
+check "the CLI after the update is not older than the image's pin ($PINNED_VER)" \
+    '[[ -n "$CC_BOOT" && "$(printf "%s\n%s\n" "$PINNED_VER" "$CC_BOOT" | sort -V | head -1)" == "$PINNED_VER" ]]'
 check "the CLI in the image clears the Opus-4.8 floor ($OPUS48_FLOOR, else '--model opus' means 4.7)" \
     'v="$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")"; [[ "$(printf "%s\n%s\n" "$OPUS48_FLOOR" "$v" | sort -V | head -1)" == "$OPUS48_FLOOR" ]]'
 # uv and pnpm: the versions the Dockerfile pins (uv on its FROM line, pnpm in its ARG), printed
@@ -319,6 +343,8 @@ check "policy: permissions.defaultMode is delivered as managed" \
     'msjq ".permissions.defaultMode == \"bypassPermissions\"" "$MSFILE"'
 check "policy: skipDangerousModePermissionPrompt is delivered as managed" \
     'msjq ".skipDangerousModePermissionPrompt == true" "$MSFILE"'
+check "policy: requiredMinimumVersion 2.1.295 is delivered as managed" \
+    'msjq ".requiredMinimumVersion == \"2.1.295\"" "$MSFILE"'
 check "preference: DISABLE_AUTOUPDATER is NOT managed (auto-update is on by default)" \
     'msjq "has(\"env\") | not" "$MSFILE"'
 check "preference: includeCoAuthoredBy is NOT managed (a session may still change it)" \

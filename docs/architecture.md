@@ -86,6 +86,7 @@ rationale: the sections below.
   | `07a-managed-policy.sh` | §7a: managed settings |
   | `07b-browser.sh` | §7b: the browser decision (`CLAUDE_BROWSER`) |
   | `07c-session-memory.sh` | §7c: the managed CLAUDE.md: container facts, the GPU and containers notes |
+  | `07d-claude-update.sh` | §7d: Claude Code at npm's latest, at every start (`DISABLE_AUTOUPDATER=1` keeps the baked version) |
   | `08a-global-claude-md.sh` | §8a: the image's global CLAUDE.md |
   | `08b-settings.sh` | §8b: merge `settings.json`, its self-heals |
   | `08c-plugins.sh` | §8c: baked plugins and the runtime kit's |
@@ -444,7 +445,11 @@ and that was the sole reason Remote Control never appeared. They are now never
 set. `DISABLE_AUTOUPDATER=1` (unrelated to flags) is no longer set either: as of
 CC-CLAUDE-CODE-UPGRADE (the 2.1.258 bump), auto-update is ON by default, so a
 running container's binary can self-update past the pinned `CLAUDE_CODE_VERSION`
-unless an operator sets `DISABLE_AUTOUPDATER=1` themselves. (Until the 2.1.280
+unless an operator sets `DISABLE_AUTOUPDATER=1` themselves. Every start also
+installs npm's latest before any session runs (§7d), so a container never starts
+a session on the baked version when a newer one exists; the same
+`DISABLE_AUTOUPDATER=1` skips that, and the managed `requiredMinimumVersion`
+(2.1.295) keeps a session from starting on an older CLI whatever happened. (Until the 2.1.280
 bump that was only nominal: the CLI sat in root-owned `/usr/local`, so every
 update failed with "Insufficient permissions to install update". It now lives in
 the claude-owned npm prefix `/opt/claude-code`, and `/usr/local/bin/claude` is

@@ -226,8 +226,17 @@ prompt. If a future Claude Code version prompts anyway:
   auto-apply; shell commands prompt in the app (you tap approve). Safer, still
   usable remotely.
 - Or pin back to a known-good `CLAUDE_CODE_VERSION` and rebuild, and set
-  `DISABLE_AUTOUPDATER=1` too, since auto-update is on by default and would
-  otherwise carry the container past the version you just pinned back to.
+  `DISABLE_AUTOUPDATER=1` too, since every start installs npm's latest and
+  auto-update is on by default: either would otherwise carry the container past
+  the version you just pinned back to.
+
+**The boot log says `WARNING: the update to Claude Code ... failed` (or `npm's
+latest version could not be read`).** Each start installs npm's latest Claude
+Code (entrypoint §7d) and carries on without it when the registry cannot be
+reached. The sessions start on the version named in that line. A CLI older than
+the managed `requiredMinimumVersion` (2.1.295) then exits at startup and says to
+update: run `claude update` in the container (it is exempt from the floor), or
+restart the container once the registry is reachable.
 
 ## Git auth failures
 

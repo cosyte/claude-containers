@@ -1735,6 +1735,9 @@ ms_has '.permissions.defaultMode == "bypassPermissions"' \
 ms_has '.skipDangerousModePermissionPrompt == true' \
     && ok  "managed: skipDangerousModePermissionPrompt (paired with the mode above)" \
     || bad "skipDangerousModePermissionPrompt is not delivered as managed policy"
+ms_has '.requiredMinimumVersion == "2.1.295"' \
+    && ok  "managed: requiredMinimumVersion 2.1.295 (an older CLI exits at startup and says to update)" \
+    || bad "requiredMinimumVersion 2.1.295 is not delivered as managed policy"
 ms_has 'has("env") | not' \
     && ok  "NOT managed: no env key at all (DISABLE_AUTOUPDATER is a preference, not policy)" \
     || bad "the managed file carries an env key: DISABLE_AUTOUPDATER should not be root-enforced"
