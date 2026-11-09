@@ -23,7 +23,8 @@ FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b98
 FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d
 
 # --- Build-time configuration -------------------------------------------------
-# CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.52 for Remote Control.
+# CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.295, the managed
+# requiredMinimumVersion (entrypoint §7a): the build refuses an older one (GUARD 1 below).
 #
 # 2.1.302 (published to npm 2026-10-16) is verified to support the exact launch this
 # image makes: `claude --dangerously-skip-permissions --remote-control <name>`
@@ -40,11 +41,14 @@ FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf37
 # that must stay on Opus 5. `sonnet` (Sonnet 5.5 from 2.1.284) and `haiku` (Haiku 5.5
 # from 2.1.293) are unchanged too: no alias moved between 2.1.293 and 2.1.302.
 #
-# WHY THE FLOOR EXISTS (CC-CLAUDE-CODE-UPGRADE): the `opus` alias resolves to the LATEST
-# Opus, and Opus 4.8 shipped in CLI 2.1.154, so the old 2.1.145 pin silently resolved
-# `--model opus` (this image's default) to Opus 4.7, quietly downgrading every gate
-# agent below the Opus 4.8 floor they need. The >=2.1.154 floor below is what makes that
-# downgrade impossible; it stays a floor, not an equality.
+# WHY THE FLOOR EXISTS: the managed settings (entrypoint §7a) set requiredMinimumVersion
+# 2.1.295, and a session on an older CLI exits at startup. §7d updates the CLI to npm's
+# latest at every start, but DISABLE_AUTOUPDATER=1 skips that and an unreachable registry
+# leaves the baked CLI in place, so an image baked below 2.1.295 could start no session at
+# all. The >=2.1.295 floor below makes that image impossible to build; it stays a floor,
+# not an equality, and it moves with MANAGED_MIN_VERSION in §7a (test/cli-version-unit.sh
+# keeps the two equal). It also clears the older Opus 4.8 floor (CC-CLAUDE-CODE-UPGRADE):
+# the `opus` alias resolves to the LATEST Opus, and below CLI 2.1.154 it meant Opus 4.7.
 #
 # UPDATED AT EVERY START: entrypoint §7d installs npm's latest into /opt/claude-code before
 # any session runs (DISABLE_AUTOUPDATER=1 skips it), and §7a's managed settings refuse a CLI
@@ -383,20 +387,24 @@ COPY --from=uv /uv /uvx /usr/local/bin/
 # and every caller in this image resolves `claude` by name. A root caller is handed to the
 # agent user first: root never runs the CLI out of the agent's prefix.
 RUN set -eu; \
-    # --- GUARD 1: the effective version must clear the Opus-4.8 floor -------------
-    # This is NOT hygiene. `--model opus` (this image's default) resolves to the LATEST
-    # Opus, and Opus 4.8 arrived in CLI 2.1.154, so ANY build below that floor silently
-    # serves Opus 4.7 and quietly downgrades every gate agent below the Opus 4.8 floor they need.
+    # --- GUARD 1: the effective version must clear the managed minimum -------------
+    # This is NOT hygiene. The managed requiredMinimumVersion (entrypoint §7a,
+    # MANAGED_MIN_VERSION) makes every session on an older CLI exit at startup, and the
+    # baked CLI is what the sessions run whenever the start-time update (§7d) cannot run:
+    # DISABLE_AUTOUPDATER=1, or the registry out of reach. Below the floor such an image
+    # starts no session at all. (The floor also clears Opus 4.8's 2.1.154: below that,
+    # `--model opus`, this image's default, silently meant Opus 4.7.)
     #
     # The floor lives HERE, in the Dockerfile, because it is the ONLY choke point every
     # build path passes through (`make build`, `docker compose build`, a compose-gen'd
     # stack, a raw `docker build`). In particular the Makefile does `-include .env` BEFORE
     # `CLAUDE_CODE_VERSION ?= …`, so an operator's gitignored `.env`, which README tells
-    # them to create from .env.example, and which on an existing host still says 2.1.145:
-    # OVERRIDES the repo's bumped default and is forwarded here as --build-arg. Without
-    # this guard that host keeps building the old CLI, keeps getting Opus 4.7, and every
-    # test stays green (the unit suite is static and never sees .env). Fail loudly instead.
-    OPUS48_FLOOR=2.1.154; \
+    # them to create from .env.example, and which on an existing host may still name an old
+    # version: OVERRIDES the repo's bumped default and is forwarded here as --build-arg.
+    # Without this guard that host keeps building the old CLI, every session on it exits at
+    # startup, and every test stays green (the unit suite is static and never sees .env).
+    # Fail loudly instead.
+    CLI_FLOOR=2.1.295; \
     # Format-check FIRST: `sort -V` ranks non-numeric strings (`latest`, `abc`, `v2.1.1`)
     # ABOVE the floor, so it would fail OPEN on them. That is a plausible operator mistake,
     # not a theoretical one: an old .env.example invited `latest` for UV_VERSION and
@@ -409,9 +417,10 @@ RUN set -eu; \
             echo "       the image must be reproducible, and a floating tag cannot be floor-checked." >&2; \
             exit 1 ;; \
     esac; \
-    if [ "$(printf '%s\n%s\n' "$OPUS48_FLOOR" "${CLAUDE_CODE_VERSION}" | sort -V | head -1)" != "$OPUS48_FLOOR" ]; then \
-        echo "ERROR: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} is below the Opus-4.8 floor ($OPUS48_FLOOR)." >&2; \
-        echo "       '--model opus' would silently resolve to Opus 4.7, below the floor the gate agents need." >&2; \
+    if [ "$(printf '%s\n%s\n' "$CLI_FLOOR" "${CLAUDE_CODE_VERSION}" | sort -V | head -1)" != "$CLI_FLOOR" ]; then \
+        echo "ERROR: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} is below the floor ($CLI_FLOOR)." >&2; \
+        echo "       $CLI_FLOOR is the managed requiredMinimumVersion: a session on an older CLI exits" >&2; \
+        echo "       at startup, so this image would start none whenever the start-time update cannot run." >&2; \
         echo "       Most likely cause: a stale .env pinning an old CLAUDE_CODE_VERSION." >&2; \
         echo "       The Makefile's '-include .env' beats its own default AND the Dockerfile ARG." >&2; \
         echo "       Fix: update (or delete) CLAUDE_CODE_VERSION in your .env, then rebuild." >&2; \
@@ -429,7 +438,7 @@ RUN set -eu; \
         echo "ERROR: pinned CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} but the installed CLI reports '$installed'." >&2; \
         exit 1; \
     fi; \
-    echo "Claude Code $installed installed (>= $OPUS48_FLOOR, so '--model opus' resolves to Opus 4.8)"
+    echo "Claude Code $installed installed (>= $CLI_FLOOR, the managed requiredMinimumVersion)"
 
 # Bake pnpm + yarn at build time (registry reachable here) so JS dev servers
 # never need a runtime corepack/registry fetch for the package-manager binary

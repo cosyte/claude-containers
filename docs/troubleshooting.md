@@ -231,10 +231,10 @@ prompt. If a future Claude Code version prompts anyway:
 - Set `CLAUDE_PERMISSION_MODE=acceptEdits` in `.env` and relaunch. Edits
   auto-apply; shell commands prompt in the app (you tap approve). Safer, still
   usable remotely.
-- Or pin back to a known-good `CLAUDE_CODE_VERSION` and rebuild, and set
-  `DISABLE_AUTOUPDATER=1` too, since every start installs npm's latest and
-  auto-update is on by default: either would otherwise carry the container past
-  the version you just pinned back to.
+- Or pin back to a known-good `CLAUDE_CODE_VERSION` (2.1.295 or later: the build
+  refuses an older one, below) and rebuild, and set `DISABLE_AUTOUPDATER=1` too,
+  since every start installs npm's latest and auto-update is on by default: either
+  would otherwise carry the container past the version you just pinned back to.
 
 **The boot log says `WARNING: the update to Claude Code ... failed` (or `npm's
 latest version could not be read`).** Each start installs npm's latest Claude
@@ -243,6 +243,15 @@ reached. The sessions start on the version named in that line. A CLI older than
 the managed `requiredMinimumVersion` (2.1.295) then exits at startup and says to
 update: run `claude update` in the container (it is exempt from the floor), or
 restart the container once the registry is reachable.
+
+**The build stops with `CLAUDE_CODE_VERSION=... is below the floor (2.1.295)`.** The
+image refuses to bake a Claude Code older than **2.1.295**, the build-time floor
+(`CLI_FLOOR` in the `Dockerfile`). It is the managed `requiredMinimumVersion` (entrypoint
+§7a): a session on an older CLI exits at startup, and the sessions run the baked CLI
+whenever the start-time update cannot (`DISABLE_AUTOUPDATER=1`, or the registry out of
+reach), so such an image could start no session at all. The usual cause is a `.env` that
+still pins an old `CLAUDE_CODE_VERSION`: the Makefile's `-include .env` beats its own
+default. Set it to 2.1.295 or later (or delete the line) and rebuild.
 
 ## Git auth failures
 
