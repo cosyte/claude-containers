@@ -39,9 +39,26 @@ fails, never a failed boot):
    after this step, so a kit host that cannot be reached delays them by up to one timeout
    (its plugins are then skipped); under `CLAUDE_EGRESS_LOCKDOWN` a kit on a host other than
    GitHub needs that host in `CLAUDE_EGRESS_EXTRA_HOSTS`.
-3. **start**: after the sessions are up, the start command runs once, detached.
+3. **warm** (umbrella mode only): the workspace's own marketplaces are registered before the
+   first session, so it loads their plugins whole (below).
+4. **start**: after the sessions are up, the start command runs once, detached.
 
 `claude-kit status` (inside the container) prints what is declared, registered and installed.
+
+**An umbrella's own marketplaces.** In umbrella mode (`GIT_UMBRELLA`,
+[multi-repo.md](multi-repo.md)) the workspace's project settings
+(`/workspace/.claude/settings.json`) can declare marketplaces of their own in
+`extraKnownMarketplaces`, such as a plugin kept in the umbrella and declared as a `directory`
+source. Claude Code registers such a marketplace in the config
+(`~/.claude/plugins/known_marketplaces.json`) at the first start in the workspace, and on a
+fresh config that first session lists the plugin without loading its agents, skills or hooks;
+the next start, or `/reload-plugins`, loads them. So after the install step,
+`claude-kit warm /workspace` makes one throwaway start there whenever the config has not
+registered each declared marketplace yet: print mode with nothing on stdin, so no prompt and
+no model call, with every hook off, no MCP server and no transcript, bounded by
+`CLAUDE_KIT_TIMEOUT`. It runs after the egress lockdown, as the sessions do. Once each
+marketplace is registered, later boots skip it. A start that fails or registers nothing is a
+warning naming the marketplaces, and the first session then needs `/reload-plugins` once.
 
 **Pin or auto-update, not both.** Without `#REF` a marketplace follows its repository's
 default branch and is registered with `"autoUpdate": true`: Claude Code refreshes it and

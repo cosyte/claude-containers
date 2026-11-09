@@ -45,3 +45,8 @@ not be fetched before, which the boot log names in a `WARNING`) and never touche
 `GIT_UMBRELLA` cannot be combined with `GIT_REPOS`. The decision and its reasons are in
 [architecture.md](architecture.md).
 
+Plugins that the umbrella's own `.claude/settings.json` declares (`extraKnownMarketplaces` and
+`enabledPlugins`) load whole from the first session, a fresh config included: before the
+sessions start, `claude-kit warm` makes one throwaway start in `/workspace` when the config has
+not registered those marketplaces yet ([kits.md](kits.md)).
+
