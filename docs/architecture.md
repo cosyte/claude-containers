@@ -91,7 +91,7 @@ rationale: the sections below.
   | `08c-plugins.sh` | §8c: baked plugins and the runtime kit's |
   | `08d-commands.sh` | §8d: baked slash commands |
   | `08e-skills.sh` | §8e: baked skills, each where it can work |
-  | `09-workspace.sh` | §9: the workspace: a mount, `GIT_REPO_URL` or `GIT_REPOS` |
+  | `09-workspace.sh` | §9: the workspace: a mount, `GIT_REPO_URL` or `GIT_REPOS`; an umbrella's submodules (`GIT_UMBRELLA`) |
   | `09b-mise-shims.sh` | §9b: this container's mise shims |
   | `10-mcp.sh` | §10: baked MCP servers |
   | `10b-chrome-devtools.sh` | §10b: the chrome-devtools MCP |
@@ -268,6 +268,39 @@ boot rather than nest one repo inside another. mise's trusted paths cover `/work
 and everything below it. Claude Code's workspace trust does not: main is fine because it
 starts in `/workspace`, and a named session started in `/workspace/<repo>` gets its own
 trust entry (next decision).
+
+## Decision (revised): an umbrella repo brings its repos as submodules
+
+The decision above stands for repos that know nothing of each other. It does not fit an
+umbrella: a repo whose job is to pin other repos as git submodules, at the commits that work
+together. Cloning those repos as siblings would drop the pins, and a sibling list kept by hand
+in `GIT_REPOS` would drift from the umbrella's `.gitmodules`. So for an umbrella the submodules
+win: `GIT_UMBRELLA=1` beside `GIT_REPO_URL` (or a checkout already at `/workspace`) makes
+`/workspace` the umbrella, with its submodules checked out inside it. The session starts in
+`/workspace` as before, and `COSYTE_UMBRELLA` holds that path (exported to every session, and
+in `/etc/profile.d` for SSH logins) for the tools that look for the umbrella.
+
+How, and why:
+
+- **Over HTTPS, not SSH.** Submodule URLs are usually SSH (`git@github.com:owner/repo.git`),
+  and the deploy key (`GIT_SSH_KEY`) reaches one repository, so SSH could clone the umbrella
+  and none of its submodules. Umbrella mode adds `url.https://github.com/.insteadOf` for
+  `git@github.com:` and `ssh://git@github.com/` to the agent's global git config, so every
+  github.com URL goes over HTTPS with `GH_TOKEN` through gh's credential helper (§5): the
+  clone, and every later fetch and push in a submodule. Without `GH_TOKEN` it warns: HTTPS
+  then reaches public repos only.
+- **Only what is missing, every boot.** After the clone, each boot checks out the submodules
+  not checked out yet (`-` in `git submodule status`: a fresh clone's, a pin added since, or
+  one an earlier boot could not fetch), the same as `git clone --recurse-submodules` the first
+  time. A checked-out submodule is never touched, whatever state the session left it in, the
+  same rule as a `GIT_REPOS` checkout.
+- **A failed submodule warns; it does not stop the boot.** A clone of the umbrella itself that
+  fails stops the boot, as any `GIT_REPO_URL` clone does. A submodule that cannot be fetched (a
+  token without access, a network blip) is a `WARNING` naming it, and the next boot tries again.
+  Stopping the boot there would only loop: the restart finds the workspace populated and goes
+  on anyway.
+- **One layout at a time.** `GIT_UMBRELLA` with `GIT_REPOS` refuses to boot, as does
+  `GIT_UMBRELLA` on a workspace with no repo at its root, or a value that is not on or off.
 
 ## Decision: several sessions share one container as tmux windows
 
