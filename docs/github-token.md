@@ -71,7 +71,8 @@ a call shows what the token can do, which is what the start-time check makes.
 At every start with `GH_TOKEN` set, the entrypoint runs `claude-gh-check` in the background
 (it never blocks or fails the boot) and writes its result to `/run/claude/gh-check.txt`,
 readable by every session, the token never in it. First one line for the token, then one line
-per github.com repo under `/workspace` (at most 30):
+per github.com repo under `/workspace` (its own repo and each `/workspace/<dir>`: an umbrella
+and each of its submodules), at most `CLAUDE_GH_CHECK_MAX_REPOS` of them (default 100):
 
 ```
 github token: scopes ok (repo, workflow, read:org)
@@ -108,6 +109,10 @@ once). It never reads as `NO` and logs no warning; run `claude-gh-check` again l
 `github: skipped (...)` means it could not ask (offline, a timeout, no `GH_TOKEN`, no github.com
 repo, or a call already rate limited, so nothing after it was checked). A rate-limited answer
 that still carries the scopes header is read for the token line first.
+`github: not probed: N more github.com repos under /workspace, past CLAUDE_GH_CHECK_MAX_REPOS=M`
+means the workspace holds more repos than the cap: the first M (the workspace's own repo, then
+its directories in name order) were probed, and the boot log has a `WARNING` with the same
+line. Raise `CLAUDE_GH_CHECK_MAX_REPOS` to probe them all; each repo is 4 read-only calls.
 
 On a public repo `read` and `checks` answer 200 to any token, so there they say only that the
 call works, not that the token holds the permission; the two write probes are exact everywhere.
