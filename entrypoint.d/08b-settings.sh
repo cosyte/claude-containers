@@ -8,8 +8,8 @@
 # Remote Control reports "not yet enabled for your account". RC is the point
 # of this image, so they must never be set. See docs/troubleshooting.md.
 PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
-# Auto-update is on by default (no DISABLE_AUTOUPDATER here, nor in §7a's managed
-# policy above): see the AUTO-UPDATER NOW ON BY DEFAULT note in the Dockerfile above
+# Auto-update is on by default, and §7d updates at every start (no DISABLE_AUTOUPDATER
+# here, nor in §7a's managed policy above): see the notes in the Dockerfile above
 # ARG CLAUDE_CODE_VERSION. An operator who wants a container to stay pinned to the
 # baked CLAUDE_CODE_VERSION should set DISABLE_AUTOUPDATER=1 themselves (env, their
 # own mounted settings.json, or, to make it non-overridable, their own file at

@@ -20,6 +20,7 @@ agent process exists.
 |---|---|
 | `permissions.defaultMode` | The containment posture the operator chose (`CLAUDE_PERMISSION_MODE`). It is what the container IS. |
 | `skipDangerousModePermissionPrompt` | Meaningless apart from the mode above; they are one decision. |
+| `requiredMinimumVersion` | `2.1.295`: the oldest Claude Code a session may start on. An older CLI exits at startup and says to update (`claude update` itself still runs). 2.1.295 is where a hook's `"onFailure": "block"` arrived, which a fail-closed `PreToolUse` guard needs: on an older CLI such a guard fails open. Claude Code reads this key only from managed settings. Each start brings the CLI to npm's latest first (entrypoint §7d), so the floor bites only when that update could not run and the installed CLI is older. |
 
 `includeCoAuthoredBy` is deliberately **not** here. It is a commit-message
 preference: nothing about the container depends on it, and a session that wants
@@ -29,10 +30,12 @@ it off should be free to turn it off. The entrypoint still sets it in
 `env.DISABLE_AUTOUPDATER` is deliberately **not** here either, as of the
 CC-CLAUDE-CODE-UPGRADE 2.1.258 bump: auto-update is now this image's default
 posture (neither the Dockerfile `ENV` nor `~/.claude/settings.json` sets it),
-so there is no "the pin stops meaning anything" case left to root-enforce
-against. An operator who wants a fleet to stay pinned, non-overridable from
-inside, sets `DISABLE_AUTOUPDATER=1` in their own file at the managed path
-below (the image never overwrites one it did not write).
+and each start also installs npm's latest (entrypoint §7d), so there is no "the
+pin stops meaning anything" case left to root-enforce against. An operator who
+wants a fleet to stay pinned, non-overridable from inside, sets
+`DISABLE_AUTOUPDATER=1` in their own file at the managed path below (the image
+never overwrites one it did not write); the start-time update reads that file's
+`env` too and skips.
 
 The Remote-Control-breaking telemetry kills (`DISABLE_TELEMETRY`,
 `DO_NOT_TRACK`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) are in neither file,

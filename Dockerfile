@@ -46,6 +46,11 @@ FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf37
 # agent below the Opus 4.8 floor they need. The >=2.1.154 floor below is what makes that
 # downgrade impossible; it stays a floor, not an equality.
 #
+# UPDATED AT EVERY START: entrypoint §7d installs npm's latest into /opt/claude-code before
+# any session runs (DISABLE_AUTOUPDATER=1 skips it), and §7a's managed settings refuse a CLI
+# older than requiredMinimumVersion 2.1.295. This ARG is the version the image bakes and
+# falls back to when the registry cannot be reached at start.
+#
 # AUTO-UPDATER NOW ON BY DEFAULT (CC-CLAUDE-CODE-UPGRADE): DISABLE_AUTOUPDATER=1 was
 # removed from this image's ENV (below), the baked settings.json `env`
 # (entrypoint.sh §8b), AND the root-owned managed-settings.json §7a composes (added by

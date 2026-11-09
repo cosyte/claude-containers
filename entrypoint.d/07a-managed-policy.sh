@@ -22,13 +22,22 @@
 # the container IS are delivered here:
 #   permissions.defaultMode            the containment posture the operator chose
 #   skipDangerousModePermissionPrompt  meaningless apart from the mode above
+#   requiredMinimumVersion             the oldest Claude Code a session may start on
+#                                      (MANAGED_MIN_VERSION): an older CLI exits at
+#                                      startup and says to update (`claude update` itself
+#                                      still runs). 2.1.295 is where a hook's
+#                                      `"onFailure": "block"` arrived, which a fail-closed
+#                                      PreToolUse guard needs; on an older CLI such a guard
+#                                      fails open. §7d brings the CLI to npm's latest first.
+#                                      Claude Code reads this key only from managed settings.
 # includeCoAuthoredBy is deliberately NOT here. It is a commit-message
 # preference: nothing about the container depends on it, and a session that
 # wants it off should be free to turn it off. Section 8b still sets it.
 # The telemetry kills stay out of BOTH files for the reason in 8b's own note.
 #
-# env.DISABLE_AUTOUPDATER is deliberately NOT here either: auto-update is the image's
-# default posture (see the note above ARG CLAUDE_CODE_VERSION in the Dockerfile), and
+# env.DISABLE_AUTOUPDATER is deliberately NOT here either: auto-update, and §7d's update
+# at every start, are the image's default posture (see the note above ARG
+# CLAUDE_CODE_VERSION in the Dockerfile), and
 # root-enforcing it here would remove the one lever (env, or a mounted settings/managed
 # file) an operator has to opt back INTO staying pinned. An operator who wants that
 # posture fleet-wide and non-overridable should set DISABLE_AUTOUPDATER=1 in their own
@@ -51,6 +60,7 @@ MANAGED_DIR="/etc/claude-code"
 MANAGED_STAMP="/etc/claude-code-image-policy.sha256"
 MANAGED_FILE="$MANAGED_DIR/managed-settings.json"
 MANAGED_PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
+MANAGED_MIN_VERSION="2.1.295"
 managed_ok=0          # 1 only when a policy file is really in force
 managed_why=""        # why it is not, when it is not
 managed_est_why=""    # why THIS IMAGE delivered no policy set of its own, if it did not
@@ -63,9 +73,10 @@ managed_owner_uid="$(id -u)"   # the uid this entrypoint runs as: root, in this 
 # The image's own policy set. jq builds it because a printf template would emit
 # invalid JSON for an exotic CLAUDE_PERMISSION_MODE and the CLI would then drop
 # the whole file, silently, with no policy in force and a happy-looking log.
-MANAGED_POLICY="$(jq -n --arg pm "$MANAGED_PERM_MODE" '{
+MANAGED_POLICY="$(jq -n --arg pm "$MANAGED_PERM_MODE" --arg minv "$MANAGED_MIN_VERSION" '{
     permissions: { defaultMode: $pm },
-    skipDangerousModePermissionPrompt: true
+    skipDangerousModePermissionPrompt: true,
+    requiredMinimumVersion: $minv
 }' 2>/dev/null)" || MANAGED_POLICY=""
 
 # True when $MANAGED_FILE is byte-for-byte the file THIS image last wrote. The
