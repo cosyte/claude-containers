@@ -47,7 +47,7 @@ FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf37
 # leaves the baked CLI in place, so an image baked below 2.1.295 could start no session at
 # all. The >=2.1.295 floor below makes that image impossible to build; it stays a floor,
 # not an equality, and it moves with MANAGED_MIN_VERSION in §7a (test/cli-version-unit.sh
-# keeps the two equal). It also clears the older Opus 4.8 floor (CC-CLAUDE-CODE-UPGRADE):
+# keeps the two equal). It also clears the older Opus 4.8 floor:
 # the `opus` alias resolves to the LATEST Opus, and below CLI 2.1.154 it meant Opus 4.7.
 #
 # UPDATED AT EVERY START: entrypoint §7d installs npm's latest into /opt/claude-code before
