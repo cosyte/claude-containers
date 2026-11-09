@@ -30,9 +30,10 @@
 # overrides the repo's pin and is forwarded as `--build-arg`, beating the Dockerfile ARG.
 # A host with a stale `.env` therefore keeps building an OLD CLI while every check here
 # stays green. Two other gates close that hole, and they must keep existing:
-#   - Dockerfile: a hard build-time floor (>= 2.1.154) + an assertion that the INSTALLED
-#     binary equals the pin. Every build path passes through it, so a stale .env now
-#     FAILS THE BUILD loudly instead of silently serving Opus 4.7.
+#   - Dockerfile: a hard build-time floor (>= 2.1.295, the managed requiredMinimumVersion
+#     of entrypoint §7a, which also clears Opus 4.8's 2.1.154) + an assertion that the
+#     INSTALLED binary equals the pin. Every build path passes through it, so a stale .env
+#     now FAILS THE BUILD loudly instead of baking a CLI every session refuses to start on.
 #   - test/smoke.sh: asserts the RUNNING IMAGE reports the pinned version and clears the
 #     floor.
 # The live Remote Control handshake stays on the on-host item CC-CLAUDE-CODE-UPGRADE-SMOKE.
@@ -116,9 +117,34 @@ grep -q 'npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}' "$REPO
 
 # The build-time guards are what make a stale, gitignored .env fail loudly instead of
 # silently building an old CLI (the Makefile's `-include .env` beats both `?=` and the ARG).
-grep -q 'OPUS48_FLOOR=2.1.154' "$REPO_ROOT/Dockerfile" \
-    && ok  "Dockerfile enforces the Opus-4.8 floor at BUILD time (a stale .env fails the build)" \
-    || bad "Dockerfile lost its build-time Opus-4.8 floor: a stale .env would silently build a pre-4.8 CLI and every test would stay green"
+# The floor is the managed requiredMinimumVersion (§7a): every session on an older CLI exits at
+# startup, so an image that bakes one starts no session whenever the start-time update cannot
+# run (DISABLE_AUTOUPDATER=1, or the registry out of reach). Read the floor the guard compares
+# against, whatever its variable is called, and run the guard itself.
+MANAGED_MIN="$(sed -n 's/^MANAGED_MIN_VERSION="\([0-9.]*\)"$/\1/p' "$REPO_ROOT/entrypoint.d/07a-managed-policy.sh")"
+FLOOR_VAR="$(sed -n 's/.*printf .%s\\n%s\\n. "\$\([A-Z0-9_]*\)" "\${CLAUDE_CODE_VERSION}" | sort -V.*/\1/p' "$REPO_ROOT/Dockerfile" | head -n 1)"
+BUILD_FLOOR=""
+[[ -n "$FLOOR_VAR" ]] && BUILD_FLOOR="$(sed -n "s/^[[:space:]]*$FLOOR_VAR=\([0-9.]*\);.*/\1/p" "$REPO_ROOT/Dockerfile" | head -n 1)"
+[[ -n "$MANAGED_MIN" && "$BUILD_FLOOR" == "$MANAGED_MIN" ]] \
+    && ok  "Dockerfile's build-time floor ($FLOOR_VAR=$BUILD_FLOOR) is the managed requiredMinimumVersion (entrypoint §7a)" \
+    || bad "Dockerfile's build-time floor is '${BUILD_FLOOR:-not found}' (${FLOOR_VAR:-no variable}), the managed requiredMinimumVersion is '${MANAGED_MIN:-not found}': an image below the managed minimum builds, and every session on it exits at startup"
+GUARD="$(awk '/GUARD 1:/{f=1} /npm install -g @anthropic-ai\/claude-code@/{f=0} f' "$REPO_ROOT/Dockerfile" \
+    | grep -v '^[[:space:]]*#' | sed 's/[[:space:]]*\\$//')"
+build_guard() { env CLAUDE_CODE_VERSION="$1" sh -c "set -eu; $GUARD" >/dev/null 2>&1; }
+if [[ -n "$GUARD" && -n "$MANAGED_MIN" ]]; then
+    below="${MANAGED_MIN%.*}.$(( ${MANAGED_MIN##*.} - 1 ))"
+    if build_guard "$below"; then
+        bad "the Dockerfile's guard lets a $below pin build: below the managed minimum ($MANAGED_MIN) every session exits at startup"
+    else
+        ok "the Dockerfile's guard refuses a $below pin (below the managed minimum $MANAGED_MIN)"
+    fi
+    build_guard "$MANAGED_MIN" && build_guard "$PINNED" \
+        && ok "the guard lets the managed minimum ($MANAGED_MIN) and the pin ($PINNED) build" \
+        || bad "the guard refuses $MANAGED_MIN or the pin $PINNED"
+    build_guard latest && bad "the guard lets 'latest' build" || ok "the guard still refuses a version that is not dotted-numeric ('latest')"
+else
+    bad "could not extract the Dockerfile's GUARD 1 (or §7a's MANAGED_MIN_VERSION): the build-time floor is unchecked"
+fi
 
 grep -q 'installed CLI reports' "$REPO_ROOT/Dockerfile" \
     && ok  "Dockerfile asserts the INSTALLED binary equals the pin" \
@@ -135,6 +161,12 @@ if version_ge "$PINNED" "$RC_FLOOR"; then
     ok "$PINNED >= $RC_FLOOR: Remote Control is supported"
 else
     bad "$PINNED < $RC_FLOOR: Remote Control does not exist in this CLI; the image's whole point breaks"
+fi
+
+if [[ -n "$MANAGED_MIN" ]] && version_ge "$PINNED" "$MANAGED_MIN"; then
+    ok "$PINNED >= $MANAGED_MIN: the pinned CLI clears the managed requiredMinimumVersion"
+else
+    bad "$PINNED < ${MANAGED_MIN:-?}: every session on the baked CLI would exit at startup whenever the start-time update cannot run"
 fi
 
 if version_ge "$PINNED" "$OPUS48_FLOOR"; then

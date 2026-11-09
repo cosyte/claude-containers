@@ -94,7 +94,7 @@ small descriptive commits as you change things.
   `claude plugin install` in the entrypoint.
 - **Workspace trust is pre-accepted** by seeding `.claude.json`
   (`hasCompletedOnboarding`, `projects["/workspace"].hasTrustDialogAccepted`).
-- Pinned/verified Claude Code: **2.1.302** (min 2.1.52 for Remote Control). `--model opus` tracks the LATEST Opus: **Opus 5.5** (1M context) from CLI 2.1.280 (unchanged on 2.1.302), Opus 5 from 2.1.219, Opus 4.8 from 2.1.154, the 2.1.145 pin silently gave Opus 4.7. A bump can therefore change the fleet's MODEL, not just the CLI; pin `CLAUDE_MODEL=claude-opus-5` (or `claude-opus-4-8`) to hold a container back.
+- Pinned/verified Claude Code: **2.1.302** (min 2.1.295, the managed `requiredMinimumVersion`: the Dockerfile's `CLI_FLOOR` refuses an older build). `--model opus` tracks the LATEST Opus: **Opus 5.5** (1M context) from CLI 2.1.280 (unchanged on 2.1.302), Opus 5 from 2.1.219, Opus 4.8 from 2.1.154, the 2.1.145 pin silently gave Opus 4.7. A bump can therefore change the fleet's MODEL, not just the CLI; pin `CLAUDE_MODEL=claude-opus-5` (or `claude-opus-4-8`) to hold a container back.
   Everything was verified against that binary, not just docs.
 
 ## Codebase map

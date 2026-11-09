@@ -241,12 +241,12 @@ check "entrypoint defaults the model to opus (best available)" \
 # test/cli-version-unit.sh proves the six *declarations* of the pin agree, but it is
 # pure-static: it reads repo files and never the built image. These are the live half:
 # the image you are actually about to run really ships the pinned CLI, and really is at
-# or above the Opus-4.8 floor. A stale gitignored .env silently overrides the repo's pin
-# (the Makefile's `-include .env` beats `?=` AND the Dockerfile ARG), so without a check
-# against the real image a host can keep shipping an old CLI, and `--model opus` keeps
-# silently resolving to Opus 4.7: with every other gate green.
+# or above the build-time floor, the managed requiredMinimumVersion. A stale gitignored
+# .env silently overrides the repo's pin (the Makefile's `-include .env` beats `?=` AND the
+# Dockerfile ARG), so without a check against the real image a host can keep shipping an
+# old CLI that every session refuses to start on: with every other gate green.
 PINNED_VER="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=\(.*\)$/\1/p' "$(dirname "${BASH_SOURCE[0]}")/../Dockerfile")"
-OPUS48_FLOOR=2.1.154
+CLI_FLOOR="$(sed -n 's/^[[:space:]]*CLI_FLOOR=\([0-9.]*\);.*/\1/p' "$REPO_ROOT/Dockerfile" | head -n 1)"
 # The IMAGE's own CLI, read from the image rather than this container: the container below
 # updated itself to npm's latest at start (§7d), which is checked next.
 check "image ships the pinned Claude Code CLI ($PINNED_VER)" \
@@ -260,8 +260,8 @@ check "the start-time update reports a version, with no WARNING, and the session
      && [[ "$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")" == "$CC_BOOT" ]]'
 check "the CLI after the update is not older than the image's pin ($PINNED_VER)" \
     '[[ -n "$CC_BOOT" && "$(printf "%s\n%s\n" "$PINNED_VER" "$CC_BOOT" | sort -V | head -1)" == "$PINNED_VER" ]]'
-check "the CLI in the image clears the Opus-4.8 floor ($OPUS48_FLOOR, else '--model opus' means 4.7)" \
-    'v="$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")"; [[ "$(printf "%s\n%s\n" "$OPUS48_FLOOR" "$v" | sort -V | head -1)" == "$OPUS48_FLOOR" ]]'
+check "the CLI in the image clears the build-time floor (${CLI_FLOOR:-not found}, the managed requiredMinimumVersion)" \
+    'v="$(cexec "claude --version" 2>/dev/null | awk "{print \$1}")"; [[ -n "$CLI_FLOOR" && "$(printf "%s\n%s\n" "$CLI_FLOOR" "$v" | sort -V | head -1)" == "$CLI_FLOOR" ]]'
 # uv and pnpm: the versions the Dockerfile pins (uv on its FROM line, pnpm in its ARG), printed
 # so a run's log shows what the image ships.
 PINNED_UV="$(sed -n 's/^FROM ghcr\.io\/astral-sh\/uv:\([0-9.]*\)@.*/\1/p' "$REPO_ROOT/Dockerfile")"
