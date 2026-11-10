@@ -38,7 +38,10 @@ agent immediately: no `sudo`, no image rebuild.
      Dependabot bumps the digest; a Node major is a hand edit (ignored in `.github/dependabot.yml`).
    - **uv**: `FROM ghcr.io/astral-sh/uv:0.13.1@sha256:... AS uv`, bumped by Dependabot.
    - **pnpm**: `ARG PNPM_VERSION=10.34.5`, matched by the Makefile and compose defaults; bumped by
-     hand, still overridable per build.
+     hand, still overridable per build. It is the version the repositories these sessions work on
+     pin in package.json's `packageManager`, recorded verbatim in `test/lib/repos-package-manager`,
+     which `test/pins-unit.sh` holds every declaration to (the test reads no other repository). When the repositories move to a new pnpm, change that line
+     and every declaration together, in one pull request.
    - **just** and **yq**: `ARG JUST_VERSION` / `ARG YQ_VERSION` with per-arch SHA256 digests, the
      same download-and-verify as mise; bumped by hand with both digests.
 

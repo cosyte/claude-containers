@@ -1,0 +1,18 @@
+# The pnpm the repositories these sessions work on pin, copied verbatim from the
+# `"packageManager"` field of their package.json. test/pins-unit.sh holds the image's
+# PNPM_VERSION, and every other declaration of it, to this one line.
+#
+# Why: the image sets manage-package-manager-versions=false, so pnpm never switches to a
+# repository's pin; the baked pnpm is the one that installs and writes their lockfiles, so it
+# must be the version they pin. The declarations agreeing with each other is not enough: a
+# change that moves all of them to another version together would otherwise stay green.
+#
+# Moving it, together with the repositories: when their `packageManager` moves to a new
+# pnpm, change this line to the same `pnpm@X.Y.Z` in the same pull request that bumps
+# PNPM_VERSION in the Dockerfile (ARG and the comment above it), Makefile, docker-compose.yml,
+# bin/claude-compose-gen, .env.example, docs/environment-variables.md and
+# docs/toolchain-provisioning.md. Change this line only when the repositories have moved:
+# the test does not fetch them, so this file is what it trusts.
+#
+# Format: comment lines start with #; exactly one other line, `pnpm@X.Y.Z`.
+pnpm@10.34.5
