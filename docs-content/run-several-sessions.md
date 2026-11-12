@@ -18,7 +18,7 @@ multi-repo container.
 
 ```
 # a standalone container: main + one session per repo, plus a read-only reviewer
-claude-launch maker --repo https://github.com/you/api.git --repo https://github.com/you/web.git \
+claude-launch maker --repo "<git URL of your api repo>" --repo "<git URL of your web repo>" \
     --session '*' --session 'review dir=api model=sonnet mode=plan'
 
 # a stack service (scenario .conf lines, or the generator's command line)
@@ -28,6 +28,10 @@ claude-launch maker --repo https://github.com/you/api.git --repo https://github.
 --session maker=review dir=api model=sonnet mode=plan
 --env maker=CLAUDE_MAIN_RESUME=1
 ```
+
+An SSH URL authenticates with the git deploy key, an HTTPS URL to a private repo needs `GH_TOKEN`,
+and a public repo clones over HTTPS with neither: [Which git URL to
+give](./installation.md#which-git-url-to-give).
 
 A session spec is `NAME [key=value ...]`, several separated by `;` (the flag repeats too):
 

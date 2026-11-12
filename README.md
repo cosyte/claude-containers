@@ -26,8 +26,12 @@ token.
 cp .env.example .env          # edit if you want; defaults are sane
 make build                    # builds the image for this host's arch
 make login                    # one-time OAuth: opens a URL, you paste a code
-./bin/claude-launch first-project --repo https://github.com/you/first-project.git
+./bin/claude-launch first-project --repo "<git URL of your repo>"
 ```
+
+An SSH URL authenticates with the git deploy key (`GIT_SSH_KEY`), an HTTPS URL to a private
+repo needs `GH_TOKEN` (see [docs/github-token.md](docs/github-token.md)), and a public repo
+clones over HTTPS with neither.
 
 `claude-launch` prints the exact SSH command and the name to look for in the
 app. SSH in and you're dropped straight into the running Claude session:

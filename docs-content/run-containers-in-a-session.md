@@ -28,8 +28,12 @@ these:
 For a standalone container:
 
 ```bash
-claude-launch myproj --repo https://github.com/me/x.git --containers
+claude-launch myproj --repo "<git URL of your repo>" --containers
 ```
+
+An SSH URL authenticates with the git deploy key, an HTTPS URL to a private repo needs `GH_TOKEN`,
+and a public repo clones over HTTPS with neither: [Which git URL to
+give](./installation.md#which-git-url-to-give).
 
 For one service of a stack:
 

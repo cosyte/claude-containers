@@ -23,13 +23,22 @@ that runs the containers, and log in once.
   names (default `~/.ssh/authorized_keys`). Without it the container starts with SSH disabled, and
   you reach the session with `claude-attach` on the host instead.
 - **Optionally, a separate key for git.** `GIT_SSH_KEY` (default `~/.ssh/claude-git-key`) is the
-  key sessions push with. Without it only public repositories, over HTTPS, can be cloned. Never use
-  your login key for git: [The security model](./security-model.md) says why, and the launchers
-  refuse it.
+  key sessions push with over SSH. `GH_TOKEN` is the other way in: with it set, private repositories
+  clone and push over HTTPS ([Set up the GitHub token](./set-up-the-github-token.md)). Without it,
+  and without `GH_TOKEN`, only public repositories can be cloned. Never use your login key for git:
+  [The security model](./security-model.md) says why, and the launchers refuse it.
 
 Optional features add their own host requirements: the NVIDIA Container Toolkit for
 [GPU sessions](./give-a-session-the-gpu.md), and a kernel setting for
 [containers in a session](./run-containers-in-a-session.md#check-the-host).
+
+## Which git URL to give
+
+`--repo` takes a repository's git URL, and its form decides how the container authenticates. An
+SSH URL (the scp-like `github.com:owner/repo.git` form, user `git`) authenticates with the git
+deploy key (`GIT_SSH_KEY`). An HTTPS URL to a private repository needs `GH_TOKEN`
+([Set up the GitHub token](./set-up-the-github-token.md)). A public repository clones over HTTPS
+with neither.
 
 ## Clone and configure
 

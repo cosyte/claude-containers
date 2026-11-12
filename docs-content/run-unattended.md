@@ -39,8 +39,12 @@ Point one autopilot container at a repo, with a command *that repo defines*:
 
 ```bash
 CLAUDE_AUTOPILOT=1 CLAUDE_AUTOPILOT_CMD='/my-build-command' CLAUDE_AUTOPILOT_INTERVAL=3600 \
-  ./bin/claude-launch builder --repo https://github.com/<org>/<repo>.git
+  ./bin/claude-launch builder --repo "<git URL of your repo>"
 ```
+
+An SSH URL authenticates with the git deploy key, an HTTPS URL to a private repo needs `GH_TOKEN`,
+and a public repo clones over HTTPS with neither (a push still needs one of the two): [Which git URL
+to give](./installation.md#which-git-url-to-give).
 
 On a rate/usage-limit failure the loop parses the actual reset time (from the
 run output or a reset epoch in the JSON) and sleeps until then: better shared-

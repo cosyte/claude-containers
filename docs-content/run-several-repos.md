@@ -18,8 +18,12 @@ each repo's own `CLAUDE.md` still applies inside it.
 --group maker=you/home,you/3d,you/keys:dev
 --active maker
 # a standalone container
-claude-launch maker --repo https://github.com/you/home.git --repo https://github.com/you/3d.git
+claude-launch maker --repo "<git URL of your home repo>" --repo "<git URL of your 3d repo>"
 ```
+
+An SSH URL authenticates with the git deploy key, an HTTPS URL to a private repo needs `GH_TOKEN`,
+and a public repo clones over HTTPS with neither: [Which git URL to
+give](./installation.md#which-git-url-to-give).
 
 The group's name is the service (`claude-maker`, its Remote Control session name) and
 takes every per-repo flag (`--active`, `--gpu`, `--cpu`, `--mem`, ...); it must not also be
