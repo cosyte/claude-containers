@@ -14,8 +14,9 @@
 #   read NUL-separated (`-z`), so a name git would print quoted (a non-ASCII byte, a double
 #   quote, a backslash, a newline) is matched as it is, never as a quoted string that misses.
 # - When in doubt it runs the smoke: a HEAD that is not a merge commit prints `true` with a
-#   warning. A git failure exits nonzero, which fails the job: never a silent `false`.
-set -uo pipefail
+#   warning. A git failure, or a failure writing or reading the path list, exits nonzero, which
+#   fails the job: never a silent `false`.
+set -euo pipefail
 
 # is_image_path <path>: the paths that change the image or how CI builds and smokes it
 is_image_path() {
@@ -48,14 +49,15 @@ list="$(mktemp)" || { echo "smoke-needed: mktemp failed" >&2; exit 1; }
 trap 'rm -f "$list"' EXIT
 git diff -z --no-renames --name-only 'HEAD^1' HEAD >"$list" || { echo "smoke-needed: git diff failed" >&2; exit 1; }
 
-while IFS= read -r -d '' path; do
+# `|| [[ -n "$path" ]]`: a last name with no closing NUL is still checked, not dropped.
+while IFS= read -r -d '' path || [[ -n "$path" ]]; do
     [[ -n "$path" ]] || continue
     if is_image_path "$path"; then
         printf 'smoke-needed: %q is an image path: smoke runs\n' "$path" >&2
         echo true
         exit 0
     fi
-done <"$list"
+done <"$list" || { echo "smoke-needed: reading the changed path list failed" >&2; exit 1; }
 
 echo "smoke-needed: no image path changed: smoke's build and test steps are skipped" >&2
 echo false

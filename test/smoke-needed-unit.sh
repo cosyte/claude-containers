@@ -148,6 +148,43 @@ test_outside_a_repo_fails() {
         || bad "outside a git repo: rc=$rc out='$out', a false would skip smoke on a broken checkout"
 }
 
+# fake_bin <repo> <git action>: a dir for PATH with a mktemp that hands out <repo>.list and a git
+# wrapper that runs the real git, then on a `diff` runs <git action> on that file
+fake_bin() {
+    local f="$1.list" real
+    real="$(command -v git)"
+    mkdir -p "$1.bin"
+    printf '#!/bin/sh\n: >"%s"; echo "%s"\n' "$f" "$f" >"$1.bin/mktemp"
+    printf '#!/bin/sh\n"%s" "$@" || exit $?\ncase "$*" in *diff*) %s "%s" ;; esac\n' \
+        "$real" "$2" "$f" >"$1.bin/git"
+    chmod +x "$1.bin/mktemp" "$1.bin/git"
+    echo "$1.bin"
+}
+
+# An image change whose path list cannot be read (the temp file is gone after git diff wrote it)
+# must fail the step, never print false: a false skips the smoke on an image change.
+test_unreadable_path_list_fails() {
+    local d b out rc
+    d="$(pr_repo README.md bin/new)"
+    b="$(fake_bin "$d" 'rm -f')"
+    out="$(cd "$d" && PATH="$b:$PATH" "$SCRIPT" pull_request 2>/dev/null)"; rc=$?
+    [[ $rc -ne 0 && "$out" != false ]] \
+        && ok "the path list removed before it is read: exit $rc, never false" \
+        || bad "path list removed before it is read: rc=$rc out='$out', want nonzero and no false"
+}
+
+# The last name in the list with no closing NUL is still read: a list cut short of its NUL must
+# not drop the one image path in it.
+test_last_name_without_nul_is_read() {
+    local d b out rc
+    d="$(pr_repo README.md bin/new)"
+    b="$(fake_bin "$d" "sh -c 'head -c -1 \"\$0\" >\"\$0.t\" && mv \"\$0.t\" \"\$0\"'")"
+    out="$(cd "$d" && PATH="$b:$PATH" "$SCRIPT" pull_request 2>/dev/null)"; rc=$?
+    [[ $rc -eq 0 && "$out" == true ]] \
+        && ok "an image path last in the list with no closing NUL: true" \
+        || bad "image path with no closing NUL: rc=$rc out='$out', want rc=0 out=true"
+}
+
 test_no_event_is_a_usage_error() {
     local out rc
     out="$("$SCRIPT" 2>/dev/null)"; rc=$?
@@ -221,6 +258,8 @@ test_rename_out_of_an_image_path_runs_smoke
 test_other_events_always_run_smoke
 test_not_a_merge_commit_runs_smoke
 test_outside_a_repo_fails
+test_unreadable_path_list_fails
+test_last_name_without_nul_is_read
 test_no_event_is_a_usage_error
 test_ci_smoke_job_always_runs
 test_ci_heavy_steps_follow_the_decision
