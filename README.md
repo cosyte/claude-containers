@@ -1,13 +1,54 @@
-# Claude Code container
+<a href="https://cosyte.com">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://cosyte.com/tile/cosyte-lockup-tile-on-dark-1200x300.png">
+    <img alt="The Cosyte logo on its own white ground: the icon beside the word Cosyte." src="https://cosyte.com/tile/cosyte-lockup-tile-on-light-1200x300.png">
+  </picture>
+</a>
 
-Self-hosted Docker image for running multiple isolated, long-lived Claude Code
-sessions on a homelab box. One container = one session = one git repo, reachable
-two ways at once: SSH into a persistent tmux session, and the Claude mobile
-app's Remote Control (Code tab).
+# claude-containers
 
-Auth is your Claude **Max** subscription via OAuth. No API keys: the entrypoint
-hard-fails if `ANTHROPIC_API_KEY` is set so you never accidentally bill per
-token.
+> Isolated, long-lived Claude Code sessions on a host you run: one container per repo, over SSH and Remote Control.
+
+[![CI](https://img.shields.io/github/actions/workflow/status/cosyte/claude-containers/ci.yml?branch=main&label=CI)](https://github.com/cosyte/claude-containers/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/cosyte/claude-containers/blob/main/LICENSE)
+
+The Claude Code container: a self-hosted Docker image, its host launchers and the in-container
+tools for running multiple isolated, long-lived Claude Code sessions on a homelab box. It is
+infrastructure, not a library: bash, `make` and Docker, with no runtime dependencies
+(`package.json` is only a task runner, and the repository ships no package).
+
+---
+
+## Contents
+
+- [Why this exists](#why-this-exists)
+- [Status](#status)
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [Commands](#commands)
+- [Most-used variables](#most-used-variables)
+- [Layout](#layout)
+- [Documentation](#documentation)
+- [Support](#support)
+- [Security](#security)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Why this exists
+
+One container = one session = one git repo, reachable two ways at once: SSH into a persistent
+tmux session, and the Claude mobile app's Remote Control (Code tab). Each container keeps its
+workspace and conversation history across a stop and a resume, and you can run as many in
+parallel as you like.
+
+Auth is your Claude **Max** subscription via OAuth. No API keys: the entrypoint hard-fails if
+`ANTHROPIC_API_KEY` is set so you never accidentally bill per token.
+
+---
+
+## Status
 
 > **Unofficial project.** Not affiliated with, endorsed by, or supported by
 > Anthropic. "Claude" and "Claude Code" are Anthropic's trademarks and are used
@@ -16,9 +57,14 @@ token.
 > and of your Claude subscription remains subject to Anthropic's own terms.
 > Report Claude Code bugs to Anthropic, not here.
 
+There is no release cadence: `main` is the version. `claude-list` shows how far each
+container's image is behind `main`, and `claude-image-rebuild --check` says whether the image is.
+
 > **Retired:** the nested-Sysbox worker broker (`--broker`/`--sysbox`) and the
 > per-session Docker engine (`--docker`); their flags refuse with an error. Background:
 > [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md).
+
+---
 
 ## Quick start
 
@@ -53,6 +99,8 @@ Run as many in parallel as you like: each gets its own SSH port and app
 session. `./bin/claude-list` shows them all. Put `bin/` on your `PATH` to drop
 the `./bin/` prefix.
 
+---
+
 ## How it works
 
 `claude-launch` runs a container per project: the entrypoint refuses an API key, merges the
@@ -66,6 +114,8 @@ readable from every container. An app's private state (a database, a key, a toke
 in `/state/<app>`, the container's own volume, which no other container mounts, and so do
 worktrees, clones and working folders that must last (`/state/wt`, `/state/tmp`):
 [docs/volume-reference.md](docs/volume-reference.md#private-state).
+
+---
 
 ## Commands
 
@@ -87,6 +137,8 @@ On the host (`bin/`), full flags in [docs/launcher-commands.md](docs/launcher-co
 
 Inside a container: `claude-sessions`, `claude-gpu`, `claude-build-slot`, `claude-kit status`,
 `claude-enqueue`.
+
+---
 
 ## Most-used variables
 
@@ -110,7 +162,27 @@ and `.env.example`.
 | `CLAUDE_EGRESS_LOCKDOWN` | `0` | `1` = default-deny egress firewall, fail-open; `strict` = fail-closed. Extend with `CLAUDE_EGRESS_EXTRA_HOSTS` |
 | `ANTHROPIC_API_KEY` | unset | **Must stay unset**: entrypoint hard-fails otherwise |
 
-## Docs
+---
+
+## Layout
+
+| Path | What it holds |
+|---|---|
+| `Dockerfile`, `entrypoint.sh`, `entrypoint.d/` | The image and its boot path: `entrypoint.sh` is a loader, and its sections live in `entrypoint.d/` |
+| `bin/` | The host launchers (`claude-launch`, `claude-compose-gen` and the rest of the table above) and the in-container tools |
+| `claude-config/` | The baked-in config merged at start: [docs/customizing-bakeins.md](docs/customizing-bakeins.md) |
+| `docs/` | The long sections of this documentation |
+| `test/` | The unit suites (`test/run-all.sh`, no Docker) and the image smoke test (`test/smoke.sh`) |
+| `CARD.md` | What this repo offers to sibling repos |
+
+A change to the `Dockerfile`, `entrypoint.sh`, `entrypoint.d/`, `bin/` or `claude-config/` is a
+change to every session that runs on the image.
+
+---
+
+## Documentation
+
+`README.md` is the operator documentation, and `docs/` holds the long sections:
 
 The full documentation, arranged as a quickstart, how-to guides, explanation and reference, is
 at [docs.cosyte.com/claude-containers](https://docs.cosyte.com/claude-containers), built from
@@ -140,17 +212,57 @@ at [docs.cosyte.com/claude-containers](https://docs.cosyte.com/claude-containers
 | The retired Sysbox broker | [docs/legacy-sysbox-broker.md](docs/legacy-sysbox-broker.md) |
 | Containers in sessions (`--containers`: rootless podman, docker and compose) | [docs/containers-in-sessions.md](docs/containers-in-sessions.md) |
 
-## Contributing, security, license
+---
 
-- **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md), the gates are
-  `make gate-quick` per change and `make gate-full` (the same commands: lint, the
-  em-dash scan, the unit tests; Docker-free, what CI's `ci` job runs); the image smoke
-  test runs in CI's `smoke` job when an image path changes and nightly (`make smoke`
-  locally is optional).
-- **Security:** [SECURITY.md](SECURITY.md). Report privately, never in an issue.
-  Read the model first: **a container is not a security boundary against a fully
-  weaponized agent**, and several plausible reports are documented non-goals.
-- **License:** [MIT](LICENSE).
-- **Support:** none promised. This is self-hosted infrastructure published as-is
-  in case it is useful; issues are read, but there is no SLA and no release
-  cadence: `main` is the version.
+## Support
+
+None promised. This is self-hosted infrastructure published as-is in case it is useful; issues
+are read, but there is no SLA and no release cadence: `main` is the version.
+
+---
+
+## Security
+
+Report a vulnerability privately, as [SECURITY.md](SECURITY.md) describes, never in an issue.
+Read the model first: **a container is not a security boundary against a fully weaponized
+agent**, and several plausible reports are documented non-goals. The details:
+[docs/security-notes.md](docs/security-notes.md).
+
+### PHI and safety
+
+Each session runs an autonomous agent that executes shell commands, so what the stack holds and
+shares is part of its contract.
+
+- **Real patient data and real credentials never enter this repository:** not a file, a fixture,
+  a log or an issue. Use placeholder names only.
+- **Redact before pasting.** Logs from this stack can contain tokens, OAuth credentials, and repo
+  contents. `GH_TOKEN`, `.credentials.json`, and SSH key material must never appear in an issue.
+- **Anyone who can read the `claude-auth` Docker volume can act as you.** It holds live OAuth
+  credentials. Protect it with host permissions.
+- **`/cache` is shared by every container on the host**, all as one user, so anything in it is
+  readable from every container. Private state goes in `/state/<app>`, the container's own
+  volume: [docs/volume-reference.md](docs/volume-reference.md#private-state).
+- **Egress is open by default.** Lockdown is opt-in (`CLAUDE_EGRESS_LOCKDOWN`):
+  [docs/egress-allowlist.md](docs/egress-allowlist.md).
+
+---
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) adds what is specific to this repository to the
+organization's [contributing guide](https://github.com/cosyte/.github/blob/main/CONTRIBUTING.md).
+The gates are `make gate-quick` per change and `make gate-full` (the same commands: lint, the
+em-dash scan, the unit tests; Docker-free, what CI's `ci` job runs). Run `mise install` once for
+the linters. The image smoke test runs in CI's `smoke` job when an image path changes and nightly
+(`make smoke` locally is optional). Questions and bug reports go to the
+[issue tracker](https://github.com/cosyte/claude-containers/issues).
+
+---
+
+## License
+
+MIT, Copyright (c) 2026 Cosyte LLC. See [LICENSE](LICENSE).
+
+---
+
+_Built by [Cosyte](https://cosyte.com)._
