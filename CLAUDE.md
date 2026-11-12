@@ -16,8 +16,10 @@ run the lint and test halves on their own. Also required in CI: `actionlint.yml`
 and `pr-title.yml` checks the PR title is Conventional Commits (a squash merge makes it the commit).
 
 CI's `smoke` job builds the image and runs `test/smoke.sh` when a PR touches an image path (the
-list is in `.github/workflows/ci.yml`). Sessions have no Docker, so it runs only in CI: on such a
-PR, wait for `smoke` to pass as well.
+list is in `scripts/smoke-needed.sh`, the job's first step). The job runs on every PR, so the
+required `smoke` check always reports; on a PR with no image path it passes without building.
+Never put a job-level `if:`, `needs:` or paths filter on it: a skipped required check blocks the
+merge. Sessions have no Docker, so it runs only in CI: on an image PR, wait for `smoke` as well.
 
 ## Hazard
 

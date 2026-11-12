@@ -4,8 +4,10 @@ name: ci
 # (test/smoke.sh) builds the image and runs it, so on a PR it only runs when an image-affecting
 # path changes; it runs on every push to main, every nightly run and every manual
 # (workflow_dispatch) run.
-# No workflow-level paths filter: a skipped `smoke` job (job-level `if:`) reports success, so
-# it can be a required check without sitting Pending on a docs-only PR.
+# No paths filter on the workflow or the job: `smoke` is a required check, and a skipped
+# required check blocks the merge, so the job always runs and reports. Its first step
+# (scripts/smoke-needed.sh) decides whether the image paths changed, and the heavy steps run
+# only then: on a docs-only PR the job passes in seconds.
 on:
   push:
     branches: [main]
@@ -37,52 +39,34 @@ jobs:
       - name: "gate (make gate-full: lint, no-emdash file scan, unit tests)"
         run: make gate-full
 
-  # Only a PR or a push has a change set to filter: a nightly or manual run tests main as a
-  # whole, so the filter is skipped there and smoke runs.
-  changes:
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      image: ${{ steps.filter.outputs.image }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - id: filter
-        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        with:
-          filters: |
-            image:
-              - Dockerfile
-              - sshd_config
-              - bash_profile
-              - entrypoint.sh
-              - entrypoint.d/**
-              - bin/**
-              - claude-config/**
-              - scripts/**
-              - containers/**
-              - test/smoke.sh
-              - Makefile
-              - docker-compose.yml
-              - .github/workflows/ci.yml
-
+  # No job-level `if:` and no `needs:`: the job runs on every event and always reports, so the
+  # required `smoke` check is never skipped. Every step after the decision carries
+  # `if: steps.changes.outputs.image == 'true'`.
   smoke:
-    needs: changes
-    # A failed `changes` job runs smoke rather than skipping it: a skip would report success.
-    # Every run but a PR's (a push to main, the nightly, a manual run) runs smoke.
-    if: >-
-      !cancelled() && (needs.changes.result != 'success'
-      || needs.changes.outputs.image == 'true' || github.event_name != 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      # Depth 2: on a PR, HEAD is the merge commit and its first parent is the base, so the
+      # decision step can diff the two.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      # true on a push, the nightly or a manual run; on a PR, true only when an image path
+      # changed (the list is in the script). A git failure fails the job, never a silent skip.
+      - id: changes
+        name: image paths changed? (scripts/smoke-needed.sh)
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          image="$(scripts/smoke-needed.sh "$EVENT")"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          if [[ "$image" != true ]]; then
+            echo "No image path changed: the image build and test/smoke.sh are skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
       # The Makefile's BUILD_ARGS, read from the Makefile itself so the two never drift. A
       # clean environment, so a runner variable (PNPM_VERSION, say) cannot override a default.
       - id: args
+        if: steps.changes.outputs.image == 'true'
         name: build args (the Makefile's BUILD_ARGS)
         run: |
           # The single quotes are deliberate: $(subst ...) is make syntax, expanded by make.
@@ -94,9 +78,11 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.changes.outputs.image == 'true'
       # Built once and loaded: smoke runs test/smoke.sh directly, not `make smoke`, whose
       # `build` prerequisite would build a second time on the runner's 14 GB disk.
       - name: build the image (claude-code-box:ci)
+        if: steps.changes.outputs.image == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -109,8 +95,10 @@ jobs:
       # a --containers session runs apparmor=unconfined: lift it on the runner (a host setting,
       # docs/containers-in-sessions.md), so smoke's section 19 runs, required, not skipped.
       - name: host allows unprivileged user namespaces (--containers)
+        if: steps.changes.outputs.image == 'true'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # Parts that need a GPU, routable IPv6 or a working firewall report SKIP, as on any host
       # without them.
       - name: smoke (test/smoke.sh against claude-code-box:ci)
+        if: steps.changes.outputs.image == 'true'
         run: SMOKE_CONTAINERS=require IMAGE=claude-code-box:ci test/smoke.sh
