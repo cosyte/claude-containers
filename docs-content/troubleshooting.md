@@ -272,7 +272,7 @@ default. Set it to 2.1.295 or later (or delete the line) and rebuild.
   relay socket (`SSH_AUTH_SOCK`); only `CLAUDE_BROKER_GIT_KEY=0` copies it to
   `~/.ssh/id_ed25519` (0600, owned by `claude`). Confirm the key is loaded with
   `ssh-add -l` in the container, and that GitHub accepts it with
-  `ssh -T git@github.com`.
+  `ssh -T -l git github.com`.
 - The boot stopped with `the git key at /etc/claude/git-key is readable by claude`:
   `/etc/claude` is not the image's root-only directory, usually because a whole
   host directory is mounted on it. Mount the key file itself at

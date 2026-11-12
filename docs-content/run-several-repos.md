@@ -18,7 +18,7 @@ each repo's own `CLAUDE.md` still applies inside it.
 --group maker=you/home,you/3d,you/keys:dev
 --active maker
 # a standalone container
-claude-launch maker --repo git@github.com:you/home.git --repo git@github.com:you/3d.git
+claude-launch maker --repo https://github.com/you/home.git --repo https://github.com/you/3d.git
 ```
 
 The group's name is the service (`claude-maker`, its Remote Control session name) and
@@ -37,7 +37,7 @@ its submodules come with it, rather than listing the repos as siblings:
 
 ```
 # a standalone container
-claude-launch acme --repo git@github.com:acme/umbrella.git --env GIT_UMBRELLA=1
+claude-launch acme --repo https://github.com/acme/umbrella.git --env GIT_UMBRELLA=1
 # a stack service (scenario .conf, or the generator's command line): the service is the repo's name
 acme/umbrella
 --env umbrella=GIT_UMBRELLA=1

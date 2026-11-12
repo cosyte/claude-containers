@@ -39,7 +39,7 @@ Point one autopilot container at a repo, with a command *that repo defines*:
 
 ```bash
 CLAUDE_AUTOPILOT=1 CLAUDE_AUTOPILOT_CMD='/my-build-command' CLAUDE_AUTOPILOT_INTERVAL=3600 \
-  ./bin/claude-launch builder --repo git@github.com:<org>/<repo>.git
+  ./bin/claude-launch builder --repo https://github.com/<org>/<repo>.git
 ```
 
 On a rate/usage-limit failure the loop parses the actual reset time (from the

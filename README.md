@@ -26,7 +26,7 @@ token.
 cp .env.example .env          # edit if you want; defaults are sane
 make build                    # builds the image for this host's arch
 make login                    # one-time OAuth: opens a URL, you paste a code
-./bin/claude-launch first-project --repo git@github.com:you/first-project.git
+./bin/claude-launch first-project --repo https://github.com/you/first-project.git
 ```
 
 `claude-launch` prints the exact SSH command and the name to look for in the

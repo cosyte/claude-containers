@@ -22,7 +22,7 @@ all optional:
 
 ```
 # one container
-claude-launch site --repo git@github.com:you/site.git \
+claude-launch site --repo https://github.com/you/site.git \
     --marketplace 'team-kit=https://git.example.com/you/team-kit.git#v1.2.0' \
     --plugin helper@team-kit \
     --start-cmd 'uv tool install git+https://git.example.com/you/team-kit.git@v1.2.0 && team-kit serve --ensure'

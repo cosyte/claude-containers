@@ -137,7 +137,7 @@ prefix to say which service. With `--start-cmd` this is the kit hook: see
 
 ```
 ./bin/claude-compose-gen --org ORG --out FILE --active site \
-  --marketplace site=claude-skills=git@github.com:org/crew.git \
+  --marketplace site=claude-skills=https://github.com/org/crew.git \
   --plugin 'site=software-engineering@claude-skills,data@claude-skills'
 ```
 

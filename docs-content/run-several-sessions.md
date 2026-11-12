@@ -18,7 +18,7 @@ multi-repo container.
 
 ```
 # a standalone container: main + one session per repo, plus a read-only reviewer
-claude-launch maker --repo git@github.com:you/api.git --repo git@github.com:you/web.git \
+claude-launch maker --repo https://github.com/you/api.git --repo https://github.com/you/web.git \
     --session '*' --session 'review dir=api model=sonnet mode=plan'
 
 # a stack service (scenario .conf lines, or the generator's command line)

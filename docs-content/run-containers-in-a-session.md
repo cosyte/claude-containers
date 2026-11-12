@@ -28,7 +28,7 @@ these:
 For a standalone container:
 
 ```bash
-claude-launch myproj --repo git@github.com:me/x.git --containers
+claude-launch myproj --repo https://github.com/me/x.git --containers
 ```
 
 For one service of a stack:

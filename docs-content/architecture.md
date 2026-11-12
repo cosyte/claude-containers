@@ -290,10 +290,11 @@ in `/etc/profile.d` for SSH logins) for the tools that look for the umbrella.
 
 How, and why:
 
-- **Over HTTPS, not SSH.** Submodule URLs are usually SSH (`git@github.com:owner/repo.git`),
+- **Over HTTPS, not SSH.** Submodule URLs are usually SSH (the scp-like `github.com:owner/repo.git` form, user `git`),
   and the deploy key (`GIT_SSH_KEY`) reaches one repository, so SSH could clone the umbrella
   and none of its submodules. Umbrella mode adds `url.https://github.com/.insteadOf` for
-  `git@github.com:` and `ssh://git@github.com/` to the agent's global git config, so every
+  both SSH forms of a github.com URL (scp-like, and `ssh://` with user `git`) to the agent's
+  global git config, so every
   github.com URL goes over HTTPS with `GH_TOKEN` through gh's credential helper (§5): the
   clone, and every later fetch and push in a submodule. Without `GH_TOKEN` it warns: HTTPS
   then reaches public repos only.
