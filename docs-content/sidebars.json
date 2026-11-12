@@ -1,0 +1,49 @@
+{
+  "docs": [
+    "intro",
+    { "type": "category", "label": "Installation", "items": ["installation"] },
+    { "type": "category", "label": "Quickstart", "items": ["quickstart"] },
+    {
+      "type": "category",
+      "label": "How-to guides",
+      "items": [
+        "run-several-repos",
+        "run-several-sessions",
+        "set-up-the-github-token",
+        "change-the-claude-account",
+        "install-a-kit",
+        "customize-the-baked-in-config",
+        "install-toolchains-with-mise",
+        "move-private-state",
+        "debug-a-frontend",
+        "give-a-session-the-gpu",
+        "run-containers-in-a-session",
+        "run-unattended",
+        "change-the-managed-settings"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Explanation",
+      "items": [
+        "architecture",
+        "security-model",
+        "managed-settings",
+        "temp-space",
+        "toolchain-provisioning",
+        "shared-tool-cache",
+        "package-provisioning-security",
+        "containers-in-sessions",
+        "retired-sysbox-broker"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Reference",
+      "items": ["launcher-commands", "environment-variables", "volumes-and-mounts", "egress-allowlist"]
+    },
+    { "type": "category", "label": "Troubleshooting", "items": ["troubleshooting"] },
+    "testing-and-quality",
+    "performance"
+  ]
+}

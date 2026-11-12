@@ -75,6 +75,10 @@ make login                    # one-time OAuth: opens a URL, you paste a code
 ./bin/claude-launch first-project --repo "<git URL of your repo>"
 ```
 
+An SSH URL authenticates with the git deploy key (`GIT_SSH_KEY`), an HTTPS URL to a private
+repo needs `GH_TOKEN` (see [docs/github-token.md](docs/github-token.md)), and a public repo
+clones over HTTPS with neither.
+
 `claude-launch` prints the exact SSH command and the name to look for in the
 app. SSH in and you're dropped straight into the running Claude session:
 
@@ -179,6 +183,10 @@ change to every session that runs on the image.
 ## Documentation
 
 `README.md` is the operator documentation, and `docs/` holds the long sections:
+
+The full documentation, arranged as a quickstart, how-to guides, explanation and reference, is
+at [docs.cosyte.com/claude-containers](https://docs.cosyte.com/claude-containers), built from
+[`docs-content/`](docs-content/). The pages below are the same material by topic.
 
 | Topic | Doc |
 |---|---|

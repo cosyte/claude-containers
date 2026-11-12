@@ -1,0 +1,556 @@
+---
+id: troubleshooting
+title: Troubleshooting
+sidebar_label: Troubleshooting
+description: "Symptoms and fixes for login, GitHub, Remote Control, SSH, sessions, the browser and GPU, egress and memory."
+---
+
+# Troubleshooting
+
+## Summary
+
+- **App session missing / no green dot**: needs Claude Code ≥ 2.1.52 and
+  outbound HTTPS. `claude-logs <name>` should show the session started; check
+  egress isn't firewalled. The name in the app is the project name.
+- **`--dangerously-skip-permissions` vs Remote Control**: there were earlier
+  reports that skip-permissions didn't fully apply under Remote Control. On the
+  pinned **2.1.302** both flags are accepted together with no interlock, and the
+  launch (`claude --dangerously-skip-permissions --remote-control <name>`) combines
+  them, so it works. This is the reason the CLI version is pinned at all: re-verify
+  it on any bump. If a future version regresses, set
+  `CLAUDE_PERMISSION_MODE=acceptEdits` (edits auto-approved, shell still
+  prompts): the verification steps are in
+  [`--dangerously-skip-permissions` with Remote Control](#--dangerously-skip-permissions-with-remote-control).
+- **SSH connection refused**: no `authorized_keys` was mounted, or wrong port.
+  `claude-list` shows the port; the connect line is reprinted by
+  `claude-launch <name>`. The git key never logs in: use a key of your own in
+  `SSH_AUTHORIZED_KEYS` (see [The security model](./security-model.md), SSH keys).
+- **Git push fails**: `GIT_SSH_KEY` not mounted or not authorized on the
+  remote. Public/https clones still work without it.
+- **Workspace trust prompt**: pre-accepted by the entrypoint; if you see it,
+  the config volume didn't mount. See [Workspace trust prompt appears](#workspace-trust-prompt-appears).
+- **GPU session**: `claude-gpu status` inside says `ok` or `degraded (<reason>)`; a
+  service that will not start at all usually means the host's CDI spec is missing.
+  See [GPU sessions](#gpu-sessions---gpu).
+
+`claude-logs <name>` shows the entrypoint/sshd log (startup, clone, MCP
+registration). For the live Claude session, SSH in and you attach to tmux.
+
+## Auth
+
+**`make login` shows a URL but no browser opens.** Expected: it's headless.
+Copy the URL to a browser on any machine, sign in with your **Max** account,
+paste the code back into the terminal. Credentials persist to the `claude-auth`
+volume; you only do this once.
+
+**Container exits immediately with "No credentials in the claude-auth volume".**
+Run `make login` before launching. Verify:
+`docker run --rm -v claude-auth:/auth alpine ls -l /auth/.credentials.json`.
+
+**"ANTHROPIC_API_KEY is set" and the container refuses to start.** Intentional.
+Remove `ANTHROPIC_API_KEY` from `.env` and your shell. This image is
+subscription-OAuth only; an API key would silently bill per token.
+
+**Logged in but sessions say unauthenticated.** The credential reconcile loop
+converges `/auth` and the per-container copy every ~30s, and running sessions are
+restarted onto a new login by themselves (next entry). Re-auth from
+scratch: `docker volume rm claude-auth && make login`.
+
+**I logged a different account into the volume. What happens to running containers?** They
+follow it, no restart: the credential within ~30 s, each session at its next idle moment
+(it restarts and resumes its conversation). `claude-account-list` shows each container as
+`in sync` or `moving, N to go`; `claude-sessions -C <project> account` names the sessions still
+on the previous account, and `account --now` moves them at once. Things to know:
+- The sessions get **new Remote Control links owned by the new account** (Claude refuses to
+  reattach another account's link, `Restored-pointer reattach vetoed` in the RC debug log). Look
+  for them in the Claude app of the new account; the old links show offline in the old one.
+- A session that stays busy for hours stays on the old account until it idles. That is safe:
+  until every session has moved, the sync never pushes the container's credential up, so the
+  old account's refreshed token cannot overwrite the new login.
+- `Auth account : account changes are NOT followed` in the boot log means `CLAUDE_AUTH_FOLLOW=0`.
+- No `Auth account` line at all means the volume has no `.claude.json` beside its credential
+  (a login made by some other route): the account is then unknown and only the token sync runs.
+
+**Every session at once reports `Login expired · Please run /login` (Remote
+Control offline fleet-wide).** The claude.ai OAuth **refresh token** expired (or
+a refresh failed). On that failure Claude Code rewrites `.credentials.json` with
+**empty** token fields: a logout that leaves a well-formed, freshly-mtimed file
+behind. The reconcile loop now **refuses to propagate a tokenless credential**
+(it checks for a non-empty `accessToken` and instead *repairs* a logged-out copy
+from whichever side still holds a real token: see `creds_have_token` in
+`entrypoint.sh`), so a per-container hiccup self-heals from the shared master and
+only a genuine refresh-token expiry takes auth down. Older images lacked that
+guard and would publish the empty credential to `/auth` and every container,
+turning one expiry into a blackout (observed 2026-07-15). Fix: **`make login`**
+on the host. Within ~30s the reconcile loop delivers the fresh token to every
+container, and the RC watchdog (below) restarts each session to reload it: no
+manual per-container action needed. Confirm the token landed:
+`docker exec <name> node -e 'const o=require("/home/claude/.claude/.credentials.json").claudeAiOauth; console.log(!!o.accessToken, new Date(o.expiresAt))'`.
+
+**A usage-limit rotation (`--accounts`) times out.** The usage watchdog asks the
+root-side account-switch listener (§6a) for the next account and waits 10 s for its
+answer. A step the listener could not finish is in `claude-logs <name>` as `WARNING:
+account switch: ...`: `could not write the answer` or `could not publish its credentials`
+almost always means the config volume is full (`df` the volume, free space). The
+listener keeps running through these, so the next rotation works once the write does.
+
+## GitHub
+
+**`gh pr create` (or `gh pr checks`, a merge) fails with 403 "Resource not accessible by
+personal access token" while `git push` works.** The push uses the SSH deploy key; `gh` uses
+`GH_TOKEN`, which lacks the permission, often a fine-grained token whose resource owner is not
+the repo's. `cat /run/claude/gh-check.txt` (or run `claude-gh-check`) names what the token can
+do on each repo; [Set up the GitHub token](./set-up-the-github-token.md) lists what it needs and the fix.
+
+**The boot log says `ERROR: GH_TOKEN holds a scope a session must never have`.** The token has
+`delete_repo` or `admin:org`, which let a session delete a repository or change an org's
+settings and rulesets. Edit the classic token on GitHub, untick both, and save: its value stays
+the same, and `claude-gh-check` reads the new scopes at once
+([Set up the GitHub token](./set-up-the-github-token.md)).
+
+## Remote Control session not in the mobile app
+
+### "Remote Control is not yet enabled for your account" (most common)
+
+This message is almost always **misleading**: it usually does NOT mean your
+account lacks Remote Control. Remote Control eligibility is the GrowthBook
+feature flag `tengu_ccr_bridge`, fetched at startup. If Claude Code's telemetry
+fetch is suppressed, that flag is never retrieved and falls back to its `false`
+default, producing this exact error even on a fully eligible Max/Pro account.
+This is documented by Anthropic and reported in 50+ upstream issues.
+
+The killers, in order of likelihood:
+
+1. **`DISABLE_TELEMETRY`, `DO_NOT_TRACK`, or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`**
+   set anywhere: env, or `~/.claude/settings.json` `env` block. Any truthy
+   value makes Claude Code skip GrowthBook entirely. **This image deliberately
+   does not set them**; the entrypoint also self-heals older per-container
+   volumes (strips them from settings.json and clears the stale flag cache).
+   Verify inside a container:
+   `jq .env /home/claude/.claude/settings.json` and `env | grep -E 'TELEMETRY|DO_NOT_TRACK|NONESSENTIAL'`: all should be absent.
+2. **Stale flag cache.** Removing the var isn't enough on its own: the old
+   evaluation is frozen. Clear it and re-fetch:
+   `jq 'del(.cachedGrowthBookFeatures,.cachedExperimentFeatures)' ~/.claude/.claude.json` (write back), `rm -rf ~/.claude/statsig`, then run any prompt (`claude -p ping`) to repopulate. Confirm `jq -r '.cachedGrowthBookFeatures.tengu_ccr_bridge' ~/.claude/.claude.json` is `true`.
+3. **Wrong auth type.** RC needs a full-scope `claude auth login` session token.
+   An inference-only `CLAUDE_CODE_OAUTH_TOKEN` / `claude setup-token`, or
+   `ANTHROPIC_API_KEY` / `CLAUDE_CODE_USE_BEDROCK|VERTEX|FOUNDRY`, disqualifies
+   it. This image uses subscription OAuth and refuses API keys, so this only
+   bites if you override auth.
+4. Diagnose precisely with `claude remote-control --verbose` inside the
+   container: it prints which condition failed.
+
+After a rebuild + container recreate (below), all four are handled
+automatically. If `tengu_ccr_bridge` is *still* `false` with a clean env,
+cleared cache, and full-scope login, you're in the genuine minority server-side
+rollout/entitlement-sync case (upstream issues #34528/#37003): no client fix;
+contact Anthropic.
+
+### Session present but not showing
+
+1. Needs Claude Code ≥ 2.1.52 (this image pins 2.1.302). Confirm in
+   `claude-logs <name>` ("Claude Code session 'claude' started in tmux").
+2. Remote Control is **outbound HTTPS only**: no inbound port. If egress is
+   firewalled/allowlisted, the session can't register. Temporarily allow
+   outbound 443 and check the app.
+3. The app session name is the (sanitized) project name. Look in the **Code**
+   tab; green dot = the `claude` process is running. No dot → SSH in, check the
+   tmux pane; relaunch with `claude-session` if it dropped to a shell.
+4. The app must be signed into the **same account** used for `make login`.
+
+## Remote Control link drops mid-session (`(unhealthy)`, watchdog)
+
+A session that registered fine can still lose its Remote Control link later.
+The RC bridge (a v2 SSE transport) retries reconnection on its own: a
+transient network drop self-heals, so a brief or even lengthy outage recovers
+with no intervention. But the bridge can also fail **terminally**: it logs a
+give-up (`recovery exhausted after …` / `notifyBridgeFailed`) and stops, and
+the link is then dead with no recovery while the local `claude` process keeps
+running, apparently healthy: the mobile/web app shows the session offline.
+Upstream context: anthropics/claude-code#34255 (also \#29726).
+
+The image handles this with two pieces:
+
+- **Healthcheck (`claude-healthcheck`)**: the Docker `HEALTHCHECK` probe. It
+  checks liveness (sshd, the tmux session, the `claude --remote-control`
+  process) *and* reads the RC debug log for the bridge's terminal give-up
+  (`recovery exhausted after …` / `notifyBridgeFailed`). A silently dropped
+  link therefore shows as `(unhealthy)` in `docker ps` and in the `claude-list`
+  STATUS column, not only an outright crash.
+- **RC watchdog (`claude-rc-watchdog`)**: a background process started by the
+  entrypoint. It tails the same log; on a confirmed dead link it waits for the
+  claude pane to go idle (so an in-flight turn is never cut off), then respawns
+  the pane with `claude-session --continue`. The Remote Control name is
+  unchanged, so the app reconnects on its own within ~30s and the conversation
+  is preserved. Two states beyond the terminal give-up:
+  - **Expired login** (`Login expired` / `Not logged in` / `requires a claude.ai
+    subscription`): the bridge refuses to enable because auth is gone, and a
+    restart can't fix that until fresh credentials exist. The watchdog restarts
+    on this state **only once the local credential is valid again** (so after a
+    host-side `make login` it recovers automatically); while the credential is
+    still empty it logs a single "run `make login`" line and waits instead of
+    churning to `MAX_RESTARTS` against a dead credential.
+  - **Resume-menu park**: a `--continue` respawn of a large, stale session opens
+    the interactive "Resume from summary" menu and blocks there: the bridge
+    never registers until it's dismissed. The watchdog detects that screen after
+    a restart and selects the recommended (summary) option so recovery stays
+    unattended.
+
+**What you'll see.** `claude-list` shows `Up … (unhealthy)` briefly, then the
+watchdog restarts the session and it returns to `(healthy)`. `claude-logs <name>`
+carries the watchdog's `[rc-watchdog]` lines explaining each decision.
+
+**Tuning / disabling** (env vars, set at `claude-launch`):
+
+- `CLAUDE_RC_WATCHDOG=0`: disable the watchdog entirely (the healthcheck still
+  reports `(unhealthy)`, but nothing auto-recovers).
+- `CLAUDE_RC_CHECK_INTERVAL` (30s), `CLAUDE_RC_IDLE_SECONDS` (45s),
+  `CLAUDE_RC_COOLDOWN` (180s), `CLAUDE_RC_MAX_RESTARTS` (10): poll cadence, the
+  idle window a pane must hold before a restart, the minimum gap between
+  restarts, and the consecutive-failure limit after which the watchdog stops.
+- `CLAUDE_RC_DEBUG_LOG`: path of the RC debug log (default
+  `/tmp/claude-rc-debug.log`). Set it empty to turn off RC logging, which also
+  disables drop detection: liveness checks still run.
+
+**Watchdog gave up (`MAX_RESTARTS` reached).** The link stayed dead across
+every restart, so this is no longer a transient bridge drop: treat it as a
+registration failure. Work through the "Remote Control session not in the
+mobile app" section above, and run `claude remote-control --verbose` in the
+container to see which condition fails.
+
+## `--dangerously-skip-permissions` with Remote Control
+
+There were earlier reports that skip-permissions didn't fully apply under
+Remote Control. On the pinned 2.1.302 the launch this image actually makes:
+`claude --dangerously-skip-permissions --remote-control "<project>"`: was
+verified to parse and start (as the unprivileged `claude` user), with no
+interlock between the two flags. Re-verify this on a TTY (`docker run -t`): with
+no tty the CLI drops into `--print` mode and exits on missing input, which looks
+like a failure but proves nothing either way. (The `claude remote-control`
+**subcommand** is not what this image runs. Its `--help` works signed out from 2.1.302
+and lists `-v, --verbose`, which the diagnosis above uses; before 2.1.302 it
+short-circuited on auth before parsing options: see [Architecture and design decisions](./architecture.md#verified-facts-claude-code-21302).) `settings.json` also
+sets `permissions.defaultMode=bypassPermissions` +
+`skipDangerousModePermissionPrompt`. So unattended operation works.
+
+**Verify end to end:** from the mobile app, send a task that needs a shell
+command (e.g. "run `ls /` and show output"). It should execute with no approval
+prompt. If a future Claude Code version prompts anyway:
+
+- Set `CLAUDE_PERMISSION_MODE=acceptEdits` in `.env` and relaunch. Edits
+  auto-apply; shell commands prompt in the app (you tap approve). Safer, still
+  usable remotely.
+- Or pin back to a known-good `CLAUDE_CODE_VERSION` (2.1.295 or later: the build
+  refuses an older one, below) and rebuild, and set `DISABLE_AUTOUPDATER=1` too,
+  since every start installs npm's latest and auto-update is on by default: either
+  would otherwise carry the container past the version you just pinned back to.
+
+**The boot log says `WARNING: the update to Claude Code ... failed` (or `npm's
+latest version could not be read`).** Each start installs npm's latest Claude
+Code (entrypoint §7d) and carries on without it when the registry cannot be
+reached. The sessions start on the version named in that line. A CLI older than
+the managed `requiredMinimumVersion` (2.1.295) then exits at startup and says to
+update: run `claude update` in the container (it is exempt from the floor), or
+restart the container once the registry is reachable.
+
+**The build stops with `CLAUDE_CODE_VERSION=... is below the floor (2.1.295)`.** The
+image refuses to bake a Claude Code older than **2.1.295**, the build-time floor
+(`CLI_FLOOR` in the `Dockerfile`). It is the managed `requiredMinimumVersion` (entrypoint
+§7a): a session on an older CLI exits at startup, and the sessions run the baked CLI
+whenever the start-time update cannot (`DISABLE_AUTOUPDATER=1`, or the registry out of
+reach), so such an image could start no session at all. The usual cause is a `.env` that
+still pins an old `CLAUDE_CODE_VERSION`: the Makefile's `-include .env` beats its own
+default. Set it to 2.1.295 or later (or delete the line) and rebuild.
+
+## Git auth failures
+
+- `Permission denied (publickey)` on push/clone: the host `GIT_SSH_KEY`
+  (`~/.ssh/claude-git-key` by default) doesn't exist, wasn't mounted, or isn't
+  authorized on the remote. `claude-launch` warns if the file is missing.
+  Generate one (`ssh-keygen -t ed25519 -f ~/.ssh/claude-git-key`) and add the
+  `.pub` as a deploy key / to your git account.
+- By default the key is held in a root ssh-agent and the agent signs through the
+  relay socket (`SSH_AUTH_SOCK`); only `CLAUDE_BROKER_GIT_KEY=0` copies it to
+  `~/.ssh/id_ed25519` (0600, owned by `claude`). Confirm the key is loaded with
+  `ssh-add -l` in the container, and that GitHub accepts it with
+  `ssh -T -l git github.com`.
+- The boot stopped with `the git key at /etc/claude/git-key is readable by claude`:
+  `/etc/claude` is not the image's root-only directory, usually because a whole
+  host directory is mounted on it. Mount the key file itself at
+  `/etc/claude/git-key` (as `claude-launch` and `claude-compose-gen` do), or rebuild
+  the image.
+- Public/https repos clone fine with no key.
+- Wrong commit author: set `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` in `.env`
+  (otherwise the host's `git config --global` is used).
+
+## SSH connection refused / closed
+
+- `claude-launch` warns and disables SSH if no `authorized_keys` was found at
+  `SSH_AUTHORIZED_KEYS`. Point it at a file containing your public key and
+  relaunch. (Remote Control still works without SSH.)
+- `Permission denied (publickey)` with the key you also push with: the git key is
+  never a login key, so sshd refuses it (`RevokedKeys`), and the boot log shows
+  `GIT KEY IN AUTHORIZED_KEYS`. Log in with a key of your own: put its `.pub` in
+  `SSH_AUTHORIZED_KEYS` (one line per device), regenerate or relaunch, and
+  recreate the container. `claude-compose-gen` and `claude-launch` refuse the
+  overlap up front, naming both files: `the git key is also an SSH login key`.
+- Wrong port: `claude-list` shows the assigned port; `claude-launch <name>`
+  reprints the connect line. Ports are auto-assigned in 2200-2299.
+- Host key changed after `docker volume rm claude-sshkeys`: clear the stale
+  entry with `ssh-keygen -R "[host]:<port>"`.
+- Connects then immediately closes: that's the tmux attach exiting because the
+  Claude pane died. SSH in again: you'll get a shell (remain-on-exit);
+  relaunch with `claude-session`, or check `claude-logs`.
+
+## Workspace trust prompt appears
+
+The entrypoint pre-accepts trust by seeding `.claude.json`. If you still get
+the dialog, the per-container config volume didn't mount (check
+`docker inspect <ctr>` for the `/home/claude/.claude` mount) or `/workspace`
+isn't the path Claude opened. As a one-off, accept it once: it persists in the
+config volume.
+
+Trust is per directory: `/workspace`'s entry does not cover `/workspace/<repo>`. Named
+sessions get an entry for their own directory (and every repo under `/workspace`) from
+`claude-sessions prepare` at boot, so a session started by hand with plain `claude` in a
+repo directory can still ask once. The boot log's `Workspace trust :` line names what
+was pre-accepted.
+
+## Several sessions in one container (`--session`, `claude-sessions`)
+
+Start with `claude-sessions ls` inside (or `claude-sessions -C <project> ls` from the
+host). STATE is Claude Code's own status while Claude runs (`busy`, `idle`, `waiting`, or `shell` while
+a background shell runs), `starting`, `exited` (Claude exited to a
+shell in that window), `down` (no window) or `stopped` (stopped by hand).
+
+- **A session is missing at boot.** `claude-logs <project>` has a `[sessions]` line for
+  each one: `skipped '<entry>': <why>` (a bad `CLAUDE_SESSIONS` entry; the launchers
+  validate, so this is usually a hand-edited env), `NOT started, its directory ... does
+  not exist` (a `dir=` typo, or a repo that did not clone), or `stopped by hand` (run
+  `claude-sessions start NAME`). A session dropped from `--session` is unregistered on
+  the next recreate, by design.
+- **`exited`.** Claude exited in that window; its last lines are in the pane
+  (`claude-sessions attach NAME`). `claude-sessions restart NAME` resumes the same
+  conversation; `--fresh` starts over.
+- **It started a fresh conversation after a restart.** A session resumes the conversation
+  the supervisor recorded for its window. None is recorded until Claude has written a
+  transcript (a session that never received a prompt has nothing to resume), and a
+  `--continue` fallback is only used when no other session shares the directory. `resume=off`
+  in the spec and main without `CLAUDE_MAIN_RESUME=1` start fresh on purpose.
+- **Moving a conversation in from another container** (a standalone container folded into a
+  multi-session one). Once that session is idle and its workspace has nothing unpushed, stop
+  the old container, copy `projects/-workspace/<id>.jsonl` (and the `<id>/` directory beside it)
+  from its config volume into this one's `projects/-workspace-<repo>/`, then
+  `claude-sessions restart <repo> --resume <id>`. The conversation's paths still say
+  `/workspace`; tell the session its repo is now `/workspace/<repo>`. A `/goal` program's
+  goal files name the launch directory too, so amend them before its next goal starts.
+  "Nothing unpushed" includes linked worktrees: a goal's worktrees usually live on the shared
+  `/cache` (`git -C /workspace worktree list`), and each one's `.git` file points into the OLD
+  container's `/workspace/.git`, so inside the new container it is broken. Once its branch is
+  pushed and clean, delete the directory and `git worktree add` it again from the new checkout.
+  Settings in a repo's committed `.claude/settings.json` sized for the old container (build
+  jobs, agent counts) reach a running session on its next command once the file changes.
+- **Its goal was not sent.** A first prompt / goal is sent on the session's first start
+  only. `claude-sessions reset NAME` makes the next start a first start again. A missing
+  goal file is a warning in the pane, and the session starts without it.
+- **Sessions keep dropping, and pids are near the limit** (`docker stats` PIDS near
+  `pids_limit`; the healthcheck line ends `pids 9x% (...)`; `[sessions] WARNING: capacity:` in
+  `claude-logs`, naming the heaviest processes). Threads count as pids. Numeric and CAD
+  libraries (OpenMP, OpenBLAS, MKL) size their thread pools to the HOST's CPUs, not the
+  container's quota, so on a 56-thread host each Python test worker carried ~100 threads, and
+  two `pytest -n 28` runs held ~8,000 of 8,192 pids. At the limit a Claude process cannot start
+  a thread and crashes. The image caps those pools per process (`CLAUDE_THREADS_PER_PROCESS`,
+  default 4; `nproc` prints the CPU quota, not that cap), crashed sessions relaunch and resume (`CLAUDE_SESSION_CRASH_RESTARTS`), and the
+  supervisor warns before the limit. Also: cap test parallelism for suites that size it from
+  the quota (a suite's own worker variable, `pytest -n`), run one heavy suite at a time, and size `pids_limit`
+  for the session count (the boot log warns under 1024 per session). To recover by hand: find
+  the heavy processes (`ps -eo pid,nlwp,rss,args --sort=-nlwp | head`), end the runaway run,
+  then `claude-sessions restart` each session that shows `exited`.
+- **Two sessions fight over git.** Sessions in the same directory share one working tree
+  and index. Give concurrent writers their own directory (a repo each, or `git worktree
+  add`) and keep a shared-directory session to reading (`mode=plan`).
+- **The container is OOM-killed.** Every session is a Claude process of 300-600 MiB plus
+  whatever it runs. The boot log's `Capacity:` line says what each gets; raise
+  `CLAUDE_MEM_LIMIT` / `--mem SVC=SIZE`, or stop a session (`claude-sessions stop NAME`,
+  remembered across restarts).
+- **One session's Remote Control is gone.** Each linked session has its own watchdog
+  (`[rc-watchdog:NAME]` in `claude-logs`) and its own debug log
+  (`/tmp/claude-rc-debug-NAME.log`); the healthcheck line names a dead link
+  (`sessions: 2/3 up (home: Remote Control dead)`) without marking the container unhealthy.
+
+## Frontend debugging (`--browser` / `CLAUDE_BROWSER`)
+
+Launching on the **browser image is enough**: the entrypoint auto-detects the
+baked Chromium + `chrome-devtools-mcp` and registers the official
+[`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)
+server inside the container with no second flag, so Claude can navigate,
+evaluate, screenshot, inspect console/network, run Lighthouse, and capture
+perf/heap traces against any frontend the agent runs. `CLAUDE_BROWSER` is
+tri-state: unset = auto (browser image self-enables), `1`/`--browser` = force on,
+`0`/`--no-browser` = opt out.
+
+- **The MCP isn't registered on a browser image.** Confirm you're actually on
+  the browser variant and that you didn't opt out:
+  ```
+  claude-logs <name> | grep -i "chrome-devtools\|Browser image detected"
+  ssh -p <port> claude@host 'command -v chromium && command -v chrome-devtools-mcp'
+  ```
+  A plain browser-image launch logs `Browser image detected … auto-registering`
+  then `Registered MCP server 'chrome-devtools'`. If you see
+  `chrome-devtools MCP disabled`, something set `CLAUDE_BROWSER=0`/`--no-browser`
+  (check your `.env`). If neither binary is on `PATH`, the image is lean.
+- **`--browser` fails: "image not built with WITH_BROWSER=1".** An explicit
+  `--browser`/`CLAUDE_BROWSER=1` against a lean image now **fails loud** (the
+  launcher refuses before creating the container; the entrypoint logs an `ERROR`)
+  rather than silently doing nothing. Build the variant:
+  ```
+  make build-browser            # tags claude-code-box:browser
+  CLAUDE_IMAGE=claude-code-box:browser ./bin/claude-launch myproj …
+  ```
+  Or `make build WITH_BROWSER=1 CLAUDE_IMAGE=mytag` for a custom tag. Set
+  `CLAUDE_IMAGE` in `.env` so every launch uses the browser variant by default
+  (it then auto-enables the MCP on every launch, no `--browser` needed).
+- **The MCP is registered but Chrome won't start in Claude.** Verify the
+  binary chain inside the container:
+  ```
+  ssh -p <port> claude@host 'chromium --version && chrome-devtools-mcp --help | head -5'
+  ```
+  Both must succeed. If `chromium` is missing, the image was built without
+  `WITH_BROWSER=1`.
+- **Every tool call fails `Protocol error (Target.setDiscoverTargets): Target
+  closed`, on the very first call.** Chrome is dying the instant it spawns.
+  Check the launch flags are actually *reaching* Chrome: `chrome-devtools-mcp`
+  uses yargs, which **silently ignores unknown options**, so a server pinned
+  below 1.0 (no `--chromeArg` support) drops `--no-sandbox` without a word.
+  Chrome then exits with `No usable sandbox!` and `claude mcp get` still
+  cheerfully reports `Connected`. Confirm the pin supports the flag:
+  ```
+  ssh -p <port> claude@host 'chrome-devtools-mcp --help | grep -- --chromeArg'
+  ```
+  No output means the image is too old: rebuild (`make build-browser`) to pick
+  up the pinned version, then **recreate** the container. Note that §10b's
+  registration is idempotent: it skips when a `chrome-devtools` entry already
+  exists, so a *restart* alone will not rewrite a stale config. To see exactly
+  what Chrome received, point `--executablePath` at a wrapper that logs `"$@"`.
+- **"Failed to launch the browser process".** Almost always sandbox/seccomp.
+  The entrypoint already passes `--chromeArg=--no-sandbox
+  --chromeArg=--disable-dev-shm-usage --chromeArg=--disable-gpu` to
+  `chrome-devtools-mcp`, which is what containers need. If you're on a host
+  with extremely restrictive seccomp (e.g. some hardened Kubernetes), relax
+  the seccomp profile for the container or expose `--cap-add=SYS_ADMIN`.
+- **Run it manually as `claude` to see real errors:**
+  ```
+  ssh -p <port> claude@host '
+    chrome-devtools-mcp --executablePath /usr/bin/chromium \
+      --headless --isolated --chromeArg=--no-sandbox \
+      <<<"{}"; echo exit=$?'
+  ```
+- **The flag is per-session.** SSH remotes / on-disk state aren't affected; if
+  you stop and `claude-launch <name>` resumes, the MCP registration is in the
+  per-container config volume and persists across restarts.
+
+## GPU sessions (`--gpu`)
+
+NVIDIA only. Start with `claude-gpu status` inside the session (or `docker exec <name> claude-gpu status`)
+: `ok` names the card, driver, free VRAM, NVENC sessions and
+utilization; `degraded (<reason>)` quotes what broke; `off` means the container was not
+created with `--gpu`. The boot-time verdict is in `/run/claude-gpu/state` and in
+`docker logs <name>` (a `GPU DEGRADED` banner), and `claude-healthcheck` prints it as
+`healthy; gpu: ...`. A degraded GPU never makes the container unhealthy.
+
+**The service will not start at all: `CDI device injection failed: unresolvable CDI
+devices nvidia.com/gpu=all`.** The host has no CDI spec for the GPU (never generated, or
+deleted). Docker refuses to create a container whose device it cannot resolve, so this is
+the one GPU failure that cannot degrade. On the host, as root:
+`nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml` (or enable the toolkit's
+`nvidia-cdi-refresh` path/service units, which regenerate it after driver changes), then
+`docker info | grep nvidia.com/gpu` must list `nvidia.com/gpu=all`. To run the session
+without the GPU meanwhile, drop `--gpu` from the `.conf` (or the launch), regenerate and
+recreate. `claude-launch --gpu` and `claude-compose-gen` check for the device up front.
+
+**`gpu: degraded (nvidia-smi failed ...: Failed to initialize NVML: Driver/library version
+mismatch)`.** The host's kernel module and user-space driver disagree, almost always a
+driver update without a reboot. Nothing inside the container can fix it: reboot the host
+(or reload the NVIDIA kernel modules), check `nvidia-smi` on the host, then restart the
+container so CDI mounts the matching libraries. Until then GPU work runs on CPU.
+
+**`gpu: degraded (nvidia-smi is not in this container ...)`.** `CLAUDE_GPU=1` is set but no
+device was attached (the service was created without the CDI device, e.g. by hand).
+Recreate it through the generator or `claude-launch --gpu`.
+
+**Jobs keep landing on CPU: `device=CPU (GPU still busy ...)`.** The card is shared and the
+guard is being polite: another tenant (a media server's hardware transcodes, another GPU
+session) holds VRAM, keeps the SMs busy, or has NVENC sessions open. The line names the
+number that failed. Wait, lower the job's needs, or tune `--min-free-mib`, `--max-util`,
+`--max-nvenc` and `--wait` (or their `CLAUDE_GPU_*` defaults). Per-process attribution is
+only visible from the host (`nvidia-smi pmon -c 1`, then map the PID through
+`/proc/<pid>/cgroup` to a container); inside a container `nvidia-smi` shows only the
+device-wide numbers.
+
+**Out of memory on the GPU.** `claude-gpu run` and `claude-gpu blender` retry a GPU run
+that failed with an out-of-memory error once on CPU and say so. Make the scene or batch
+smaller, or raise `--min-free-mib` so it waits for more headroom.
+
+**EGL or OpenGL picks Mesa (`llvmpipe`) on a GPU session.** Check, in order:
+`/usr/share/glvnd/egl_vendor.d/10_nvidia.json` exists (CDI mounts it; if not, the device
+is not attached); `__EGL_VENDOR_LIBRARY_FILENAMES` is not set (the guard sets it only for
+CPU runs); nothing puts a private `libGL`/`libEGL` on `LD_LIBRARY_PATH` (a bundled copy
+shadows glvnd's dispatch and therefore NVIDIA); `DISPLAY` is unset (headless programs
+should go straight to EGL). Blender's OpenGL backend does not log its renderer: ask it
+(`blender -b --python-expr "import gpu; print(gpu.platform.renderer_get())"`). Note that
+`eglinfo`'s default platforms can crash on NVIDIA without `/dev/dri`; use
+`eglinfo -B -p surfaceless`.
+
+**`claude-blender-install` fails.** `CHECKSUM MISMATCH` means the download is not the
+pinned build: it was deleted and nothing was installed; do not work around it, re-run
+(another mirror is tried) or check the pin. blender.org can answer scripted downloads
+with a bot challenge, which is why two official mirrors follow it in the source list.
+The install lives in the shared `/cache/blender`, so a half-installed tree is never
+visible: the install is renamed into place only after it is complete.
+
+**CUDA says the device or architecture is unsupported.** CUDA 13 dropped compute
+capability below 7.5. Use userspace built for CUDA 12.x on such a card (for example
+`cupy-cuda12x` plus the `nvidia-*-cu12` runtime wheels).
+
+## Container restart-loops
+
+`claude-launch` surfaces the last 30 log lines if startup fails. Common causes:
+bad `GIT_REPO_URL`/branch, missing auth volume, unreadable mounted key. Fix the
+cause, then `claude-rm <name>` and relaunch (or `docker start` after fixing a
+mount).
+
+## Changed `.env` but a resumed container ignores it
+
+`claude-launch <name>` on a *stopped* container runs `docker start`, which
+reuses the container's creation-time environment, port mappings, and mounts.
+Editing `.env` (or passing new `--repo`/`--port`/`--expose`/`--dev-cmd`) has no
+effect on resume: `claude-launch` prints a warning when it sees options it
+must ignore. To apply the new values, recreate the container:
+`claude-rm <name>` (add `--purge` to also drop the workspace/config volumes),
+then `claude-launch <name> …` again.
+
+## Restricting egress
+
+Egress is open by default: Claude Code, npm, pip, git and MCP servers all need
+outbound. To lock down a paranoid setup, attach the container to an `internal`
+Docker network plus a proxy/firewall that allows only:
+
+- `api.anthropic.com`, `claude.ai`, `*.anthropic.com`, `cdn.growthbook.io`
+  (API + Remote Control + the feature-flag fetch RC eligibility depends on)
+- `registry.npmjs.org`, your git host, any MCP server hosts you enable
+
+Easiest is a host firewall (nftables) or an egress proxy with
+`HTTPS_PROXY`/`HTTP_PROXY` set in `.env`. Blocking everything else still leaves
+SSH (inbound) and Remote Control (outbound 443) working. **Never set
+`DISABLE_TELEMETRY`, `DO_NOT_TRACK`, or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`**.
+Each disables the GrowthBook fetch that resolves the `tengu_ccr_bridge`
+Remote Control gate, breaking RC with a misleading "not yet enabled for your
+account" (see the Remote Control section above). The image and entrypoint
+deliberately avoid them.
+
+## Performance / OOM
+
+This image installs Claude Code via npm (not the native installer), avoiding
+the historical startup filesystem scan that OOM'd containers. If a container is
+still memory-starved, raise `CLAUDE_MEM_LIMIT`. Builds in `/workspace` honor
+`CLAUDE_CPU_LIMIT`/`CLAUDE_MEM_LIMIT`. A container running several sessions shares that
+limit between them: see the boot log's `Capacity:` line.

@@ -1,0 +1,569 @@
+---
+id: architecture
+title: Architecture and design decisions
+sidebar_label: Architecture
+description: "How the image, the entrypoint and the launchers fit together, and the design decisions behind them."
+---
+
+# Architecture and design decisions
+
+## Overview
+
+```
+ host                                   container: claude-<project>
+ ┌────────────────────────┐             ┌──────────────────────────────────┐
+ │ ./bin/claude-launch ───┼── docker ──▶│ entrypoint.sh (root)             │
+ │                        │   run -d    │   ├─ refuse ANTHROPIC_API_KEY     │
+ │ ssh -p 22NN ───────────┼────────────▶│   ├─ sshd  (port 22 ⇄ host 22NN) │
+ │                        │             │   ├─ merge baked-in config       │
+ │                        │             │   ├─ clone / use /workspace      │
+ │                        │             │   └─ gosu claude ▶ tmux "claude" │
+ │                        │             │            ├─ main: claude \     │
+ │                        │             │            │   --dangerously-    │
+ │                        │             │            │   skip-permissions  │
+ │                        │             │            │   --remote-control  │
+ │                        │             │            │   "<project>"       │
+ │                        │             │            └─ <name>: claude …   │
+ │                        │             │                --remote-control  │
+ │                        │             │                "<project>-<name>"│
+ └────────────────────────┘             └───────┬──────────────────────────┘
+                                                 │ outbound HTTPS only
+ Claude mobile app  ◀───── Remote Control ───────┘  (no inbound port)
+
+ volumes:
+   claude-auth          (shared)  OAuth credentials   → /auth
+   claude-sshkeys       (shared)  SSH host keys        → /etc/ssh/host-keys
+   claude-config-<proj> (per ctr) sessions + config    → /home/claude/.claude
+   claude-ws-<proj>     (per ctr) the git repo         → /workspace
+   claude-scratch-<proj>(per ctr) disk-backed TMPDIR   → /scratch
+   claude-state-<proj>  (per ctr) app dbs and keys     → /state  (CLAUDE_STATE_DIR)
+   claude-cache         (shared)  tool caches only     → /cache
+```
+
+`/cache` is shared by every container on the host, all as one user, so anything in it is
+readable from every container. An app's private state (a database, a key, a token) goes
+in `/state/<app>`, the container's own volume, which no other container mounts, and so do
+worktrees, clones and working folders that must last (`/state/wt`, `/state/tmp`):
+[Volumes and mounts](./volumes-and-mounts.md#private-state).
+
+Why credentials and config are split: a single shared `~/.claude` across
+containers would corrupt concurrent sessions and collide on the `/workspace`
+project key. Credentials are shared (one login, all containers); per-container
+config keeps sessions independent and resumable. The entrypoint keeps the
+credentials file converged across containers. Details and the deviation
+rationale: the sections below.
+
+## Component map
+
+- **Dockerfile**: `node:24-trixie-slim`, system packages, `gh`, `uv`,
+  Claude Code via npm (pinned), non-root `claude` user, hardened sshd config,
+  baked-in `claude-config/`.
+- **entrypoint.sh**: runs as root: refuses API-key auth, sets up sshd, fixes
+  volume ownership, reconciles credentials, pre-accepts trust, merges baked-in
+  config, prepares `/workspace`, then `gosu`-drops to `claude` and launches
+  Claude Code inside a detached tmux session. Stays PID 1 for clean signals.
+  Only the workspace's top level is owned before the sessions start; the rest of
+  the tree is checked in the background once they are up, because even a pass
+  that changes nothing reads every inode (minutes on a spinning disk). Until the
+  pass reaches it, a deeper file with a foreign owner (a bind mount from another
+  uid) is read-only to the agent; the boot log says when the pass is done.
+  It is a loader: the numbered sections live in `entrypoint.d/` (installed
+  at `/usr/local/lib/claude/entrypoint.d/`), one file each, which it sources in
+  order into its own shell (so a section's variables, functions and background jobs
+  reach every later one) and announces in the boot log as `§<n> <name>`:
+
+  | File | Section |
+  |---|---|
+  | `00-retired-env.sh` | §0: warn about retired broker/Sysbox env |
+  | `00b-retired-controller.sh` | §0b: refuse the retired `CLAUDE_CONTROLLER` mode |
+  | `01-auth.sh` | §1: refuse API-key auth; `make login`'s login mode |
+  | `01b-accounts.sh` | §1b: multi-account mode, the active account |
+  | `02-volumes.sh` | §2: ownership of the mounted volumes |
+  | `02a-scratch.sh` | §2a: disk-backed scratch (`TMPDIR`) |
+  | `02b-gpu.sh` | §2b: the GPU probe |
+  | `02c-state.sh` | §2c: private state (`/state`); owns its top level, the rest in §12g |
+  | `02d-containers.sh` | §2d: a `--containers` session's subordinate ids, uid-map helper and podman API |
+  | `02e-kvm.sh` | §2e: a `--kvm` session's /dev/kvm group for the agent |
+  | `03-host-keys.sh` | §3: persistent SSH host keys |
+  | `04-key-inputs.sh` | §4: the root-only key directory; the git key refused for SSH |
+  | `05-git.sh` | §5: the git key broker, identity, secret guard, `GH_TOKEN` |
+  | `06-credentials.sh` | §6: the credential reconcile loop |
+  | `06a-account-switch.sh` | §6a: the account-switch listener |
+  | `07-claude-json.sh` | §7: seed `.claude.json` |
+  | `07a-managed-policy.sh` | §7a: managed settings |
+  | `07b-browser.sh` | §7b: the browser decision (`CLAUDE_BROWSER`) |
+  | `07c-session-memory.sh` | §7c: the managed CLAUDE.md: container facts, the GPU and containers notes |
+  | `07d-claude-update.sh` | §7d: Claude Code at npm's latest, at every start (`DISABLE_AUTOUPDATER=1` keeps the baked version) |
+  | `08a-global-claude-md.sh` | §8a: the image's global CLAUDE.md |
+  | `08b-settings.sh` | §8b: merge `settings.json`, its self-heals |
+  | `08c-plugins.sh` | §8c: baked plugins and the runtime kit's |
+  | `08d-commands.sh` | §8d: baked slash commands |
+  | `08e-skills.sh` | §8e: baked skills, each where it can work |
+  | `09-workspace.sh` | §9: the workspace: a mount, `GIT_REPO_URL` or `GIT_REPOS`; an umbrella's submodules (`GIT_UMBRELLA`) |
+  | `09b-mise-shims.sh` | §9b: this container's mise shims |
+  | `10-mcp.sh` | §10: baked MCP servers |
+  | `10b-chrome-devtools.sh` | §10b: the chrome-devtools MCP |
+  | `11-sshd.sh` | §11: start sshd |
+  | `12-session-env.sh` | §12: the session's environment: model, mode, OpenTelemetry, thread pools |
+  | `12a-egress.sh` | §12a: egress lockdown and its refresh |
+  | `12b-session-launch.sh` | §12b: the kit's plugins, an umbrella's plugin warm-up, the tmux session, dev and SCM windows |
+  | `12c-rc-watchdog.sh` | §12c: the Remote Control watchdog |
+  | `12d-usage-watchdog.sh` | §12d: the usage-limit watchdog |
+  | `12e-named-sessions.sh` | §12e: named sessions and their supervisor |
+  | `12f-gh-check.sh` | §12f: the `GH_TOKEN` scope and permission check |
+  | `12g-workspace-owner.sh` | §12g: workspace and `/state` ownership, the deep passes |
+  | `12h-orphan-reaper.sh` | §12h: the orphan reaper (agent processes left to PID 1, `CLAUDE_ORPHAN_MAX_AGE`) |
+  | `13-stay-alive.sh` | §13: the boot summary, the liveness loop, shutdown |
+- **claude-session**: the tmux pane command: `cd /workspace`, exec
+  `claude --dangerously-skip-permissions --remote-control "<project>"`, and
+  fall back to a shell if Claude exits so SSH stays usable. With `--session NAME`
+  it runs a named session instead (its directory, Remote Control name, model,
+  first prompt and resume come from `claude-sessions`).
+- **claude-sessions**: several sessions in one container: reconciles
+  `CLAUDE_SESSIONS` into a registry on the config volume, pre-accepts workspace
+  trust for each session's directory, opens one tmux window per session, and runs a
+  supervisor that records each window's conversation and keeps an RC watchdog beside
+  every linked session. Also the operator's `ls/new/start/stop/restart/send/rm`.
+- **bash_profile**: interactive SSH logins `exec tmux attach` to the live
+  `claude` session; non-interactive SSH (scp/rsync) is untouched.
+- **bin/**: `claude-launch/list/stop/rm/logs` over a shared `_common.sh`; inside the
+  image also `claude-gpu` (the GPU guard) and `claude-blender-install`.
+- **.claude/skills/claude-containers/**: project skill: when this repo is
+  opened in Claude Code, it teaches the model the architecture, invariants,
+  and operational playbook so it can drive build/login/launch/customize/debug.
+
+## Verified facts (Claude Code 2.1.302)
+
+Everything below was checked against the installed binary, not just docs:
+
+- `--remote-control [name]` is a real top-level flag; `-n/--name` is a separate
+  display-name flag. The **top-level** launch this image actually makes:
+  `claude --dangerously-skip-permissions --remote-control "<project>"`: was
+  verified to parse and start on 2.1.302 (as the unprivileged `claude` user; the
+  CLI refuses skip-permissions when running as root, by design). Verify it on a
+  TTY: with no tty the CLI falls into `--print` mode and exits on missing input
+  *before* proving anything about the interactive launch.
+- The `claude remote-control` **subcommand** (not what this image runs) prints its
+  usage signed out from 2.1.302; before that it short-circuited on auth before parsing
+  its options. On 2.1.302 its `--help` lists `--name`, `--permission-mode` (choices
+  include `bypassPermissions`), `-v, --verbose`, `--debug-file`, `--spawn` and
+  `--capacity`. It no longer takes `--sandbox` or `--no-sandbox` (removed in 2.1.300;
+  either now exits with an error), and nothing in this image passes them.
+- `--dangerously-skip-permissions` ≡ `--permission-mode bypassPermissions`.
+- Setting `CLAUDE_CONFIG_DIR` relocates **everything**, including the otherwise
+  HOME-level `.claude.json`, into that directory. Verified empirically: this
+  is what lets one per-container volume capture all session state.
+- Workspace trust + onboarding live in `<config>/.claude.json` as
+  `hasCompletedOnboarding` and `projects["<path>"].hasTrustDialogAccepted`.
+- Plugins are declarative: `settings.json` `extraKnownMarketplaces` +
+  `enabledPlugins` are synced by Claude Code on startup.
+- `--bare` forces API-key-only auth and disables plugins/CLAUDE.md, so it is
+  **not** used here.
+
+## Decision: split credentials from per-container config (deviation)
+
+The spec describes one shared `claude-auth` volume mounted at
+`/home/claude/.claude` across all containers. Implemented differently, on
+purpose:
+
+- `claude-auth` (shared) → `/auth`, credentials only.
+- `claude-config-<project>` (per container) → `/home/claude/.claude`
+  (`CLAUDE_CONFIG_DIR`), all session/history/state.
+- `claude-state-<project>` (per container, mounted in no other) → `/state`
+  (`CLAUDE_STATE_DIR`): an app's own databases, keys and tokens. The shared `/cache` is
+  readable from every container (one volume, one UID), so it holds tool caches only
+  ([Volumes and mounts](./volumes-and-mounts.md#private-state)).
+
+Reason: Claude rewrites `.claude.json`, `history.jsonl` and `sessions/`
+constantly. With one shared config dir, parallel containers race those files,
+and every container's workspace is `/workspace` so they collide on the same
+`projects["/workspace"]` key: one session could resume another's. That breaks
+spec acceptance criteria 6 (resume preserved) and 7 (independent parallel
+containers). The split preserves the spec's actual goal: *one login, every
+container reuses it*: via a shared credentials volume, while keeping sessions
+isolated.
+
+**Credential convergence.** Claude refreshes the OAuth token and rewrites
+`.credentials.json` in its config dir. A background loop in the entrypoint keeps
+`/auth/.credentials.json` and the per-container copy converged (newest mtime
+wins, atomic replace, ~30s). Net effect: one login propagates to all
+containers, and refreshed tokens propagate back through the shared volume.
+Limitation: if two containers refresh within the same ~30s window the later
+write wins; refreshes are infrequent (hours apart) so this is acceptable for a
+homelab. A token-rotation regression would surface as a re-login prompt, not
+data loss.
+
+**A changed account is followed.** "Newest wins" is only right while both files belong to
+one account. The master's account is the `oauthAccount.accountUuid` in the `.claude.json` the
+login writes beside it; the container records the account its own copy came from
+(`.credentials-account`). When they differ, the operator logged another account in, and the
+container takes the master's credential, refreshes its cached identity and asks
+`claude-sessions supervise` (through `.account-changed`) to restart each session at its next
+idle moment. Two rules keep the new login from being undone: while any Claude process that
+started before the switch is alive (start times from `/proc`, in milliseconds), nothing is
+pushed up, because such a process refreshes the OLD account's token into the container's file;
+and a container whose own copy is another account's replaces it at boot, before any session
+starts. Sessions are restarted rather than left to pick the token up because Remote Control
+links are owned by an account: Claude refuses to reattach one across accounts and mints a new
+one on start. Before this, changing accounts meant restarting every container by hand, and a
+stopped container started later could push the previous account back into the shared volume.
+
+## Decision: per-container workspace defaults to a named volume
+
+`claude-ws-<project>` (named volume) is the default: consistent with the other
+volumes, cleanly removed by `claude-rm --purge`, and matches the spec's
+"per-container workspace volume" wording. `--workspace <path>` bind-mounts a
+host checkout instead (use that when you want the repo directly on the host
+filesystem for backups/inspection). Back up a named volume with
+`docker run --rm -v claude-ws-<p>:/w -v "$PWD":/b alpine tar czf /b/<p>.tgz -C /w .`
+
+## Decision: MCP secrets are runtime-only
+
+Baked `mcp/*.json` use `${VAR}` placeholders, expanded by `envsubst` from the
+container environment at registration time. Secrets come from `.env`
+(`--env-file`), never the image. Confirms the spec's stated preference.
+
+## Decision: frontend debugging is an opt-in image variant
+
+The default image stays lean. A `WITH_BROWSER=1` build arg
+(`make build-browser`, tag `claude-code-box:browser`) bakes Debian's headless
+**Chromium** (multi-arch) and the official
+[`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)
+server: adding ~200 MB. At runtime, **launching on the browser image is
+sufficient**: the entrypoint auto-detects the baked binaries and registers the
+MCP by default (`CLAUDE_BROWSER` is tri-state, unset = auto, `1`/`--browser` =
+force on and fail loud on a lean image, `0`/`--no-browser` = opt out;
+`claude-compose-gen --browser REPO` selects the image and forces it on). So
+Claude gets the full Chrome DevTools Protocol surface
+(navigate / evaluate / console / network / Lighthouse / perf trace / heap
+snapshots / screenshots: 55+ tools) against any frontend the agent runs in
+`/workspace`. Headless-only inside the container; the agent reads pages back
+via screenshots and DOM queries.
+
+Why a build arg, not a runtime install: Chromium is ~200 MB and would cost
+every user, including those who never debug a frontend. Why MCP, not a CLI
+wrapper: it composes with the stack's existing MCP discipline, declarative,
+secret-free (the MCP needs none), removable per session. Why Chromium over
+`@puppeteer/browsers install chrome` at build time: Debian's package is
+multi-arch with one apt line, vs Puppeteer's per-arch binary download +
+runtime-managed cache. The launcher reads the image's `claude.browser` LABEL to
+fail loud + early if `--browser` is requested against the lean image; the
+in-container entrypoint can't read its own image labels, so it auto-detects the
+variant by probing the baked binaries on `PATH`.
+The image also carries provenance labels, set last in the Dockerfile so a new
+commit changes only metadata and every cached layer stays a hit:
+`org.opencontainers.image.revision` (the commit), `claude.dirty` (whether the tree
+had changes), `org.opencontainers.image.created` (UTC) and `claude.cli-version`.
+The Makefile's `BUILD_ARGS` fill them from git; `claude-compose-gen` emits them as
+`${GIT_COMMIT:-unknown}`-style interpolations, never a literal commit. Older images
+have none, so a reader treats a missing label as `unknown`.
+Chrome is started with `--no-sandbox --disable-dev-shm-usage --disable-gpu`
+(required in unprivileged Docker; Chrome's user-namespace sandbox conflicts
+with the default seccomp).
+
+## Decision: several repos share one workspace as sibling checkouts
+
+`claude-compose-gen --group NAME=REPO,REPO,...` and a repeated `claude-launch --repo`
+give one container several repos. The entrypoint clones each into `/workspace/<repo>`
+(the list travels as `GIT_REPOS`, whitespace-separated `URL[#BRANCH]`) and the session
+starts in `/workspace`. Sibling checkouts, not submodules or a monorepo: every repo keeps
+its own history, remote, branch and `CLAUDE.md`, and nothing about the repos themselves
+changes. Each boot clones only what is missing and never touches an existing checkout, so
+growing the list is a restart, and a session's uncommitted work survives it. The single
+repo layout (`/workspace` is the repo) is unchanged and the two never mix: `GIT_REPOS`
+with `GIT_REPO_URL`, or on a workspace that already has a repo at its root, refuses to
+boot rather than nest one repo inside another. mise's trusted paths cover `/workspace`
+and everything below it. Claude Code's workspace trust does not: main is fine because it
+starts in `/workspace`, and a named session started in `/workspace/<repo>` gets its own
+trust entry (next decision).
+
+## Decision (revised): an umbrella repo brings its repos as submodules
+
+The decision above stands for repos that know nothing of each other. It does not fit an
+umbrella: a repo whose job is to pin other repos as git submodules, at the commits that work
+together. Cloning those repos as siblings would drop the pins, and a sibling list kept by hand
+in `GIT_REPOS` would drift from the umbrella's `.gitmodules`. So for an umbrella the submodules
+win: `GIT_UMBRELLA=1` beside `GIT_REPO_URL` (or a checkout already at `/workspace`) makes
+`/workspace` the umbrella, with its submodules checked out inside it. The session starts in
+`/workspace` as before, and `COSYTE_UMBRELLA` holds that path (exported to every session, and
+in `/etc/profile.d` for SSH logins) for the tools that look for the umbrella.
+
+How, and why:
+
+- **Over HTTPS, not SSH.** Submodule URLs are usually SSH (the scp-like `github.com:owner/repo.git` form, user `git`),
+  and the deploy key (`GIT_SSH_KEY`) reaches one repository, so SSH could clone the umbrella
+  and none of its submodules. Umbrella mode adds `url.https://github.com/.insteadOf` for
+  both SSH forms of a github.com URL (scp-like, and `ssh://` with user `git`) to the agent's
+  global git config, so every
+  github.com URL goes over HTTPS with `GH_TOKEN` through gh's credential helper (§5): the
+  clone, and every later fetch and push in a submodule. Without `GH_TOKEN` it warns: HTTPS
+  then reaches public repos only.
+- **Only what is missing, every boot.** After the clone, each boot checks out the submodules
+  not checked out yet (`-` in `git submodule status`: a fresh clone's, a pin added since, or
+  one an earlier boot could not fetch), the same as `git clone --recurse-submodules` the first
+  time. A checked-out submodule is never touched, whatever state the session left it in, the
+  same rule as a `GIT_REPOS` checkout.
+- **A failed submodule warns; it does not stop the boot.** A clone of the umbrella itself that
+  fails stops the boot, as any `GIT_REPO_URL` clone does. A submodule that cannot be fetched (a
+  token without access, a network blip) is a `WARNING` naming it, and the next boot tries again.
+  Each submodule is fetched on its own, bounded by `GIT_SUBMODULE_TIMEOUT` (300 s by default):
+  git sets no transfer timeout of its own, so a stalled connection would hold the boot, and every
+  session, for as long as it stalled. A fetch stopped at the bound is a `WARNING` too.
+  Stopping the boot there would only loop: the restart finds the workspace populated and goes
+  on anyway.
+- **One layout at a time.** `GIT_UMBRELLA` with `GIT_REPOS` refuses to boot, as does
+  `GIT_UMBRELLA` on a workspace with no repo at its root, or a value that is not on or off.
+- **The umbrella's own plugins load from the first session.** An umbrella's project settings
+  can declare plugin marketplaces (`extraKnownMarketplaces`), and on a fresh config the first
+  session lists their plugins without loading their agents, skills or hooks: that start is
+  what registers the marketplace in the config, and only later starts load the plugin whole.
+  So in umbrella mode §12b runs `claude-kit warm /workspace` before any session: when the
+  config's `plugins/known_marketplaces.json` does not list each declared marketplace, it makes
+  one throwaway start in the workspace (no prompt, no hook, no MCP server, no transcript),
+  bounded, and a failure is a `WARNING` ([Install a kit at session start](./install-a-kit.md)).
+
+## Decision: several sessions share one container as tmux windows
+
+`CLAUDE_SESSIONS` (from `claude-launch --session` / `claude-compose-gen --session`) and
+`claude-sessions new` run more Claude sessions beside `main`: one tmux window each, each
+its own `claude` process with its own Remote Control name (`<project>-<name>`), directory,
+model, permission mode and optional first prompt. The alternative, one container per
+session, is still the right call for unrelated repos, but it is wrong for several lanes
+over one workspace: a second container cannot share the first one's checkout without a
+foreign volume mount, and it doubles the image, the sshd, the watchdogs and the port.
+
+What had to change for a container to hold more than one session, and why:
+
+- **Workspace trust is per directory.** The trust seeded for `/workspace` does not cover
+  `/workspace/<repo>`: a session started there sat on "Is this a project you trust?"
+  (observed on 2.1.280). `claude-sessions prepare` seeds the same entry for every session
+  directory and every repo under `/workspace`, as the claude user, *before* main starts,
+  so no running Claude rewrites `.claude.json` under it. A session added at runtime gets
+  its directory seeded best-effort and checked afterwards.
+- **Resume is by conversation id, not by directory.** `--continue` picks the most recent
+  conversation in the current directory, which is a sibling's whenever two sessions share
+  one. A supervisor records each window's conversation from Claude Code's own
+  `sessions/<pid>.json` (it maps a tmux pane to a session id and follows a `/clear`), and
+  every resume path (boot, RC recovery, usage rotation, `claude-sessions restart`) passes
+  `--resume <id>`. `--continue` remains only as a fallback where it cannot be ambiguous.
+  `claude-session-id` resolves by window for the same reason.
+- **A first prompt is sent exactly once.** The start is recorded before Claude runs, so a
+  restart resumes a session that is on goal 4 instead of replaying goal 1.
+- **Recovery is scoped to one pane.** The RC watchdog used `pkill -f remote-control`,
+  which with several sessions kills all of them. It now kills only the process tree under
+  its own pane, uses a per-window lock, exits when its window is gone, and one runs per
+  linked session (started by the supervisor, so its output reaches `docker logs`).
+- **Health is still about the container.** Named sessions are reported on the healthy line
+  and never make the container unhealthy: an unhealthy status only ever leads to a restart
+  of every session in it, which is the wrong response to one session's trouble.
+- **Declared vs added.** `CLAUDE_SESSIONS` is creation-time, so it is authoritative for its
+  entries on every boot (a dropped entry is unregistered); `new` sessions live on the
+  config volume until `rm`. A stop is remembered either way.
+- **tmux formats.** tmux prints a control character in a `-F` format as `_`, so fields are
+  split on `|`, and tmux output is captured before it is matched: under `pipefail` a
+  `grep -q` that exits early leaves tmux writing into a closed pipe and fails the match
+  for any window that is not the last one listed.
+
+Main is unchanged unless asked: same window, same Remote Control name, a fresh
+conversation on boot unless `CLAUDE_MAIN_RESUME=1`.
+
+## Decision: GPU sessions are CDI devices on plain runc
+
+`--gpu` (`claude-compose-gen --gpu REPO`, `claude-launch --gpu`, `CLAUDE_GPU=1`) gives a
+session the host's NVIDIA GPU. NVIDIA only; no `/dev/dri`, no device selection.
+
+**Mechanism: the CDI device `nvidia.com/gpu=all`, requested by name, on the default `runc`
+runtime.** The NVIDIA Container Toolkit's CDI spec lists everything the device needs (the
+`/dev/nvidia*` nodes, the driver's user libraries including CUDA, OptiX, the EGL/GLX
+vendor libraries and the Vulkan ICD, and `nvidia-smi`), and Docker injects it at creation,
+matched to the host driver. Nothing about the hardening changes: `cap_drop: ALL`, the
+minimal cap set and `no-new-privileges` stay, no capability is added, nothing is
+privileged, no host network, no socket. The alternatives were rejected:
+
+| approach | why not |
+|---|---|
+| `runtime: nvidia` | a second runtime to keep installed and in step, for what CDI does on runc |
+| `--gpus all` (the legacy device request) | mounts the compute libraries only (no EGL vendor file), so no headless graphics: EEVEE and VTK fall back to Mesa |
+| baking driver libraries into the image | they must match the host's kernel module exactly; a copy drifts and shadows the right one |
+
+**Compose syntax, verified on Docker 28.5 with Compose 2.39.** Both
+`devices: [nvidia.com/gpu=all]` and `deploy.resources.reservations.devices` with
+`driver: cdi` produce the same thing on the container (`HostConfig.DeviceRequests`:
+`Driver cdi`, `DeviceIDs [nvidia.com/gpu=all]`, `Runtime runc`), and `nvidia-smi` works
+in both. The generator emits `devices:` because it is the same shape as
+`docker run --device nvidia.com/gpu=all` and carries no `deploy:` semantics. Compose
+prints it back as `source/target: nvidia.com/gpu=all`. `NVIDIA_DRIVER_CAPABILITIES` does
+nothing in CDI mode: the spec is generated with every capability, and the mounted
+library set is identical with or without the variable.
+
+**The image carries the vendor-neutral half, in every variant:** glvnd's dispatch
+libraries (`libEGL`, `libGL`, `libOpenGL`, `libGLX`), Mesa llvmpipe (the CPU renderer,
+and the only one a session without a GPU has), OSMesa for VTK, and the X client
+libraries Blender's official build links even when it runs headless. That is about
+230 MB, mostly LLVM for llvmpipe, and it is also what lets a CPU-only session render a
+preview at all (OCP, behind build123d, hard-links `libGL.so.1`). glvnd reads
+`/usr/share/glvnd/egl_vendor.d`: CDI mounts `10_nvidia.json`, the image has
+`50_mesa.json`, so EGL picks NVIDIA when the device is attached and Mesa when it is not.
+
+**Degrade, do not fail.** With `CLAUDE_GPU=1` the entrypoint probes the card once, bounded
+(20 s at most), records `ok` or `degraded (<reason>)` in root-owned
+`/run/claude-gpu/state`, and on a failure prints a banner and puts it on the tmux status
+line; `claude-healthcheck` appends the GPU state to its healthy line and never fails on
+it. A session that loses its GPU is still a working session, and an unhealthy verdict
+would only get it restarted into the same state. The boundary: a missing CDI spec makes
+Docker refuse to create the container, before any code of ours runs, so that case is a
+loud creation error instead (the launcher and generator check for the device first).
+
+**Sharing the card: `claude-gpu`.** A GPU on a homelab host is rarely exclusive (a media
+server's NVENC transcodes, a metrics exporter). From inside a container `nvidia-smi` sees
+only device-wide numbers, not other containers' processes, and those are exactly what a
+polite preflight needs: free VRAM, SM utilization, NVENC session count. `claude-gpu run`
+waits for all three to be under their limits, falls back to CPU through an environment
+contract (`CLAUDE_GPU_DEVICE`, `CUDA_VISIBLE_DEVICES=`, glvnd pointed at Mesa), retries
+a GPU out-of-memory failure once on CPU, and always says which device ran. Per-process
+attribution needs the host PID namespace, so it lives on the host side, not in the guard.
+
+**`/scratch` on RAM.** Blender's render temp and kernel caches, and throwaway venvs,
+churn under `TMPDIR`; on a spinning pool that churn is the D-state wedge class the browser
+variant already moved to RAM. 4g plus the 1g `/tmp` can exceed the 4g default memory limit
+when full (a tmpfs is charged only as it fills), so a rendering service raises `--mem`.
+
+**Blender is installed, not baked.** A pinned, SHA-256-verified blender.org LTS tarball
+(`claude-blender-install`) goes rootless into the shared `/cache/blender`, under a lock
+and renamed into place when complete: one download serves every container, the image
+stays the same size for sessions that never render, and a Blender bump is a one-line pin
+change, not an image variant.
+
+## Decision: one substantive build stage
+
+A heavy builder stage was considered and rejected: the image weight is the
+required system packages (`build-essential`, Python, gh) which must be in the
+final image per spec. Claude Code is pure JS via npm with the cache cleaned. A
+multi-stage split wouldn't meaningfully shrink the result, so the final stage
+stays single with aggressive apt/npm cleanup. (There is one trivial throwaway
+stage that only re-exports the `uv` binaries: BuildKit forbids variable
+expansion directly in `COPY --from=`, so it must go through a named stage.)
+Multi-arch
+(`linux/amd64,linux/arm64`) is handled by `docker buildx` (`make build-all` /
+`make push`); `make build` loads the host arch locally because Docker can't
+`--load` a multi-arch manifest into the local engine.
+
+## Decision: workspace trust pre-acceptance
+
+The cleanest non-interactive method is seeding `<config>/.claude.json` with
+`hasCompletedOnboarding: true` and `projects["/workspace"]
+.hasTrustDialogAccepted: true` (the exact shape Claude Code uses). Done with a
+`jq` merge that only fills missing keys. No `--bare`, no piping `/dev/null`,
+no `-p`: those each disable features we need.
+
+## Permission mode & Remote Control
+
+Launch is `claude --dangerously-skip-permissions --remote-control "<project>"`.
+On 2.1.302 these compose correctly. Belt-and-suspenders: `settings.json` also
+sets `permissions.defaultMode = bypassPermissions` and
+`skipDangerousModePermissionPrompt: true` (a real settings key). If a future
+Claude Code regresses the interaction, set `CLAUDE_PERMISSION_MODE=acceptEdits`.
+The end-to-end verification is in
+[Troubleshooting](./troubleshooting.md#--dangerously-skip-permissions-with-remote-control).
+
+## Decision: policy is delivered where the agent user cannot write
+
+`~/.claude/settings.json` is owned by the agent user, sits on a volume that
+outlives the container, and the entrypoint's merge lets the existing file win, so
+the process being policed owned the file the policy was written in. The settings
+that are *policy* rather than preference are therefore also written to the
+root-owned `/etc/claude-code/managed-settings.json`, which Claude Code reads
+above every other settings level, before the agent process starts. Which settings
+count as policy, how an operator changes them from the host, and why
+`permissions.disableBypassPermissionsMode` is deliberately not set:
+[Managed settings](./managed-settings.md). It is additive by design: the
+`settings.json` composition above is unchanged, so a container whose managed file
+is missing or unparseable behaves exactly as it did before, and says so in the
+boot log rather than claiming an enforcement it does not have. The boot log is
+derived from the file on disk rather than from what the entrypoint attempted, so
+it is equally incapable of denying an enforcement that is there: a policy file an
+operator mounted is reported even on a boot where this image delivered none.
+
+## Decision: telemetry stays ON (Remote Control depends on it)
+
+Remote Control eligibility is the GrowthBook feature flag `tengu_ccr_bridge`,
+fetched at startup. `DISABLE_TELEMETRY`, `DO_NOT_TRACK`, and
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` each make Claude Code skip the
+GrowthBook fetch, so the flag falls back to its `false` default and RC reports
+"not yet enabled for your account": even on a fully eligible account
+(confirmed against Anthropic's docs and 50+ upstream issues; reproduced and
+fixed here). An earlier revision of this image set `DISABLE_TELEMETRY=1` /
+`DO_NOT_TRACK=1` (Dockerfile ENV **and** the entrypoint's settings.json `env`)
+and that was the sole reason Remote Control never appeared. They are now never
+set. `DISABLE_AUTOUPDATER=1` (unrelated to flags) is no longer set either: since
+the bump to Claude Code 2.1.258, auto-update is ON by default, so a
+running container's binary can self-update past the pinned `CLAUDE_CODE_VERSION`
+unless an operator sets `DISABLE_AUTOUPDATER=1` themselves. Every start also
+installs npm's latest before any session runs (§7d), so a container never starts
+a session on the baked version when a newer one exists; the same
+`DISABLE_AUTOUPDATER=1` skips that, and the managed `requiredMinimumVersion`
+(2.1.295) keeps a session from starting on an older CLI whatever happened. (Until the 2.1.280
+bump that was only nominal: the CLI sat in root-owned `/usr/local`, so every
+update failed with "Insufficient permissions to install update". It now lives in
+the claude-owned npm prefix `/opt/claude-code`, and `/usr/local/bin/claude` is
+`bin/claude-launcher`, which re-runs the postinstall that the claude user's
+`ignore-scripts=true` skips during a self-update.) The entrypoint
+also self-heals pre-existing per-container config volumes: it strips these keys
+from `settings.json` and, if any were present, clears
+`cachedGrowthBookFeatures`/`statsig` so the next run re-resolves the gate.
+Trade-off accepted: this image cannot be fully telemetry-silent and also
+provide Remote Control; RC is the product, so telemetry stays on.
+
+## Retired: the nested-Sysbox worker-broker substrate, and the per-session Docker engine
+
+An earlier revision of this repo ran a nested-Sysbox "worker broker" substrate so a
+controller container could spawn autonomous nested workers: a root-owned
+broker that launched hardened nested workers on an inner `dockerd` under Sysbox,
+K-aware resource sizing, a worker-lifecycle run/reap contract,
+disk-safety floors + GC, a controller mode wiring it to an external
+lease/scheduler control plane, and per-worker spend/capacity
+observability, plus the curated worker `apt` and the pull-through
+cache proxy) supply-chain hardening built on top of it.
+
+That whole substrate was retired on 2026-07-12 in favor of Claude Code subagents in
+per-worktree git worktrees, and stripped from `main`. A follow-up prune
+(2026-07-14), pruned the residue the strip left behind: `bin/claude-controller` (by then
+a pass-through to `claude-autopilot`; `CLAUDE_CONTROLLER=1` now refuses to boot),
+`bin/claude-reaper` (it pruned a spool nothing writes to), the controller image variant
+(an unreachable `dockerd`), and the autopilot's default command
+(`CLAUDE_AUTOPILOT_CMD` is now required).
+
+A later per-session Docker engine (`--docker`: an inner `dockerd` in the session, under
+the same user-namespaced runtime, so the agent could build images and run containers)
+was removed as well. It was the last thing that needed a non-default runtime on the host,
+it had to skip the capability drop every other session keeps, and it voided two
+in-container controls (the git-key broker and egress lockdown) because socket access is
+a route to root inside the container. Every session now runs on plain `runc` with
+`--cap-drop ALL`; the removed flags refuse, naming the removal.
+
+The frozen implementation, the full rationale, and the follow-up resolution live in
+[The retired Sysbox broker](./retired-sysbox-broker.md); nothing above or below this
+note describes either.
+
+## Acceptance
+
+| # | Criterion | How it's met / verify |
+|---|---|---|
+| 1 | `make build` works (amd64+arm64) | `make build` (host arch, loaded); `make build-all`/`make push` for both arches via buildx |
+| 2 | `make login` persists creds | Login-mode entrypoint runs `claude auth login --claudeai` with `CLAUDE_CONFIG_DIR=/auth`; creds land in `claude-auth` |
+| 3 | launch clones + starts + prints | `claude-launch myproj --repo …`; entrypoint clones, launches with flags; connect info printed |
+| 4 | SSH → live tmux | `bash_profile` `exec tmux attach -t claude`; session started by entrypoint before sshd accepts logins |
+| 5 | Appears in app, named, green | `--remote-control "<project>"`, outbound HTTPS; name = project name |
+| 6 | stop→launch resumes | Per-container `claude-config`/`claude-ws` volumes survive `docker stop`; `claude-launch` does `docker start` |
+| 7 | Two parallel, independent | Distinct container names, ports (`alloc_port`), per-container volumes, separate app sessions |
+| 7b | Several sessions in one container | `--session` / `CLAUDE_SESSIONS`: one window + Remote Control link each, trusted, resumed by id; `test/sessions-unit.sh`, smoke §17c |
+| 8 | Baked MCP/plugins/commands/skills usable | In a session: `/mcp`, `/plugin`, `/container-info`, the `example-skill`; see customizing-bakeins.md |
+
+## Guides that apply this
+
+- [Run several repos in one container](./run-several-repos.md)
+- [Run several sessions in one container](./run-several-sessions.md)
+- [Change the Claude account](./change-the-claude-account.md)
+- [Give a session the GPU](./give-a-session-the-gpu.md)
+- [Debug a frontend from a session](./debug-a-frontend.md)
+- [Change the managed settings from the host](./change-the-managed-settings.md)
