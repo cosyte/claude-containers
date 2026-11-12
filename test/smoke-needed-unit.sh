@@ -3,7 +3,8 @@
 #   - scripts/smoke-needed.sh, run in a throwaway repo whose HEAD is a pull request merge commit
 #     (what actions/checkout makes): a docs-only change prints false, a change to any image path
 #     prints true; a push, nightly or manual run prints true; a HEAD that is no merge commit
-#     prints true (when in doubt, smoke runs); a rename out of an image path counts
+#     prints true (when in doubt, smoke runs); a rename out of an image path counts; an image
+#     path git would print quoted (a non-ASCII byte, a space, a double quote, a newline) counts
 #   - .github/workflows/ci.yml: the smoke job has no job-level if: or needs:, so the required
 #     smoke check always reports (a skipped required check blocks the merge); no separate
 #     changes job; its checkout fetches depth 2; its first step after checkout runs the script;
@@ -67,7 +68,7 @@ test_each_image_path_runs_smoke() {
     local p d out rc miss=""
     for p in Dockerfile sshd_config bash_profile entrypoint.sh entrypoint.d/10-x.sh \
              bin/claude-launch claude-config/settings.json scripts/x.sh containers/x.conf \
-             test/smoke.sh Makefile docker-compose.yml .github/workflows/ci.yml; do
+             test/smoke.sh Makefile docker-compose.yml .dockerignore .github/workflows/ci.yml; do
         d="$(pr_repo README.md "$p")"
         out="$(decide "$d" pull_request)"; rc=$?
         [[ $rc -eq 0 && "$out" == true ]] || miss+=" $p(rc=$rc out='$out')"
@@ -82,6 +83,24 @@ test_lookalike_paths_do_not_run_smoke() {
     out="$(decide "$d" pull_request)"
     [[ "$out" == false ]] && ok "lookalike paths (docs/Dockerfile.md, test/smoke-unit.sh, another workflow): false" \
         || bad "lookalike paths: out='$out', want false"
+}
+
+# An image path with a byte git quotes by default (core.quotePath) must still match the list: a
+# quoted name starts with a double quote and would match nothing, a false that skips the smoke.
+test_quoted_image_paths_run_smoke() {
+    local p d out rc miss=""
+    for p in 'claude-config/café.md' 'claude-config/a b.md' 'bin/a"b' $'entrypoint.d/a\nb.sh' \
+             'containers/a\b.conf' $'claude-config/tab\there.md'; do
+        d="$(pr_repo README.md "$p")"
+        out="$(decide "$d" pull_request)"; rc=$?
+        [[ $rc -eq 0 && "$out" == true ]] || miss+=" $(printf '%q' "$p")(rc=$rc out='$out')"
+    done
+    [[ -z "$miss" ]] && ok "an image path git would quote (non-ASCII, space, double quote, newline, backslash, tab): true" \
+        || bad "quoted image paths that did not run smoke:$miss"
+    d="$(pr_repo 'docs/café.md' 'docs/a b.md' $'docs/a\nb.md')"
+    out="$(decide "$d" pull_request)"; rc=$?
+    [[ $rc -eq 0 && "$out" == false ]] && ok "docs paths with the same odd bytes: still false" \
+        || bad "odd docs-only paths: rc=$rc out='$out', want rc=0 out=false"
 }
 
 test_rename_out_of_an_image_path_runs_smoke() {
@@ -197,6 +216,7 @@ test_script_exists
 test_docs_only_pr_skips_the_heavy_steps
 test_each_image_path_runs_smoke
 test_lookalike_paths_do_not_run_smoke
+test_quoted_image_paths_run_smoke
 test_rename_out_of_an_image_path_runs_smoke
 test_other_events_always_run_smoke
 test_not_a_merge_commit_runs_smoke

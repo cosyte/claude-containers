@@ -32,8 +32,8 @@ reporting rather than an issue.
 2. The image smoke test (`test/smoke.sh`) builds the image and exercises a real container. CI's
    `smoke` job runs it when a PR touches the Dockerfile, `entrypoint.sh`, `entrypoint.d/`,
    `sshd_config`, `bash_profile`, `bin/`, `claude-config/`, `scripts/`, `containers/`,
-   `test/smoke.sh`, the Makefile, `docker-compose.yml`, or `ci.yml`, on every push to `main`, on
-   the nightly run (05:29 UTC), and on a manual run (`gh workflow run ci.yml`). The job runs on
+   `test/smoke.sh`, the Makefile, `docker-compose.yml`, `.dockerignore`, or `ci.yml`, on every
+   push to `main`, on the nightly run (05:29 UTC), and on a manual run (`gh workflow run ci.yml`). The job runs on
    every PR, so the required `smoke` check always reports: its first step,
    `scripts/smoke-needed.sh`, decides from the PR's diff, and on any other PR the build and test
    steps are skipped and the job passes without building the image. A full smoke takes about 3
