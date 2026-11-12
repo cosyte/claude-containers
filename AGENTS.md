@@ -22,8 +22,9 @@ Run `make gate-quick` from the repository root before you push: `make lint`, the
 `scripts/check-no-emdash.sh` over every tracked file, then `test/run-all.sh`. A failing step stops
 it. CI's required `ci` and `no-emdash` checks run the same. CI's `no-emdash-messages`, never a
 required check, reads the pull request title, body, and commit messages, so check them first with
-`bash scripts/check-no-emdash.sh --stdin "PR text"`. On a pull request that touches an image path,
-CI's `smoke` job builds the image and runs `test/smoke.sh`; wait for it as well. A change to
+`bash scripts/check-no-emdash.sh --stdin "PR text"`. CI's `smoke` job runs on every pull request;
+when one touches an image path (`scripts/smoke-needed.sh` decides), it builds the image and runs
+`test/smoke.sh`, so wait for it as well. A change to
 `.github/workflows/` also passes `actionlint`.
 
 ## Docs

@@ -32,10 +32,13 @@ reporting rather than an issue.
 2. The image smoke test (`test/smoke.sh`) builds the image and exercises a real container. CI's
    `smoke` job runs it when a PR touches the Dockerfile, `entrypoint.sh`, `entrypoint.d/`,
    `sshd_config`, `bash_profile`, `bin/`, `claude-config/`, `scripts/`, `containers/`,
-   `test/smoke.sh`, the Makefile, `docker-compose.yml`, or `ci.yml`, on every push to `main`, on
-   the nightly run (05:29 UTC), and on a manual run (`gh workflow run ci.yml`); on any other PR it
-   is skipped and reports success. It takes about 3 minutes with a warm layer cache, 8 cold, and
-   the parts that need a GPU, routable IPv6, or a firewall report SKIP on a hosted runner.
+   `test/smoke.sh`, the Makefile, `docker-compose.yml`, `.dockerignore`, or `ci.yml`, on every
+   push to `main`, on the nightly run (05:29 UTC), and on a manual run (`gh workflow run ci.yml`). The job runs on
+   every PR, so the required `smoke` check always reports: its first step,
+   `scripts/smoke-needed.sh`, decides from the PR's diff, and on any other PR the build and test
+   steps are skipped and the job passes without building the image. A full smoke takes about 3
+   minutes with a warm layer cache, 8 cold, and the parts that need a GPU, routable IPv6, or a
+   firewall report SKIP on a hosted runner.
    `make smoke` locally stays optional.
 3. Update the docs in the same PR. `README.md` is **load-bearing operator documentation**: if a
    command in it fails on a fresh clone, that is a bug.
