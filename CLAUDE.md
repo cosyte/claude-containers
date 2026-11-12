@@ -3,7 +3,8 @@
 The Docker image, its host launchers (`bin/claude-launch`, `bin/claude-compose-gen`) and the
 in-container tools that run isolated, long-lived Claude Code sessions. Infrastructure, not a
 library: bash, `make` and Docker, no runtime dependencies (`package.json` is only a task runner).
-`README.md` is the operator's documentation, `docs/` holds the long sections, and `CARD.md` says
+`README.md` is the operator's documentation, `docs/` holds the long sections, `docs-content/`
+holds the same material arranged for docs.cosyte.com (keep the two in step), and `CARD.md` says
 what this repo offers to sibling repos.
 
 @AGENTS.md

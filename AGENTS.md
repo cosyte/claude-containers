@@ -26,6 +26,16 @@ required check, reads the pull request title, body, and commit messages, so chec
 CI's `smoke` job builds the image and runs `test/smoke.sh`; wait for it as well. A change to
 `.github/workflows/` also passes `actionlint`.
 
+## Docs
+
+`docs/` holds the operator documentation by topic, and the unit suites read it. `docs-content/`
+holds the same material arranged for docs.cosyte.com: intro, installation, quickstart, how-to
+guides, explanation, reference, troubleshooting, and the testing and performance pages, with
+`docs-content/sidebars.json` listing each page once. A change to what a reader of `docs/` sees
+goes into the matching `docs-content/` page in the same pull request. No em or en dash, and a
+brace or an angle bracket outside code is written in code, since the site compiles each page as
+MDX.
+
 ## Data
 
 This repository is public. Use placeholder names only (`me/x`, `myproj`, `acme/*`, "the owner"):

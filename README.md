@@ -108,6 +108,10 @@ and `.env.example`.
 
 ## Docs
 
+The full documentation, arranged as a quickstart, how-to guides, explanation and reference, is
+at [docs.cosyte.com/claude-containers](https://docs.cosyte.com/claude-containers), built from
+[`docs-content/`](docs-content/). The pages below are the same material by topic.
+
 | Topic | Doc |
 |---|---|
 | Architecture, design decisions, acceptance | [docs/architecture.md](docs/architecture.md) |

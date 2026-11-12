@@ -1,0 +1,130 @@
+---
+id: customize-the-baked-in-config
+title: Customize the baked-in config
+sidebar_label: Customize the baked-in config
+description: "Change the CLAUDE.md, settings, MCP servers, plugins, slash commands and skills every container gets from the image."
+---
+
+# Customize the baked-in config
+
+`claude-config/` is copied into the image at build time and merged into
+`~/.claude` on container start. Apart from `CLAUDE.md` (the image's copy at every
+start) the merge **only fills what's absent**, so a
+container's own evolving state (sessions, history, settings you change inside)
+is never clobbered by a restart. Change a bake-in → `make build` → relaunch.
+
+Everything baked in is also overridable at runtime by mounting onto the target
+path inside the container (add a `-v` in a wrapper, or use the compose file).
+
+```
+claude-config/
+├── CLAUDE.md            → ~/.claude/CLAUDE.md          (copied at every start)
+├── settings.json        → merged into ~/.claude/settings.json  (optional)
+├── mcp/*.json           → registered via `claude mcp add-json --scope user`
+├── plugins/plugins.json → unioned into settings.json (Claude auto-syncs)
+├── commands/*.md        → ~/.claude/commands/          (copied if absent)
+└── skills/<name>/SKILL.md → ~/.claude/skills/<name>/   (copied if absent and usable)
+```
+
+## CLAUDE.md
+
+Global memory for every session in the container. Keep it short; per-repo
+guidance belongs in the repo's own `CLAUDE.md`. The entrypoint copies the image's
+file over `~/.claude/CLAUDE.md` at every start, so a change here reaches existing
+containers at their next start and an edit made inside a container does not last.
+Override at runtime by mounting a file onto `/home/claude/.claude/CLAUDE.md`: a
+mounted file (it has its own line in `/proc/self/mountinfo`) is left alone.
+
+What one container has is not written here: at every start the entrypoint runs
+`claude-container-facts` and writes its "This container" section (browser,
+chrome-devtools MCP, GPU, toolchains with versions, `/cache` and `/scratch` free
+space, how to install more) into the managed memory `/etc/claude-code/CLAUDE.md`,
+which every session reads. A `--gpu` session gets the GPU note after it. A file an
+operator put at that path (no `claude-containers:` marker) is left alone.
+
+## settings.json
+
+The entrypoint generates a base (`permissions.defaultMode`,
+`skipDangerousModePermissionPrompt`, telemetry-off env) and recursively merges,
+in order: base → optional `claude-config/settings.json` → existing
+per-container settings (existing wins). Drop a `claude-config/settings.json` to
+add hooks, status line, etc. to every container.
+
+Anything customized here is a **default**, not policy: this file is owned by the
+agent user and a session can change it. The settings the image asserts as policy
+are ALSO delivered to the root-owned `/etc/claude-code/managed-settings.json`,
+which Claude Code reads above every other settings level and which a session
+cannot write, so changing them here does not change them for real. See
+[Managed settings](./managed-settings.md) for what is policy and how to change
+it from the host.
+
+## MCP servers
+
+One `*.json` per server in `claude-config/mcp/`; filename (sans `.json`) is the
+server name. Registered at **user scope** on start. `.json.example` files are
+inactive: rename to `.json` to enable.
+
+- Shapes: `{"command","args","env"}` (stdio), `{"type":"http","url","headers"}`,
+  `{"type":"sse","url","headers"}`.
+- **Never bake secrets.** Use `${VAR}`; the entrypoint runs `envsubst` against
+  the container env before registering. Provide values via `.env`
+  (`claude-launch` passes the whole `.env` with `--env-file`).
+- Load a subset: `claude-launch … --mcp atlassian-rovo` (repeatable), or
+  `CLAUDE_MCP_ENABLED=atlassian-rovo,foo`.
+
+Verify in a session with `/mcp`.
+
+## Plugins
+
+`claude-config/plugins/plugins.json` declares `extraKnownMarketplaces` and
+`enabledPlugins` (`"<plugin>@<marketplace>"`). The entrypoint unions these into
+`settings.json`; Claude Code registers the marketplaces on startup. A plugin from
+a git source may still need installing once
+(`claude plugin install <plugin>@<marketplace>`): enabling it in settings does not by itself install it.
+Replace the shipped example marketplace with your own. Verify with `/plugin`.
+
+To add a marketplace and plugins to one container without rebuilding the image, declare
+them at creation time instead (`--marketplace`, `--plugin`, `--start-cmd`): see
+[Install a kit at session start](./install-a-kit.md). Those are also installed by the CLI at boot.
+
+## Slash commands
+
+Markdown files in `claude-config/commands/`, optional YAML frontmatter
+(`description:`). `container-info.md` ships as a working example. Invoke as
+`/container-info`. Add your own `*.md` and rebuild.
+
+A command or skill that a newer image no longer ships is not removed from an existing
+config volume either (nothing baked is ever deleted there): remove
+`~/.claude/commands/<name>.md` by hand if you do not want it.
+
+A baked command is copied only if that file doesn't already exist in the
+container's config volume, so editing one here reaches existing containers
+only after its copy there is removed (or the config volume is recreated).
+
+## Skills
+
+One directory per skill under `claude-config/skills/`, each with a `SKILL.md`
+(frontmatter `name:` + `description:`). `example-skill/` ships as a sanity
+check. Add directories and rebuild. A baked skill directory is copied only if
+that skill doesn't already exist in the container, so in-container edits
+survive restarts. A skill that needs something is copied only where it is there:
+`frontend-debugging` only when the chrome-devtools MCP is on (chromium and the MCP
+baked, `CLAUDE_BROWSER` not off). Where it is not, an unmodified copy a past start
+installed is removed; an edited one is kept.
+
+## Quick proof everything loaded
+
+SSH into a launched container (you land in the Claude tmux session) and run:
+
+```
+/mcp                # baked MCP servers (after enabling one)
+/plugin             # marketplaces + enabled plugins
+/container-info     # baked slash command: prints repo/version/MCP/RC facts
+```
+
+Ask Claude to "use the example-skill" to confirm skills resolve.
+
+## Reference
+
+- [Volumes and mounts](./volumes-and-mounts.md)
+- [Managed settings](./managed-settings.md)
