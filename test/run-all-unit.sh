@@ -121,7 +121,7 @@ done
 grep -q '"test": "test/run-all.sh"' "$REPO_ROOT/package.json" && ok "npm test is test/run-all.sh" || bad "package.json test script"
 CI="$REPO_ROOT/.github/workflows/ci.yml"
 grep -Eq '^[[:space:]]*run: make gate-full[[:space:]]*$' "$CI" \
-    && (cd "$REPO_ROOT" && make -n --no-print-directory gate-quick 2>/dev/null) | grep -qx 'test/run-all.sh' \
+    && grep -qx 'test/run-all.sh' <<<"$(cd "$REPO_ROOT" && make -n --no-print-directory gate-quick 2>/dev/null)" \
     && ! grep -Eq 'run: test/[a-z-]*unit\.sh' "$CI" \
     && ok "CI runs make gate-full, gate-quick runs test/run-all.sh, no per-suite list" || bad "ci.yml or the gate-quick target"
 

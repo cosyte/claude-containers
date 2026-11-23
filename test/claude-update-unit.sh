@@ -166,7 +166,9 @@ pos() { local i=0 n; for n in $order; do [[ "$n" == "$1" ]] && { echo "$i"; retu
     && ok "§7d runs after §7a (the managed floor) and before §10 (the first CLI call)" \
     || bad "section order: $order"
 for f in "$EP_D"/[0-9]*.sh; do
-    grep -vE '^[[:space:]]*#' "$f" | grep -qE '(^|[^-])claude (mcp|plugin)' || continue
+    # Captured, then matched: a section is KBs, and a pipe into grep -q fails under pipefail
+    # when grep exits on a match while the producer still writes (SIGPIPE).
+    grep -qE '(^|[^-])claude (mcp|plugin)' <<<"$(grep -vE '^[[:space:]]*#' "$f")" || continue
     n="${f##*/}"; n="${n%%-*}"; n="${n#0}"
     (( $(pos "$n") > $(pos 7d) )) || echo "$n"
 done > "$TMPD/early"

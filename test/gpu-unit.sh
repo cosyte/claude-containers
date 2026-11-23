@@ -399,7 +399,10 @@ for p in libglvnd0 libegl1 libgl1 libopengl0 libglx0 libegl-mesa0 libgl1-mesa-dr
     grep -qE "^[[:space:]]+[^#]*\\b${p}\\b" "$DF" || { bad "the Dockerfile must install $p"; continue; }
 done
 ok "the Dockerfile installs the glvnd dispatch, Mesa and Blender's X client libraries"
-if grep -vE '^[[:space:]]*#' "$DF" | grep -qiE 'libnvidia|nvidia-driver|libcuda|nvidia-container|cuda-toolkit'; then
+# Captured, then matched: under pipefail `producer | grep -q` fails when grep -q exits on a
+# match while the producer still writes (SIGPIPE, 141), at random once its output passes 4 KiB.
+DF_CODE="$(grep -vE '^[[:space:]]*#' "$DF")"
+if grep -qiE 'libnvidia|nvidia-driver|libcuda|nvidia-container|cuda-toolkit' <<<"$DF_CODE"; then
     bad "the Dockerfile must never install NVIDIA driver libraries (CDI injects them, matched to the host)"
 else
     ok "the Dockerfile installs no NVIDIA driver library"
@@ -411,7 +414,7 @@ NOTE="$REPO_ROOT/claude-config/CLAUDE.gpu.md"
     && ok "the GPU note teaches claude-gpu status/run and claude-blender-install" || bad "the GPU note is missing its essentials"
 grep -q 'claude-containers: GPU session note' "$NOTE" && grep -q 'GPU_NOTE_MARK="claude-containers: GPU session note"' "$(ep_section 7c)" \
     && ok "the note carries the marker the entrypoint uses to never overwrite an operator's file" || bad "the note's marker must match the entrypoint's"
-cat "$(ep_section 7c)" | grep -q 'CLAUDE_GPU:-0' \
+grep -q 'CLAUDE_GPU:-0' "$(ep_section 7c)" \
     && ok "the note is written only when CLAUDE_GPU=1" || bad "the GPU note must be gated on CLAUDE_GPU"
 
 echo

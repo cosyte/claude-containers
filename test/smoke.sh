@@ -123,7 +123,7 @@ fi
 echo
 echo "== 2. fail-fast: no credentials =="
 out="$(docker run --rm -v "$AUTHVOL:/auth" "$IMAGE" 2>&1 || true)"
-echo "$out" | grep -q "No credentials in the claude-auth volume" \
+grep -q "No credentials in the claude-auth volume" <<<"$out" \
     && ok "clear error when auth volume empty" \
     || bad "missing/!clear no-credentials error"
 
@@ -148,7 +148,7 @@ check "a login stopped before its code leaves the auth volume root's and empty" 
 echo
 echo "== 3. fail-fast: empty workspace, no repo =="
 out="$(docker run --rm -e CLAUDE_SKIP_AUTH_CHECK=1 -v "$WSVOL:/workspace" "$IMAGE" 2>&1 || true)"
-echo "$out" | grep -q "Empty workspace and no GIT_REPO_URL" \
+grep -q "Empty workspace and no GIT_REPO_URL" <<<"$out" \
     && ok "clear error when no repo and empty workspace" \
     || bad "missing/!clear no-repo error"
 
@@ -644,8 +644,10 @@ check "lockdown container still boots (never bricks, default-deny or fail-open)"
     'docker exec "$EGCN" gosu claude tmux has-session -t claude >/dev/null 2>&1'
 check "lockdown either enforces default-deny or fails OPEN, never half-applied" \
     'p="$(docker exec "$EGCN" iptables -S OUTPUT 2>/dev/null | head -1)"; [ "$p" = "-P OUTPUT DROP" ] || [ "$p" = "-P OUTPUT ACCEPT" ]'
-# Only meaningful when default-deny actually engaged (network was reachable):
-if docker exec "$EGCN" iptables -S OUTPUT 2>/dev/null | head -1 | grep -q "DROP"; then
+# Only meaningful when default-deny actually engaged (network was reachable). Materialized,
+# then tested, as the IPv6 check below is: `iptables -S | head -1 | grep -q` under pipefail
+# fails at random on a long ruleset (SIGPIPE, 141) and skipped the pair below as "failed open".
+if eg4_policy="$(docker exec "$EGCN" iptables -S OUTPUT 2>/dev/null || true)"; [[ "${eg4_policy%%$'\n'*}" == *DROP* ]]; then
     check "default-deny blocks a non-allowlisted IP (1.1.1.1:443)" \
         '! docker exec "$EGCN" gosu claude curl -sS -m8 -o /dev/null https://1.1.1.1 2>/dev/null'
     check "default-deny still permits an allowlisted host (api.github.com)" \
