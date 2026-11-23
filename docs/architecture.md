@@ -79,7 +79,7 @@ rationale: the sections below.
   | `02e-kvm.sh` | §2e: a `--kvm` session's /dev/kvm group for the agent |
   | `03-host-keys.sh` | §3: persistent SSH host keys |
   | `04-key-inputs.sh` | §4: the root-only key directory; the git key refused for SSH |
-  | `05-git.sh` | §5: the git key broker, identity, secret guard, `GH_TOKEN` |
+  | `05-git.sh` | §5: the git key broker, identity, secret guard, `GH_TOKEN` (gh as git's helper; sshd's `SetEnv` for SSH logins) |
   | `06-credentials.sh` | §6: the credential reconcile loop |
   | `06a-account-switch.sh` | §6a: the account-switch listener |
   | `07-claude-json.sh` | §7: seed `.claude.json` |

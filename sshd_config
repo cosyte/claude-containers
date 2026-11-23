@@ -38,3 +38,11 @@ LoginGraceTime 30
 MaxAuthTries 4
 
 Subsystem sftp internal-sftp
+
+# GH_TOKEN for SSH logins: when the container has one, the entrypoint (§5) writes it here as
+# `SetEnv GH_TOKEN=...`, root-only, at every boot, and removes the file when it has none. A login
+# (VS Code Remote-SSH, `ssh host cmd`) then has the token the sessions have. A missing file is
+# no error. Last and outside any Match block, so it reaches every login; the entrypoint writes
+# that one SetEnv line into it and nothing else (a value with a character a token never has is
+# refused), so it cannot add a directive.
+Include /etc/ssh/sshd_config.d/claude-gh-token.conf

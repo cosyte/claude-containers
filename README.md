@@ -155,7 +155,7 @@ and `.env.example`.
 | `GIT_REPO_URL`/`_BRANCH`/`_DEPTH` |: | Clone source (or use `--repo`/`--branch`/`--depth`) |
 | `GIT_UMBRELLA` | off | `1`: the repo at `/workspace` is an umbrella, cloned with its submodules over HTTPS (`GH_TOKEN`); sets `COSYTE_UMBRELLA`. See [docs/multi-repo.md](docs/multi-repo.md) |
 | `GIT_AUTHOR_NAME`/`_EMAIL` (+`COMMITTER`) | host git config | Commit identity |
-| `GH_TOKEN` | unset | GitHub token for `gh` and HTTPS git in every session: [docs/github-token.md](docs/github-token.md) |
+| `GH_TOKEN` | unset | GitHub token for `gh` and HTTPS git in every session and SSH login (VS Code Remote-SSH included): [docs/github-token.md](docs/github-token.md) |
 | `GIT_SSH_KEY` | `~/.ssh/claude-git-key` | Host SSH key for git, mounted read-only and brokered. For git alone: never in `SSH_AUTHORIZED_KEYS` (the launch tools refuse that, and sshd in the container refuses it for logins) |
 | `SSH_AUTHORIZED_KEYS` | `~/.ssh/authorized_keys` | Your own public keys allowed to SSH in (read-only), never the git key's |
 | `CLAUDE_CPU_LIMIT`/`CLAUDE_MEM_LIMIT` | `2`/`4g` | Per-container resource caps |

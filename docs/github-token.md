@@ -1,9 +1,10 @@
 # GitHub token (`GH_TOKEN`)
 
-`GH_TOKEN` is the token every session's `gh` and HTTPS git use. `git push` over SSH uses the
-deploy key instead (`GIT_SSH_KEY`), so a push can work while every API write fails: a session
-only learns that a token cannot open a PR when `gh pr create` returns 403. This page says which
-token to use, which scopes it must never hold, and how to see, at start, what it can do.
+`GH_TOKEN` is the token every session's `gh` and HTTPS git use, and every SSH login's. `git
+push` over SSH uses the deploy key instead (`GIT_SSH_KEY`), so a push can work while every API
+write fails: a session only learns that a token cannot open a PR when `gh pr create` returns
+403. This page says which token to use, which scopes it must never hold, and how to see, at
+start, what it can do.
 
 ## The token: a classic token, narrowed
 
@@ -66,6 +67,29 @@ The repo's own `permissions` field (`gh api repos/o/r`) and GraphQL's `viewerPer
 **your account's role**, not the token's, so they say `admin` while the token is refused. Only
 a call shows what the token can do, which is what the start-time check makes.
 
+## SSH logins and VS Code
+
+An SSH login has the token too, so VS Code Remote-SSH's Git panel and terminals, and
+`ssh <container> cmd`, push over HTTPS and call `gh` as a session does. sshd builds a fresh
+environment for every login, so at each start with `GH_TOKEN` set the entrypoint (§5) writes
+`SetEnv GH_TOKEN=...` into `/etc/ssh/sshd_config.d/claude-gh-token.conf` (root's, mode 600),
+which `sshd_config` includes, and sshd puts the token into every login's environment, where the
+sessions already hold it. VS Code starts its server from a non-interactive SSH command that
+reads no login profile, so sshd is the one place that reaches every login, and the token stays
+out of every file the agent can read. The value is never on a command line or in the boot log,
+and the image ships no such file.
+
+A container started without `GH_TOKEN`, or with it empty, has no such file and its logins no
+token. A value with a character outside `A-Z a-z 0-9 _ . -`, which no GitHub token has, is never
+written into sshd's config: the boot log has a `WARNING`, and SSH logins have no token while the
+sessions still do.
+
+From your machine, with a private repo the token reaches in place of `me/x`:
+
+```
+ssh -p <port> claude@<host> 'gh auth status && git ls-remote https://github.com/me/x'
+```
+
 ## The start-time check
 
 At every start with `GH_TOKEN` set, the entrypoint runs `claude-gh-check` in the background
@@ -117,6 +141,6 @@ line. Raise `CLAUDE_GH_CHECK_MAX_REPOS` to probe them all; each repo is 4 read-o
 On a public repo `read` and `checks` answer 200 to any token, so there they say only that the
 call works, not that the token holds the permission; the two write probes are exact everywhere.
 
-A new or changed token reaches a container when it is recreated with the new `GH_TOKEN`; the
-check runs at that start. A narrowed scope on the same token needs no recreation: run
+A new or changed token reaches a container, its sessions and its SSH logins when it is recreated
+with the new `GH_TOKEN`; the check runs at that start. A narrowed scope on the same token needs no recreation: run
 `claude-gh-check` to see it.
