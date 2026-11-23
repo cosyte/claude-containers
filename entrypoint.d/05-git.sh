@@ -162,3 +162,34 @@ if [[ -n "${GH_TOKEN:-}" ]]; then
 else
     log "No GH_TOKEN: git uses the SSH deploy key only; gh CLI is unauthenticated"
 fi
+
+# >>> GH_TOKEN for SSH logins (test/git-unit.sh runs this block against a sandbox)
+# sshd builds a fresh environment for every login, so an SSH login (VS Code Remote-SSH's server,
+# its Git panel and terminals, `ssh host cmd`) had no GH_TOKEN while the tmux sessions did, and
+# gh's credential helper above could not authenticate an HTTPS push there. sshd_config Includes
+# SSHD_TOKEN_CONF, and sshd's SetEnv puts the token into every login's environment: where the
+# sessions hold it already, so no file the agent can read ever holds it, whatever shell or
+# client the login runs. The file is root's, mode 600, in root's own /etc/ssh/sshd_config.d,
+# written through a fresh mktemp file renamed onto its name; the value never reaches a command
+# line (printf is a builtin) or the log. It is written again at every boot (before §11 starts
+# sshd) and removed when GH_TOKEN is empty, so a container without a token gives its logins none.
+# A value outside a GitHub token's characters is never written into sshd's config, where it
+# could add a directive: SSH logins then get no token, and the log says so without the value.
+SSHD_TOKEN_CONF="/etc/ssh/sshd_config.d/claude-gh-token.conf"   # root-only, Included by sshd_config
+rm -f "$SSHD_TOKEN_CONF"
+if [[ -n "${GH_TOKEN:-}" ]]; then
+    _tc=""
+    if [[ ! "$GH_TOKEN" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+        log "WARNING: GH_TOKEN holds a character outside A-Z a-z 0-9 _ . -, so it is not written into sshd's config: SSH logins have no GH_TOKEN (the sessions still do)"
+    elif mkdir -p "${SSHD_TOKEN_CONF%/*}" \
+         && _tc="$(mktemp "${SSHD_TOKEN_CONF%/*}/.claude-gh-token.XXXXXX")" \
+         && printf 'SetEnv GH_TOKEN=%s\n' "$GH_TOKEN" > "$_tc" \
+         && chmod 600 "$_tc" && mv -fT "$_tc" "$SSHD_TOKEN_CONF"; then
+        log "GH_TOKEN for SSH    : every SSH login gets it too (sshd SetEnv from a root-only file)"
+    else
+        [[ -z "$_tc" ]] || rm -f "$_tc"
+        log "WARNING: could not write sshd's GH_TOKEN file: SSH logins have no GH_TOKEN (the sessions still do)"
+    fi
+    unset _tc
+fi
+# <<< GH_TOKEN for SSH logins

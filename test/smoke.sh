@@ -454,11 +454,27 @@ else
 fi
 
 echo
-echo "== 8. GH_TOKEN wires gh in as git credential helper =="
+echo "== 8. GH_TOKEN wires gh in as git credential helper, in the sessions and in SSH logins =="
 check "entrypoint ran 'gh auth setup-git' for GH_TOKEN" \
     'grep -q "gh wired in as git credential helper" <<<"$(docker logs "$CN" 2>&1)"'
 check "git credential helper for github.com HTTPS uses gh" \
     'asclaude_x "git config --global --get-all credential.https://github.com.helper" 2>/dev/null | grep -q "gh auth git-credential"'
+# SSH logins get the same token (§5 writes sshd's SetEnv file): VS Code Remote-SSH starts its
+# server, its Git panel and its terminals from a non-interactive SSH login like these.
+ssh_cn() { ssh -i "$TMP/key" -p "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+               -o ConnectTimeout=5 -o BatchMode=yes claude@127.0.0.1 "$1" 2>/dev/null; }
+ssh_cred() { ssh_cn 'printf "protocol=https\nhost=github.com\n\n" | GIT_TERMINAL_PROMPT=0 git credential fill'; }
+check "an SSH login (as VS Code Remote-SSH's server starts) has the container's GH_TOKEN" \
+    '[ "$(ssh_cn '\''printf %s "${GH_TOKEN:-}"'\'')" = ghp_smoketestdummy ]'
+check "gh in an SSH login uses it (gh auth token)" \
+    '[ "$(ssh_cn "gh auth token")" = ghp_smoketestdummy ]'
+check "git's credential helper in an SSH login gives it to github.com HTTPS (VS Code's Git panel)" \
+    'ssh_cred | grep -qx "password=ghp_smoketestdummy"'
+check "sshd's token file is root's, mode 600, and the agent cannot read it" \
+    '[ "$(docker exec "$CN" stat -c "%U %a" /etc/ssh/sshd_config.d/claude-gh-token.conf)" = "root 600" ] \
+     && ! docker exec -u claude "$CN" cat /etc/ssh/sshd_config.d/claude-gh-token.conf >/dev/null 2>&1'
+check "the boot log never carries the token" \
+    '! grep -qF ghp_smoketestdummy <<<"$(docker logs "$CN" 2>&1)"'
 
 echo
 echo "== 9. claude-compose-gen per-repo resource overrides =="
@@ -925,6 +941,10 @@ check "the boot log names the git key found in authorized_keys" \
 check "sshd's RevokedKeys file (root-owned) lists the git key" \
     'docker exec "$BRKCN" grep -qF "$(cut -d" " -f2 "$TMP/gitkey.pub")" /etc/ssh/revoked_keys \
      && [ "$(docker exec "$BRKCN" stat -c %U /etc/ssh/revoked_keys)" = root ]'
+# This container has no GH_TOKEN: sshd gives its SSH logins none (§5 wrote no token file).
+check "no GH_TOKEN -> no sshd token file, and sshd sets no environment for SSH logins" \
+    '! docker exec "$BRKCN" test -e /etc/ssh/sshd_config.d/claude-gh-token.conf \
+     && o="$(docker exec "$BRKCN" /usr/sbin/sshd -T 2>&1)" && grep -q "^port 22$" <<<"$o" && ! grep -qi "^setenv" <<<"$o"'
 # THE DONE PROPERTY, in one container: the key loaded in the session's agent opens no sshd,
 # though authorized_keys lists it, and though the agent adds it there again itself.
 # A refusal, not any failure: sshd answers and says no ("Permission denied (publickey)").

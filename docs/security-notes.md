@@ -201,6 +201,14 @@
   `claude-sshkeys` so the fingerprint is stable; all containers share it
   (acceptable for a single-owner homelab: the private host keys are root-only in
   every container; use distinct keys if that matters to you).
+- **`GH_TOKEN` in SSH logins.** sshd starts every login with a fresh environment, so the
+  entrypoint gives SSH logins the token through sshd itself: `SetEnv` in
+  `/etc/ssh/sshd_config.d/claude-gh-token.conf`, a root-only file (mode 600) that `sshd_config`
+  includes, written again at every boot and removed when `GH_TOKEN` is unset. A login then holds
+  the token in its environment as the sessions do; no file the agent can read holds it, no
+  command line carries it, and the boot log never prints it. A value with a character no GitHub
+  token has is refused, so it cannot add an sshd directive. See
+  [docs/github-token.md](github-token.md#ssh-logins-and-vs-code).
 - **The SSH port is published on all host interfaces** (`0.0.0.0`) by default,
   so it is reachable from the whole LAN. Auth is pubkey-only, but to limit the
   exposure set `CLAUDE_SSH_BIND=127.0.0.1` (host-only) or another interface:
