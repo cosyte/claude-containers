@@ -62,7 +62,8 @@ publish_creds() {  # publish_creds <src> <dst>
     if [[ "$2" == "$CLAUDE_CONFIG_DIR/.credentials.json" ]]; then
         agent_put "$2" 600 < "$1"
     else
-        creds_have_token "$1" && root_put "$2" < "$1"
+        # Under the master's lock (§0a): a login or another container's push is never undone.
+        creds_have_token "$1" && with_master_lock "${2%/*}" root_put "$2" < "$1"
     fi
 }
 # Every configured master locked (§0a's lock_master; it touches nothing that is already right).

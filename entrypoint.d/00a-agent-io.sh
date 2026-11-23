@@ -29,7 +29,10 @@ agent_put() {
 # (the credential sync compares it), so a descriptor the agent opened while it was the agent's
 # writes nowhere. With `fresh` (once, at a start or a login) every file is written again, also one
 # an older image's lock made root's in place. Modes are set with a leading 00, which also clears a
-# setgid or setuid bit. Checked first, so a master that is already right is not touched.
+# setgid or setuid bit. Checked first, so a master that is already right is not touched. The
+# names are handled under the master's lock (with_master_lock), so a rewrite never undoes a login
+# or a credential sync that writes meanwhile, and a copy is bounded to 1 MiB whatever happens to
+# the file between its stat and the copy.
 lock_master() {
     local f p u h a s m
     if [[ "$(stat -c '%u %a' "$1" 2>/dev/null)" != "$EUID 700" ]]; then
@@ -37,23 +40,35 @@ lock_master() {
         chmod 00700 "$1" 2>/dev/null || true
         [[ "$(stat -c '%u %a' "$1" 2>/dev/null)" == "$EUID 700" ]] || return 0
     fi
-    for f in .credentials.json .claude.json; do
-        p="$1/$f"
-        if [[ -L "$p" ]] || { [[ -e "$p" ]] && [[ ! -f "$p" ]]; }; then
-            rm -rf -- "$p" 2>/dev/null || true
-        elif [[ -f "$p" ]]; then
-            read -r u h a s m < <(stat -c '%u %h %a %s %.9Y' "$p" 2>/dev/null) || continue
-            if (( s > 1048576 )); then
-                rm -f -- "$p" 2>/dev/null || true
-                log "WARNING: $p was over 1 MiB, not a credential master: removed"
-            elif [[ "$u" != 0 || "$h" != 1 || "${2:-}" == fresh ]]; then
-                root_put "$p" "$m" < "$p" || true
-            elif [[ "$a" != 600 ]]; then
-                chmod 00600 "$p" 2>/dev/null || true
+    _lock_master_names() {
+        for f in .credentials.json .claude.json; do
+            p="$1/$f"
+            if [[ -L "$p" ]] || { [[ -e "$p" ]] && [[ ! -f "$p" ]]; }; then
+                rm -rf -- "$p" 2>/dev/null || true
+            elif [[ -f "$p" ]]; then
+                read -r u h a s m < <(stat -c '%u %h %a %s %.9Y' "$p" 2>/dev/null) || continue
+                if (( s > 1048576 )); then
+                    rm -f -- "$p" 2>/dev/null || true
+                    log "WARNING: $p was over 1 MiB, not a credential master: removed"
+                elif [[ "$u" != 0 || "$h" != 1 || "${2:-}" == fresh ]]; then
+                    root_put "$p" "$m" < <(head -c 1048576 -- "$p") || true
+                elif [[ "$a" != 600 ]]; then
+                    chmod 00600 "$p" 2>/dev/null || true
+                fi
             fi
-        fi
-    done
+        done
+    }
+    with_master_lock "$1" _lock_master_names "$@" || true
     return 0
+}
+# with_master_lock <dir> <command...>: the command under an exclusive lock on the master's
+# directory (flock; it holds across every container on this host that mounts the volume), so
+# no two writes of a master interleave: a login, a credential sync, a rewrite. The directory is
+# locked, not a file in it, so no name an older login left there is ever opened. Bounded: a
+# lock not had in 30 s is a failed command, never a boot that waits for ever.
+with_master_lock() {
+    local d="$1"; shift
+    ( flock -x -w 30 9 || exit 1; "$@" ) 9<"$d"
 }
 # root_put <file> [mtime]: stdin becomes <file>, root's own, mode 600, in a directory root keeps
 # (the credential masters), with that mtime if one is given. Its temp file is created exclusively

@@ -590,6 +590,23 @@ printf 'WRITTEN-THROUGH-A-HELD-DESCRIPTOR\n' >&9; exec 9>&-
     && ok "lock_master: a file the agent owned is written again as a new file (a held descriptor writes nowhere); so is a hard link, its other name untouched" \
     || bad "lock_master: a held descriptor still writes the master, or a hard link stayed: $(command cat "$SB/m/.credentials.json" 2>/dev/null | tr '\n' ' ')"
 
+# A rewrite never undoes a write that lands meanwhile. lock_master (fresh) copies the master and
+# its rename is held back a second; a login writes the master 0.3 s in, under the master's lock.
+# Without the lock the rewrite's rename puts the old credential back over the login's.
+reset_sb; mkdir -p "$SB/m"; printf '{"claudeAiOauth":{"accessToken":"tok-OLD"}}\n' > "$SB/m/.credentials.json"
+( eval "$(ep_agent_io)"; chown() { :; }; mv() { sleep 1; command mv "$@"; }; lock_master "$SB/m" fresh ) >/dev/null 2>&1 &
+lm_pid=$!; sleep 0.3
+( eval "$(ep_agent_io)"; printf '{"claudeAiOauth":{"accessToken":"tok-NEW"}}\n' > "$SB/new"
+  ( flock -x -w 30 9 && root_put "$SB/m/.credentials.json" < "$SB/new" ) 9<"$SB/m" ) >/dev/null 2>&1
+wait "$lm_pid" 2>/dev/null
+command grep -q tok-NEW "$SB/m/.credentials.json" \
+    && ok "lock_master: a rewrite holds the master's lock, so a login that writes meanwhile is never undone" \
+    || bad "lock_master's rewrite put the old credential back over a login's: $(command cat "$SB/m/.credentials.json")"
+command grep -qF 'with_master_lock "$AUTH_DIR" _login_take' "$(ep_section 1)" \
+   && command grep -qF 'creds_have_token "$1" && with_master_lock "${2%/*}" root_put "$2" < "$1"' "$S6" \
+    && ok "§1's login and §6's push write a master only under its lock (with_master_lock)" \
+    || bad "a write of a master in §1 or §6 does not take the master's lock"
+
 # A huge sparse file at a master's name is removed, never copied: a copy would fill the disk.
 reset_sb; mkdir -p "$SB/m"; truncate -s 2G "$SB/m/.claude.json"
 lm_run

@@ -53,15 +53,20 @@ if [[ "${CLAUDE_LOGIN_MODE:-0}" == "1" ]]; then
         die "the login left no credential with a token: the auth volume is unchanged"
     fi
     agent_cat "$_ld/.claude.json" > "$_lr/claude.json" 2>/dev/null || : > "$_lr/claude.json"
-    root_put "$AUTH_DIR/.credentials.json" < "$_lr/credentials" \
+    # Both files under the master's lock (§0a's with_master_lock), as every write of a master is:
+    # a running container's sync or start never interleaves with them. Then the account the
+    # credential belongs to (oauthAccount), which a running container follows.
+    _login_take() {
+        root_put "$AUTH_DIR/.credentials.json" < "$_lr/credentials" || return 1
+        if jq -e '.oauthAccount.accountUuid' "$_lr/claude.json" >/dev/null 2>&1; then
+            root_put "$AUTH_DIR/.claude.json" < "$_lr/claude.json" \
+                || log "WARNING: could not write the account's .claude.json into $AUTH_DIR"
+        else
+            log "WARNING: the login left no account identity (.claude.json): containers follow this credential only after a restart"
+        fi
+    }
+    with_master_lock "$AUTH_DIR" _login_take \
         || { _login_clean; die "could not write the credential into $AUTH_DIR"; }
-    # The account the credential belongs to (oauthAccount), which a running container follows.
-    if jq -e '.oauthAccount.accountUuid' "$_lr/claude.json" >/dev/null 2>&1; then
-        root_put "$AUTH_DIR/.claude.json" < "$_lr/claude.json" \
-            || log "WARNING: could not write the account's .claude.json into $AUTH_DIR"
-    else
-        log "WARNING: the login left no account identity (.claude.json): containers follow this credential only after a restart"
-    fi
     _login_clean
     log "Login complete: the credential is in the auth volume, root's, mode 600."
     exit 0
