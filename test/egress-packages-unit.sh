@@ -462,8 +462,11 @@ done < <(memo_rows)
 # neither. This is the check that fails the day the vendor's list grows and nobody
 # looks at it.
 undocumented=()
+# The hosts once, then matched: a pipe into grep -q fails under pipefail (SIGPIPE) when grep
+# exits on a match while the producer still writes, and would mark a documented host undocumented.
+MEMO_HOSTS="$(memo_rows | cut -f1)"
 for h in $DOCUMENTED_HOSTS; do
-    memo_rows | cut -f1 | grep -qxF -- "$h" || undocumented+=("$h")
+    grep -qxF -- "$h" <<<"$MEMO_HOSTS" || undocumented+=("$h")
 done
 [[ ${#undocumented[@]} -eq 0 ]] \
     && ok "every host the published requirements name is either pinned or recorded as omitted ($(echo $DOCUMENTED_HOSTS | wc -w) documented hosts)" \

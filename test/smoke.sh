@@ -123,7 +123,7 @@ fi
 echo
 echo "== 2. fail-fast: no credentials =="
 out="$(docker run --rm -v "$AUTHVOL:/auth" "$IMAGE" 2>&1 || true)"
-echo "$out" | grep -q "No credentials in the claude-auth volume" \
+grep -q "No credentials in the claude-auth volume" <<<"$out" \
     && ok "clear error when auth volume empty" \
     || bad "missing/!clear no-credentials error"
 
@@ -148,7 +148,7 @@ check "a login stopped before its code leaves the auth volume root's and empty" 
 echo
 echo "== 3. fail-fast: empty workspace, no repo =="
 out="$(docker run --rm -e CLAUDE_SKIP_AUTH_CHECK=1 -v "$WSVOL:/workspace" "$IMAGE" 2>&1 || true)"
-echo "$out" | grep -q "Empty workspace and no GIT_REPO_URL" \
+grep -q "Empty workspace and no GIT_REPO_URL" <<<"$out" \
     && ok "clear error when no repo and empty workspace" \
     || bad "missing/!clear no-repo error"
 
@@ -634,8 +634,12 @@ check "claude-egress-firewall baked + executable" \
 # engages, also assert a non-allowlisted IP is blocked.
 EGHARDEN="$(source "$REPO_ROOT/bin/_common.sh"; CLAUDE_EGRESS_LOCKDOWN=1 harden_run_args)"
 # shellcheck disable=SC2086
+# A day's refresh interval: the boot pass saves the state a refresh pass needs (it saves none
+# without an interval), and the daemon sleeps through this section, so only the allowlisted-host
+# check below runs a refresh, by hand.
 docker run -d --name "$EGCN" $EGHARDEN \
     -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=egress -e CLAUDE_EGRESS_LOCKDOWN=1 \
+    -e CLAUDE_EGRESS_REFRESH_INTERVAL=86400 \
     -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
 for _ in $(seq 1 60); do
     docker logs "$EGCN" 2>&1 | grep -qE "Egress lockdown" && break; sleep 1
@@ -644,12 +648,35 @@ check "lockdown container still boots (never bricks, default-deny or fail-open)"
     'docker exec "$EGCN" gosu claude tmux has-session -t claude >/dev/null 2>&1'
 check "lockdown either enforces default-deny or fails OPEN, never half-applied" \
     'p="$(docker exec "$EGCN" iptables -S OUTPUT 2>/dev/null | head -1)"; [ "$p" = "-P OUTPUT DROP" ] || [ "$p" = "-P OUTPUT ACCEPT" ]'
-# Only meaningful when default-deny actually engaged (network was reachable):
-if docker exec "$EGCN" iptables -S OUTPUT 2>/dev/null | head -1 | grep -q "DROP"; then
+# Only meaningful when default-deny actually engaged (network was reachable). Materialized,
+# then tested, as the IPv6 check below is: `iptables -S | head -1 | grep -q` under pipefail
+# fails at random on a long ruleset (SIGPIPE, 141) and skipped the pair below as "failed open".
+if eg4_policy="$(docker exec "$EGCN" iptables -S OUTPUT 2>/dev/null || true)"; [[ "${eg4_policy%%$'\n'*}" == *DROP* ]]; then
     check "default-deny blocks a non-allowlisted IP (1.1.1.1:443)" \
         '! docker exec "$EGCN" gosu claude curl -sS -m8 -o /dev/null https://1.1.1.1 2>/dev/null'
-    check "default-deny still permits an allowlisted host (api.github.com)" \
-        'c=$(docker exec "$EGCN" gosu claude curl -sS -m12 -o /dev/null -w "%{http_code}" https://api.github.com 2>/dev/null); [ -n "$c" ] && [ "$c" != 000 ]'
+    # Each address is pinned at boot, and the daemon sleeps for a day. When the boot pass could
+    # not fetch GitHub's published ranges, api.github.com is pinned by the one DNS answer it got
+    # then, and that name's answer rotates: a later lookup can land on an address the ruleset
+    # does not hold, and curl gets no answer (000). So a miss runs one refresh pass, the step
+    # that follows a moved address in a session, and tries again, twice at most; a last miss
+    # prints the name's current answer, what each refresh pass said, and the boot log's egress
+    # lines, so the cause is in the job's output.
+    eg_github() { docker exec "$EGCN" gosu claude curl -sS -m12 -o /dev/null -w "%{http_code}" https://api.github.com 2>/dev/null || true; }
+    eg_github_reach() {
+        local c rlog=""
+        c="$(eg_github)"
+        for _ in 1 2; do
+            [[ -n "$c" && "$c" != 000 ]] && return 0
+            rlog+="$(docker exec "$EGCN" claude-egress-firewall --refresh-once 2>&1 || true)"$'\n'
+            c="$(eg_github)"
+        done
+        [[ -n "$c" && "$c" != 000 ]] && return 0
+        echo "    api.github.com resolves to: $(docker exec "$EGCN" getent ahostsv4 api.github.com 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"
+        echo "    refresh passes:"; sed 's/^/      /' <<<"$rlog"
+        echo "    boot log:"; docker logs "$EGCN" 2>&1 | grep -iE 'egress|github|allowlist|refresh' | tail -20 | sed 's/^/      /'
+        return 1
+    }
+    check "default-deny still permits an allowlisted host (api.github.com)" 'eg_github_reach'
 else
     echo "  SKIP  default-deny allow/deny checks (lockdown failed open, no network in test env)"
 fi

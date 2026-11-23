@@ -231,7 +231,8 @@ if env CLAUDE_PORTS_USED_OVERRIDE= "$GEN" --env-file "$ENVF" --out "$OUTM" --por
         && ok "--mount volume is declared external: true" \
         || bad "claude-ws-super should be declared external in the top-level volumes"
     # It must NOT leak onto services that didn't ask for it.
-    awk '/^  two:/,/^volumes:/' "$OUTM" | grep -q -- '- claude-ws-super:/super:ro' \
+    # Captured, then matched: a match must not be lost to SIGPIPE under pipefail.
+    grep -q -- '- claude-ws-super:/super:ro' <<<"$(awk '/^  two:/,/^volumes:/' "$OUTM")" \
         && bad "--mount leaked onto service 'two'" \
         || ok "--mount applies only to the named repo"
 else

@@ -288,7 +288,10 @@ out="$(kit warm "$WWS" 2>&1)"; rc=$?
 KENV=(PATH="$FAKE/bin:$PATH")
 out="$(kit warm 2>&1)"; rc=$?
 [[ $rc -ne 0 && "$out" == *"usage: claude-kit warm DIR"* ]] && ok "warm without a directory: usage, exit 1" || bad "warm usage (rc=$rc): $out"
-"$KIT" help | grep -q '^  claude-kit warm DIR' && ok "claude-kit help documents warm" || bad "claude-kit help does not document warm"
+# Captured, then matched: under pipefail `producer | grep -q` fails when grep -q exits on a
+# match while the producer still writes (SIGPIPE, 141), at random once its output passes 4 KiB.
+KHELP="$("$KIT" help)"
+grep -q '^  claude-kit warm DIR' <<<"$KHELP" && ok "claude-kit help documents warm" || bad "claude-kit help does not document warm"
 
 # ======================================================================================
 echo "== start: the optional start command =="

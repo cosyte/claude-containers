@@ -257,7 +257,8 @@ done
 # survive is a live COPY/chmod/ARG/target.
 code_of() { grep -vE '^[[:space:]]*#' "$1"; }
 
-if ! code_of "$REPO_ROOT/Dockerfile" | grep -qE 'claude-(controller|reaper)'; then
+# Captured, then matched: a pipe into grep -q fails under pipefail when grep exits early (see has).
+if ! grep -qE 'claude-(controller|reaper)' <<<"$(code_of "$REPO_ROOT/Dockerfile")"; then
     ok  "Dockerfile has no live COPY/chmod of the pruned bins (a stale COPY would fail the build)"
 else
     bad "Dockerfile still references a pruned bin: $(code_of "$REPO_ROOT/Dockerfile" | grep -E 'claude-(controller|reaper)')"
@@ -1759,7 +1760,9 @@ ms_has '.permissions // {} | has("disableBypassPermissionsMode") | not' \
     || bad "the image now disables bypass mode by itself: that is the operator's call, not the image's"
 # Comments are allowed to name the key (§7a's own block explains why it is deferred);
 # a line of CODE that sets it is the regression, so the scan drops comment lines first.
-grep -vE '^[[:space:]]*#' "$EP_BOOT" | grep -q 'disableBypassPermissionsMode' \
+# Captured, then matched (has, above): the boot path is tens of KB, and a pipe into grep -q fails
+# under pipefail when grep exits early.
+has "$(grep -vE '^[[:space:]]*#' "$EP_BOOT")" 'disableBypassPermissionsMode' \
     && bad "entrypoint.sh sets disableBypassPermissionsMode in code: this change must not make that call" \
     || ok  "no line of entrypoint.sh code sets disableBypassPermissionsMode"
 
