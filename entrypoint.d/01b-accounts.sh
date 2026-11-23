@@ -19,7 +19,10 @@ if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
     # first. The agent makes it when it is missing (a root mkdir by a name in its home would act
     # on whatever the agent put there).
     # (An operator's CLAUDE_CONFIG_DIR outside the agent's home, where it cannot, root makes.)
-    as_agent mkdir -p "$CLAUDE_CONFIG_DIR" 2>/dev/null || mkdir -p "$CLAUDE_CONFIG_DIR"
+    if ! as_agent mkdir -p "$CLAUDE_CONFIG_DIR" 2>/dev/null; then
+        [[ "$CLAUDE_CONFIG_DIR/" != "$CLAUDE_HOME/"* ]] && mkdir -p "$CLAUDE_CONFIG_DIR" \
+            || die "could not make the config dir $CLAUDE_CONFIG_DIR"
+    fi
     own_tree "$CLAUDE_CONFIG_DIR" -maxdepth 0
     ACTIVE_FILE="$CLAUDE_CONFIG_DIR/.active-account"
     # The config dir is the agent's, so the agent reads and writes the file (agent_put, agent_cat,

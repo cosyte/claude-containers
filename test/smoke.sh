@@ -133,7 +133,7 @@ echo "== 2b. a login keeps the auth volume root's =="
 # with nothing in it, and the CLI runs as the agent. No code comes: the container is removed,
 # and the volume is still root's and empty.
 LOGINCN="claude-smoke-login-$$"
-docker run -d --name "$LOGINCN" -e CLAUDE_LOGIN_MODE=1 -v "$AUTHVOL:/auth" "$IMAGE" >/dev/null 2>&1 || true
+docker run -dit --name "$LOGINCN" -e CLAUDE_LOGIN_MODE=1 -v "$AUTHVOL:/auth" "$IMAGE" >/dev/null 2>&1 || true
 for _ in $(seq 1 60); do docker exec "$LOGINCN" pgrep -f 'auth login' >/dev/null 2>&1 && break; sleep 1; done
 check "during a login the auth volume is root's, mode 700, with nothing in it yet" \
     '[ "$(docker exec "$LOGINCN" stat -c "%U %a" /auth 2>/dev/null)" = "root 700" ] && [ -z "$(docker exec "$LOGINCN" ls -A /auth 2>/dev/null)" ]'

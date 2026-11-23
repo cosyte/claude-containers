@@ -20,14 +20,14 @@ fi
 # a stack's TMPDIR is a /scratch volume its running containers share. The CLI is the image's
 # launcher on root's system PATH, never one from a directory a running agent can write, and it
 # runs in an environment of its own (env -i): its home and temp dir are the private directory,
-# the auto-updater is off, and only the terminal, the locale, a proxy and a CA bundle pass through.
+# the auto-updater is off, and only the terminal, the locale, a proxy and a CA store pass through.
 # LOGIN_CLI and LOGIN_TMP are named on their own lines so test/agent-paths-unit.sh can run this
 # exact block against a sandbox.
 LOGIN_CLI=/usr/local/bin/claude
 LOGIN_TMP=/tmp
 if [[ "${CLAUDE_LOGIN_MODE:-0}" == "1" ]]; then
     mkdir -p "$AUTH_DIR"
-    lock_master "$AUTH_DIR"
+    lock_master "$AUTH_DIR" fresh
     [[ "$(stat -c '%u %a' "$AUTH_DIR")" == "$EUID 700" ]] \
         || die "could not make the auth volume at $AUTH_DIR root's (mode 700): no login"
     chown -hR root:root "$AUTH_DIR" 2>/dev/null || true
@@ -35,8 +35,8 @@ if [[ "${CLAUDE_LOGIN_MODE:-0}" == "1" ]]; then
         || die "could not make a private directory for the login under $LOGIN_TMP"
     _lr="$(mktemp -d "$LOGIN_TMP/claude-login-root.XXXXXX")" || die "could not make root's directory under $LOGIN_TMP"
     _le=(PATH="$PATH" HOME="$_ld" TMPDIR="$_ld" CLAUDE_CONFIG_DIR="$_ld" DISABLE_AUTOUPDATER=1)
-    for _v in TERM LANG LC_ALL HTTPS_PROXY HTTP_PROXY NO_PROXY https_proxy http_proxy no_proxy \
-              NODE_EXTRA_CA_CERTS SSL_CERT_FILE; do
+    for _v in TERM LANG LC_ALL HTTPS_PROXY HTTP_PROXY NO_PROXY ALL_PROXY https_proxy http_proxy \
+              no_proxy all_proxy NODE_EXTRA_CA_CERTS SSL_CERT_FILE SSL_CERT_DIR; do
         if [[ -n "${!_v:-}" ]]; then _le+=("$_v=${!_v}"); fi
     done
     # Cleanup never decides the outcome: the volume already says whether the login took effect.

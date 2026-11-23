@@ -16,7 +16,7 @@
 masters=("$AUTH_DIR")
 [[ -z "${CLAUDE_ACCOUNTS:-}" ]] || masters=("${ACCOUNT_NAMES[@]/#//auth-accounts/}")
 for d in "${masters[@]}"; do
-    lock_master "$d"
+    lock_master "$d" fresh
 done
 unset masters d
 if [[ ! -s "$AUTH_DIR/.credentials.json" ]]; then

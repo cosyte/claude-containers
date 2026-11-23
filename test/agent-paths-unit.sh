@@ -377,7 +377,8 @@ echo "== nowhere in the boot path does a root step name an agent path =="
 AGENT_VARS='CLAUDE_CONFIG_DIR|CLAUDE_HOME|CJSON|ACCT_FILE|SWITCH_FILE|ACTIVE_FILE|SETTINGS_DST|AUTHKEYS_DST|HOOKS_DIR|CC_PREFIX|gmd|cj|b|req_file|done_file|use_req_file|use_done_file|_ld'
 TOOLS='mktemp|install|chmod|chown|cp|ln|cat|jq|grep|cmp|diff|tee|touch|tail|head|dd|rm|mkdir|mv|find|ls|truncate|sed'
 NET="$(ep_boot | command grep -nE "(^|[^a-z_-])($TOOLS)( [^|;&]*)?\"\\\$\\{?($AGENT_VARS)[}\"/]|[<>]+ *\"?\\\$\\{?($AGENT_VARS)[}\"/]" \
-    | command grep -vE '^[0-9]+: *#|^[0-9]+: *(log|die) |as_agent |agent_put |agent_cat |asclaude |-execdir chown -h|own_tree |_ld="\$\(mktemp -d ' || true)"
+    | command grep -vE '^[0-9]+: *#|^[0-9]+: *(log|die) |as_agent |agent_put |agent_cat |asclaude |-execdir chown -h|own_tree |_ld="\$\(mktemp -d ' \
+    | command grep -vF '[[ "$CLAUDE_CONFIG_DIR/" != "$CLAUDE_HOME/"* ]] && mkdir -p "$CLAUDE_CONFIG_DIR" \' || true)"
 [[ -z "$NET" ]] \
     && ok "no root mktemp, install, chmod, chown, cp, ln, cat, jq, grep, cmp, diff, tail, dd, rm, mkdir, mv, find or redirect names an agent path" \
     || bad "root acts by name on an agent path:"$'\n'"$NET"
@@ -474,6 +475,7 @@ FAKE
       AUTH_DIR="$SB/auth"; CLAUDE_USER="$(id -un)"; CLAUDE_UID=4242; CLAUDE_GID=4242; CLAUDE_HOME="$AGENT_HOME"
       CLAUDE_LOGIN_MODE=1
       as_agent() { [[ "${CLEAN_FAILS:-}" == 1 && "$1" == rm ]] && return 1; PATH="$LA:$PATH" "$@"; }
+      if [[ "${CHMOD_FAILS:-}" == 1 ]]; then chmod() { :; }; fi
       chown() { printf '%s\n' "$*" >> "$SB/chown.log"; }
       die() { echo "die: $*"; exit 1; }
       log() { :; }
@@ -583,9 +585,27 @@ lm_run
     || bad "lock_master gave a rewritten master a new mtime: the sync would take it for a newer credential"
 printf 'WRITTEN-THROUGH-A-HELD-DESCRIPTOR\n' >&9; exec 9>&-
 ! command grep -q WRITTEN-THROUGH "$SB/m/.credentials.json" && command grep -q tok-agent "$SB/m/.credentials.json" \
-   && [[ "$(stat -c %a "$SB/m/.credentials.json")" == 600 && ! -e "$SB/m/.claude.json" && "$(command cat "$OUT/linked")" == outside ]] \
-    && ok "lock_master: a file the agent owned is written again as a new file (a held descriptor writes nowhere); a hard link is removed" \
+   && [[ "$(stat -c %a "$SB/m/.credentials.json")" == 600 && "$(command cat "$OUT/linked")" == outside ]] \
+   && [[ -f "$SB/m/.claude.json" && "$(stat -c %h "$SB/m/.claude.json")" == 1 && "$(stat -c %h "$OUT/linked")" == 1 ]] \
+    && ok "lock_master: a file the agent owned is written again as a new file (a held descriptor writes nowhere); so is a hard link, its other name untouched" \
     || bad "lock_master: a held descriptor still writes the master, or a hard link stayed: $(command cat "$SB/m/.credentials.json" 2>/dev/null | tr '\n' ' ')"
+
+# A huge sparse file at a master's name is removed, never copied: a copy would fill the disk.
+reset_sb; mkdir -p "$SB/m"; truncate -s 2G "$SB/m/.claude.json"
+lm_run
+[[ ! -e "$SB/m/.claude.json" ]] && [[ "$(du -sk "$SB/m" | cut -f1)" -lt 1024 ]] \
+    && ok "lock_master: a file over 1 MiB at a master's name (a 2 GiB sparse one) is removed, never copied" \
+    || bad "lock_master copied or kept a huge file at a master's name: $(du -sh "$SB/m" 2>/dev/null | cut -f1)"
+# Once at a start and at a login, every master file is written again (fresh): also one an older
+# image's lock made root's in place, which a descriptor opened before it could still write.
+command grep -qxF '    lock_master "$d" fresh' "$S6" && command grep -qxF '    lock_master "$AUTH_DIR" fresh' "$(ep_section 1)" \
+    && ok "§6 at start and §1 at a login write every master file again once (lock_master ... fresh)" \
+    || bad "§6's start or §1's login does not lock with fresh"
+# A volume root could not take (here chmod has no effect) is no volume to log in to.
+login_sb; out="$(CHMOD_FAILS=1 run_login ok)"
+[[ "$out" != *"rc=0"* && "$out" == *"could not make the auth volume"* ]] && victim_intact \
+    && ok "§1: a volume root could not make its own, mode 700, is refused: no login into it" \
+    || bad "§1 logged in to a volume it could not take: $(tail -n 2 <<<"$out" | tr '\n' ' ')"
 
 echo "== a master an older login left to the agent (§6 at start, every sync pass, §6a) =="
 # Recorded in order: root's chown of the master, and any read of a file in it. The lock comes first.

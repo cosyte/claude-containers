@@ -19,43 +19,50 @@ agent_put() {
         cat > "$t" && chmod "$2" "$t" && mv -fT "$t" "$1" && exit 0
         rm -f "$t"; exit 1' agent_put "$1" "$2"
 }
-# lock_master <dir>: a credential master (an auth volume's root) root's, mode 700, then its two
-# files root's, mode 600. First the directory: once it is root's, no agent can change what is in
-# it. Then each name: anything that is not a regular file (a link, a FIFO, a directory) is
-# removed, never followed or opened (only a login writes these names); a file with a second hard
-# link is removed; a file root does not own is written again as a new file of root's (root_put),
-# so a descriptor the agent opened while it was the agent's writes nowhere. Modes are set with a
-# leading 00, which also clears a setgid or setuid bit an agent left. Checked first, so a master
-# that is already right is not touched. A running agent never reaches a master, whatever an older
-# login left in the volume.
+# lock_master <dir> [fresh]: a credential master (an auth volume's root) root's, mode 700, then
+# its two files root's, mode 600. First the directory: once it is root's (this process's own uid,
+# root's in a container), no agent can change what is in it, and nothing else runs until it is.
+# Then each name: anything that is not a regular file (a link, a FIFO, a directory) is removed,
+# never followed or opened (only a login writes these names), and so is a file over 1 MiB (a
+# master is a few KB; copying a huge sparse file would fill the disk). A file root does not own,
+# or with a second hard link, is written again as a new file of root's (root_put), its mtime kept
+# (the credential sync compares it), so a descriptor the agent opened while it was the agent's
+# writes nowhere. With `fresh` (once, at a start or a login) every file is written again, also one
+# an older image's lock made root's in place. Modes are set with a leading 00, which also clears a
+# setgid or setuid bit. Checked first, so a master that is already right is not touched.
 lock_master() {
-    local f p m
-    if [[ "$(stat -c '%u %a' "$1" 2>/dev/null)" != "0 700" ]]; then
+    local f p u h a s m
+    if [[ "$(stat -c '%u %a' "$1" 2>/dev/null)" != "$EUID 700" ]]; then
         chown root:root "$1" 2>/dev/null || true
         chmod 00700 "$1" 2>/dev/null || true
+        [[ "$(stat -c '%u %a' "$1" 2>/dev/null)" == "$EUID 700" ]] || return 0
     fi
     for f in .credentials.json .claude.json; do
         p="$1/$f"
         if [[ -L "$p" ]] || { [[ -e "$p" ]] && [[ ! -f "$p" ]]; }; then
-            rm -rf -- "$p"
+            rm -rf -- "$p" 2>/dev/null || true
         elif [[ -f "$p" ]]; then
-            case "$(stat -c '%u %h %a' "$p" 2>/dev/null)" in
-                "0 1 600") ;;
-                "0 1 "*)   chmod 00600 "$p" 2>/dev/null || true ;;
-                *" 1 "*)   # its mtime kept: the credential sync compares it
-                           m="$(stat -c %.9Y "$p")" && root_put "$p" < "$p" && touch -h -d "@$m" "$p" || true ;;
-                *)         rm -f -- "$p" ;;
-            esac
+            read -r u h a s m < <(stat -c '%u %h %a %s %.9Y' "$p" 2>/dev/null) || continue
+            if (( s > 1048576 )); then
+                rm -f -- "$p" 2>/dev/null || true
+                log "WARNING: $p was over 1 MiB, not a credential master: removed"
+            elif [[ "$u" != 0 || "$h" != 1 || "${2:-}" == fresh ]]; then
+                root_put "$p" "$m" < "$p" || true
+            elif [[ "$a" != 600 ]]; then
+                chmod 00600 "$p" 2>/dev/null || true
+            fi
         fi
     done
     return 0
 }
-# root_put <file>: stdin becomes <file>, root's own, mode 600, in a directory root keeps (the
-# credential masters). Its temp file is created exclusively (dd conv=excl opens no name that
-# exists, a symlink included) and renamed onto the name: root never reopens a name there.
+# root_put <file> [mtime]: stdin becomes <file>, root's own, mode 600, in a directory root keeps
+# (the credential masters), with that mtime if one is given. Its temp file is created exclusively
+# (dd conv=excl opens no name that exists, a symlink included), given its mtime, and renamed onto
+# the name: root never reopens a name there, and no reader ever sees it with another mtime.
 root_put() {
     local t; t="$(mktemp -u "$1.XXXXXX")" || return 1
-    if ( umask 077; dd of="$t" conv=excl status=none 2>/dev/null ) && mv -fT "$t" "$1"; then
+    if ( umask 077; dd of="$t" conv=excl status=none 2>/dev/null ) \
+       && { [[ -z "${2:-}" ]] || touch -h -d "@$2" "$t"; } && mv -fT "$t" "$1"; then
         return 0
     fi
     rm -f "$t"
