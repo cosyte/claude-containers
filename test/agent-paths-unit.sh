@@ -606,6 +606,14 @@ command grep -qF 'with_master_lock "$AUTH_DIR" _login_take' "$(ep_section 1)" \
    && command grep -qF 'creds_have_token "$1" && with_master_lock "${2%/*}" root_put "$2" < "$1"' "$S6" \
     && ok "§1's login and §6's push write a master only under its lock (with_master_lock)" \
     || bad "a write of a master in §1 or §6 does not take the master's lock"
+# A lock no one can have (a handle left from an older login can hold it) never stops writes:
+# flock here gives up at once, as at its 30 s timeout; the write goes ahead with a warning.
+reset_sb; mkdir -p "$SB/m"; printf '{"claudeAiOauth":{"accessToken":"tok-NEW"}}\n' > "$SB/new"
+wout="$( ( eval "$(ep_agent_io)"; flock() { return 1; }; log() { echo "$*"; }
+           with_master_lock "$SB/m" root_put "$SB/m/.credentials.json" < "$SB/new" ) 2>&1 )"
+command grep -q tok-NEW "$SB/m/.credentials.json" 2>/dev/null && [[ "$wout" == *"was not had in 30 s"* ]] \
+    && ok "with_master_lock: a lock not had in time is logged and the write goes ahead" \
+    || bad "with_master_lock: a lock no one can have stops every write of the master: $wout"
 
 # A huge sparse file at a master's name is removed, never copied: a copy would fill the disk.
 reset_sb; mkdir -p "$SB/m"; truncate -s 2G "$SB/m/.claude.json"

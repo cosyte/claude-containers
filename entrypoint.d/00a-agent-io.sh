@@ -65,10 +65,12 @@ lock_master() {
 # directory (flock; it holds across every container on this host that mounts the volume), so
 # no two writes of a master interleave: a login, a credential sync, a rewrite. The directory is
 # locked, not a file in it, so no name an older login left there is ever opened. Bounded: a
-# lock not had in 30 s is a failed command, never a boot that waits for ever.
+# lock not had in 30 s (a handle an older login's window left open can hold it) is logged and the
+# write goes ahead without it, the rare race over a master no one can write again.
 with_master_lock() {
     local d="$1"; shift
-    ( flock -x -w 30 9 || exit 1; "$@" ) 9<"$d"
+    ( flock -x -w 30 9 || log "WARNING: the lock on $d was not had in 30 s: writing without it"
+      "$@" ) 9<"$d"
 }
 # root_put <file> [mtime]: stdin becomes <file>, root's own, mode 600, in a directory root keeps
 # (the credential masters), with that mtime if one is given. Its temp file is created exclusively
