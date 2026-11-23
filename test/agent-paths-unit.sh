@@ -23,6 +23,10 @@
 #     fchmodat without AT_SYMLINK_NOFOLLOW, which follows a symlink): §6's first copy, §5's key
 #     file, §8a, §8d
 #   - an unlink, then a create by the same name: §5's ~/.ssh/config
+#   - root's install -d never names a path in the agent's dirs (it follows a symlink at a name
+#     that exists): §2d's runtime dir, §8d, §8e
+#   - root makes no temp file in TMPDIR (the agent's /scratch) for the agent's content: a
+#     here-string bigger than a pipe is one, which bash opens again by name (§6, §7, §12f)
 #   - own_tree never hands over a file with a second hard link
 #   - §0a's as_agent really drops to the agent user (a recording gosu), on the system PATH
 #   - the image keeps /opt/claude-config root's; the healthcheck reads the agent's log as the
@@ -358,15 +362,54 @@ command grep -qF 'if as_agent /usr/local/bin/claude-kit settings "$CLAUDE_CONFIG
 
 echo "== nowhere in the boot path does a root step name an agent path =="
 # Every line root runs, outside comments and log lines, that names an agent path and a tool that
-# opens, creates or changes a file by name. The agent's own steps (as_agent, agent_put,
-# agent_cat, asclaude), own_tree (-execdir, -h), install -d (a no-follow descriptor), a test
-# ([[ -L ]], [[ -s ]]) and an unlink are allowed.
+# opens, creates or changes a file by name (install -d too: it follows a symlink at a name that
+# exists). The agent's own steps (as_agent, agent_put, agent_cat, asclaude), own_tree
+# (-execdir, -h), a test ([[ -L ]], [[ -s ]]) and an unlink are allowed.
 AGENT_VARS='CLAUDE_CONFIG_DIR|CLAUDE_HOME|CJSON|ACCT_FILE|SWITCH_FILE|ACTIVE_FILE|SETTINGS_DST|AUTHKEYS_DST|HOOKS_DIR|CC_PREFIX|gmd|cj|b'
 NET="$(ep_boot | command grep -nE "(^|[^a-z_-])(mktemp|install|chmod|chown|cp|ln|cat|jq|grep|cmp|diff|tee|touch|tail|dd)( [^|;&]*)?\"\\\$\\{?($AGENT_VARS)[}\"/]|>>? *\"?\\\$\\{?($AGENT_VARS)[}\"/]" \
-    | command grep -vE '^[0-9]+: *#|^[0-9]+: *(log|die) |as_agent |agent_put |agent_cat |asclaude |install -d |-execdir chown -h|own_tree ' || true)"
+    | command grep -vE '^[0-9]+: *#|^[0-9]+: *(log|die) |as_agent |agent_put |agent_cat |asclaude |-execdir chown -h|own_tree ' || true)"
 [[ -z "$NET" ]] \
     && ok "no root mktemp, install, chmod, chown, cp, ln, cat, jq, grep, cmp, diff, tail, dd or redirect names an agent path" \
     || bad "root acts by name on an agent path:"$'\n'"$NET"
+
+# §2d: root makes the agent's runtime dir in its own /run/user; what goes inside, the agent makes.
+S2D="$(cat "$(ep_section 2d)")"
+command grep -qxF '    as_agent mkdir -m 700 "$CONTAINERS_RUNTIME_DIR/podman"' <<<"$S2D" \
+    && ! command grep -qE '^[^#]*(install|chown|chmod|mkdir)[^#|;&]*"\$CONTAINERS_RUNTIME_DIR/' <<<"$(command grep -v 'as_agent ' <<<"$S2D")" \
+    && ok "§2d: the agent makes what goes inside its runtime dir; root never acts by a name in it" \
+    || bad "§2d: root acts by a name inside the agent's runtime dir (an install -d there follows a symlink the agent put at the name)"
+
+# A here-string or here-document bigger than a pipe is a temp file bash makes in TMPDIR and opens
+# again by name, and root's TMPDIR is the agent's /scratch. So every here-string root runs reads
+# a short value the operator set, never the agent's content, and root runs no here-document.
+HS="$(ep_boot | command grep -vE '^ *#' | command grep -oE '<<< *"?\$\{?[A-Za-z_]+' | sed -E 's/.*\$\{?//' | LC_ALL=C sort -u | tr '\n' ' ')"
+HD="$(ep_boot | command grep -vE '^ *#' | command grep -nE '<<-? *['"'"'"]?[A-Za-z_]+['"'"'"]?( |$)' | command grep -v '<<<' || true)"
+[[ "$HS" == "CLAUDE_ACCOUNTS OWN_TREE_KEEP_IDS authkeys_fps gitkey_pub " && -z "$HD" ]] \
+    && ok "root's here-strings read only short operator values, and it runs no here-document (TMPDIR is the agent's)" \
+    || bad "a root here-string or here-document could carry the agent's content into a temp file in TMPDIR: strings of ${HS:-none}; documents: ${HD:-none}"
+
+echo "== root's own steps make nothing in TMPDIR, the agent's /scratch =="
+# Bash puts a here-string bigger than a pipe in a temp file it makes in TMPDIR (and opens again
+# by name). TMPDIR here is an empty directory of its own: any file made and removed in it moves
+# the directory's mtime. The agent's .claude.json is 70 KB, past a pipe's 64 KiB.
+BIG="$(head -c 70000 /dev/zero | tr '\0' x)"
+tmpdir_untouched() { [[ "$(stat -c %.9Y "$SB/tmpdir")" == "$1" && -z "$(ls -A "$SB/tmpdir")" ]]; }
+reset_sb; mkdir -p "$SB/tmpdir"; t0="$(stat -c %.9Y "$SB/tmpdir")"
+printf '{"oauthAccount":{"accountUuid":"u-old"},"pad":"%s"}\n' "$BIG" > "$CFG/.claude.json"
+printf '{"oauthAccount":{"accountUuid":"u-new"}}\n' > "$SB/master/.claude.json"
+sleep 0.01
+( TMPDIR="$SB/tmpdir"; CLAUDE_CONFIG_DIR="$CFG"; eval "$F6_REF"; refresh_cached_account "$SB/master" ) >/dev/null 2>&1
+[[ "$(command jq -r .oauthAccount.accountUuid "$CFG/.claude.json" 2>/dev/null)" == u-new ]] && tmpdir_untouched "$t0" \
+    && ok "§6 refresh_cached_account merges a 70 KB .claude.json and makes nothing in TMPDIR" \
+    || bad "§6 refresh_cached_account made a temp file in TMPDIR for the agent's .claude.json (root's would be in /scratch)"
+reset_sb; mkdir -p "$SB/tmpdir"; t0="$(stat -c %.9Y "$SB/tmpdir")"
+printf '{"pad":"%s"}\n' "$BIG" > "$CFG/.claude.json"
+sleep 0.01
+( TMPDIR="$SB/tmpdir"; CLAUDE_CONFIG_DIR="$CFG"; AUTH_DIR="$SB/master"; WORKSPACE=/workspace
+  set -euo pipefail; eval "$S7" ) >/dev/null 2>&1
+cj_trusted && tmpdir_untouched "$t0" \
+    && ok "§7 merges a 70 KB .claude.json and makes nothing in TMPDIR" \
+    || bad "§7 made a temp file in TMPDIR for the agent's .claude.json (root's would be in /scratch)"
 
 echo
 echo "agent-paths-unit: $PASS passed, $FAIL failed"

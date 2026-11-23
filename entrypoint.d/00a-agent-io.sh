@@ -6,7 +6,9 @@
 # So the agent reads and writes there itself, and the kernel checks each path against the
 # agent's own rights. as_agent runs a command as the agent user (its uid and groups) on root's
 # system-only PATH: system tools, never one from a directory the agent can write. Root hands
-# content over on stdin (agent_put) and takes it back on stdout (agent_cat).
+# content over on stdin (agent_put) and takes it back on stdout (agent_cat), through pipes,
+# never a here-string or here-document: bash keeps one bigger than a pipe in a temp file under
+# TMPDIR, which is the agent's /scratch, and opens it again by name.
 as_agent() { gosu "$CLAUDE_USER" "$@"; }
 # agent_cat <file>: the regular file at <file>, as the agent reads it; fails when it cannot.
 agent_cat() { as_agent sh -c '[ -f "$1" ] && exec cat -- "$1"' agent_cat "$1"; }

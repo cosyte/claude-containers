@@ -135,8 +135,7 @@ refresh_cached_account() {  # the container's .claude.json oauthAccount := the m
     local cj="$CLAUDE_CONFIG_DIR/.claude.json" acct cur
     acct="$(jq -c '.oauthAccount // empty' "$1/.claude.json" 2>/dev/null)" || return 0
     [[ -n "$acct" && -s "$cj" && ! -L "$cj" ]] || return 0
-    cur="$(agent_cat "$cj" 2>/dev/null)" || return 0
-    cur="$(jq --argjson a "$acct" '.oauthAccount = $a' <<<"$cur" 2>/dev/null)" || return 0
+    cur="$(agent_cat "$cj" 2>/dev/null | jq --argjson a "$acct" '.oauthAccount = $a' 2>/dev/null)" || return 0
     [[ -n "$cur" ]] || return 0
     printf '%s\n' "$cur" | agent_put "$cj" 600 2>/dev/null || true
     return 0

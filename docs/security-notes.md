@@ -59,8 +59,10 @@
   it, and root would follow it to any file in the container. So the agent does each read and
   write there itself (`as_agent`, `agent_put`, `agent_cat` in `entrypoint.sh`), and the
   kernel checks every path against the agent's own rights; root only computes the content
-  and hands it over. Where root keeps its own file (the shared credential master), its temp
-  file is created exclusively and never reopened by name. What root copies from, the image's
+  and hands it over, through pipes: a here-string or here-document bigger than a pipe is a
+  temp file bash makes in `TMPDIR` (`/scratch`, the agent's) and opens again by name. Where
+  root keeps its own file (the shared credential master), its temp file is created
+  exclusively and never reopened by name. What root copies from, the image's
   `/opt/claude-config`, is root's and read-only to the agent. A temp file for a root-owned
   destination is made in a root-owned directory, never in `TMPDIR` (`/scratch`, which the
   agent owns). A new root-side step follows the same rules; `test/agent-paths-unit.sh` and

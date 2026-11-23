@@ -43,9 +43,12 @@ if [[ "${CLAUDE_CONTAINERS:-0}" =~ ^(1|true|yes|on)$ ]]; then
     asclaude mkdir -p "$CONTAINERS_STORE_DIR"
     asclaude chmod 700 "$CONTAINERS_STORE_DIR"
     # /run/user is in the container layer here, not a tmpfs, so it survives a restart: clear it,
-    # or podman reads the last boot's state as live.
+    # or podman reads the last boot's state as live. Root makes the runtime dir itself, in its own
+    # /run/user; what goes inside it, the agent's, the agent makes: a root `install -d -o` there
+    # would follow a symlink the agent put at the name and chown its target.
     rm -rf "$CONTAINERS_RUNTIME_DIR"
-    install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 700 "$CONTAINERS_RUNTIME_DIR" "$CONTAINERS_RUNTIME_DIR/podman"
+    install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 700 "$CONTAINERS_RUNTIME_DIR"
+    as_agent mkdir -m 700 "$CONTAINERS_RUNTIME_DIR/podman"
     install -d -m 755 "${UIDMAP_SOCK%/*}" "$CONTAINERS_LOG_DIR"
     # Both restart when they exit; their output stays out of the boot log. The service waits
     # (bounded) for the helper: podman with subordinate ids and no helper fails its first map.

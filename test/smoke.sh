@@ -444,7 +444,8 @@ check "projects[/workspace].hasTrustDialogAccepted == true" \
 echo
 echo "== 6b. root's work in the agent's files: written by the agent, copied from root's =="
 # The entrypoint never acts by name in the agent's directories: the agent writes its own files
-# there (§0a), so each is the agent's; and what root copies from is root's alone.
+# there (§0a), so each is the agent's; and what root copies from is root's alone. The one file
+# left out is this run's own plugins.json, bind-mounted from the host with the host's owner.
 check "the agent's .claude.json and settings.json are its own files" \
     '[ "$(docker exec "$CN" stat -c "%U" /home/claude/.claude/.claude.json /home/claude/.claude/settings.json | sort -u)" = claude ]'
 check "the agent's .ssh is its own (mode 700), and authorized_keys too (mode 600)" \

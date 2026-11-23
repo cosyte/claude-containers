@@ -30,13 +30,14 @@ CJSON_CUR="$(agent_cat "$CJSON" 2>/dev/null || true)"
 OAUTH_ACCOUNT='{}'
 [[ -s "$AUTH_DIR/.claude.json" ]] && \
     OAUTH_ACCOUNT="$(jq -c '.oauthAccount // {}' "$AUTH_DIR/.claude.json" 2>/dev/null || echo '{}')"
-CACHED_UUID="$(jq -r '.oauthAccount.accountUuid // empty' <<<"$CJSON_CUR" 2>/dev/null || true)"
-FRESH_UUID="$(jq -r '.accountUuid // empty' <<<"$OAUTH_ACCOUNT" 2>/dev/null || true)"
+# Pipes, never a here-string: bash keeps a big one in a temp file in TMPDIR (§0a).
+CACHED_UUID="$(printf '%s\n' "$CJSON_CUR" | jq -r '.oauthAccount.accountUuid // empty' 2>/dev/null || true)"
+FRESH_UUID="$(printf '%s\n' "$OAUTH_ACCOUNT" | jq -r '.accountUuid // empty' 2>/dev/null || true)"
 if [[ -n "$FRESH_UUID" && -n "$CACHED_UUID" && "$FRESH_UUID" != "$CACHED_UUID" ]]; then
     log "Cached account       : SELF-HEALED (was accountUuid ${CACHED_UUID:0:8}…, mounted auth is now ${FRESH_UUID:0:8}…): refreshing the cached identity to match"
 fi
 # A file that is not JSON is left as it is: jq fails, nothing is written.
-if CJSON_NEW="$(jq --argjson oauth "$OAUTH_ACCOUNT" \
+if CJSON_NEW="$(printf '%s\n' "$CJSON_CUR" | jq --argjson oauth "$OAUTH_ACCOUNT" \
    --arg cached_uuid "$CACHED_UUID" --arg fresh_uuid "$FRESH_UUID" '
     .hasCompletedOnboarding = (.hasCompletedOnboarding // true)
   | .oauthAccount = (
@@ -51,7 +52,8 @@ if CJSON_NEW="$(jq --argjson oauth "$OAUTH_ACCOUNT" \
         hasClaudeMdExternalIncludesApproved: true,
         hasClaudeMdExternalIncludesWarningShown: true
     })
-' <<<"$CJSON_CUR")" && [[ -n "$CJSON_NEW" ]]; then
+'
+)" && [[ -n "$CJSON_NEW" ]]; then
     printf '%s\n' "$CJSON_NEW" | agent_put "$CJSON" 600 || true
 fi
 unset CJSON_CUR CJSON_NEW
