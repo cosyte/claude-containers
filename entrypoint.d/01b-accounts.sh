@@ -18,7 +18,8 @@ if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
     # This runs before §2 hands the config dir over, and the agent writes in it below: its top
     # first. The agent makes it when it is missing (a root mkdir by a name in its home would act
     # on whatever the agent put there).
-    as_agent mkdir -p "$CLAUDE_CONFIG_DIR"
+    # (An operator's CLAUDE_CONFIG_DIR outside the agent's home, where it cannot, root makes.)
+    as_agent mkdir -p "$CLAUDE_CONFIG_DIR" 2>/dev/null || mkdir -p "$CLAUDE_CONFIG_DIR"
     own_tree "$CLAUDE_CONFIG_DIR" -maxdepth 0
     ACTIVE_FILE="$CLAUDE_CONFIG_DIR/.active-account"
     # The config dir is the agent's, so the agent reads and writes the file (agent_put, agent_cat,

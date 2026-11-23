@@ -444,9 +444,12 @@ run_login() {  # run_login <fake mode> [plant-temp]: the shipped block; prints r
     command rm -rf "$LB" "$LA"; mkdir -p "$LB" "$LA" "$SB/tmp"
     printf '{"claudeAiOauth":{"accessToken":"%s"}}\n' "$SECRET_MARK" > "$CRED_SECRET"; chmod 600 "$CRED_SECRET"
     # The fake `claude auth login`: writes what the real one does into CLAUDE_CONFIG_DIR, or not.
-    cat > "$LB/claude" <<'FAKE'
-#!/usr/bin/env bash
+    # Its parameters are in the script itself: the login runs it with an environment of its own.
+    printf '#!/usr/bin/env bash\nFAKE_MODE=%q FAKE_SEEN=%q FAKE_SECRET=%q FAKE_CRED_SECRET=%q\n' \
+        "$1" "$SB/login-dir" "$SECRET" "$CRED_SECRET" > "$LB/claude"
+    cat >> "$LB/claude" <<'FAKE'
 printf '%s\n' "$CLAUDE_CONFIG_DIR" > "$FAKE_SEEN"
+env > "$FAKE_SEEN.env"
 d="$CLAUDE_CONFIG_DIR"
 case "$FAKE_MODE" in
     fail) exit 1 ;;
@@ -466,11 +469,11 @@ FAKE
     printf '#!/usr/bin/env bash\nshift\nexec "$@"\n' > "$LA/gosu"
     chmod +x "$LA/cat" "$LA/gosu"
     blk="$(printf '%s\n' "$L1" | sed -e "s#^LOGIN_CLI=.*#LOGIN_CLI=\"$LB/claude\"#" -e "s#^LOGIN_TMP=.*#LOGIN_TMP=\"$SB/tmp\"#")"
-    ( export FAKE_MODE="$1" FAKE_SEEN="$SB/login-dir" FAKE_SECRET="$SECRET" FAKE_CRED_SECRET="$CRED_SECRET"
-      export CLAUDE_AGENT_PATH="$LA:$PATH"; export PATH="$LA:$PATH"
+    ( export CLAUDE_AGENT_PATH="$SB/agent-path-marker:$LA:$PATH"; export PATH="$LA:$PATH"
+      export TMPDIR="$SB/scratch" npm_config_cache="$SB/cache/npm" STACK_ONLY=leaked
       AUTH_DIR="$SB/auth"; CLAUDE_USER="$(id -un)"; CLAUDE_UID=4242; CLAUDE_GID=4242; CLAUDE_HOME="$AGENT_HOME"
       CLAUDE_LOGIN_MODE=1
-      as_agent() { PATH="$LA:$PATH" "$@"; }
+      as_agent() { [[ "${CLEAN_FAILS:-}" == 1 && "$1" == rm ]] && return 1; PATH="$LA:$PATH" "$@"; }
       chown() { printf '%s\n' "$*" >> "$SB/chown.log"; }
       die() { echo "die: $*"; exit 1; }
       log() { :; }
@@ -481,12 +484,13 @@ FAKE
       if [[ "${2:-}" == plant-temp ]]; then
           mktemp() { local t; t="$(command mktemp "$@")" || return; [[ "$1" == -u && "$t" == "$SB/auth/"* ]] && command ln -s "$VICTIM" "$t"; printf '%s\n' "$t"; }
       fi
+      set -euo pipefail
       eval "$blk"
       echo "fell through" ) 2>&1
     echo "rc=$?"
 }
-login_sb() {  # a volume an older login left: mode 755, links at both names, an old credential elsewhere
-    reset_sb; mkdir -p "$SB/auth"; chmod 755 "$SB/auth"; : > "$SB/chown.log"; : > "$SB/root-opened.log"
+login_sb() {  # a volume an older login left: mode 2755 (setgid kept), links at both names
+    reset_sb; mkdir -p "$SB/auth" "$SB/scratch"; chmod 2755 "$SB/auth"; : > "$SB/chown.log"; : > "$SB/root-opened.log"
     command ln -s "$VICTIM" "$SB/auth/.credentials.json"; command ln -s "$VICTIM" "$SB/auth/.claude.json"
 }
 login_sb_old() {  # the same, with a credential of its own already there (tok-old)
@@ -516,6 +520,26 @@ login_dir_gone \
 [[ ! -s "$SB/root-opened.log" ]] \
     && ok "§1: root opens no name in the login's directory (the agent reads it, agent_cat)" \
     || bad "§1: root opened names in the agent's login directory: $(head -n 2 "$SB/root-opened.log" | tr '\n' ' ')"
+# The CLI's environment is its own: home, temp dir and config dir the private directory, no
+# directory a running agent can write on its PATH, nothing else of the stack's.
+LENV="$SB/login-dir.env"; LDIR="$(command cat "$SB/login-dir" 2>/dev/null)"
+if [[ -n "$LDIR" ]] && command grep -qx "HOME=$LDIR" "$LENV" && command grep -qx "TMPDIR=$LDIR" "$LENV" \
+   && command grep -qx "DISABLE_AUTOUPDATER=1" "$LENV" && ! command grep -q 'agent-path-marker' "$LENV" \
+   && ! command grep -qE '^(STACK_ONLY|npm_config_cache)=' "$LENV"; then
+    ok "§1: the login CLI runs in an environment of its own (home and temp the private dir, no agent PATH, no stack variables)"
+else
+    bad "§1: the login CLI ran with the stack's environment or the agent's PATH: $(command grep -E '^(HOME|TMPDIR|PATH|STACK_ONLY|npm_config_cache)=' "$LENV" 2>/dev/null | tr '\n' ' ')"
+fi
+# Pinned where they are made: the image's launcher, /tmp, and the CLI line.
+if command grep -qx 'LOGIN_CLI=/usr/local/bin/claude' <<<"$L1" && command grep -qx 'LOGIN_TMP=/tmp' <<<"$L1" \
+   && command grep -qF '_ld="$(mktemp -d "$LOGIN_TMP/claude-login.XXXXXX")"' <<<"$L1" \
+   && command grep -qF '_le=(PATH="$PATH" HOME="$_ld" TMPDIR="$_ld" CLAUDE_CONFIG_DIR="$_ld" DISABLE_AUTOUPDATER=1)' <<<"$L1" \
+   && command grep -qF 'if ! as_agent env -i "${_le[@]}" "$LOGIN_CLI" auth login --claudeai; then' <<<"$L1" \
+   && ! command grep -qE 'CLAUDE_AGENT_PATH|TMPDIR:-|gosu ' <<<"$L1"; then
+    ok "§1: the login is pinned: the image's launcher, a private dir under /tmp, env -i, no agent PATH"
+else
+    bad "§1: the login's CLI, its directory or its environment moved"
+fi
 
 login_sb; out="$(run_login plant-json)"
 [[ "$out" == *"rc=0"* && ! -L "$SB/auth/.claude.json" ]] && ! command grep -rqF "$SECRET_MARK" "$SB/auth" \
@@ -536,7 +560,43 @@ victim_intact && command grep -q tok-old "$SB/auth/.credentials.json" && [[ "$ou
     && ok "§1: a link at root's temp name in the volume is never written through (an exclusive create, then a rename)" \
     || bad "§1 wrote through a link at its temp name in the volume (victim: $(victim_state))"
 
+# The login took effect once the volume holds it: a cleanup that fails afterwards changes nothing.
+login_sb_old; chmod 00755 "$SB/auth"; out="$(CLEAN_FAILS=1 run_login ok)"
+[[ "$out" == *"rc=0"* ]] && command grep -q tok-login "$SB/auth/.credentials.json" \
+    && ok "§1: a cleanup that fails after the credential is in the volume still reports the login done" \
+    || bad "§1: a failed cleanup turned a login that took effect into an error: $(tail -n 2 <<<"$out" | tr '\n' ' ')"
+
+echo "== §0a lock_master: whatever an older login left at a master's names =="
+lm_run() { ( eval "$(ep_agent_io)"; chown() { :; }; lock_master "$SB/m" ) >/dev/null 2>&1; }
+reset_sb; mkdir -p "$SB/m"; chmod 2755 "$SB/m"; mkfifo "$SB/m/.claude.json"; mkdir "$SB/m/.credentials.json"
+lm_run
+[[ "$(stat -c %a "$SB/m")" == 700 && ! -e "$SB/m/.claude.json" && ! -e "$SB/m/.credentials.json" ]] \
+    && ok "lock_master: a setgid master becomes plain 700; a FIFO and a directory at its names are removed" \
+    || bad "lock_master left a setgid bit, a FIFO or a directory: $(stat -c %a "$SB/m"), $(ls -A "$SB/m" | tr '\n' ' ')"
+reset_sb; mkdir -p "$SB/m"; printf '{"claudeAiOauth":{"accessToken":"tok-agent"}}\n' > "$SB/m/.credentials.json"
+printf 'outside\n' > "$OUT/linked"; command ln "$OUT/linked" "$SB/m/.claude.json"
+touch -d '1 hour ago' "$SB/m/.credentials.json"; lm_t0="$(stat -c %.9Y "$SB/m/.credentials.json")"
+exec 9<>"$SB/m/.credentials.json"
+lm_run
+[[ "$(stat -c %.9Y "$SB/m/.credentials.json")" == "$lm_t0" ]] \
+    && ok "lock_master: a master written again keeps its mtime (the credential sync compares mtimes)" \
+    || bad "lock_master gave a rewritten master a new mtime: the sync would take it for a newer credential"
+printf 'WRITTEN-THROUGH-A-HELD-DESCRIPTOR\n' >&9; exec 9>&-
+! command grep -q WRITTEN-THROUGH "$SB/m/.credentials.json" && command grep -q tok-agent "$SB/m/.credentials.json" \
+   && [[ "$(stat -c %a "$SB/m/.credentials.json")" == 600 && ! -e "$SB/m/.claude.json" && "$(command cat "$OUT/linked")" == outside ]] \
+    && ok "lock_master: a file the agent owned is written again as a new file (a held descriptor writes nowhere); a hard link is removed" \
+    || bad "lock_master: a held descriptor still writes the master, or a hard link stayed: $(command cat "$SB/m/.credentials.json" 2>/dev/null | tr '\n' ' ')"
+
 echo "== a master an older login left to the agent (§6 at start, every sync pass, §6a) =="
+# Recorded in order: root's chown of the master, and any read of a file in it. The lock comes first.
+lock_log_shims() {  # in the subshell that runs the section: chown and the reads, recorded
+    chown() { printf 'chown %s\n' "$*" >> "$SB/lock.log"; }
+    local t
+    for t in grep jq cat cmp dd; do
+        eval "$t() { local a; for a; do [[ \"\$a\" == \"$SB/master/\"* ]] && printf 'read %s\n' \"\$a\" >> \"$SB/lock.log\"; done; command $t \"\$@\"; }"
+    done
+}
+locked_first() { [[ "$(command grep -m1 -E "^(chown root:root $SB/master\$|read )" "$SB/lock.log" 2>/dev/null)" == "chown root:root $SB/master" ]]; }
 # Until it is locked again the volume is the agent's: a link at the master's name to a root-only
 # credential must never be read into the agent's own copy.
 S6TOP="$(awk '/^# >>> credential sync/{exit} {print}' "$S6")"
@@ -544,10 +604,11 @@ reset_sb; mkdir -p "$SB/master"; chmod 755 "$SB/master"
 printf '{"claudeAiOauth":{"accessToken":"%s"}}\n' "$SECRET_MARK" > "$OUT/cred"; chmod 600 "$OUT/cred"
 command ln -s "$OUT/cred" "$SB/master/.credentials.json"
 ( CLAUDE_CONFIG_DIR="$CFG"; AUTH_DIR="$SB/master"; CLAUDE_SKIP_AUTH_CHECK=1; CLAUDE_UID="$(id -u)"; CLAUDE_GID="$(id -g)"
-  die() { exit 1; }; set -euo pipefail; eval "$S6TOP" ) >/dev/null 2>&1
+  die() { exit 1; }; lock_log_shims; set -euo pipefail; eval "$S6TOP" ) >/dev/null 2>&1
 [[ ! -e "$CFG/.credentials.json" || -z "$(command grep -F "$SECRET_MARK" "$CFG/.credentials.json")" ]] \
    && [[ ! -L "$SB/master/.credentials.json" && "$(stat -c %a "$SB/master")" == 700 ]] \
-    && ok "§6 at start: the master is locked before it is read; a link at its name is removed, never copied to the agent" \
+   && locked_first \
+    && ok "§6 at start: the master is locked (root's chown first) before it is read; a link at its name is removed, never copied" \
     || bad "§6 at start copied a root-only file to the agent through a link at the master's name, or left the master open"
 
 reset_sb; mkdir -p "$SB/master"; chmod 755 "$SB/master"
@@ -556,11 +617,25 @@ command ln -s "$OUT/cred" "$SB/master/.credentials.json"
 printf '{"claudeAiOauth":{"accessToken":""}}\n' > "$CFG/.credentials.json"
 ( CLAUDE_CONFIG_DIR="$CFG"; AUTH_DIR="$SB/master"; CLAUDE_UID="$(id -u)"; CLAUDE_GID="$(id -g)"
   CLAUDE_AUTH_FOLLOW=0; CREDS_SNAP_DIR="$SB/root/snap"; CLAUDE_BIN_RE='^/fake/bin/claude$'
-  set -euo pipefail; eval "$SYNC"; reconcile_once || true ) >/dev/null 2>&1
+  set -euo pipefail; eval "$SYNC"; : > "$SB/lock.log"; lock_log_shims; reconcile_once || true ) >/dev/null 2>&1
 ! command grep -qF "$SECRET_MARK" "$CFG/.credentials.json" 2>/dev/null \
-   && [[ ! -L "$SB/master/.credentials.json" && "$(stat -c %a "$SB/master")" == 700 ]] \
-    && ok "§6 every pass: the master is locked again before it is read; a link at its name never reaches the agent's copy" \
+   && [[ ! -L "$SB/master/.credentials.json" && "$(stat -c %a "$SB/master")" == 700 ]] && locked_first \
+    && ok "§6 every pass: the master is locked again (root's chown first) before it is read; a link at its name never reaches the agent's copy" \
     || bad "§6's sync read a root-only file into the agent's copy through a link at the master's name"
+
+# Multi-account: every pass locks every configured account's master, not only the active one.
+SYNCM="$(sed "s#/auth-accounts/#$SB/accts/#g" <<<"$SYNC")"
+reset_sb; mkdir -p "$SB/accts/work" "$SB/accts/home"; chmod 755 "$SB/accts/home"
+printf '{"claudeAiOauth":{"accessToken":"tok-work"}}\n' > "$SB/accts/work/.credentials.json"
+printf '{"claudeAiOauth":{"accessToken":"tok-work"}}\n' > "$CFG/.credentials.json"
+command ln -s "$OUT/cred" "$SB/accts/home/.claude.json"
+printf 'work\n' > "$CFG/.active-account"
+( CLAUDE_CONFIG_DIR="$CFG"; CLAUDE_UID="$(id -u)"; CLAUDE_GID="$(id -g)"; CLAUDE_ACCOUNTS="work,home"; ACCOUNT_NAMES=(work home)
+  CLAUDE_AUTH_FOLLOW=0; CREDS_SNAP_DIR="$SB/root/snap"; CLAUDE_BIN_RE='^/fake/bin/claude$'
+  set -euo pipefail; eval "$SYNCM"; reconcile_once || true ) >/dev/null 2>&1
+[[ "$(stat -c %a "$SB/accts/home")" == 700 && ! -L "$SB/accts/home/.claude.json" ]] \
+    && ok "§6 every pass, multi-account: an account that is not the active one is locked too" \
+    || bad "§6's sync pass left a configured account's master open: $(stat -c %a "$SB/accts/home")"
 
 # §6a: a switch to an account whose volume an older login left open.
 S6A="$(sed "s#/auth-accounts/#$SB/accts/#g; s/while sleep 2; do/while sleep 0.1; do/" "$(ep_section 6a)")"
@@ -582,6 +657,13 @@ kill "$(command cat "$SB/listener.pid" 2>/dev/null)" 2>/dev/null || true
    && [[ "$(command cat "$CFG/.account-switch-done" 2>/dev/null)" == "ERROR:no-token:home" && "$(stat -c %a "$SB/accts/home")" == 700 ]] \
     && ok "§6a: an account's master is locked before a switch reads it; a link at its name is no credential" \
     || bad "§6a read a root-only file into the agent's copy through a link at an account's master: answer '$(command cat "$CFG/.account-switch-done" 2>/dev/null)'"
+
+# §6a's request is read and removed by the agent: no root dd or rm by its name (a name in the
+# config dir, which a bare `docker run` leaves swappable).
+SR="$(fn_text "$(ep_section 6a)" _switch_read)"
+[[ -n "$SR" ]] && ! command grep -E '(^|[^a-z_])(dd|rm) ' <<<"$SR" | command grep -qv 'as_agent ' \
+    && ok "§6a reads and removes a request as the agent, never root by its name" \
+    || bad "§6a's _switch_read reads or removes a request as root: $(command grep -E '(dd|rm) ' <<<"$SR" | tr -s ' ' | tr '\n' ' ')"
 
 echo
 echo "agent-paths-unit: $PASS passed, $FAIL failed"

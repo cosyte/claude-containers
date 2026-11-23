@@ -65,6 +65,15 @@ publish_creds() {  # publish_creds <src> <dst>
         creds_have_token "$1" && root_put "$2" < "$1"
     fi
 }
+# Every configured master locked (§0a's lock_master; it touches nothing that is already right).
+lock_masters() {
+    local n
+    if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
+        for n in "${ACCOUNT_NAMES[@]}"; do lock_master "/auth-accounts/$n"; done
+    else
+        lock_master "$AUTH_DIR"
+    fi
+}
 # The agent's own copy, read BY THE AGENT into root's own file, its mtime kept, once per
 # pass: every decision below is made on the snapshot, never on a name in the agent's dir.
 CREDS_SNAP_DIR="${CREDS_SNAP_DIR:-/run/claude-creds}"
@@ -155,9 +164,9 @@ reconcile_once() {
     # keeps token-refresh write-back flowing to whichever account is now active.
     local md a m l
     md="$(master_dir)"; a="$md/.credentials.json"          # the shared master (root:600)
-    # Every pass, before reading it: a volume an older login left to the agent is the
-    # agent's until it is locked again (§0a).
-    lock_master "$md"
+    # Every pass, before reading any: a volume an older login left to the agent is the agent's
+    # until it is locked again, the active account's and every other configured one's.
+    lock_masters
     m="$(account_of "$md")"; l="$(local_account)"
     # CLAUDE_AUTH_FOLLOW=0: no account logic at all, the pre-existing newest-wins sync.
     [[ "${CLAUDE_AUTH_FOLLOW:-1}" =~ ^(0|false|no|off)$ ]] && m=""

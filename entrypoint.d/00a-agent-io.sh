@@ -20,19 +20,32 @@ agent_put() {
         rm -f "$t"; exit 1' agent_put "$1" "$2"
 }
 # lock_master <dir>: a credential master (an auth volume's root) root's, mode 700, then its two
-# files root's, mode 600; a link at either name is removed, never followed (only a login writes
-# them). First the directory: once it is root's, no agent can change what is in it. A running
-# agent never reaches a master, whatever an older login left in the volume.
+# files root's, mode 600. First the directory: once it is root's, no agent can change what is in
+# it. Then each name: anything that is not a regular file (a link, a FIFO, a directory) is
+# removed, never followed or opened (only a login writes these names); a file with a second hard
+# link is removed; a file root does not own is written again as a new file of root's (root_put),
+# so a descriptor the agent opened while it was the agent's writes nowhere. Modes are set with a
+# leading 00, which also clears a setgid or setuid bit an agent left. Checked first, so a master
+# that is already right is not touched. A running agent never reaches a master, whatever an older
+# login left in the volume.
 lock_master() {
-    local f
-    chown root:root "$1" 2>/dev/null || true
-    chmod 700 "$1" 2>/dev/null || true
+    local f p m
+    if [[ "$(stat -c '%u %a' "$1" 2>/dev/null)" != "0 700" ]]; then
+        chown root:root "$1" 2>/dev/null || true
+        chmod 00700 "$1" 2>/dev/null || true
+    fi
     for f in .credentials.json .claude.json; do
-        if [[ -L "$1/$f" ]]; then
-            rm -f "$1/$f"
-        elif [[ -f "$1/$f" ]]; then
-            chown root:root "$1/$f" 2>/dev/null || true
-            chmod 600 "$1/$f" 2>/dev/null || true
+        p="$1/$f"
+        if [[ -L "$p" ]] || { [[ -e "$p" ]] && [[ ! -f "$p" ]]; }; then
+            rm -rf -- "$p"
+        elif [[ -f "$p" ]]; then
+            case "$(stat -c '%u %h %a' "$p" 2>/dev/null)" in
+                "0 1 600") ;;
+                "0 1 "*)   chmod 00600 "$p" 2>/dev/null || true ;;
+                *" 1 "*)   # its mtime kept: the credential sync compares it
+                           m="$(stat -c %.9Y "$p")" && root_put "$p" < "$p" && touch -h -d "@$m" "$p" || true ;;
+                *)         rm -f -- "$p" ;;
+            esac
         fi
     done
     return 0

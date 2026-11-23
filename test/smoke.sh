@@ -52,7 +52,7 @@ cleanup() {
     docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" "$BRKOFFCN" "$BRKFAILCN" "$NOKEYCN" "$KEYDIRCN" \
                  "$BRWACN" "$BRWOCN" "$BRWFCN" "$BRWLCN" \
                  "$EG6CN" "$EG6ALLOW" "$EG6DENY" "$EGSFCN" "$EGSOKCN" "$EGRFCN" \
-                 "claude-smoke-containers-$$" "claude-smoke-accounts-$$" >/dev/null 2>&1 || true
+                 "claude-smoke-containers-$$" "claude-smoke-accounts-$$" "claude-smoke-login-$$" >/dev/null 2>&1 || true
     docker volume rm "claude-smoke-acct-one-$$" "claude-smoke-acct-two-$$" >/dev/null 2>&1 || true
     # The network only goes after its containers do, or Docker refuses to remove it.
     docker network rm "$EG6NET" >/dev/null 2>&1 || true
@@ -126,6 +126,24 @@ out="$(docker run --rm -v "$AUTHVOL:/auth" "$IMAGE" 2>&1 || true)"
 echo "$out" | grep -q "No credentials in the claude-auth volume" \
     && ok "clear error when auth volume empty" \
     || bad "missing/!clear no-credentials error"
+
+echo
+echo "== 2b. a login keeps the auth volume root's =="
+# The CLI waits for the code the owner would paste. Until then the volume is root's, mode 700,
+# with nothing in it, and the CLI runs as the agent. No code comes: the container is removed,
+# and the volume is still root's and empty.
+LOGINCN="claude-smoke-login-$$"
+docker run -d --name "$LOGINCN" -e CLAUDE_LOGIN_MODE=1 -v "$AUTHVOL:/auth" "$IMAGE" >/dev/null 2>&1 || true
+for _ in $(seq 1 60); do docker exec "$LOGINCN" pgrep -f 'auth login' >/dev/null 2>&1 && break; sleep 1; done
+check "during a login the auth volume is root's, mode 700, with nothing in it yet" \
+    '[ "$(docker exec "$LOGINCN" stat -c "%U %a" /auth 2>/dev/null)" = "root 700" ] && [ -z "$(docker exec "$LOGINCN" ls -A /auth 2>/dev/null)" ]'
+check "the login CLI runs as the agent, in a private directory under /tmp" \
+    '[ "$(docker exec "$LOGINCN" ps -o user= -p "$(docker exec "$LOGINCN" pgrep -f "auth login" | head -n 1)" 2>/dev/null | tr -d " ")" = claude ] \
+     && [ "$(docker exec "$LOGINCN" sh -c "stat -c %U /tmp/claude-login.*" 2>/dev/null)" = claude ]'
+docker rm -f "$LOGINCN" >/dev/null 2>&1 || true
+check "a login stopped before its code leaves the auth volume root's and empty" \
+    '[ "$(docker run --rm -v "$AUTHVOL:/auth" --entrypoint stat "$IMAGE" -c "%U %a" /auth 2>/dev/null)" = "root 700" ] \
+     && [ -z "$(docker run --rm -v "$AUTHVOL:/auth" --entrypoint ls "$IMAGE" -A /auth 2>/dev/null)" ]'
 
 echo
 echo "== 3. fail-fast: empty workspace, no repo =="

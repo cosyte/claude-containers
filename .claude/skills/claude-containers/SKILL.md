@@ -158,8 +158,9 @@ cp .env.example .env          # edit if needed; defaults are sane
 make build                    # host-arch image, loaded locally
 make login                    # one-time OAuth; opens a URL, paste the code
 ```
-`make login` runs a throwaway container with `CLAUDE_LOGIN_MODE=1` and
-`CLAUDE_CONFIG_DIR=/auth`, persisting creds to the `claude-auth` volume.
+`make login` runs a throwaway container with `CLAUDE_LOGIN_MODE=1`: the CLI logs in as the
+agent in a private directory, and root moves the credential into the `claude-auth` volume,
+which stays root's (mode 700, the credential 600).
 
 **Launch / manage**
 ```

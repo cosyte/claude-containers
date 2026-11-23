@@ -3,8 +3,9 @@
 mkdir -p "$AUTH_DIR" "$HOSTKEY_DIR" "$WORKSPACE"
 # The config dir and ~/.ssh are in the agent's home (the config dir is a volume in a stack, a
 # plain directory in a bare `docker run`): the agent makes them, removes a link at ~/.ssh, and
-# root never creates or removes by a name there.
-as_agent mkdir -p "$CLAUDE_CONFIG_DIR"
+# root never creates or removes by a name there. (An operator's CLAUDE_CONFIG_DIR outside the
+# agent's home, where the agent cannot make it, root makes: no agent can write where it goes.)
+as_agent mkdir -p "$CLAUDE_CONFIG_DIR" 2>/dev/null || mkdir -p "$CLAUDE_CONFIG_DIR"
 # ~/.ssh is agent-owned and lives in the container layer, so a session can replace it with a
 # symlink that survives a restart. Remove a symlink here (never follow it) before the real
 # directory is made again; a real ~/.ssh is left as is. [[ -L ]] tests the link itself.
