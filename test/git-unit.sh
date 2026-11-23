@@ -46,11 +46,14 @@ if [[ -n "$BLOCK" ]] && grep -qF "SSHD_TOKEN_CONF=\"$TMPD/probe/sshd_config.d/cl
    && grep -qF "SSHD_TOKEN_CONF=\"$TOKEN_PATH\"" <<<"$BLOCK"; then
     ok "the block is extracted from §5, names $TOKEN_PATH, and that one path is redirected into a sandbox"
 else
+    # Stop here: every case below would write into the real /etc/ssh/sshd_config.d.
     bad "the block did not extract, or its root-only path did not redirect: these tests would target /etc/ssh"
+    echo; echo "git-unit: $PASS passed, $FAIL failed"; exit 1
 fi
 
 # run_block <sandbox> [VAR=VAL ...]: the block under the entrypoint's shell options, as the
 # loader sources it; GH_TOKEN only as given (this suite may itself run where one is set).
+# RB_UMASK and RB_STUBS (a directory put first on PATH) set up the hostile cases.
 run_block() {
     local sb="$TMPD/$1"; shift
     mkdir -p "$sb"
@@ -58,6 +61,8 @@ run_block() {
     ( unset GH_TOKEN
       # shellcheck disable=SC2163  # "$@" is VAR=VAL pairs, exported as given
       if [[ $# -gt 0 ]]; then export "$@"; fi
+      [[ -z "${RB_UMASK:-}" ]] || umask "$RB_UMASK"
+      [[ -z "${RB_STUBS:-}" ]] || PATH="$RB_STUBS:$PATH"
       log() { echo "[entrypoint] $*"; }
       set -euo pipefail
       eval "$b"
@@ -95,6 +100,14 @@ out="$(run_block link "GH_TOKEN=$TOK")"
     && ok "a symlink at the name is replaced with root's own file; its target is untouched" \
     || bad "the block wrote through a symlink, or left it: $out"
 
+# The file is never readable by anyone but root, not even for a moment: it is created 0600 by
+# mktemp, so a chmod that does nothing and a umask of 000 still leave it 600.
+mkdir -p "$TMPD/stub-chmod"; printf '#!/bin/sh\nexit 0\n' > "$TMPD/stub-chmod/chmod"; chmod +x "$TMPD/stub-chmod/chmod"
+out="$(RB_UMASK=000 RB_STUBS="$TMPD/stub-chmod" run_block umask "GH_TOKEN=$TOK")"
+[[ "$out" == *"rc=0"* && "$(stat -c '%a' "$(conf_of umask)" 2>/dev/null)" == 600 ]] \
+    && ok "with umask 000 and a chmod that does nothing, the file is still 600 (created private, never widened)" \
+    || bad "the file is created readable before its chmod: mode $(stat -c '%a' "$(conf_of umask)" 2>&1)"
+
 # --- the token is unset or empty: gone ------------------------------------------------------
 for v in unset empty; do
     mkdir -p "$TMPD/$v/sshd_config.d"; printf 'SetEnv GH_TOKEN=%s\n' "$TOK" > "$(conf_of "$v")"
@@ -111,7 +124,7 @@ for v in "$TOK"$'\n'"PasswordAuthentication yes" "$TOK PermitRootLogin" "\"$TOK\
     mkdir -p "$TMPD/bad/sshd_config.d"; printf 'SetEnv GH_TOKEN=old\n' > "$(conf_of bad)"
     out="$(run_block bad "GH_TOKEN=$v")"
     if [[ "$out" == *"rc=0"* && ! -e "$(conf_of bad)" && "$(leftovers bad)" == 0 ]] \
-       && grep -q "WARNING: GH_TOKEN holds a character outside" <<<"$out" && ! grep -qF "$TOK" <<<"$out"; then
+       && grep -q "WARNING: GH_TOKEN holds a character outside" <<<"$out" && ! grep -qF -- "$v" <<<"$out"; then
         ok "GH_TOKEN $(printf '%q' "$v" | cut -c1-24)...: refused with a WARNING naming no value; no file (the old one is gone too)"
     else
         bad "GH_TOKEN $(printf '%q' "$v"): written, or logged with its value: $out / $(cat "$(conf_of bad)" 2>&1)"
@@ -125,20 +138,25 @@ out="$(run_block ro "GH_TOKEN=$TOK")"
     && ok "a file that cannot be written is a WARNING (no value in it) and the boot goes on" \
     || bad "a failed write ended the boot or went unlogged: $out"
 
+# A failure after the temp file exists (the rename): a WARNING, no file, no temp file left.
+mkdir -p "$TMPD/stub-mv"; printf '#!/bin/sh\nexit 1\n' > "$TMPD/stub-mv/mv"; chmod +x "$TMPD/stub-mv/mv"
+out="$(RB_STUBS="$TMPD/stub-mv" run_block latefail "GH_TOKEN=$TOK")"
+[[ "$out" == *"rc=0"* && ! -e "$(conf_of latefail)" && "$(leftovers latefail)" == 0 ]] \
+    && grep -q "WARNING: could not write sshd's GH_TOKEN file" <<<"$out" && ! grep -qF "$TOK" <<<"$out" \
+    && ok "a rename that fails is a WARNING, and its temp file (holding the token) is removed" \
+    || bad "a failed rename left a file or no warning: $out / $(ls -A "$TMPD/latefail/sshd_config.d" 2>&1)"
+
 # --- the value reaches nothing but builtins ---------------------------------------------------
 # Every use of the value: the [[ ]] test and printf (a bash builtin), never an external
 # command's argument list (readable in /proc/<pid>/cmdline by any user), never a log line.
-uses="$(grep -v '^ *#' <<<"$BLOCK" | grep -F '$GH_TOKEN' | sed 's/^ *//')"
-if [[ "$(wc -l <<<"$uses")" == 2 ]] \
-   && grep -qF '[[ ! "$GH_TOKEN" =~' <<<"$uses" \
-   && grep -qF "printf 'SetEnv GH_TOKEN=%s\\n' \"\$GH_TOKEN\" > \"\$_tc\"" <<<"$uses"; then
-    ok "the value is used twice only: the [[ ]] check and the builtin printf into the temp file"
-else
-    bad "the token's value is used somewhere else (a command line or a log?): $uses"
-fi
-! grep -qE '(^|[^a-z_])(echo|env|command|/usr/bin/printf)[^#]*GH_TOKEN' <<<"$(grep -v '^ *#' <<<"$BLOCK")" \
-    && ok "no echo, env or external printf touches the value" \
-    || bad "an external command may carry the token on its command line"
+# shellcheck disable=SC2016  # the patterns are the literal code text
+uses="$(grep -v '^ *#' <<<"$BLOCK" | grep -E '\$\{?GH_TOKEN' | sed 's/^ *//')"
+want="$(printf '%s\n' 'if [[ -n "${GH_TOKEN:-}" ]]; then' \
+    'if [[ ! "$GH_TOKEN" =~ ^[A-Za-z0-9_.-]+$ ]]; then' \
+    "&& printf 'SetEnv GH_TOKEN=%s\\n' \"\$GH_TOKEN\" > \"\$_tc\" \\")"
+[[ "$uses" == "$want" ]] \
+    && ok "the value is read on three lines only: the two [[ ]] tests and the builtin printf into the temp file" \
+    || bad "the token's value is used somewhere else (a command line or a log?): $uses"
 
 echo "== sshd_config Includes it =="
 inc="$(grep -nE '^[[:space:]]*Include[[:space:]]' "$SSHD_CONFIG")"

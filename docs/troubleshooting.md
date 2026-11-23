@@ -100,6 +100,12 @@ settings and rulesets. Edit the classic token on GitHub, untick both, and save: 
 the same, and `claude-gh-check` reads the new scopes at once
 ([github-token.md](github-token.md)).
 
+**VS Code's Git panel, or `ssh <container> cmd`, cannot push over HTTPS, and the boot log says
+`WARNING: could not write sshd's GH_TOKEN file`.** The entrypoint could not write the root-only
+file through which sshd gives SSH logins the token, so logins have none while the sessions
+still do. Look for a full disk or a read-only `/etc/ssh` in the container; it is written again
+at the next start ([github-token.md](github-token.md#ssh-logins-and-vs-code)).
+
 ## Remote Control session not in the mobile app
 
 ### "Remote Control is not yet enabled for your account" (most common)

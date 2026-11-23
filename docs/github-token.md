@@ -82,7 +82,8 @@ and the image ships no such file.
 A container started without `GH_TOKEN`, or with it empty, has no such file and its logins no
 token. A value with a character outside `A-Z a-z 0-9 _ . -`, which no GitHub token has, is never
 written into sshd's config: the boot log has a `WARNING`, and SSH logins have no token while the
-sessions still do.
+sessions still do. In a login, as in a session, `GH_TOKEN` takes precedence over a `gh auth
+login` made there: to use another identity in one login, `unset GH_TOKEN` in it.
 
 From your machine, with a private repo the token reaches in place of `me/x`:
 
