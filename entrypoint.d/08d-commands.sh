@@ -3,11 +3,13 @@
 if compgen -G "$BAKE_DIR/commands/*.md" > /dev/null; then
     # The config dir is the agent's: a symlink where the commands dir goes is replaced, and a
     # name already present (a symlink included, even a dangling one) is never installed over.
+    # install -d sets the directory's owner and mode through a no-follow descriptor; each file
+    # is written by the agent (agent_put, §0a's), never by root by that name.
     [[ -L "$CLAUDE_CONFIG_DIR/commands" ]] && rm -f "$CLAUDE_CONFIG_DIR/commands"
     install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/commands"
     for f in "$BAKE_DIR"/commands/*.md; do
         t="$CLAUDE_CONFIG_DIR/commands/$(basename "$f")"
-        [[ -e "$t" || -L "$t" ]] || install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 644 "$f" "$t"
+        [[ -e "$t" || -L "$t" ]] || agent_put "$t" 644 < "$f"
     done
     log "Installed baked-in slash commands"
 fi

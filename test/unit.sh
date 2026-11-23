@@ -13,6 +13,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=test/lib/entrypoint.sh
 source "$REPO_ROOT/test/lib/entrypoint.sh"
 EP_BOOT="$TMPDIR/boot.sh"; ep_boot > "$EP_BOOT"   # the whole boot path, in run order
+# §0a's real agent_put and agent_cat, for the sections run in a sandbox below. One user and no
+# root here, so the agent is this user: as_agent runs the command as it is.
+eval "$(ep_agent_io)"; as_agent() { "$@"; }
 PASS=0 FAIL=0
 ok()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
@@ -86,8 +89,8 @@ STALE_CMD="$(sed -n 's/^STALE_HOOK_CMD="\(.*\)"$/\1/p' "$ENTRYPOINT")"
     || bad "STALE_HOOK_CMD is '$STALE_CMD': does not match the baked hook; the self-heal is a NO-OP"
 HOOK_FILTER="$(awk '/jq --arg stale "\$STALE_HOOK_CMD"/{f=1; sub(/^.*--arg stale "\$STALE_HOOK_CMD" .$/,""); }
                     f{print}
-                    f && /^ *> "\$SETTINGS_TMP"$/{exit}' "$ENTRYPOINT" \
-                 | sed -e "s/' *\\\\$//" -e '/^ *> "\$SETTINGS_TMP"/d')"
+                    f && /then del\(\.hooks\) else \. end\)/{exit}' "$ENTRYPOINT" \
+                 | sed -e "s/' *\\\\$//" -e "s/')\"\$//")"
 
 if [[ -n "$HOOK_FILTER" ]] && echo '{}' | jq --arg stale "$STALE_CMD" "$HOOK_FILTER" >/dev/null 2>&1; then
     ok "the §8b stale-hook jq filter was extracted from entrypoint.sh and parses"
@@ -2011,25 +2014,24 @@ ms_8b_missing=()
 for _needle in 'permissions: { defaultMode: $pm }' 'skipDangerousModePermissionPrompt: true' \
                'includeCoAuthoredBy: true' \
                'del(.DISABLE_TELEMETRY,.DO_NOT_TRACK,.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)' \
-               'STALE_HOOK_CMD' 'mv -fT "$SETTINGS_TMP" "$SETTINGS_DST"'; do
+               'STALE_HOOK_CMD' 'agent_put "$SETTINGS_DST" 600'; do
     grep -qF "$_needle" <<<"$MS_8B" || ms_8b_missing+=("$_needle")
 done
 [[ ${#ms_8b_missing[@]} -eq 0 ]] \
     && ok  "§8b still composes the same settings, still strips the telemetry kills, still self-heals the stale hook" \
     || bad "§8b lost something managed policy does not replace: ${ms_8b_missing[*]}"
-# settings.json is written into a mktemp in the config dir and renamed onto its own name, never
-# with a bare `>`: root must not write through a symlink at that agent-owned path. mktemp is
-# O_EXCL, and mv -T renames onto the name itself rather than into whatever it points at.
-if grep -qF 'SETTINGS_TMP="$(mktemp "$CLAUDE_CONFIG_DIR/.settings.json.XXXXXX")"' <<<"$MS_8B" \
-   && grep -qF 'mv -fT "$SETTINGS_TMP" "$SETTINGS_DST"' <<<"$MS_8B" \
-   && ! grep -qF '> "$CLAUDE_CONFIG_DIR/settings.json"' <<<"$MS_8B"; then
-    ok  "§8b writes settings.json via a mktemp + mv, never a bare redirect through a possible symlink"
+# settings.json is written by the agent (agent_put: its own temp file renamed onto the name),
+# never by root: no root mktemp, redirect or chown by a name in that agent-owned dir, where a
+# session can swap a symlink in between two of root's steps.
+if grep -qF '| agent_put "$SETTINGS_DST" 600' <<<"$MS_8B" \
+   && ! grep -qE '^[^#]*(mktemp|chown|> *"\$(SETTINGS|CLAUDE_CONFIG_DIR))' <<<"$MS_8B"; then
+    ok  "§8b's settings.json is written by the agent (agent_put), with no root mktemp, redirect or chown there"
 else
-    bad "§8b still writes settings.json with a bare '> settings.json' (root would follow a symlink the agent planted there)"
+    bad "§8b still writes, makes a temp file or chowns in the config dir as root (root would follow a symlink the agent swapped in)"
 fi
-grep -qF 'chown -h "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"' "$ENTRYPOINT" \
-    && ok  "§8b still hands settings.json to the agent user (managed policy did not take it away)" \
-    || bad "settings.json is no longer chowned to the agent user"
+grep -qF 'printf '"'"'%s\n'"'"' "$SETTINGS_NEW" | agent_put "$SETTINGS_DST" 600' "$ENTRYPOINT" \
+    && ok  "§8b still hands settings.json to the agent user, its own file (managed policy did not take it away)" \
+    || bad "settings.json is no longer written as the agent user's own file"
 grep -qF 'Merged baked-in plugin marketplaces/plugins into settings.json' "$ENTRYPOINT" \
     && grep -qF 'Merged runtime plugin marketplaces/plugins into settings.json' "$ENTRYPOINT" \
     && ok  "§8c still merges the baked and runtime plugin sets" \
@@ -2319,11 +2321,12 @@ nf_outside() { printf 'outside\n' > "$NFO/$1"; printf '%s' "$NFO/$1"; }   # a fi
 nf_intact()  { [[ "$(cat "$NFO/$1" 2>/dev/null)" == outside ]]; }
 nf_regular() { [[ -f "$1" && ! -L "$1" ]]; }
 
-# §1b: .active-account is written through mktemp and renamed onto its name, never with `>`.
+# §1b: .active-account is written and read by the agent (agent_put, agent_cat), never root.
 S1B="$(ep_section 1b)"
-grep -qF 'mv -fT "$t" "$ACTIVE_FILE"' "$S1B" && ! grep -qE '^[^#]*> "\$ACTIVE_FILE"' "$S1B" \
-    && ok  "§1b writes .active-account through a fresh temp file, never a bare redirect" \
-    || bad "§1b still writes .active-account with a bare '>'"
+grep -qF '| agent_put "$ACTIVE_FILE" 644' "$S1B" && grep -qF 'agent_cat "$ACTIVE_FILE"' "$S1B" \
+   && ! grep -qE '^[^#]*(> "\$ACTIVE_FILE"|mktemp|chmod|[^_a-z]cat "\$ACTIVE_FILE")' "$S1B" \
+    && ok  "§1b writes and reads .active-account as the agent, never root by that name" \
+    || bad "§1b still writes or reads .active-account as root"
 
 # §6: the helpers the reconcile loop and the listener call while sessions run.
 S6="$(ep_section 6)"

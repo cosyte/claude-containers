@@ -668,6 +668,9 @@ COPY sshd_config /etc/ssh/sshd_config
 RUN install -o root -g root -m 644 /dev/null /etc/ssh/revoked_keys
 
 # --- Baked-in Claude config + entrypoint --------------------------------------
+# Root's, readable by all and writable by root only (the chmod below, whatever the build
+# context's modes): the entrypoint copies it into the agent's config dir at every start, so a
+# file or symlink the agent could leave here would be copied as root.
 COPY claude-config/ /opt/claude-config/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 # Its numbered sections, sourced in order by entrypoint.sh (root's, read-only to everyone else).
@@ -751,8 +754,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude /usr/local/bin/c
         /usr/local/bin/claude-container-facts \
         /usr/local/bin/claude-mise-shims \
         /usr/local/bin/claude-gh-check \
-    && chown -R ${CLAUDE_UID}:${CLAUDE_GID} /opt/claude-config \
-                                            /home/${CLAUDE_USER}/.bash_profile
+    && chown -R root:root /opt/claude-config && chmod -R u=rwX,go=rX /opt/claude-config \
+    && chown ${CLAUDE_UID}:${CLAUDE_GID} /home/${CLAUDE_USER}/.bash_profile
 
 # mise interactive activation: APPEND to the user's stock ~/.bashrc
 # (from /etc/skel via `useradd -m`) rather than overwriting it, so Debian's

@@ -20,7 +20,8 @@ CC_PKG="@anthropic-ai/claude-code"
 CC_VIEW_TIMEOUT=60
 CC_INSTALL_TIMEOUT=600
 cc_version() {  # the version in the prefix, from its package.json; empty when there is none
-    jq -r '.version // empty' "$CC_PREFIX/lib/node_modules/$CC_PKG/package.json" 2>/dev/null || true
+    # The prefix is the agent's: the agent reads the file (agent_cat), root only parses it.
+    agent_cat "$CC_PREFIX/lib/node_modules/$CC_PKG/package.json" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true
 }
 cc_from="$(cc_version)"
 cc_off="${DISABLE_AUTOUPDATER:-}"

@@ -33,28 +33,23 @@ git_brokered=0                                            # outcome flag; test/u
 BROKER_RUN_DIR="/run/claude"                              # root-owned socket dir
 BROKER_PROFILE_D="/etc/profile.d/claude-ssh-agent.sh"     # login-shell SSH_AUTH_SOCK export
 if [[ -s "$GITKEY_SRC" ]]; then
-    # ~/.ssh is a real agent-owned directory by here (§2 removed any symlink at it). Its
-    # entries are still the agent's, though, so remove a symlink the agent may have left at
-    # config before writing, or the root `cat >`/`chown`/`chmod` below would act on its
-    # target. rm -f unlinks a symlink without following it; `cat >` then creates a fresh file.
-    rm -f "$CLAUDE_HOME/.ssh/config"
-    cat > "$CLAUDE_HOME/.ssh/config" <<EOF
-Host *
+    # ~/.ssh and its entries are the agent's, so every file written there below is written by
+    # the agent (agent_put, §0a's), never by root by name: a root write, chown or chmod
+    # of a name there would follow a symlink swapped in between two of its steps. The config is
+    # built here and written once, at the end of this block.
+    ssh_config='Host *
     StrictHostKeyChecking accept-new
     UserKnownHostsFile ~/.ssh/known_hosts
-EOF
+'
     if [[ "${CLAUDE_BROKER_GIT_KEY:-}" =~ ^(0|false|no|off)$ ]]; then
         # THE EXPLICIT OPT-OUT, and the only path that writes a readable key.
         # Drop any relay export a previous brokered boot of THIS container left
         # in /etc/profile.d: `docker restart` keeps the container filesystem, so
         # without this a login shell would point SSH_AUTH_SOCK at a dead socket.
         rm -f "$BROKER_PROFILE_D"
-        # Unlink first, never follow: install would otherwise copy the key through a symlink
-        # the agent may have planted at id_ed25519, writing the private bytes to its target.
-        rm -f "$CLAUDE_HOME/.ssh/id_ed25519"
-        install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 \
-            "$GITKEY_SRC" "$CLAUDE_HOME/.ssh/id_ed25519"
-        printf 'Host *\n    IdentityFile ~/.ssh/id_ed25519\n' >> "$CLAUDE_HOME/.ssh/config"
+        # Root reads the root-only mounted key; the agent writes its copy.
+        agent_put "$CLAUDE_HOME/.ssh/id_ed25519" 600 < "$GITKEY_SRC"
+        ssh_config+=$'Host *\n    IdentityFile ~/.ssh/id_ed25519\n'
         log "Git SSH key         : installed as a readable file at ~/.ssh/id_ed25519 (CLAUDE_BROKER_GIT_KEY=${CLAUDE_BROKER_GIT_KEY} opt-out)"
         log "Deploy key readable : YES. The agent user can read this deploy key's private bytes (mode 600, owned by $CLAUDE_USER). Unset CLAUDE_BROKER_GIT_KEY to broker it instead."
     else
@@ -104,10 +99,8 @@ EOF
             log "Deploy key readable : NO. The agent user cannot read this deploy key's private bytes: brokering failed and no key file was installed, so git has no key to authenticate with."
         fi
     fi
-    # config was just created fresh above (symlink removed), so it is a regular file; -h keeps
-    # chown off a link's target regardless, and chmod acts on that same fresh regular file.
-    chown -h "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_HOME/.ssh/config"
-    chmod 600 "$CLAUDE_HOME/.ssh/config"
+    printf '%s' "$ssh_config" | agent_put "$CLAUDE_HOME/.ssh/config" 600
+    unset ssh_config
 else
     log "No git SSH key mounted at $GITKEY_SRC (https/public repos still work)"
     log "Deploy key readable : n/a, no deploy key is mounted, so there is nothing to read."
@@ -139,11 +132,11 @@ case "${CLAUDE_SECRET_GUARD:-1}" in
         log "Secret guard         : disabled (CLAUDE_SECRET_GUARD=0)" ;;
     *)
         # ~/.claude-hooks is agent-owned; drop a symlink the agent may have left at it (never
-        # follow it) so the root `ln -sf` below plants pre-commit in the real directory.
+        # follow it), and let the agent make the directory and the hook link in it (as_agent):
+        # a root `ln` or `chown` by a name there would act on whatever the agent swapped in.
         [[ -L "$HOOKS_DIR" ]] && rm -f "$HOOKS_DIR"
         asclaude mkdir -p "$HOOKS_DIR"
-        ln -sf /usr/local/bin/claude-secret-guard "$HOOKS_DIR/pre-commit"
-        chown -h "$CLAUDE_UID:$CLAUDE_GID" "$HOOKS_DIR/pre-commit" 2>/dev/null || true
+        as_agent ln -sf /usr/local/bin/claude-secret-guard "$HOOKS_DIR/pre-commit"
         asclaude git config --global core.hooksPath "$HOOKS_DIR"
         log "Secret guard         : on (blocks committing secrets; bypass with git commit --no-verify)" ;;
 esac

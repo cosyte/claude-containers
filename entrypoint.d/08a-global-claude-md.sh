@@ -11,11 +11,12 @@ if [[ -f "$BAKE_DIR/CLAUDE.md" ]]; then
     gmd="$CLAUDE_CONFIG_DIR/CLAUDE.md"
     if awk -v p="$gmd" '$5 == p { f = 1 } END { exit !f }' "$MOUNTINFO" 2>/dev/null; then
         log "Global CLAUDE.md    : left alone, $gmd is mounted (the operator's own)"
-    elif [[ -L "$gmd" ]] || ! cmp -s "$BAKE_DIR/CLAUDE.md" "$gmd"; then
-        # The config dir is the agent's: a symlink at the path is replaced, never installed through.
+    elif [[ -L "$gmd" ]] || ! as_agent cmp -s "$BAKE_DIR/CLAUDE.md" "$gmd"; then
+        # The config dir is the agent's: a symlink at the path is replaced, and the agent compares
+        # and writes the file (as_agent, agent_put, §0a's), never root by that name.
         [[ -L "$gmd" ]] && rm -f "$gmd"
         # Never fatal: a full volume (or a directory at the path) must not stop the boot.
-        if install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 644 "$BAKE_DIR/CLAUDE.md" "$gmd" 2>/dev/null; then
+        if agent_put "$gmd" 644 < "$BAKE_DIR/CLAUDE.md" 2>/dev/null; then
             log "Global CLAUDE.md    : installed the image's copy"
         else
             log "Global CLAUDE.md    : WARNING, could not install the image's copy at $gmd"

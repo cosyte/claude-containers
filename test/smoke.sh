@@ -442,6 +442,19 @@ check "projects[/workspace].hasTrustDialogAccepted == true" \
     'cexec "jq -e \".projects[\\\"/workspace\\\"].hasTrustDialogAccepted==true\" /home/claude/.claude/.claude.json" >/dev/null 2>&1'
 
 echo
+echo "== 6b. root's work in the agent's files: written by the agent, copied from root's =="
+# The entrypoint never acts by name in the agent's directories: the agent writes its own files
+# there (§0a), so each is the agent's; and what root copies from is root's alone.
+check "the agent's .claude.json and settings.json are its own files" \
+    '[ "$(docker exec "$CN" stat -c "%U" /home/claude/.claude/.claude.json /home/claude/.claude/settings.json | sort -u)" = claude ]'
+check "the agent's .ssh is its own (mode 700), and authorized_keys too (mode 600)" \
+    '[ "$(docker exec "$CN" stat -c "%U %a" /home/claude/.ssh)" = "claude 700" ] \
+     && [ "$(docker exec "$CN" stat -c "%U %a" /home/claude/.ssh/authorized_keys)" = "claude 600" ]'
+check "/opt/claude-config is root's: the agent can write no directory in it and owns nothing there" \
+    'docker exec "$CN" gosu claude sh -c "for d in \$(find /opt/claude-config -type d); do [ -w \"\$d\" ] && exit 1; done; exit 0" \
+     && [ -z "$(docker exec "$CN" find /opt/claude-config -user claude ! -path /opt/claude-config/plugins/plugins.json 2>/dev/null)" ]'
+
+echo
 echo "== 7. SSH in (non-interactive command) =="
 PORT="$(docker port "$CN" 22/tcp | head -1 | sed 's/.*://')"
 if ssh -i "$TMP/key" -p "$PORT" \

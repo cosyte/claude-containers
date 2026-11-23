@@ -318,8 +318,8 @@ own_out="$(
     CLAUDE_CONTAINERS=1
     eval "$(sed -n '/^CONTAINERS_SUBID_START=/,/^}/p' "$REPO_ROOT/entrypoint.sh")"; own_tree /ws
 )"
-[[ "$(sed -n 1p <<<"$own_out")" == '/ws ( ! -uid 1000 -o ! -gid 1000 ) -execdir chown -h 1000:1000 {} +' \
-   && "$(sed -n 2p <<<"$own_out")" == '/ws ( ! -uid 1000 -o ! -gid 1000 ) ! ( -uid +99999 -uid -165536 ) ! ( -gid +99999 -gid -165536 ) -execdir chown -h 1000:1000 {} +' ]] \
+[[ "$(sed -n 1p <<<"$own_out")" == '/ws ( ! -uid 1000 -o ! -gid 1000 ) ( -type d -o -links 1 ) -execdir chown -h 1000:1000 {} +' \
+   && "$(sed -n 2p <<<"$own_out")" == '/ws ( ! -uid 1000 -o ! -gid 1000 ) ! ( -uid +99999 -uid -165536 ) ! ( -gid +99999 -gid -165536 ) ( -type d -o -links 1 ) -execdir chown -h 1000:1000 {} +' ]] \
     && ok "own_tree is unchanged by default and skips the subordinate range, uid and gid, on a --containers session" \
     || bad "own_tree must skip uids and gids 100000..165535 only when CLAUDE_CONTAINERS is on: $own_out"
 # Known before the first pass: §2 (the config volume) and §2c (/state) run before §2d, so a

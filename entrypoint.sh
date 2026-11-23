@@ -28,14 +28,14 @@ WORKSPACE="/workspace"
 log()  { echo "[entrypoint] $*"; }
 die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
 asclaude() { gosu "$CLAUDE_USER" env PATH="$CLAUDE_AGENT_PATH" CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" HOME="$CLAUDE_HOME" "$@"; }
-# Hand a tree to the agent user, touching only what is not already its own. `chown -R` writes
-# every inode (a chown with the same owner still updates ctime), so on maker's config volume
-# and ten-repo workspace on spinning disk it held every boot for minutes before any session
-# started (2026-10-07). find only reads a tree that is already right. -h: a symlink itself,
-# never its target, as chown -R did; find does not follow symlinks either. -execdir, not -exec:
-# the workspace pass runs while the agent is up (§12g), and -h guards only the last component,
-# so a parent directory swapped for a symlink between find and chown would hand the agent a
-# root file. -execdir chowns ./name from inside the directory find already holds.
+# Hand a tree to the agent user, touching only what is not already its own: `chown -R` writes
+# every inode (ctime), minutes per boot on a large tree on spinning disk, and find only reads a
+# tree that is already right. -h: a symlink itself, never its target. -execdir, not -exec: the
+# workspace pass runs while the agent is up (§12g) and -h guards only the last component, so a
+# parent swapped for a symlink between find and chown would hand the agent a root file; -execdir
+# chowns ./name from inside the directory find already holds. A file with a second hard link is
+# left alone: a hard link is the file itself, and one the agent made in its home to a system
+# file (the same filesystem) would be handed over.
 # OWN_TREE_KEEP_IDS="LO HI" (a --containers session) leaves files whose owner or group is in
 # that range alone: they belong to a nested container (postgres's 999 is 100998 here; a file its
 # root writes with the postgres group is 1000:100998), and handing them to the agent breaks that
@@ -55,7 +55,7 @@ own_tree() {
               ! \( -gid "+$((_lo - 1))" -gid "-$((_hi + 1))" \))
     fi
     find "$@" \( ! -uid "$CLAUDE_UID" -o ! -gid "$CLAUDE_GID" \) "${keep[@]}" \
-        -execdir chown -h "$CLAUDE_UID:$CLAUDE_GID" {} +
+        \( -type d -o -links 1 \) -execdir chown -h "$CLAUDE_UID:$CLAUDE_GID" {} +
 }
 
 # --- Sections ------------------------------------------------------------------

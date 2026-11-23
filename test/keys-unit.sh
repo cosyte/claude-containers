@@ -26,6 +26,9 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=test/lib/entrypoint.sh
 source "$REPO_ROOT/test/lib/entrypoint.sh"
+# §0a's real as_agent, agent_put and agent_cat, for §4 run in a sandbox below: as_agent calls
+# gosu, which is this suite's one fake (on PATH where §4 runs).
+eval "$(ep_agent_io)"
 EP_BOOT="$TMPDIR/boot.sh"; ep_boot > "$EP_BOOT"   # the whole boot path, in run order
 TMPD="$(mktemp -d)"
 trap 'rm -rf "$TMPD"' EXIT

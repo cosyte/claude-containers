@@ -5,24 +5,21 @@
 # (the runtime kit below installs what IT declares). We union the
 # two plugin keys into existing settings; existing entries win on conflict.
 if [[ -f "$BAKE_DIR/plugins/plugins.json" ]]; then
-    # settings.json is in the agent-owned config dir: a fresh temp file renamed onto its own
-    # name (mv -T), as §8b does, never a fixed temp name.
+    # settings.json is in the agent-owned config dir: the agent reads and writes it (agent_cat,
+    # agent_put, as §8b does), root only computes the merge.
     # A symlink there is not the agent's settings: read it as {}, never through the link.
-    PLUGINS_TMP="$(mktemp "$CLAUDE_CONFIG_DIR/.settings.json.XXXXXX")"
     PLUGINS_CUR='{}'
     [[ -s "$CLAUDE_CONFIG_DIR/settings.json" && ! -L "$CLAUDE_CONFIG_DIR/settings.json" ]] \
-        && PLUGINS_CUR="$(cat "$CLAUDE_CONFIG_DIR/settings.json")"
-    jq -s '
+        && PLUGINS_CUR="$(agent_cat "$CLAUDE_CONFIG_DIR/settings.json")"
+    if PLUGINS_NEW="$(jq -s '
         .[0] as $cur | .[1] as $plug |
         $cur
         | .extraKnownMarketplaces = (($plug.extraKnownMarketplaces // {}) + ($cur.extraKnownMarketplaces // {}))
         | .enabledPlugins         = (($plug.enabledPlugins // {})         + ($cur.enabledPlugins // {}))
-    ' <(printf '%s\n' "$PLUGINS_CUR") "$BAKE_DIR/plugins/plugins.json" \
-        > "$PLUGINS_TMP" \
-        && mv -fT "$PLUGINS_TMP" "$CLAUDE_CONFIG_DIR/settings.json" \
-        || rm -f "$PLUGINS_TMP"
-    unset PLUGINS_TMP PLUGINS_CUR
-    chown -h "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
+    ' <(printf '%s\n' "$PLUGINS_CUR") "$BAKE_DIR/plugins/plugins.json")" && [[ -n "$PLUGINS_NEW" ]]; then
+        printf '%s\n' "$PLUGINS_NEW" | agent_put "$CLAUDE_CONFIG_DIR/settings.json" 600 || true
+    fi
+    unset PLUGINS_CUR PLUGINS_NEW
     log "Merged baked-in plugin marketplaces/plugins into settings.json"
 fi
 
@@ -33,12 +30,12 @@ fi
 # A declared marketplace replaces the settings.json entry of that name (adding, moving or
 # dropping #ref takes effect at the next start); for enabledPlugins an existing value wins.
 # The plugins are installed by the CLI, as the agent user, in §12b before any session starts.
+# The merge runs as the agent (as_agent): it reads and writes a file in the agent's config dir.
 kit_declared() { [[ -n "${CLAUDE_EXTRA_MARKETPLACES:-}" || -n "${CLAUDE_EXTRA_PLUGINS:-}" ]]; }
 if kit_declared; then
-    if /usr/local/bin/claude-kit settings "$CLAUDE_CONFIG_DIR/settings.json"; then
+    if as_agent /usr/local/bin/claude-kit settings "$CLAUDE_CONFIG_DIR/settings.json"; then
         log "Merged runtime plugin marketplaces/plugins into settings.json"
     else
         log "WARNING: claude-kit could not merge CLAUDE_EXTRA_MARKETPLACES / CLAUDE_EXTRA_PLUGINS into settings.json"
     fi
-    chown -h "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
 fi

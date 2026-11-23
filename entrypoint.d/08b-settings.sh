@@ -22,9 +22,11 @@ BASE_SETTINGS="$(jq -n --arg pm "$PERM_MODE" '{
 [[ -f "$BAKE_DIR/settings.json" ]] && \
     BASE_SETTINGS="$(jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") "$BAKE_DIR/settings.json")"
 EXISTING_SETTINGS='{}'
-# A symlink at settings.json is not the agent's settings: start from {}, never read through it.
+# A symlink at settings.json is not the agent's settings: start from {}. The agent reads the
+# file (agent_cat, §0a's): a root read by that name would follow a symlink swapped in
+# after this check and merge a root-only file into the agent's settings.
 [[ -s "$CLAUDE_CONFIG_DIR/settings.json" && ! -L "$CLAUDE_CONFIG_DIR/settings.json" ]] && \
-    EXISTING_SETTINGS="$(cat "$CLAUDE_CONFIG_DIR/settings.json")"
+    EXISTING_SETTINGS="$(agent_cat "$CLAUDE_CONFIG_DIR/settings.json")"
 # Self-heal 1: strip the Remote-Control-breaking telemetry kills from the final
 # settings (covers per-container volumes created by an older image). If any
 # were present, drop the cached GrowthBook flags + statsig cache so the next
@@ -38,21 +40,18 @@ EXISTING_SETTINGS='{}'
 # user settings win, so it would survive forever and fire an ENOENT at every
 # session start. Same class of residue, same fix, as the telemetry strip above.
 STALE_HOOK_CMD="/usr/local/bin/claude-md-fragments"
-# settings.json sits in the agent-owned config dir, so a session can replace it with a symlink
-# that survives a restart; a bare `> settings.json` as root would then truncate and write the
-# link's target. Build into a fresh temp in the same directory (mktemp makes it O_EXCL, so it
-# cannot be a planted symlink) and rename over settings.json, which replaces a symlink at that
-# name without ever following it. Same 0-byte-on-jq-failure behaviour as the old `>` (the type
-# guards below keep jq from failing), but never writing outside the config dir.
+# settings.json sits in the agent-owned config dir, so a session can replace it with a symlink,
+# or swap one in while root works there. Root only computes the merge; the agent writes the
+# result (agent_put: a fresh temp file renamed onto the name, which replaces a symlink there
+# without following it). The type guards below keep jq from failing; if it fails anyway, the
+# boot stops before anything is written, as it did.
 SETTINGS_DST="$CLAUDE_CONFIG_DIR/settings.json"
-SETTINGS_TMP="$(mktemp "$CLAUDE_CONFIG_DIR/.settings.json.XXXXXX")"
-jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") <(echo "$EXISTING_SETTINGS") \
+SETTINGS_NEW="$(jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") <(echo "$EXISTING_SETTINGS") \
     | jq 'if .env then .env |= (del(.DISABLE_TELEMETRY,.DO_NOT_TRACK,.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)) else . end' \
     | jq --arg stale "$STALE_HOOK_CMD" '
         # Type-guard every level: a hand-corrupted settings.json (.hooks a string,
         # a SessionStart group that is not an object, ...) must pass through untouched
-        # rather than error: a jq failure here would leave the `>` redirect below
-        # having truncated settings.json to 0 bytes.
+        # rather than error: a jq failure here would stop the boot.
         (if (.hooks | type) == "object" and (.hooks.SessionStart | type) == "array" then
              .hooks.SessionStart |= (
                  map(if type == "object" and ((.hooks | type) == "array")
@@ -67,26 +66,24 @@ jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") <(echo "$EXISTING_SETTINGS") \
               and ((.hooks.SessionStart | length) == 0)
            then del(.hooks.SessionStart) else . end)
         | (if (.hooks | type) == "object" and ((.hooks | length) == 0)
-           then del(.hooks) else . end)' \
-    > "$SETTINGS_TMP"
-# -T: rename onto settings.json's own name, never into a directory or link found there.
-mv -fT "$SETTINGS_TMP" "$SETTINGS_DST"
+           then del(.hooks) else . end)')"
+printf '%s\n' "$SETTINGS_NEW" | agent_put "$SETTINGS_DST" 600
+unset SETTINGS_NEW
 if echo "$EXISTING_SETTINGS" \
     | jq -e --arg stale "$STALE_HOOK_CMD" \
         '[.hooks.SessionStart // [] | .[] | .hooks // [] | .[] | select((.command // "") == $stale)] | length > 0' \
         >/dev/null 2>&1; then
     log "Migrated settings.json: removed the stale '$STALE_HOOK_CMD' SessionStart hook (CLAUDE.d fragment loader, since removed)"
 fi
-chown -h "$CLAUDE_UID:$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/settings.json"
 if echo "$EXISTING_SETTINGS" | jq -e '.env // {} | (.DISABLE_TELEMETRY // .DO_NOT_TRACK // .CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) != null' >/dev/null 2>&1; then
     log "Migrated settings.json: removed telemetry kills that block Remote Control; clearing stale feature-flag cache"
-    # .claude.json is in the same agent-owned dir: the same fresh-temp-and-rename rule.
-    if [[ -s "$CJSON" && ! -L "$CJSON" ]]; then
-        CJSON_TMP="$(mktemp "$CJSON.XXXXXX")"
-        jq 'del(.cachedGrowthBookFeatures,.cachedExperimentFeatures)' "$CJSON" > "$CJSON_TMP" \
-            && mv -fT "$CJSON_TMP" "$CJSON" && chown -h "$CLAUDE_UID:$CLAUDE_GID" "$CJSON" \
-            || rm -f "$CJSON_TMP"
-        unset CJSON_TMP
+    # .claude.json is in the same agent-owned dir: the agent reads and writes it, root only
+    # computes the change.
+    if [[ -s "$CJSON" && ! -L "$CJSON" ]] \
+       && CJSON_NEW="$(agent_cat "$CJSON" | jq 'del(.cachedGrowthBookFeatures,.cachedExperimentFeatures)')" \
+       && [[ -n "$CJSON_NEW" ]]; then
+        printf '%s\n' "$CJSON_NEW" | agent_put "$CJSON" 600 || true
     fi
+    unset CJSON_NEW
     rm -rf "$CLAUDE_CONFIG_DIR/statsig" 2>/dev/null || true
 fi

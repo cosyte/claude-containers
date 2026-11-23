@@ -9,4 +9,6 @@ mkdir -p "$CLAUDE_CONFIG_DIR" "$AUTH_DIR" "$HOSTKEY_DIR" "$WORKSPACE"
 mkdir -p "$CLAUDE_HOME/.ssh"
 own_tree "$CLAUDE_CONFIG_DIR" "$CLAUDE_HOME/.ssh"
 chown "$CLAUDE_UID:$CLAUDE_GID" "$WORKSPACE" 2>/dev/null || true
-chmod 700 "$CLAUDE_HOME/.ssh"
+# Its mode by the agent itself (as_agent): ~/.ssh is an entry in the agent's home, so a root
+# chmod by that name would follow a symlink swapped in after the check above.
+as_agent chmod 700 "$CLAUDE_HOME/.ssh"

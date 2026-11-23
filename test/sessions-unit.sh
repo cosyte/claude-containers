@@ -635,7 +635,8 @@ touch -d '1 hour ago' "$CF/.credentials.json"
 {
     echo 'set -euo pipefail'
     echo 'log() { echo "[entrypoint] $*"; }'
-    echo "AUTH_DIR='$AU' CLAUDE_CONFIG_DIR='$CF' CLAUDE_UID=$(id -u) CLAUDE_GID=$(id -g) CLAUDE_BIN_RE='^/fake/bin/claude\$'"
+    ep_agent_io; echo 'as_agent() { "$@"; }'   # §0a's helpers; one user here, so the agent is it
+    echo "AUTH_DIR='$AU' CLAUDE_CONFIG_DIR='$CF' CLAUDE_UID=$(id -u) CLAUDE_GID=$(id -g) CLAUDE_BIN_RE='^/fake/bin/claude\$' CREDS_SNAP_DIR='$TMPD/snap-sync'"
     printf '%s\n' "$SYNC"
     cat <<'EOS'
 cred() { printf '{"claudeAiOauth":{"accessToken":"%s","refreshToken":"r-%s"}}\n' "$1" "$1"; }
@@ -677,7 +678,7 @@ grep -q '^\[master-logged-out-other-account\] local=tok-mine master= ' <<<"$out"
 
 cred tok-A > "$AU/.credentials.json"; acct acct-A > "$AU/.claude.json"; touch -d '1 hour ago' "$AU/.credentials.json"
 cred tok-B > "$CF/.credentials.json"; acct acct-B > "$CF/.claude.json"; rm -f "${CF:?}/.credentials-account" "${CF:?}/.account-changed"
-out="$( { echo 'log() { echo "[entrypoint] $*"; }'; echo "AUTH_DIR='$AU' CLAUDE_CONFIG_DIR='$CF' CLAUDE_UID=$(id -u) CLAUDE_GID=$(id -g) CLAUDE_AUTH_FOLLOW=0"; printf '%s\n' "$SYNC"; echo 'reconcile_once || true'; } | bash 2>&1; echo "master=$(sed -E 's/.*"accessToken":"([^"]*)".*/\1/' "$AU/.credentials.json") switch=$([[ -e "$CF/.account-changed" ]] && echo yes || echo no)")"
+out="$( { echo 'log() { echo "[entrypoint] $*"; }'; ep_agent_io; echo 'as_agent() { "$@"; }'; echo "AUTH_DIR='$AU' CLAUDE_CONFIG_DIR='$CF' CLAUDE_UID=$(id -u) CLAUDE_GID=$(id -g) CLAUDE_AUTH_FOLLOW=0 CREDS_SNAP_DIR='$TMPD/snap-off'"; printf '%s\n' "$SYNC"; echo 'reconcile_once || true'; } | bash 2>&1; echo "master=$(sed -E 's/.*"accessToken":"([^"]*)".*/\1/' "$AU/.credentials.json") switch=$([[ -e "$CF/.account-changed" ]] && echo yes || echo no)")"
 [[ "$out" == *"account changes are NOT followed (CLAUDE_AUTH_FOLLOW=0)"* && "$out" == *"master=tok-B switch=no"* ]] \
     && ok "CLAUDE_AUTH_FOLLOW=0 turns it off: the old newest-wins sync, and the boot log says so" || bad "follow off: $out"
 
@@ -821,7 +822,8 @@ EPS="$TMPD/ep-accounts.sh"
 {
     echo 'set -euo pipefail'
     echo "log() { echo \"[entrypoint] \$*\" >> '$TMPD/ep-accounts.log'; }"
-    echo "AUTH_DIR='/auth-accounts/work' CLAUDE_CONFIG_DIR='$CFG' CLAUDE_UID=$(id -u) CLAUDE_GID=$(id -g) CLAUDE_BIN_RE='^/fake/bin/claude\$'"
+    ep_agent_io; echo 'as_agent() { "$@"; }'   # §0a's helpers; one user here, so the agent is it
+    echo "AUTH_DIR='/auth-accounts/work' CLAUDE_CONFIG_DIR='$CFG' CLAUDE_UID=$(id -u) CLAUDE_GID=$(id -g) CLAUDE_BIN_RE='^/fake/bin/claude\$' CREDS_SNAP_DIR='$TMPD/snap-accounts'"
     echo 'CLAUDE_ACCOUNTS=work,home,spare,nouuid; ACCOUNT_NAMES=(work home spare nouuid)'
     printf '%s\n' "$SYNC"
     sed 's/while sleep 2; do/while sleep 0.2; do/' "$(ep_section 6a)"

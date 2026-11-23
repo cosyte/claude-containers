@@ -16,15 +16,14 @@ if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
         [[ -d "/auth-accounts/$n" ]] || die "account '$n' listed in CLAUDE_ACCOUNTS has no volume mounted at /auth-accounts/$n: check claude-launch --accounts wiring"
     done
     mkdir -p "$CLAUDE_CONFIG_DIR"
+    # This runs before §2 hands the config dir over, and the agent writes in it below: its top first.
+    own_tree "$CLAUDE_CONFIG_DIR" -maxdepth 0
     ACTIVE_FILE="$CLAUDE_CONFIG_DIR/.active-account"
-    # The config dir is the agent's: write through a fresh temp file renamed onto the name itself
-    # (mv -T), never `>` onto a name that may be a symlink. 644: the usage watchdog reads it.
-    _write_active() {
-        local t; t="$(mktemp "$CLAUDE_CONFIG_DIR/.active-account.XXXXXX")" || return 1
-        { printf '%s\n' "$1" > "$t" && chmod 644 "$t" && mv -fT "$t" "$ACTIVE_FILE"; } || { rm -f "$t"; return 1; }
-    }
+    # The config dir is the agent's, so the agent reads and writes the file (agent_put, agent_cat,
+    # §0a's), never root by name. 644: the usage watchdog reads it.
+    _write_active() { printf '%s\n' "$1" | agent_put "$ACTIVE_FILE" 644; }
     [[ -s "$ACTIVE_FILE" && ! -L "$ACTIVE_FILE" ]] || _write_active "${ACCOUNT_NAMES[0]}"
-    ACTIVE_ACCOUNT="$(cat "$ACTIVE_FILE")"
+    ACTIVE_ACCOUNT="$(agent_cat "$ACTIVE_FILE")"
     case ",${CLAUDE_ACCOUNTS}," in
         *",${ACTIVE_ACCOUNT},"*) ;;
         *) log "WARNING: previously-active account '$ACTIVE_ACCOUNT' is no longer in CLAUDE_ACCOUNTS: falling back to '${ACCOUNT_NAMES[0]}'"

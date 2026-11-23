@@ -52,14 +52,19 @@
   handed to the agent user before the CLI runs. A `docker exec -u claude` starts with the
   system PATH: run an agent-installed tool through the session (`claude-attach`) or with
   `sh -c 'PATH=$CLAUDE_AGENT_PATH exec <tool>'`.
-- **Root's writes into the agent's directories.** The entrypoint runs as root and fills in
-  files in directories the agent owns (its home and the config volume), at boot and in its
-  background loops. Each such write is done as the agent, or goes through a fresh temp file
-  (`mktemp`) renamed onto the name itself (`mv -T`); root never writes, installs or chowns
-  through a symlink it finds there, and replaces one where its own file belongs. A temp file
-  for a root-owned destination is made in a root-owned directory, never in `TMPDIR`
-  (`/scratch`, which the agent owns). A new root-side write follows the same rules;
-  `test/unit.sh` checks the existing ones.
+- **Root's work in the agent's directories.** The entrypoint runs as root and fills in
+  files in directories the agent owns (its home, the config volume, the CLI's prefix), at
+  boot and in its background loops. Root never acts there by name: between any two of its
+  steps on a name (create, write, chown, chmod, read) a session can rename a symlink over
+  it, and root would follow it to any file in the container. So the agent does each read and
+  write there itself (`as_agent`, `agent_put`, `agent_cat` in `entrypoint.sh`), and the
+  kernel checks every path against the agent's own rights; root only computes the content
+  and hands it over. Where root keeps its own file (the shared credential master), its temp
+  file is created exclusively and never reopened by name. What root copies from, the image's
+  `/opt/claude-config`, is root's and read-only to the agent. A temp file for a root-owned
+  destination is made in a root-owned directory, never in `TMPDIR` (`/scratch`, which the
+  agent owns). A new root-side step follows the same rules; `test/agent-paths-unit.sh` and
+  `test/unit.sh` check them.
 - **Secret guard (on by default).** A fleet-wide git pre-commit hook
   (`CLAUDE_SECRET_GUARD=1`) blocks the autonomous agent from committing obvious
   secrets: `.env`, `*.pem`, `*.key`, `id_rsa`, files containing a `PRIVATE KEY`

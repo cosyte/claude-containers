@@ -68,6 +68,7 @@ rationale: the sections below.
   | File | Section |
   |---|---|
   | `00-retired-env.sh` | §0: warn about retired broker/Sysbox env |
+  | `00a-agent-io.sh` | §0a: `as_agent`, `agent_put`, `agent_cat`: the agent reads and writes its own files |
   | `00b-retired-controller.sh` | §0b: refuse the retired `CLAUDE_CONTROLLER` mode |
   | `01-auth.sh` | §1: refuse API-key auth; `make login`'s login mode |
   | `01b-accounts.sh` | §1b: multi-account mode, the active account |

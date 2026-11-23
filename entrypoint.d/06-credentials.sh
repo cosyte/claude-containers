@@ -16,10 +16,8 @@ if [[ ! -s "$AUTH_DIR/.credentials.json" ]]; then
     fi
 fi
 if [[ -s "$AUTH_DIR/.credentials.json" && ! -s "$CLAUDE_CONFIG_DIR/.credentials.json" ]]; then
-    # The config dir is the agent's: never install through a symlink at that name.
-    [[ -L "$CLAUDE_CONFIG_DIR/.credentials.json" ]] && rm -f "$CLAUDE_CONFIG_DIR/.credentials.json"
-    install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 \
-        "$AUTH_DIR/.credentials.json" "$CLAUDE_CONFIG_DIR/.credentials.json"
+    # The config dir is the agent's, so the agent writes its copy (agent_put, §0a's).
+    agent_put "$CLAUDE_CONFIG_DIR/.credentials.json" 600 < "$AUTH_DIR/.credentials.json"
 fi
 # Defense-in-depth: lock the SHARED fleet-wide credential master to root-only so
 # a prompt-injected agent can't read or even list it. The agent keeps its OWN
@@ -33,7 +31,9 @@ masters=("$AUTH_DIR")
 for d in "${masters[@]}"; do
     chown root:root "$d" 2>/dev/null || true
     chmod 700 "$d" 2>/dev/null || true
-    [[ -e "$d/.credentials.json" ]] && { chown root:root "$d/.credentials.json" 2>/dev/null || true; chmod 600 "$d/.credentials.json" 2>/dev/null || true; }
+    # A symlink at the master's name is never the master: left alone, its target untouched.
+    [[ -f "$d/.credentials.json" && ! -L "$d/.credentials.json" ]] \
+        && { chown -h root:root "$d/.credentials.json" 2>/dev/null || true; chmod 600 "$d/.credentials.json" 2>/dev/null || true; }
 done
 unset masters d
 
@@ -56,17 +56,37 @@ creds_have_token() {  # creds_have_token <file>  -> 0 if it holds a non-empty ac
 
 # Publish SRC over DST atomically: a unique tmp in DST's own dir (so a shared
 # /auth is never left with a half-written file, and no fixed tmp name can be
-# picked up by a concurrent container), then rename. Ownership follows DST: the
-# shared master stays root:600, the per-container copy claude:600.
+# picked up by a concurrent container), then rename onto DST's own name (mv -T).
+# Ownership follows DST: the shared master stays root:600, the per-container copy
+# claude:600. The per-container copy is in the agent's config dir, so the agent
+# writes it (agent_put); the master's source is a root-owned snapshot (local_snapshot
+# below), never a name in the agent's dir. Root's temp file there is created
+# exclusively (dd conv=excl opens no name that exists, a symlink included) with mode
+# 600 from the umask: root never acts on a name it did not just create. A copy
+# without a token is never published.
 publish_creds() {  # publish_creds <src> <dst>
     local src="$1" dst="$2" t
-    t="$(mktemp "$dst.XXXXXX")" || return 1
-    # mv -T: rename onto DST's own name, never into a directory or symlink found there.
     if [[ "$dst" == "$CLAUDE_CONFIG_DIR/.credentials.json" ]]; then
-        { install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 "$src" "$t" && mv -fT "$t" "$dst"; } || { rm -f "$t"; return 1; }
-    else
-        { install -m 600 "$src" "$t" && mv -fT "$t" "$dst"; } || { rm -f "$t"; return 1; }
+        agent_put "$dst" 600 < "$src"
+        return
     fi
+    t="$(mktemp -u "$dst.XXXXXX")" || return 1
+    if ( umask 077; dd if="$src" of="$t" conv=excl status=none 2>/dev/null ) \
+       && creds_have_token "$t" && mv -fT "$t" "$dst"; then
+        return 0
+    fi
+    rm -f "$t"
+    return 1
+}
+# The agent's own copy, read BY THE AGENT into root's own file, its mtime kept, once per
+# pass: every decision below is made on the snapshot, never on a name in the agent's dir.
+CREDS_SNAP_DIR="${CREDS_SNAP_DIR:-/run/claude-creds}"
+{ mkdir -p "$CREDS_SNAP_DIR" && chmod 700 "$CREDS_SNAP_DIR"; } 2>/dev/null || true
+local_snapshot() {  # local_snapshot <agent's file> <snapshot file>: empty when there is none
+    local m
+    agent_cat "$1" > "$2" 2>/dev/null || : > "$2"
+    m="$(as_agent stat -c %.9Y -- "$1" 2>/dev/null)" && touch -d "@$m" "$2" 2>/dev/null
+    return 0
 }
 
 # Which ACCOUNT each credential belongs to. The shared master's account is in the .claude.json
@@ -87,7 +107,7 @@ master_dir() {
     if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
         # .active-account sits in the agent's config dir: use it only when it names a configured
         # account, as the account-switch listener (§6a) requires of a request.
-        local a; a="$(cat "$CLAUDE_CONFIG_DIR/.active-account" 2>/dev/null || true)"
+        local a; a="$(agent_cat "$CLAUDE_CONFIG_DIR/.active-account" 2>/dev/null || true)"
         case "$a" in
             ""|*,*) a="${ACCOUNT_NAMES[0]}" ;;
             *) case ",${CLAUDE_ACCOUNTS}," in *",${a},"*) ;; *) a="${ACCOUNT_NAMES[0]}" ;; esac ;;
@@ -100,38 +120,29 @@ master_dir() {
 account_of() { jq -r '.oauthAccount.accountUuid // empty' "$1/.claude.json" 2>/dev/null || true; }
 email_of()   { jq -r '.oauthAccount.emailAddress // empty' "$1/.claude.json" 2>/dev/null || true; }
 local_account() {  # the account the container's own credential came from
-    local a=""; [[ -L "$ACCT_FILE" ]] || a="$(cat "$ACCT_FILE" 2>/dev/null || true)"
-    [[ -n "$a" ]] || a="$(account_of "$CLAUDE_CONFIG_DIR")"
+    local a=""; [[ -L "$ACCT_FILE" ]] || a="$(agent_cat "$ACCT_FILE" 2>/dev/null || true)"
+    [[ -n "$a" ]] || a="$(agent_cat "$CLAUDE_CONFIG_DIR/.claude.json" 2>/dev/null \
+        | jq -r '.oauthAccount.accountUuid // empty' 2>/dev/null || true)"
     printf '%s' "$a"
 }
-# These write into the agent's config dir while sessions run, so each goes through a fresh
-# temp file (mktemp: a new name, never an existing one) renamed onto the target's own name
-# (mv -T); a fixed or guessable temp name, or a bare `>`, could be a symlink there.
+# These write into the agent's config dir while sessions run, so the agent does each read and
+# write there (agent_cat, agent_put): root never creates, writes, chowns or chmods a name in
+# that dir, where a session can swap a symlink in between any two of its steps.
 set_local_account() {
-    local t; t="$(mktemp "$ACCT_FILE.XXXXXX" 2>/dev/null)" || return 0
-    printf '%s\n' "$1" > "$t" || { rm -f "$t"; return 0; }
-    chown "$CLAUDE_UID:$CLAUDE_GID" "$t" 2>/dev/null || true
-    chmod 644 "$t" 2>/dev/null || true
-    mv -fT "$t" "$ACCT_FILE" || rm -f "$t"
+    printf '%s\n' "$1" | agent_put "$ACCT_FILE" 644 2>/dev/null || true
 }
 refresh_cached_account() {  # the container's .claude.json oauthAccount := the master's
-    local cj="$CLAUDE_CONFIG_DIR/.claude.json" acct t
+    local cj="$CLAUDE_CONFIG_DIR/.claude.json" acct cur
     acct="$(jq -c '.oauthAccount // empty' "$1/.claude.json" 2>/dev/null)" || return 0
     [[ -n "$acct" && -s "$cj" && ! -L "$cj" ]] || return 0
-    t="$(mktemp "$cj.acct.XXXXXX" 2>/dev/null)" || return 0
-    if jq --argjson a "$acct" '.oauthAccount = $a' "$cj" > "$t" 2>/dev/null && [[ -s "$t" ]]; then
-        chown "$CLAUDE_UID:$CLAUDE_GID" "$t" 2>/dev/null || true
-        mv -fT "$t" "$cj" || rm -f "$t"
-    else
-        rm -f "$t"
-    fi
+    cur="$(agent_cat "$cj" 2>/dev/null)" || return 0
+    cur="$(jq --argjson a "$acct" '.oauthAccount = $a' <<<"$cur" 2>/dev/null)" || return 0
+    [[ -n "$cur" ]] || return 0
+    printf '%s\n' "$cur" | agent_put "$cj" 600 2>/dev/null || true
     return 0
 }
 write_switch_file() {  # write_switch_file <epoch> <account>: the request claude-sessions acts on
-    local t; t="$(mktemp "$SWITCH_FILE.XXXXXX" 2>/dev/null)" || return 0
-    printf '%s %s\n' "$1" "$2" > "$t" || { rm -f "$t"; return 0; }
-    chown "$CLAUDE_UID:$CLAUDE_GID" "$t" 2>/dev/null || true
-    mv -fT "$t" "$SWITCH_FILE" || rm -f "$t"
+    printf '%s %s\n' "$1" "$2" | agent_put "$SWITCH_FILE" 600 2>/dev/null || true
 }
 # A Claude process that started before the switch (so it still runs the previous account).
 # Exact, not `ps` elapsed seconds: each process's start comes from /proc (boot time + starttime
@@ -171,30 +182,36 @@ reconcile_once() {
         log "Auth account        : the shared credential is now $(email_of "$md") (${m:0:8}…, was ${l:0:8}…); taken over, and each session restarts onto it at its next idle moment"
         return 0
     fi
-    if (( SWITCH_AT > 0 )); then
-        if old_claude_running "$SWITCH_AT"; then
-            # Sessions still on the old account: the master wins, nothing is ever pushed up.
-            creds_have_token "$a" && ! cmp -s "$a" "$b" && publish_creds "$a" "$b"
-            return 0
+    # The agent's copy, read by the agent into root's own snapshot (local_snapshot): every
+    # comparison below is made on that, and a copy pushed up is the snapshot, never the name.
+    local bs
+    bs="$(mktemp "$CREDS_SNAP_DIR/local.XXXXXX" 2>/dev/null)" || return 0
+    local_snapshot "$b" "$bs"
+    if (( SWITCH_AT > 0 )) && old_claude_running "$SWITCH_AT"; then
+        # Sessions still on the old account: the master wins, nothing is ever pushed up.
+        creds_have_token "$a" && ! cmp -s "$a" "$bs" && publish_creds "$a" "$b"
+    else
+        if (( SWITCH_AT > 0 )); then
+            SWITCH_AT=0
+            refresh_cached_account "$md"
+            log "Auth account        : every Claude process now runs on $(email_of "$md")"
         fi
-        SWITCH_AT=0
-        refresh_cached_account "$md"
-        log "Auth account        : every Claude process now runs on $(email_of "$md")"
+        if creds_have_token "$bs" && ! creds_have_token "$a"; then
+            # master absent/logged-out, local good -> seed or repair the master, but only with a
+            # credential of the master's own account (or when the master names none)
+            [[ -z "$m" || "$m" == "$l" ]] && publish_creds "$bs" "$a"
+        elif creds_have_token "$a" && ! creds_have_token "$bs"; then
+            # local absent/logged-out, master good -> repair the local copy
+            publish_creds "$a" "$b"
+        elif creds_have_token "$bs" && [[ "$bs" -nt "$a" ]] && ! cmp -s "$bs" "$a"; then
+            # both good, local refreshed more recently -> push the refresh up (same account only)
+            [[ -z "$m" || "$m" == "$l" ]] && publish_creds "$bs" "$a"
+        elif creds_have_token "$a" && [[ "$a" -nt "$bs" ]] && ! cmp -s "$a" "$bs"; then
+            # both good, master refreshed more recently -> pull the refresh down
+            publish_creds "$a" "$b"
+        fi
     fi
-    if creds_have_token "$b" && ! creds_have_token "$a"; then
-        # master absent/logged-out, local good -> seed or repair the master, but only with a
-        # credential of the master's own account (or when the master names none)
-        [[ -z "$m" || "$m" == "$l" ]] && publish_creds "$b" "$a"
-    elif creds_have_token "$a" && ! creds_have_token "$b"; then
-        # local absent/logged-out, master good -> repair the local copy
-        publish_creds "$a" "$b"
-    elif creds_have_token "$b" && [[ "$b" -nt "$a" ]] && ! cmp -s "$b" "$a"; then
-        # both good, local refreshed more recently -> push the refresh up (same account only)
-        [[ -z "$m" || "$m" == "$l" ]] && publish_creds "$b" "$a"
-    elif creds_have_token "$a" && [[ "$a" -nt "$b" ]] && ! cmp -s "$a" "$b"; then
-        # both good, master refreshed more recently -> pull the refresh down
-        publish_creds "$a" "$b"
-    fi
+    rm -f "$bs"
     # both tokenless (a real refresh-token expiry): nothing to do, the loop
     # never invents a token; recovery is `make login` on the host.
     return 0

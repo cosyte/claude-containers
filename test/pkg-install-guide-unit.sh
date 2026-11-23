@@ -237,9 +237,8 @@ bash -n "$ENTRY" && ok "entrypoint.sh parses (bash -n)" || bad "entrypoint.sh ha
 
 # Extract §8a so the assertion is scoped and cannot be masked by a lookalike elsewhere.
 SEC8A="$(cat "$(ep_section 8a)")"
-if grep -qF 'BAKE_DIR/CLAUDE.md' <<<"$SEC8A" \
-   && grep -qF 'install -o' <<<"$SEC8A"; then
-    ok "§8a installs BAKE_DIR/CLAUDE.md (install -o)"
+if grep -qF 'agent_put "$gmd" 644 < "$BAKE_DIR/CLAUDE.md"' <<<"$SEC8A"; then
+    ok "§8a installs BAKE_DIR/CLAUDE.md (as the agent, agent_put)"
 else
     bad "§8a must install BAKE_DIR/CLAUDE.md"
 fi
