@@ -650,8 +650,28 @@ check "lockdown either enforces default-deny or fails OPEN, never half-applied" 
 if eg4_policy="$(docker exec "$EGCN" iptables -S OUTPUT 2>/dev/null || true)"; [[ "${eg4_policy%%$'\n'*}" == *DROP* ]]; then
     check "default-deny blocks a non-allowlisted IP (1.1.1.1:443)" \
         '! docker exec "$EGCN" gosu claude curl -sS -m8 -o /dev/null https://1.1.1.1 2>/dev/null'
-    check "default-deny still permits an allowlisted host (api.github.com)" \
-        'c=$(docker exec "$EGCN" gosu claude curl -sS -m12 -o /dev/null -w "%{http_code}" https://api.github.com 2>/dev/null); [ -n "$c" ] && [ "$c" != 000 ]'
+    # This container runs without the refresh daemon (CLAUDE_EGRESS_REFRESH_INTERVAL unset), so
+    # each address is pinned once, at boot. When the boot pass could not fetch GitHub's published
+    # ranges, api.github.com is pinned by the one DNS answer it got then, and that name's answer
+    # rotates: a later lookup can land on an address the ruleset does not hold, and curl gets no
+    # answer (000). So a miss runs one refresh pass, the step that follows a moved address in a
+    # session, and tries again, twice at most; a last miss prints the name's current answer and
+    # the firewall's log, so the cause is in the job's output.
+    eg_github() { docker exec "$EGCN" gosu claude curl -sS -m12 -o /dev/null -w "%{http_code}" https://api.github.com 2>/dev/null || true; }
+    eg_github_reach() {
+        local c i
+        c="$(eg_github)"
+        for i in 1 2; do
+            [[ -n "$c" && "$c" != 000 ]] && return 0
+            docker exec "$EGCN" claude-egress-firewall --refresh-once >/dev/null 2>&1 || true
+            c="$(eg_github)"
+        done
+        [[ -n "$c" && "$c" != 000 ]] && return 0
+        echo "    api.github.com resolves to: $(docker exec "$EGCN" getent ahostsv4 api.github.com 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"
+        docker logs "$EGCN" 2>&1 | grep -iE 'egress|github|allowlist|refresh' | tail -20 | sed 's/^/    /'
+        return 1
+    }
+    check "default-deny still permits an allowlisted host (api.github.com)" 'eg_github_reach'
 else
     echo "  SKIP  default-deny allow/deny checks (lockdown failed open, no network in test env)"
 fi
