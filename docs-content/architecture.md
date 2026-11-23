@@ -75,6 +75,7 @@ rationale: the sections below.
   | File | Section |
   |---|---|
   | `00-retired-env.sh` | §0: warn about retired broker/Sysbox env |
+  | `00a-agent-io.sh` | §0a: `as_agent`, `agent_put`, `agent_cat`: the agent reads and writes its own files |
   | `00b-retired-controller.sh` | §0b: refuse the retired `CLAUDE_CONTROLLER` mode |
   | `01-auth.sh` | §1: refuse API-key auth; `make login`'s login mode |
   | `01b-accounts.sh` | §1b: multi-account mode, the active account |
@@ -550,7 +551,7 @@ note describes either.
 | # | Criterion | How it's met / verify |
 |---|---|---|
 | 1 | `make build` works (amd64+arm64) | `make build` (host arch, loaded); `make build-all`/`make push` for both arches via buildx |
-| 2 | `make login` persists creds | Login-mode entrypoint runs `claude auth login --claudeai` with `CLAUDE_CONFIG_DIR=/auth`; creds land in `claude-auth` |
+| 2 | `make login` persists creds | Login-mode entrypoint locks the `claude-auth` volume (root's, mode 700), runs `claude auth login --claudeai` as the agent in a private directory, and moves the credential into the volume, root's, mode 600 |
 | 3 | launch clones + starts + prints | `claude-launch myproj --repo …`; entrypoint clones, launches with flags; connect info printed |
 | 4 | SSH → live tmux | `bash_profile` `exec tmux attach -t claude`; session started by entrypoint before sshd accepts logins |
 | 5 | Appears in app, named, green | `--remote-control "<project>"`, outbound HTTPS; name = project name |

@@ -54,12 +54,12 @@ if [[ -s "$GITKEY_SRC" ]]; then
 fi
 install -m 644 <(if [[ -n "$gitkey_pub" ]]; then printf '%s\n' "$gitkey_pub"; fi) "$REVOKED_KEYS"
 if [[ -s "$AUTHKEYS_SRC" ]]; then
-    # Unlink first, never follow: a symlink the agent may have left at authorized_keys would
-    # otherwise let the root install write the owner's login keys through it to the target.
-    rm -f "$AUTHKEYS_DST"
-    install -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 600 "$AUTHKEYS_SRC" "$AUTHKEYS_DST"
+    # ~/.ssh is the agent's, so the agent writes its copy (agent_put, §0a's): a root
+    # install by that name would follow a symlink swapped in before its chmod. Root reads only
+    # the root-only mounted file, never the copy.
+    agent_put "$AUTHKEYS_DST" 600 < "$AUTHKEYS_SRC"
     # Fingerprints, as sshd reads the file: options, cert-authority, every key-type name.
-    authkeys_fps="$(ssh-keygen -lf "$AUTHKEYS_DST" 2>/dev/null | awk '{ print $2 }' || true)"
+    authkeys_fps="$(ssh-keygen -lf "$AUTHKEYS_SRC" 2>/dev/null | awk '{ print $2 }' || true)"
     authkeys_n="$(grep -c . <<<"$authkeys_fps" || true)"
     authkeys_git=0
     [[ -z "$gitkey_fp" ]] || authkeys_git="$(grep -cxF -- "$gitkey_fp" <<<"$authkeys_fps" || true)"

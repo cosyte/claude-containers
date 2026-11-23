@@ -11,24 +11,26 @@ _skill_usable() {  # _skill_usable <name>
 }
 if [[ -d "$BAKE_DIR/skills" ]]; then
     # The config dir is the agent's: a symlink where the skills dir goes is replaced, and a
-    # skill name that is a symlink is left alone, never copied into or removed through.
-    [[ -L "$CLAUDE_CONFIG_DIR/skills" ]] && rm -f "$CLAUDE_CONFIG_DIR/skills"
-    install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" "$CLAUDE_CONFIG_DIR/skills"
+    # skill name that is a symlink is left alone, never copied into or removed through. The
+    # agent makes the directory, compares, copies and removes (as_agent): root never reads,
+    # writes, chowns or removes by a name in its dir (a root `install -d -o` follows a symlink
+    # put at the name, and a root rm by a path through skills/ follows one swapped in there).
+    [[ -L "$CLAUDE_CONFIG_DIR/skills" ]] && as_agent rm -f "$CLAUDE_CONFIG_DIR/skills"
+    as_agent mkdir -p "$CLAUDE_CONFIG_DIR/skills"
     for d in "$BAKE_DIR"/skills/*/; do
         [[ -f "$d/SKILL.md" ]] || continue
         name="$(basename "$d")"
         t="$CLAUDE_CONFIG_DIR/skills/$name"
         [[ -L "$t" ]] && continue
         if ! _skill_usable "$name"; then
-            if [[ -d "$t" ]] && diff -rq "$d" "$t" >/dev/null 2>&1; then
-                rm -rf "$t"
+            if [[ -d "$t" ]] && as_agent diff -rq "$d" "$t" >/dev/null 2>&1; then
+                as_agent rm -rf "$t"
                 log "Skill $name: removed, this container lacks what it needs"
             fi
             continue
         fi
         if [[ ! -d "$t" ]]; then
-            cp -a "$d" "$t"
-            chown -R "$CLAUDE_UID:$CLAUDE_GID" "$t"
+            as_agent cp -R --preserve=mode,timestamps "$d" "$t"
         fi
     done
     log "Installed baked-in skills"

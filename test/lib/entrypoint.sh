@@ -8,6 +8,10 @@
 #   ep_order         the section numbers the loader announces ("§<n>"), in the order it sources
 #                    them, space-separated: what test/smoke.sh expects in the boot log, read
 #                    from entrypoint.d/ so a new section never needs a hand-kept list
+#   ep_agent_io      §0a's functions (as_agent, agent_put, agent_cat, lock_master, root_put, with_master_lock), as text to eval: what a
+#                    section run in a sandbox needs to read and write the agent's files. Its
+#                    as_agent calls gosu: a suite with no gosu stub on PATH defines its own
+#                    as_agent after the eval (`as_agent() { "$@"; }`, one user, no root)
 EP_LOADER="$REPO_ROOT/entrypoint.sh"
 EP_D="$REPO_ROOT/entrypoint.d"
 
@@ -39,4 +43,8 @@ ep_order() {
         _ep_nums+=("${n#0}")
     done < <(printf '%s\n' "$EP_D"/[0-9]*.sh | LC_ALL=C sort)
     printf '%s\n' "${_ep_nums[*]}"
+}
+
+ep_agent_io() {
+    awk '/^(as_agent|agent_put|agent_cat|lock_master|root_put|with_master_lock)\(\) \{/ { f = 1 } f { print } f && /\}$/ && !/^ / { f = 0 }' "$(ep_section 0a)"
 }

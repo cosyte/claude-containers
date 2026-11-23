@@ -21,22 +21,23 @@
 # to do here".
 CJSON="$CLAUDE_CONFIG_DIR/.claude.json"
 # The config dir is the agent's: a symlink at .claude.json is not one of its files, so it is
-# replaced, and the merge below goes through a fresh temp file renamed onto the name (mv -T).
-[[ -L "$CJSON" ]] && rm -f "$CJSON"
-if [[ ! -s "$CJSON" ]]; then
-    CJSON_TMP="$(mktemp "$CJSON.XXXXXX")"
-    echo '{}' > "$CJSON_TMP" && mv -fT "$CJSON_TMP" "$CJSON"
-fi
+# replaced. The agent reads and writes the file itself (agent_cat, agent_put, §0a's), and
+# root only computes the merge: a root read or write by that name would follow a symlink the
+# agent swapped in after the check, copying a root-only file into the agent's.
+[[ -L "$CJSON" ]] && as_agent rm -f "$CJSON"
+[[ -s "$CJSON" ]] || echo '{}' | agent_put "$CJSON" 600
+CJSON_CUR="$(agent_cat "$CJSON" 2>/dev/null || true)"
 OAUTH_ACCOUNT='{}'
 [[ -s "$AUTH_DIR/.claude.json" ]] && \
     OAUTH_ACCOUNT="$(jq -c '.oauthAccount // {}' "$AUTH_DIR/.claude.json" 2>/dev/null || echo '{}')"
-CACHED_UUID="$(jq -r '.oauthAccount.accountUuid // empty' "$CJSON" 2>/dev/null || true)"
-FRESH_UUID="$(jq -r '.accountUuid // empty' <<<"$OAUTH_ACCOUNT" 2>/dev/null || true)"
+# Pipes, never a here-string: bash keeps a big one in a temp file in TMPDIR (§0a).
+CACHED_UUID="$(printf '%s\n' "$CJSON_CUR" | jq -r '.oauthAccount.accountUuid // empty' 2>/dev/null || true)"
+FRESH_UUID="$(printf '%s\n' "$OAUTH_ACCOUNT" | jq -r '.accountUuid // empty' 2>/dev/null || true)"
 if [[ -n "$FRESH_UUID" && -n "$CACHED_UUID" && "$FRESH_UUID" != "$CACHED_UUID" ]]; then
     log "Cached account       : SELF-HEALED (was accountUuid ${CACHED_UUID:0:8}…, mounted auth is now ${FRESH_UUID:0:8}…): refreshing the cached identity to match"
 fi
-CJSON_TMP="$(mktemp "$CJSON.XXXXXX")"
-jq --argjson oauth "$OAUTH_ACCOUNT" \
+# A file that is not JSON is left as it is: jq fails, nothing is written.
+if CJSON_NEW="$(printf '%s\n' "$CJSON_CUR" | jq --argjson oauth "$OAUTH_ACCOUNT" \
    --arg cached_uuid "$CACHED_UUID" --arg fresh_uuid "$FRESH_UUID" '
     .hasCompletedOnboarding = (.hasCompletedOnboarding // true)
   | .oauthAccount = (
@@ -51,6 +52,8 @@ jq --argjson oauth "$OAUTH_ACCOUNT" \
         hasClaudeMdExternalIncludesApproved: true,
         hasClaudeMdExternalIncludesWarningShown: true
     })
-' "$CJSON" > "$CJSON_TMP" && mv -fT "$CJSON_TMP" "$CJSON" || rm -f "$CJSON_TMP"
-unset CJSON_TMP
-chown -h "$CLAUDE_UID:$CLAUDE_GID" "$CJSON"
+'
+)" && [[ -n "$CJSON_NEW" ]]; then
+    printf '%s\n' "$CJSON_NEW" | agent_put "$CJSON" 600 || true
+fi
+unset CJSON_CUR CJSON_NEW

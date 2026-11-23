@@ -50,8 +50,10 @@ gosu "$CLAUDE_USER" tmux has-session -t "$SESSION" >/dev/null 2>&1 \
 # The RC bridge (v2 SSE transport) logs a terminal give-up as "recovery
 # exhausted after …" / notifyBridgeFailed, and a (re)connect as "v2 transport
 # connected". Unhealthy only when the latest decisive event is a give-up.
+# The log is the agent's (claude-session writes it, in /tmp): read it as the agent, never as
+# root by a name the agent can point anywhere.
 if [[ -n "$LOG" && -s "$LOG" ]]; then
-    last="$(tail -n 800 "$LOG" 2>/dev/null \
+    last="$(gosu "$CLAUDE_USER" tail -n 800 -- "$LOG" 2>/dev/null \
         | grep -aoE 'v2 transport connected|recovery exhausted after|notifyBridgeFailed' \
         | tail -n1)"
     case "$last" in

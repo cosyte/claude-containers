@@ -19,12 +19,14 @@ if [[ -n "${GH_TOKEN:-}" ]]; then
             && tmp="$(mktemp "$GH_CHECK_FILE.XXXXXX")" && printf '%s\n' "$out" > "$tmp" \
             && chmod 644 "$tmp" && mv -f "$tmp" "$GH_CHECK_FILE" \
             || log "WARNING: could not write $GH_CHECK_FILE"
-        while IFS= read -r line; do
+        # A pipe, never a here-string: the check's output is the agent's, and bash keeps a big
+        # here-string in a temp file in TMPDIR, the agent's /scratch (§0a).
+        printf '%s\n' "$out" | while IFS= read -r line; do
             [[ "$line" =~ \ NO ]] && log "WARNING: GH_TOKEN is missing a permission: $line (docs/github-token.md)"
             [[ "$line" == "github token: scopes FAIL"* ]] && log "ERROR: GH_TOKEN holds a scope a session must never have: $line"
             [[ "$line" == "github: not probed: "* || "$line" == "github: CLAUDE_GH_CHECK_MAX_REPOS="* ]] \
                 && log "WARNING: $line (docs/github-token.md)"
-        done <<<"$out"
+        done || true
         exit 0
     ) &
 else

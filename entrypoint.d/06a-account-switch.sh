@@ -5,9 +5,9 @@
 # /auth-accounts/<name> is root:700 / root:600, same lockdown as the
 # single-account master in §6): it requests a swap here instead. Runs as
 # root specifically so it CAN read every account, unlike the watchdog.
-# Request/done files live inside $CLAUDE_CONFIG_DIR: root can read/write there
-# regardless of its claude:700 ownership, so no separate shared directory or
-# group permissions are needed.
+# Request/done files live inside $CLAUDE_CONFIG_DIR, the agent's: root reads a request
+# without following a link, and the agent itself writes each answer (agent_put), so no
+# separate shared directory or group permissions are needed.
 # Two requests, each through its own pair of files so neither answer meets the other's:
 #   .account-switch-request  the usage watchdog's rotation: the credential is published here
 #                            and the watchdog respawns its sessions itself.
@@ -28,14 +28,12 @@ account_switch_listener() {
     local use_done_file="$CLAUDE_CONFIG_DIR/.account-use-done"
     local names=() req uuid
     IFS=',' read -ra names <<< "$CLAUDE_ACCOUNTS"
-    # Both files this writes sit in the agent's config dir, so each goes through a fresh temp
-    # file renamed onto the target's own name (mv -T), never a fixed temp name and never into
-    # whatever the target points at. 644: the watchdog reads them.
+    # Both files this writes sit in the agent's config dir, so the agent writes them (agent_put,
+    # §0a's: a fresh temp file renamed onto the target's own name). Root never creates,
+    # writes or chmods a name there: a session can swap a symlink in between any two of those
+    # steps, and root would follow it. 644: the watchdog reads them.
     _switch_write() {  # _switch_write <dst> <text>
-        local t; t="$(mktemp "$1.XXXXXX" 2>/dev/null)" || return 1
-        { printf '%s\n' "$2" > "$t" && chmod 644 "$t" && mv -fT "$t" "$1"; } 2>/dev/null && return 0
-        rm -f "$t" 2>/dev/null
-        return 1
+        printf '%s\n' "$2" | agent_put "$1" 644 2>/dev/null
     }
     _switch_answer() {  # _switch_answer <answer file> <text>
         _switch_write "$1" "$2" && return 0
@@ -43,19 +41,21 @@ account_switch_listener() {
         return 0
     }
     # A request is a file the agent wrote, so it may be anything: a symlink to a root-only file,
-    # a FIFO, a huge file, a directory. Root opens it without following a symlink (nofollow, also
-    # when one is swapped in after the check) and without waiting on a FIFO (nonblock), reads at
-    # most 64 bytes in one read, keeps its first line, and never repeats what it read in an answer
-    # unless it names a configured account. A directory there is left alone and never answered.
+    # a FIFO, a huge file, a directory. The agent reads it (as_agent: the kernel checks the path,
+    # the config dir included, against the agent's rights), without following a symlink
+    # (nofollow, also when one is swapped in after the check) and without waiting on a FIFO
+    # (nonblock), at most 64 bytes in one read; root keeps its first line, and never repeats what
+    # it read in an answer unless it names a configured account. A directory there is left alone
+    # and never answered.
     _switch_pending() {  # _switch_pending <request file>: there is a request to read
         [[ -L "$1" ]] || [[ -f "$1" && -s "$1" ]]
     }
     _switch_read() {  # _switch_read <request file>: prints the name asked for; the file is removed
         local r=""
         if [[ -f "$1" && ! -L "$1" ]]; then
-            r="$(timeout 2 dd if="$1" iflag=nofollow,nonblock bs=64 count=1 status=none 2>/dev/null | head -n 1)"
+            r="$(as_agent timeout 2 dd if="$1" iflag=nofollow,nonblock bs=64 count=1 status=none 2>/dev/null | head -n 1)"
         fi
-        rm -f -- "$1" 2>/dev/null
+        as_agent rm -f -- "$1" 2>/dev/null
         printf '%s' "$r"
     }
     # Validate against CLAUDE_ACCOUNTS before touching any path: an unvalidated name
@@ -68,6 +68,8 @@ account_switch_listener() {
     while sleep 2; do
         if _switch_pending "$req_file"; then
             req="$(_switch_read "$req_file")"
+            # A configured account's master is locked before root reads it (§0a's lock_master).
+            _is_account "$req" && lock_master "/auth-accounts/$req"
             if ! _is_account "$req"; then
                 _switch_answer "$done_file" "ERROR:unknown-account"
             elif ! creds_have_token "/auth-accounts/$req/.credentials.json"; then
@@ -90,6 +92,7 @@ account_switch_listener() {
             # account's refreshes never pushed up meanwhile). So it is refused wherever that sync
             # would not follow: CLAUDE_AUTH_FOLLOW off, or no account recorded beside the credential.
             req="$(_switch_read "$use_req_file")"
+            _is_account "$req" && lock_master "/auth-accounts/$req"
             uuid=""
             if ! _is_account "$req"; then
                 _switch_answer "$use_done_file" "ERROR:unknown-account"

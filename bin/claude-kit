@@ -109,9 +109,10 @@ cmd_settings() {
     [[ -n "$file" ]] || die "usage: claude-kit settings FILE"
     parse; report_errs
     declared_p || return 0
-    # Root runs this (entrypoint §8c) on a file in the agent's config dir: read what is there,
-    # then write through a fresh temp file renamed onto the name itself (mv -T), never `>` onto
-    # a name that may be a symlink. A symlink there is not the agent's settings: start from {}.
+    # The entrypoint runs this as the agent (§8c) on a file in the agent's config dir: read what
+    # is there, then write through a fresh temp file renamed onto the name itself (mv -T), never
+    # `>` onto a name that may be a symlink. A symlink there is not the agent's settings: start
+    # from {}.
     local cur='{}' tmp
     [[ -s "$file" && ! -L "$file" ]] && cur="$(cat "$file")"
     local mkt='{}' pin='{}' plg='{}' i p

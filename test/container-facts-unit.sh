@@ -19,6 +19,9 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=test/lib/entrypoint.sh
 source "$REPO_ROOT/test/lib/entrypoint.sh"
+# §0a's real agent_put and agent_cat, for the sections run in a sandbox below. One user and no
+# root here, so the agent is this user: as_agent runs the command as it is.
+eval "$(ep_agent_io)"; as_agent() { "$@"; }
 ENTRY="$REPO_ROOT/entrypoint.sh"
 FACTS="$REPO_ROOT/bin/claude-container-facts"
 TMPD="$(mktemp -d)"

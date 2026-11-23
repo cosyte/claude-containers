@@ -34,7 +34,8 @@ down in every container (#36). Treat a change to the `Dockerfile`, `entrypoint.s
 
 - Public repo: placeholder names only (`me/x`, `myproj`, `acme/*`, "the owner"); never a person,
   a private repo, a host, an email, a LAN address or an internal work-item ID (#39, #41, #42).
-- Root trusts nothing the agent can write: in agent-owned paths it writes a fresh `mktemp` file
-  and renames it in with `mv -T`, never through a symlink, on a system-only PATH (#118, #120, #122).
+- Root trusts nothing the agent can write, on a system-only PATH (#118, #120, #122): it never
+  acts by name in an agent-owned path (no write, chown, chmod or read there). The agent does it
+  (`as_agent`, `agent_put`, `agent_cat` in `entrypoint.sh`), and what root copies from is root's.
 - A new launcher flag or `CLAUDE_*`/`GIT_*` variable gets its docs in the same PR;
   `test/docs-unit.sh` fails without them (#93, after the docs had drifted from the code).
