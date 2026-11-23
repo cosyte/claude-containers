@@ -49,6 +49,10 @@
 #                                          (a new login in the shared credential is followed
 #                                          automatically: each session moves at its next idle
 #                                          moment; --now moves the busy ones too)
+#   claude-sessions account --use NAME [--now]
+#                                          multi-account mode (CLAUDE_ACCOUNTS): make NAME the
+#                                          active account; refused for a name not in the list or
+#                                          without a valid token. The sessions then move as above
 #   claude-sessions check SPEC             validate a CLAUDE_SESSIONS value (works anywhere)
 #   claude-sessions -C PROJECT CMD ...     from the host: run CMD in container claude-PROJECT
 # Internal (the entrypoint, claude-session, the healthcheck): prepare, boot [--no-reconcile],
@@ -667,18 +671,36 @@ account_switch_pass() {
     return 0
 }
 
-# account [--now]: the Claude account this container uses, and how far a switch has got.
+# account [--now] | account --use NAME [--now]: the Claude account this container uses, and how
+# far a switch has got; --use makes NAME the active account first (multi-account mode).
+ACCOUNT_USAGE="usage: claude-sessions account [--now] | claude-sessions account --use NAME [--now]"
 cmd_account() {
-    local email acct t pend
+    local email acct t pend now="" use="" have_use=0 accounts active
+    while (( $# )); do
+        case "$1" in
+            --now)   now=--now; shift ;;
+            --use)   have_use=1; use="${2:-}"; shift
+                     # --use --now: no NAME given, not an account called --now
+                     if [[ "$use" == -* ]]; then use=""; else (( $# )) && shift; fi ;;
+            --use=*) have_use=1; use="${1#--use=}"; shift ;;
+            *) die "$ACCOUNT_USAGE" ;;
+        esac
+    done
+    # Not taken over yet: no --now, which would act on whatever older switch is still recorded.
+    if (( have_use )); then account_use "$use" || now=""; fi
     email="$(jq -r '.oauthAccount.emailAddress // "unknown"' "$CONFIG_DIR/.claude.json" 2>/dev/null || echo unknown)"
     acct="$(cat "$CONFIG_DIR/.credentials-account" 2>/dev/null || true)"
     echo "account: $email${acct:+ (${acct:0:8})}"
+    if accounts="$(cenv CLAUDE_ACCOUNTS)" && [[ -n "$accounts" ]]; then
+        active="$(head -n 1 "$CONFIG_DIR/.active-account" 2>/dev/null || true)"
+        echo "active : ${active:-unknown} (of $accounts; claude-sessions account --use NAME switches)"
+    fi
     if [[ ! -s "$ACCOUNT_SWITCH_FILE" ]]; then
         echo "switch : none in progress (every session runs on this account)"
         return 0
     fi
     read -r t _ < "$ACCOUNT_SWITCH_FILE"
-    if [[ "${1:-}" == --now ]]; then account_switch_pass --now; fi
+    if [[ "$now" == --now ]]; then account_switch_pass --now; fi
     pend="$(switch_pending | paste -sd' ' -)"
     if [[ -n "$pend" ]]; then
         echo "switch : in progress since $(date -u -d "@$t" +%FT%TZ 2>/dev/null || echo "$t"); still on the previous account: $pend"
@@ -687,6 +709,68 @@ cmd_account() {
         account_switch_pass
         echo "switch : complete (every session runs on this account)"
     fi
+}
+
+# account --use NAME: make NAME, one of CLAUDE_ACCOUNTS, the active account. The agent cannot read
+# another account's credential (root's, /auth-accounts/NAME), so the entrypoint's root listener
+# (§6a) checks NAME and records it; §6's credential sync then takes it over on its next pass (every
+# 30 s), as it does a new login, and writes the switch request the supervisor and --now act on.
+# Waits for that takeover (CLAUDE_SESSIONS_USE_WAIT seconds, default 45): 0 once taken over, 1 when
+# not yet; exits 1 when refused.
+account_use() {  # account_use NAME
+    local name="$1" accounts n known=0 wait ans uuid before t i j
+    local req="$CONFIG_DIR/.account-use-request" done_file="$CONFIG_DIR/.account-use-done"
+    [[ -n "$name" ]] || die "$ACCOUNT_USAGE"
+    accounts="$(cenv CLAUDE_ACCOUNTS)" || accounts=""
+    [[ -n "$accounts" ]] || die "account --use: this container has one account (CLAUDE_ACCOUNTS is not set). --use switches between the accounts of multi-account mode (claude-launch --accounts); to change the account a credential volume holds, log the new one into it (docs/account-switching.md)"
+    local -a names=()
+    IFS=',' read -ra names <<<"$accounts"
+    for n in "${names[@]}"; do [[ "$n" == "$name" ]] && known=1; done
+    (( known )) || die "account --use: '$name' is not one of this container's accounts ($accounts)"
+    wait="${CLAUDE_SESSIONS_USE_WAIT:-45}"; [[ "$wait" =~ ^[1-9][0-9]*$ ]] || wait=45
+    # The Claude account the container runs on before this request: the sync may take the new one
+    # over between the listener's answer and the next line, so "already on it" is judged from here.
+    before="$(cat "$CONFIG_DIR/.credentials-account" 2>/dev/null || true)"
+    # The request goes in whole (a fresh temp file renamed onto its name): the listener never
+    # reads half of one.
+    rm -f "$done_file"
+    t="$(mktemp "$req.XXXXXX" 2>/dev/null)" || die "account --use: cannot write the request in $CONFIG_DIR"
+    { printf '%s\n' "$name" > "$t" && mv -fT "$t" "$req"; } || { rm -f "$t"; die "account --use: cannot write the request in $CONFIG_DIR"; }
+    ans=""
+    for (( i = 0; i < (wait < 10 ? wait : 10) * 4; i++ )); do
+        [[ -s "$done_file" ]] && { ans="$(head -n 1 "$done_file" 2>/dev/null)"; break; }
+        sleep 0.25
+    done
+    rm -f "$done_file"
+    case "$ans" in
+        "") rm -f "$req"
+            die "account --use: the entrypoint's account-switch listener did not answer: it is not running (claude-logs names why; a container restart starts it again)" ;;
+        ERROR:no-token:*)      die "account --use: '$name' has no valid token: log it in on the host (claude-account-login $name), then try again" ;;
+        ERROR:no-identity:*)   die "account --use: '$name' has no account recorded beside its credential (.claude.json): log it in again on the host (claude-account-login $name)" ;;
+        ERROR:follow-off:*)    die "account --use: this container runs with CLAUDE_AUTH_FOLLOW=0, so its sessions do not follow an account change; --use is refused" ;;
+        ERROR:record-failed:*) die "account --use: '$name' could not be recorded as the active account (is the config volume full? claude-logs names the step)" ;;
+        ERROR:*)               die "account --use: refused ($ans)" ;;
+    esac
+    read -r _ uuid <<<"$ans"
+    if [[ -n "$uuid" && "$before" == "$uuid" ]]; then
+        echo "use    : '$name' is the active account; this container already runs on its Claude account"
+        return 0
+    fi
+    echo "use    : '$name' is the active account; waiting for the credential sync to take it over (it runs every 30 s)"
+    for (( i = 0; i < wait; i++ )); do
+        if [[ -n "$uuid" && "$(cat "$CONFIG_DIR/.credentials-account" 2>/dev/null)" == "$uuid" ]]; then
+            # The sync records the account, then the identity, then the switch request: wait for
+            # the last, so what is printed next names the new account.
+            for (( j = 0; j < 25; j++ )); do
+                [[ -s "$ACCOUNT_SWITCH_FILE" && "$(cut -d' ' -f2 "$ACCOUNT_SWITCH_FILE" 2>/dev/null)" == "$uuid" ]] && break
+                sleep 0.2
+            done
+            return 0
+        fi
+        sleep 1
+    done
+    echo "use    : not taken over within ${wait}s; claude-sessions account shows it once it is (then --now moves the busy sessions)"
+    return 1
 }
 
 # --- capacity: pids and memory near the container's limits --------------------------------------
@@ -1031,7 +1115,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         mark)       cmd_mark "$@" ;;
         names)      cmd_names ;;
         health)     cmd_health ;;
-        -h|--help|help) sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//' ;;
+        -h|--help|help) sed -n '2,/^set -uo pipefail$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' ;;
         *) die "unknown command '$cmd' (claude-sessions --help)" ;;
     esac
 fi

@@ -796,6 +796,134 @@ check "shutdown records every window's conversation before tmux goes" \
     bash -c "awk '/^shutdown\\(\\) \\{/{f=1} f&&/claude-sessions record/{r=NR} f&&/tmux kill-server/{k=NR; exit} END{exit !(r && k && r < k)}' '$EP'"
 check "the image bakes claude-sessions" grep -qx 'COPY bin/claude-sessions /usr/local/bin/claude-sessions' "$REPO_ROOT/Dockerfile"
 
+echo "== account --use: an operator's switch between the accounts of multi-account mode =="
+# The real §6 credential sync and §6a listener, run unprivileged against a sandbox: only the
+# root-only /auth-accounts/ is moved into it (asserted), the listener polls every 0.2 s and the
+# sync every 0.3 s (30 s in a container). claude-sessions is the real one, as the agent.
+AA="$TMPD/accts"; CFG="$CLAUDE_CONFIG_DIR"; mkdir -p "$AA"/{work,home,spare,nouuid}
+cred tok-work > "$AA/work/.credentials.json"; acct uuid-work > "$AA/work/.claude.json"
+cred tok-home > "$AA/home/.credentials.json"; acct uuid-home > "$AA/home/.claude.json"
+printf '{"claudeAiOauth":{"accessToken":""}}\n' > "$AA/spare/.credentials.json"; acct uuid-spare > "$AA/spare/.claude.json"
+cred tok-nouuid > "$AA/nouuid/.credentials.json"   # logged in by some other route: no .claude.json
+cp "$AA/work/.credentials.json" "$CFG/.credentials.json"; acct uuid-work > "$CFG/.claude.json"
+echo work > "$CFG/.active-account"; echo uuid-work > "$CFG/.credentials-account"
+rm -f "$CFG/.account-changed" "$CFG"/.account-use-*
+tm_reset; tm_main; rm -rf "${REG:?}" "${TMPD:?}/run" "${FAKE:?}/watchdog.calls"
+export CLAUDE_SESSIONS='home; review dir=home'
+"$CS" boot >/dev/null 2>&1
+rm -f "$CFG/sessions/"*.json
+mksess "$(cat "$FAKE/tm/w/home/pane")" s-home
+mksess "$(cat "$FAKE/tm/w/review/pane")" s-review
+for f in "$CFG"/sessions/*.json; do jq ".startedAt = $(( ($(date +%s) - 60) * 1000 ))" "$f" > "$f.t" && mv "$f.t" "$f"; done
+sj_review="$(grep -l '"s-review"' "$CFG"/sessions/*.json)"
+jq '.status = "busy"' "$sj_review" > "$sj_review.t" && mv "$sj_review.t" "$sj_review"
+EPS="$TMPD/ep-accounts.sh"
+{
+    echo 'set -euo pipefail'
+    echo "log() { echo \"[entrypoint] \$*\" >> '$TMPD/ep-accounts.log'; }"
+    echo "AUTH_DIR='/auth-accounts/work' CLAUDE_CONFIG_DIR='$CFG' CLAUDE_UID=$(id -u) CLAUDE_GID=$(id -g) CLAUDE_BIN_RE='^/fake/bin/claude\$'"
+    echo 'CLAUDE_ACCOUNTS=work,home,spare,nouuid; ACCOUNT_NAMES=(work home spare nouuid)'
+    printf '%s\n' "$SYNC"
+    sed 's/while sleep 2; do/while sleep 0.2; do/' "$(ep_section 6a)"
+    echo "echo \"\$ACCT_SWITCH_PID\" > '$TMPD/ep-accounts.pid'"
+    echo "trap 'kill \"\$ACCT_SWITCH_PID\" 2>/dev/null; exit 0' TERM"
+    echo 'while :; do reconcile_once || true; sleep 0.3; done'
+} | sed "s#/auth-accounts/#$AA/#g" > "$EPS"
+check "the sandbox harness: /auth-accounts/ moved into it, the listener's poll shortened" \
+    bash -c "! grep -q '/auth-accounts/' '$EPS' && grep -qF '$AA/\$req/.credentials.json' '$EPS' && grep -q 'while sleep 0.2; do' '$EPS'"
+bash "$EPS" 2>>"$TMPD/ep-accounts.log" & EP_PID=$!; KILL+=("$EP_PID")
+for _ in $(seq 1 50); do [[ -s "$TMPD/ep-accounts.pid" ]] && break; sleep 0.1; done
+KILL+=("$(cat "$TMPD/ep-accounts.pid" 2>/dev/null || echo "$EP_PID")")
+use() { CLAUDE_ACCOUNTS=work,home,spare,nouuid CLAUDE_SESSIONS_USE_WAIT="${USE_WAIT:-15}" "$CS" account "$@" 2>&1; }
+unchanged() { [[ "$(cat "$CFG/.active-account")" == work && "$(cat "$CFG/.credentials-account")" == uuid-work && ! -e "$CFG/.account-changed" ]]; }
+
+out="$("$CS" account --use home 2>&1)"; rc=$?
+(( rc != 0 )) && [[ "$out" == *"this container has one account (CLAUDE_ACCOUNTS is not set)"* ]] && unchanged \
+    && [[ ! -e "$CFG/.account-use-request" ]] \
+    && ok "without CLAUDE_ACCOUNTS, --use is refused with a message, and nothing is asked" || bad "single account: rc=$rc $out"
+out="$(use --use bogus)"; rc=$?
+(( rc != 0 )) && [[ "$out" == *"'bogus' is not one of this container's accounts (work,home,spare,nouuid)"* ]] && unchanged \
+    && ok "a name not in CLAUDE_ACCOUNTS is refused" || bad "unknown name: rc=$rc $out"
+out="$(use --use spare)"; rc=$?
+(( rc != 0 )) && [[ "$out" == *"'spare' has no valid token: log it in on the host (claude-account-login spare)"* ]] && unchanged \
+    && ok "an account without a valid token is refused (the root listener checked it), nothing changes" || bad "no token: rc=$rc $out"
+out="$(use --use nouuid)"; rc=$?
+(( rc != 0 )) && [[ "$out" == *"'nouuid' has no account recorded beside its credential"* ]] && unchanged \
+    && ok "an account with no identity beside its credential is refused, nothing changes" || bad "no identity: rc=$rc $out"
+out="$(use --use)"; rc=$?
+(( rc != 0 )) && [[ "$out" == *"usage: claude-sessions account"* ]] \
+    && ok "--use without a NAME prints the usage" || bad "no name: rc=$rc $out"
+out="$(use --use --now)"; rc=$?
+(( rc != 0 )) && [[ "$out" == *"usage: claude-sessions account"* ]] && unchanged \
+    && ok "--use --now with no NAME prints the usage (--now is never taken for a name)" || bad "--use --now: rc=$rc $out"
+out="$(use --bogus)"; rc=$?
+(( rc != 0 )) && [[ "$out" == *"usage: claude-sessions account"* ]] \
+    && ok "an unknown account option prints the usage" || bad "unknown option: rc=$rc $out"
+
+out="$(use --use home)"; rc=$?
+if (( rc == 0 )) && [[ "$out" == *"'home' is the active account; waiting for the credential sync"* \
+      && "$out" == *"account: uuid-home@example.com (uuid-hom"* && "$out" == *"active : home (of work,home,spare,nouuid"* \
+      && "$out" == *"in progress since"*"still on the previous account: home review"* ]]; then
+    ok "--use home: the active account, the credential sync takes it over, account names home's email and the sessions still to move"
+else
+    bad "--use home: rc=$rc $out"
+fi
+[[ "$(cat "$CFG/.active-account")" == home && "$(cat "$CFG/.credentials-account")" == uuid-home \
+   && "$(sed -E 's/.*"accessToken":"([^"]*)".*/\1/' "$CFG/.credentials.json")" == tok-home \
+   && "$(cut -d' ' -f2 "$CFG/.account-changed")" == uuid-home ]] \
+    && grep -q "Auth account        : 'home' is the active account now (claude-sessions account --use)" "$TMPD/ep-accounts.log" \
+    && grep -q "the shared credential is now uuid-home@example.com" "$TMPD/ep-accounts.log" \
+    && ok "it moves as a new login does: the credential, the identity, the switch request, both named in the boot log" \
+    || bad "the takeover did not happen as an account change: $(cat "$CFG/.active-account" "$CFG/.credentials-account" "$CFG/.account-changed" 2>&1)"
+"$CS" supervise --once > "$TMPD/sup.out" 2>&1; out="$(cat "$TMPD/sup.out")"
+[[ "$out" == *"home: restarted onto the new account"* && "$out" != *"review: restarted"* ]] \
+    && grep -q '^--respawn target=claude:home .*--session home --continue' "$FAKE/watchdog.calls" \
+    && ok "the idle session restarts onto it at its next idle moment, resuming its conversation; the busy one is left" \
+    || bad "supervise after --use: $out"
+n0="$(grep -c '^--respawn target=claude:review ' "$FAKE/watchdog.calls" || true)"
+out="$(use --use home --now)"; rc=$?
+(( rc == 0 )) && [[ "$out" == *"'home' is the active account; this container already runs on its Claude account"* ]] \
+    && [[ "$(grep -c '^--respawn target=claude:review ' "$FAKE/watchdog.calls")" -gt "$n0" ]] \
+    && ok "--use home --now again: already on it, and --now moves the busy session at once" || bad "--use --now: rc=$rc $out"
+out="$(use --use=work --now)"; rc=$?
+(( rc == 0 )) && [[ "$out" == *"account: uuid-work@example.com"* && "$(cat "$CFG/.active-account")" == work ]] \
+    && ok "--use=NAME works too, and switches back" || bad "--use=work: rc=$rc $out"
+kill "$EP_PID" 2>/dev/null; kill "$(cat "$TMPD/ep-accounts.pid" 2>/dev/null)" 2>/dev/null
+out="$(USE_WAIT=1 use --use home)"; rc=$?
+(( rc != 0 )) && [[ "$out" == *"the entrypoint's account-switch listener did not answer"* && ! -e "$CFG/.account-use-request" ]] \
+    && ok "with no listener (an older image) it says so, and leaves no request behind" || bad "no listener: rc=$rc $out"
+unset CLAUDE_SESSIONS
+
+echo "== the usage watchdog stands down while an account switch is in progress =="
+# Sessions not moved yet still run on the previous account; a limit they hit is not the new
+# account's. A rotation then would bench the account chosen and replace it.
+WDC="$TMPD/wd-config"; mkdir -p "$WDC"; echo home > "$WDC/.active-account"
+tm_reset; tm_main
+wdrun() {  # wdrun: two passes of the real watch_loop, limits stubbed, rotation recorded
+    ( export CLAUDE_ACCOUNTS=work,home CLAUDE_CONFIG_DIR="$WDC" CLAUDE_SESSIONS_SWITCH_FILE="$WDC/.account-changed" CLAUDE_RC_WATCHDOG_BIN="$WD"
+      # shellcheck source=bin/claude-usage-watchdog
+      source "$REPO_ROOT/bin/claude-usage-watchdog"
+      n=0; sleep() { n=$((n + 1)); (( n <= 2 )); }
+      limited_windows() { echo main; }
+      rotate_account() { echo "ROTATE $*"; }
+      watch_loop 2>&1 )
+}
+echo "$(date +%s) uuid-home" > "$WDC/.account-changed"
+out="$(wdrun)"
+[[ "$out" != *ROTATE* && "$(grep -c 'An account switch is in progress' <<<"$out")" == 1 ]] \
+    && ok "a limit during a switch: no rotation, and one log line, not one per pass" || bad "during a switch: $out"
+rm -f "$WDC/.account-changed"
+out="$(wdrun)"
+[[ "$out" == *"ROTATE home main"* ]] && ok "once the switch is done, a limit rotates as before" || bad "after the switch: $out"
+out="$( export CLAUDE_ACCOUNTS=work,home CLAUDE_CONFIG_DIR="$WDC" CLAUDE_SESSIONS_SWITCH_FILE="$WDC/.account-changed" CLAUDE_RC_WATCHDOG_BIN="$WD"
+        source "$REPO_ROOT/bin/claude-usage-watchdog"
+        mark_cooldown_if_new() { :; }; next_account() { echo work; }; usage_state() { echo limited; }
+        pane_idle() { echo personal > "$WDC/.active-account"; }   # an operator's --use lands while it waits
+        request_account_switch() { echo "REQUEST $1"; }
+        rotate_account home main; echo "rc=$?" )"
+[[ "$out" != *REQUEST* && "$out" == *"not rotating"* && "$out" == *"rc=1"* ]] \
+    && ok "a rotation already waiting stands down when the active account changes under it" || bad "in-flight rotation: $out"
+
 echo
 echo "sessions-unit: $PASS passed, $FAIL failed"
 (( FAIL == 0 ))

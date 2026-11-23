@@ -65,6 +65,8 @@ claude-sessions restart home --resume ID   # take over conversation ID (e.g. one
 claude-sessions stop home              # stays stopped across restarts, until: claude-sessions start home
 claude-sessions reset home             # forget its conversation; the next start re-sends its first prompt
 claude-sessions rm review              # a `new` session only; a declared one is stopped instead
+claude-sessions account               # the Claude account in use, and any switch in progress
+claude-sessions account --use personal [--now]   # multi-account mode: switch to another of CLAUDE_ACCOUNTS
 ```
 
 Sessions from `--session` (`CLAUDE_SESSIONS`) are the container's declaration: reconciled

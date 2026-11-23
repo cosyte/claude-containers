@@ -81,7 +81,7 @@ rationale: the sections below.
   | `04-key-inputs.sh` | §4: the root-only key directory; the git key refused for SSH |
   | `05-git.sh` | §5: the git key broker, identity, secret guard, `GH_TOKEN` (gh as git's helper; sshd's `SetEnv` for SSH logins) |
   | `06-credentials.sh` | §6: the credential reconcile loop |
-  | `06a-account-switch.sh` | §6a: the account-switch listener |
+  | `06a-account-switch.sh` | §6a: the account-switch listener (the usage watchdog's rotation, `claude-sessions account --use`) |
   | `07-claude-json.sh` | §7: seed `.claude.json` |
   | `07a-managed-policy.sh` | §7a: managed settings |
   | `07b-browser.sh` | §7b: the browser decision (`CLAUDE_BROWSER`) |

@@ -236,6 +236,14 @@ respawn_windows() {  # respawn_windows <window>...
     return $rc
 }
 
+# An account switch in progress: an operator's (claude-sessions account --use) or a new login in
+# the shared credential. The credential sync wrote this request, and the supervisor moves each
+# session onto the new account, telling one a usage limit had stopped to continue. Sessions not
+# moved yet still run, and hit limits, on the previous account; a rotation now would read that as
+# the new account's limit, put the new account in cooldown and replace the operator's choice. So
+# the watchdog leaves those sessions to the supervisor until the switch is done.
+switch_in_progress() { [[ -s "${CLAUDE_SESSIONS_SWITCH_FILE:-$CLAUDE_CONFIG_DIR/.account-changed}" ]]; }
+
 # Mark the current account cooling down, wait for the first limited pane to go idle
 # (never interrupt an in-flight turn), then try each round-robin candidate in order
 # until one actually accepts the switch: a candidate the listener rejects
@@ -258,6 +266,11 @@ rotate_account() {  # rotate_account <current-account> <limited window>...
     done
     [[ "$(usage_state)" == limited ]] || { say "Recovered before rotation, standing down."; WINDOW="$keep"; return 0; }
     WINDOW="$keep"
+    # The account may have been switched while this waited (an operator's --use): leave it.
+    if switch_in_progress || [[ "$(cat "$CLAUDE_CONFIG_DIR/.active-account" 2>/dev/null)" != "$current" ]]; then
+        say "The active account changed while waiting (an account switch): not rotating."
+        return 1
+    fi
 
     while IFS= read -r target; do
         [[ -n "$target" ]] || continue
@@ -288,7 +301,7 @@ watch_loop() {
     fi
     mkdir -p "$COOLDOWN_DIR"
 
-    local restarts=0 last_attempt=0 now current w
+    local restarts=0 last_attempt=0 now current w switch_said=0
     local -a limited stale fresh
 
     say "started: watching every session window for a usage-limit hit (accounts: ${CLAUDE_ACCOUNTS}, check every ${CHECK_INTERVAL}s)"
@@ -305,6 +318,13 @@ watch_loop() {
             fi
             continue
         fi
+
+        if switch_in_progress; then
+            (( switch_said )) || say "An account switch is in progress: the supervisor moves the sessions onto the new account; no rotation until it is done."
+            switch_said=1
+            continue
+        fi
+        switch_said=0
 
         # A session that has not been respawned since the last rotation still runs on the
         # previous account: resume it under the current one, which is not the one limited.
