@@ -52,7 +52,8 @@ cleanup() {
     docker rm -f "$CN" "$OTELCN" "$EGCN" "$BRKCN" "$BRKOFFCN" "$BRKFAILCN" "$NOKEYCN" "$KEYDIRCN" \
                  "$BRWACN" "$BRWOCN" "$BRWFCN" "$BRWLCN" \
                  "$EG6CN" "$EG6ALLOW" "$EG6DENY" "$EGSFCN" "$EGSOKCN" "$EGRFCN" \
-                 "claude-smoke-containers-$$" >/dev/null 2>&1 || true
+                 "claude-smoke-containers-$$" "claude-smoke-accounts-$$" >/dev/null 2>&1 || true
+    docker volume rm "claude-smoke-acct-one-$$" "claude-smoke-acct-two-$$" >/dev/null 2>&1 || true
     # The network only goes after its containers do, or Docker refuses to remove it.
     docker network rm "$EG6NET" >/dev/null 2>&1 || true
     docker volume rm "$AUTHVOL" "$WSVOL" >/dev/null 2>&1 || true
@@ -1393,8 +1394,39 @@ check "after a restart alpha resumes its conversation instead of re-sending goal
     'p="$(sx tmux capture-pane -p -t claude:alpha -S -50)"; grep -q "Resuming conversation" <<<"$p" && ! grep -q "First start" <<<"$p"'
 check "a session stopped by hand stays stopped across the restart" \
     '! sx tmux list-windows -t claude -F "#{window_name}" | grep -qx beta'
+check "claude-sessions account --use is refused, with a message, in a container with one account" \
+    '! sx claude-sessions account --use other >/dev/null 2>&1 \
+     && sx claude-sessions account --use other 2>&1 | grep -q "this container has one account"'
 docker rm -f "$SESSCN" >/dev/null 2>&1 || true
 docker volume rm "$SESSCFG" >/dev/null 2>&1 || true
+
+echo
+echo "== 17d. claude-sessions account --use: an operator's switch in multi-account mode =="
+# Two accounts, neither logged in: the root listener (§6a) refuses one without a valid token. Then
+# root writes a stand-in credential and identity for the second, and --use takes it over through
+# the credential sync (§6) as a new login is, with the real root/agent split in between.
+ACCTCN="claude-smoke-accounts-$$"
+docker run -d --name "$ACCTCN" -e CLAUDE_SKIP_AUTH_CHECK=1 -e CLAUDE_PROJECT_NAME=accts \
+    -e CLAUDE_ACCOUNTS=one,two -v "claude-smoke-acct-one-$$:/auth-accounts/one" \
+    -v "claude-smoke-acct-two-$$:/auth-accounts/two" -v "$TMP/repo:/workspace" "$IMAGE" >/dev/null 2>&1 || true
+wait_tmux "$ACCTCN" || true
+ax() { docker exec "$ACCTCN" gosu claude "$@"; }
+check "--use an account without a valid token: refused by the root listener; the active account stays" \
+    'o="$(ax claude-sessions account --use two 2>&1)"; grep -q "has no valid token" <<<"$o" \
+     && [ "$(ax cat /home/claude/.claude/.active-account)" = one ]'
+docker exec "$ACCTCN" sh -c 'printf "%s\n" "{\"claudeAiOauth\":{\"accessToken\":\"smoke-stand-in\",\"refreshToken\":\"r\"}}" > /auth-accounts/two/.credentials.json \
+    && printf "%s\n" "{\"oauthAccount\":{\"accountUuid\":\"smoke-two-uuid\",\"emailAddress\":\"two@example.com\"}}" > /auth-accounts/two/.claude.json \
+    && chmod 600 /auth-accounts/two/.credentials.json' >/dev/null 2>&1 || true
+check "--use two: recorded as active, taken over by the credential sync; account names two's email" \
+    'o="$(ax claude-sessions account --use two 2>&1)"; grep -q "account: two@example.com" <<<"$o" \
+     && [ "$(ax cat /home/claude/.claude/.active-account)" = two ]'
+check "the boot log names the operator's switch and the takeover" \
+    'loggrep "$ACCTCN" -q "is the active account now (claude-sessions account --use)" \
+     && loggrep "$ACCTCN" -q "the shared credential is now two@example.com"'
+check "the agent still cannot read the account's own credential" \
+    '! ax cat /auth-accounts/two/.credentials.json >/dev/null 2>&1'
+docker rm -f "$ACCTCN" >/dev/null 2>&1 || true
+docker volume rm "claude-smoke-acct-one-$$" "claude-smoke-acct-two-$$" >/dev/null 2>&1 || true
 
 # --- 18. GPU sessions (--gpu) ----------------------------------------------------
 # 18a needs the NVIDIA Container Toolkit's CDI device on this host (a skip says so).

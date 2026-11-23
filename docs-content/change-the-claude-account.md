@@ -2,7 +2,7 @@
 id: change-the-claude-account
 title: Change the Claude account
 sidebar_label: Change the account
-description: "Log a new Claude account into the shared credential volume, and every container on it follows with no restart."
+description: "Log a new Claude account into the shared credential volume, and every container on it follows with no restart; or switch between the accounts of multi-account mode."
 ---
 
 # Change the Claude account
@@ -38,8 +38,29 @@ change (a dormant service) replaces its own stale credential at boot, before any
 restart, as before). The health line shows `moving to a new account (N sessions to go)` while a
 switch is in progress.
 
-This is for changing the account a volume holds. `--accounts a,b` (rotation between several
-logged-in accounts on a usage-limit hit) is separate and unchanged.
+This is for changing the account a volume holds. A container with several accounts
+(`--accounts a,b`, `CLAUDE_ACCOUNTS`) rotates between them by itself on a usage-limit hit, and
+switches when you ask, below.
+
+## Switching between the accounts of multi-account mode
+
+```
+claude-sessions account --use personal                # inside the container
+claude-sessions -C maker account --use personal --now # from the host; --now moves busy sessions at once
+```
+
+The agent cannot read another account's credential, so `--use NAME` asks the entrypoint's root
+listener (§6a). It refuses a name that is not in `CLAUDE_ACCOUNTS`, an account without a valid
+token (`claude-account-login NAME` on the host fixes that), an account with no `.claude.json`
+beside its credential (logged in by some other route), and any switch in a container with
+`CLAUDE_AUTH_FOLLOW=0`; nothing changes then. Otherwise it records NAME as the active account,
+which a restart keeps, and the credential sync takes it over within one tick (~30 s) as it does
+a new login: the credential and the cached identity at once, then each session at its next idle
+moment, with a fresh Remote Control link under that account (`--now` moves the busy ones too).
+The command waits for that takeover (up to 45 s) and then prints what `claude-sessions account`
+prints: the email in use, the active name, and the sessions still on the previous account. A
+container without `CLAUDE_ACCOUNTS` refuses `--use` with a message. The usage-limit rotation is
+unchanged and carries on from the account chosen.
 
 ## Reference
 

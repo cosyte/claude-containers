@@ -2159,9 +2159,9 @@ AS_DIR="$(mktemp -d)"; AS_CFG="$AS_DIR/config"; mkdir -p "$AS_CFG"
     log() { echo "[entrypoint] $*" >> "$AS_DIR/log"; }
     sleep() { command sleep 0.1; }
     creds_have_token() { [[ -e "$AS_DIR/has-token" ]]; }
-    publish_creds() { [[ -e "$AS_DIR/publish-ok" ]]; }
-    set_local_account() { :; }
-    account_of() { :; }
+    publish_creds() { echo "publish_creds $*" >> "$AS_DIR/calls"; [[ -e "$AS_DIR/publish-ok" ]]; }
+    set_local_account() { echo "set_local_account $*" >> "$AS_DIR/calls"; }
+    account_of() { [[ -e "$AS_DIR/no-identity" ]] || echo "uuid-${1##*/}"; }
     # shellcheck disable=SC2034  # read by the sourced §6a
     CLAUDE_CONFIG_DIR="$AS_CFG" CLAUDE_ACCOUNTS="work,home"
     # shellcheck source=/dev/null
@@ -2181,11 +2181,11 @@ as_ask() {  # as_ask <name>: send a request as the watchdog does, print the answ
 as_alive() { [[ -n "$as_pid" ]] && kill -0 "$as_pid" 2>/dev/null; }
 mkdir "$AS_CFG/.account-switch-done"
 as_ask nosuch >/dev/null
-as_alive && grep -q "WARNING: account switch: could not write the answer 'ERROR:unknown-account:nosuch'" "$AS_DIR/log" 2>/dev/null \
+as_alive && grep -q "WARNING: account switch: could not write the answer 'ERROR:unknown-account'" "$AS_DIR/log" 2>/dev/null \
     && ok  "an answer that cannot be written is logged, and the listener keeps running" \
     || bad "a failed answer write ended the listener or went unlogged (pid ${as_pid:-none}): $(cat "$AS_DIR/log" 2>/dev/null)"
 rmdir "$AS_CFG/.account-switch-done"
-[[ "$(as_ask nosuch)" == "ERROR:unknown-account:nosuch" ]] \
+[[ "$(as_ask nosuch)" == "ERROR:unknown-account" ]] \
     && ok  "once the write works again, the next request is answered" \
     || bad "the listener did not answer after a failed write"
 touch "$AS_DIR/has-token"
@@ -2209,6 +2209,76 @@ for ((i = 0; i < 30; i++)); do [[ -f "$AS_CFG/.account-switch-done" && ! -L "$AS
    && ! -L "$AS_CFG/.account-switch-done" && "$(cat "$AS_CFG/.account-switch-done")" == home ]] \
     && ok  "§6a replaces a symlink at .active-account or the answer file, never writing through it" \
     || bad "§6a wrote through a symlink in the config dir, or left it in place"
+
+echo "== §6a: a request is read as data, never as a path to follow or text to repeat =="
+# A request file sits in the agent's config dir, so the agent can make it anything. Root reads a
+# regular file only, at most 64 bytes, and an answer names a configured account or nothing: a
+# symlink to a root-only file (an account's credential, the git key) must never come back to the
+# agent in the answer.
+printf 'ROOTONLY-SECRET-%s\n' bytes > "$AS_DIR/secret"
+for pair in switch use; do
+    rm -f "$AS_CFG/.account-$pair-done"; ln -sfn "$AS_DIR/secret" "$AS_CFG/.account-$pair-request"
+    for ((i = 0; i < 30; i++)); do [[ -s "$AS_CFG/.account-$pair-done" ]] && break; sleep 0.1; done
+    a="$(cat "$AS_CFG/.account-$pair-done" 2>/dev/null)"
+    [[ "$a" == "ERROR:unknown-account" ]] && ! grep -rqF ROOTONLY-SECRET "$AS_CFG" "$AS_DIR/log" \
+       && [[ ! -e "$AS_CFG/.account-$pair-request" && "$(cat "$AS_DIR/secret")" == "ROOTONLY-SECRET-bytes" ]] \
+        && ok  "a symlinked .account-$pair-request is answered ERROR:unknown-account, its target's bytes in no answer or log" \
+        || bad "a symlinked .account-$pair-request leaked or was not consumed: answer '$a'"
+done
+as_use() {  # as_use <name>: send a request as claude-sessions account --use does, print the answer
+    rm -f "$AS_CFG/.account-use-done"; echo "$1" > "$AS_CFG/.account-use-request"
+    local i
+    for ((i = 0; i < 30; i++)); do
+        [[ -s "$AS_CFG/.account-use-done" ]] && { cat "$AS_CFG/.account-use-done"; return 0; }
+        sleep 0.1
+    done
+}
+mkfifo "$AS_CFG/.account-switch-request"
+[[ "$(as_use nosuch)" == "ERROR:unknown-account" ]] && as_alive \
+    && ok  "a FIFO at a request's name is never opened: the listener keeps answering" \
+    || bad "a FIFO at the request's name stopped the listener"
+rm -f "$AS_CFG/.account-switch-request"
+for v in "work,home" "../work" "wor" "work " ""; do
+    [[ "$(as_use "$v")" == "ERROR:unknown-account" ]] \
+        && ok  "--use '$v' is not a configured name: refused" || bad "--use '$v' was taken for an account"
+done
+
+echo "== §6a: an operator's switch (claude-sessions account --use) =="
+echo work > "$AS_CFG/.active-account"; rm -f "$AS_DIR/has-token" "$AS_DIR/calls"
+[[ "$(as_use home)" == "ERROR:no-token:home" && "$(cat "$AS_CFG/.active-account")" == work ]] \
+    && ok  "an account without a valid token is refused, and the active account stays" \
+    || bad "a tokenless account was accepted, or the active account changed"
+touch "$AS_DIR/has-token" "$AS_DIR/no-identity"
+[[ "$(as_use home)" == "ERROR:no-identity:home" && "$(cat "$AS_CFG/.active-account")" == work ]] \
+    && ok  "an account with no identity beside its credential is refused (the sync could not follow it)" \
+    || bad "an account with no identity was accepted"
+rm -f "$AS_DIR/no-identity"
+[[ "$(as_use home)" == "home uuid-home" && "$(cat "$AS_CFG/.active-account")" == home && ! -L "$AS_CFG/.active-account" ]] \
+    && grep -q "Auth account        : 'home' is the active account now (claude-sessions account --use)" "$AS_DIR/log" \
+    && ok  "a valid account is recorded as active and answered with its name and account id" \
+    || bad "the switch was not recorded or answered: $(cat "$AS_CFG/.active-account" 2>&1)"
+[[ ! -s "$AS_DIR/calls" ]] \
+    && ok  "an operator's switch publishes nothing and sets no local account: §6's sync takes it over" \
+    || bad "an operator's switch acted for the sync: $(cat "$AS_DIR/calls")"
+as_alive && kill "$as_pid" 2>/dev/null
+# CLAUDE_AUTH_FOLLOW=0: the sync would never follow, so the listener refuses instead.
+(
+    set -euo pipefail
+    log() { echo "[entrypoint] $*" >> "$AS_DIR/log"; }
+    sleep() { command sleep 0.1; }
+    creds_have_token() { :; }; publish_creds() { :; }; set_local_account() { :; }
+    account_of() { echo "uuid-${1##*/}"; }
+    # shellcheck disable=SC2034  # read by the sourced §6a
+    CLAUDE_CONFIG_DIR="$AS_CFG" CLAUDE_ACCOUNTS="work,home" CLAUDE_AUTH_FOLLOW=0
+    # shellcheck source=/dev/null
+    source "$(ep_section 6a)"
+    echo "$ACCT_SWITCH_PID" > "$AS_DIR/pid"
+) >/dev/null 2>&1
+as_pid="$(cat "$AS_DIR/pid" 2>/dev/null)"
+echo work > "$AS_CFG/.active-account"
+[[ "$(as_use home)" == "ERROR:follow-off:home" && "$(cat "$AS_CFG/.active-account")" == work ]] \
+    && ok  "with CLAUDE_AUTH_FOLLOW=0 an operator's switch is refused (no session would follow it)" \
+    || bad "CLAUDE_AUTH_FOLLOW=0 did not refuse the switch"
 as_alive && kill "$as_pid" 2>/dev/null
 rm -rf "$AS_DIR"
 
