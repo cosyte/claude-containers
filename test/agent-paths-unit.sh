@@ -374,7 +374,7 @@ NET="$(ep_boot | command grep -nE "(^|[^a-z_-])(mktemp|install|chmod|chown|cp|ln
 
 # §2d: root makes the agent's runtime dir in its own /run/user; what goes inside, the agent makes.
 S2D="$(cat "$(ep_section 2d)")"
-command grep -qxF '    as_agent mkdir -m 700 "$CONTAINERS_RUNTIME_DIR/podman"' <<<"$S2D" \
+command grep -qxF '    as_agent mkdir -p -m 700 "$CONTAINERS_RUNTIME_DIR/podman"' <<<"$S2D" \
     && ! command grep -qE '^[^#]*(install|chown|chmod|mkdir)[^#|;&]*"\$CONTAINERS_RUNTIME_DIR/' <<<"$(command grep -v 'as_agent ' <<<"$S2D")" \
     && ok "§2d: the agent makes what goes inside its runtime dir; root never acts by a name in it" \
     || bad "§2d: root acts by a name inside the agent's runtime dir (an install -d there follows a symlink the agent put at the name)"
@@ -382,9 +382,10 @@ command grep -qxF '    as_agent mkdir -m 700 "$CONTAINERS_RUNTIME_DIR/podman"' <
 # A here-string or here-document bigger than a pipe is a temp file bash makes in TMPDIR and opens
 # again by name, and root's TMPDIR is the agent's /scratch. So every here-string root runs reads
 # a short value the operator set, never the agent's content, and root runs no here-document.
-HS="$(ep_boot | command grep -vE '^ *#' | command grep -oE '<<< *"?\$\{?[A-Za-z_]+' | sed -E 's/.*\$\{?//' | LC_ALL=C sort -u | tr '\n' ' ')"
+# Each here-string's whole word is listed, so a command substitution or a longer word shows.
+HS="$(ep_boot | command grep -vE '^ *#' | command grep -oE '<<< *[^ )]+' | sed -E 's/^<<< *//' | LC_ALL=C sort -u | tr '\n' ' ')"
 HD="$(ep_boot | command grep -vE '^ *#' | command grep -nE '<<-? *['"'"'"]?[A-Za-z_]+['"'"'"]?( |$)' | command grep -v '<<<' || true)"
-[[ "$HS" == "CLAUDE_ACCOUNTS OWN_TREE_KEEP_IDS authkeys_fps gitkey_pub " && -z "$HD" ]] \
+[[ "$HS" == '"$CLAUDE_ACCOUNTS" "$OWN_TREE_KEEP_IDS" "$authkeys_fps" "$gitkey_pub" ' && -z "$HD" ]] \
     && ok "root's here-strings read only short operator values, and it runs no here-document (TMPDIR is the agent's)" \
     || bad "a root here-string or here-document could carry the agent's content into a temp file in TMPDIR: strings of ${HS:-none}; documents: ${HD:-none}"
 

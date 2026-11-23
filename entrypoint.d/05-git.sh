@@ -67,7 +67,9 @@ if [[ -s "$GITKEY_SRC" ]]; then
         # are gone from the agent's home, not merely that this boot did not add
         # them. (The ssh config was rewritten from scratch above, so its
         # IdentityFile line is already gone.)
-        rm -f "$CLAUDE_HOME/.ssh/id_ed25519" "$CLAUDE_HOME/.ssh/id_ed25519.pub"
+        # As the agent: ~/.ssh is an entry in its home, and a root rm by a path through it would
+        # follow a link swapped in at ~/.ssh.
+        as_agent rm -f "$CLAUDE_HOME/.ssh/id_ed25519" "$CLAUDE_HOME/.ssh/id_ed25519.pub"
         mkdir -p "$BROKER_RUN_DIR" && chmod 711 "$BROKER_RUN_DIR"
         AGENT_SOCK="$BROKER_RUN_DIR/agent-root.sock"     # root-only
         CLAUDE_SOCK="$BROKER_RUN_DIR/agent.sock"         # claude-usable, via relay

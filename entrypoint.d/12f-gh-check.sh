@@ -26,7 +26,7 @@ if [[ -n "${GH_TOKEN:-}" ]]; then
             [[ "$line" == "github token: scopes FAIL"* ]] && log "ERROR: GH_TOKEN holds a scope a session must never have: $line"
             [[ "$line" == "github: not probed: "* || "$line" == "github: CLAUDE_GH_CHECK_MAX_REPOS="* ]] \
                 && log "WARNING: $line (docs/github-token.md)"
-        done
+        done || true
         exit 0
     ) &
 else

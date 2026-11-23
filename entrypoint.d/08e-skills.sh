@@ -12,8 +12,9 @@ _skill_usable() {  # _skill_usable <name>
 if [[ -d "$BAKE_DIR/skills" ]]; then
     # The config dir is the agent's: a symlink where the skills dir goes is replaced, and a
     # skill name that is a symlink is left alone, never copied into or removed through. The
-    # agent makes the directory, compares and copies (as_agent): root never reads, writes or
-    # chowns by a name in its dir (a root `install -d -o` follows a symlink put at the name).
+    # agent makes the directory, compares, copies and removes (as_agent): root never reads,
+    # writes, chowns or removes by a name in its dir (a root `install -d -o` follows a symlink
+    # put at the name, and a root rm by a path through skills/ follows one swapped in there).
     [[ -L "$CLAUDE_CONFIG_DIR/skills" ]] && rm -f "$CLAUDE_CONFIG_DIR/skills"
     as_agent mkdir -p "$CLAUDE_CONFIG_DIR/skills"
     for d in "$BAKE_DIR"/skills/*/; do
@@ -23,7 +24,7 @@ if [[ -d "$BAKE_DIR/skills" ]]; then
         [[ -L "$t" ]] && continue
         if ! _skill_usable "$name"; then
             if [[ -d "$t" ]] && as_agent diff -rq "$d" "$t" >/dev/null 2>&1; then
-                rm -rf "$t"
+                as_agent rm -rf "$t"
                 log "Skill $name: removed, this container lacks what it needs"
             fi
             continue

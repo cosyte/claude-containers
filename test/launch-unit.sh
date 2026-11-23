@@ -342,7 +342,7 @@ mkdir -p "$LINKD/outside"
 ln -s "$LINKD/outside" "$LINKD/home/.local" 2>/dev/null || { mkdir -p "$LINKD/home"; ln -s "$LINKD/outside" "$LINKD/home/.local"; }
 (
     set -euo pipefail
-    asclaude() { "$@"; }
+    asclaude() { "$@"; }; as_agent() { "$@"; }
     export CLAUDE_HOME="$LINKD/home"
     # shellcheck disable=SC2034  # read by the extracted §2d snippet run through eval below
     CONTAINERS_STORE_DIR="$LINKD/home/.local/share/containers"

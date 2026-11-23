@@ -37,7 +37,7 @@ if [[ "${CLAUDE_CONTAINERS:-0}" =~ ^(1|true|yes|on)$ ]]; then
     # does not hide an inner one), never follow it; then the agent makes the real directories,
     # which can only land inside its own home.
     for _d in "$CLAUDE_HOME/.local" "$CLAUDE_HOME/.local/share" "$CONTAINERS_STORE_DIR"; do
-        [[ -L "$_d" ]] && rm -f "$_d"
+        [[ -L "$_d" ]] && as_agent rm -f "$_d"
     done
     unset _d
     asclaude mkdir -p "$CONTAINERS_STORE_DIR"
@@ -48,7 +48,7 @@ if [[ "${CLAUDE_CONTAINERS:-0}" =~ ^(1|true|yes|on)$ ]]; then
     # would follow a symlink the agent put at the name and chown its target.
     rm -rf "$CONTAINERS_RUNTIME_DIR"
     install -d -o "$CLAUDE_UID" -g "$CLAUDE_GID" -m 700 "$CONTAINERS_RUNTIME_DIR"
-    as_agent mkdir -m 700 "$CONTAINERS_RUNTIME_DIR/podman"
+    as_agent mkdir -p -m 700 "$CONTAINERS_RUNTIME_DIR/podman"
     install -d -m 755 "${UIDMAP_SOCK%/*}" "$CONTAINERS_LOG_DIR"
     # Both restart when they exit; their output stays out of the boot log. The service waits
     # (bounded) for the helper: podman with subordinate ids and no helper fails its first map.

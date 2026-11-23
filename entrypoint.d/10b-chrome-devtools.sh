@@ -64,7 +64,8 @@ _browser_mcp_failed() {
     fi
     local t="$CLAUDE_CONFIG_DIR/skills/frontend-debugging"
     if [[ -d "$t" ]] && as_agent diff -rq "$BAKE_DIR/skills/frontend-debugging" "$t" >/dev/null 2>&1; then
-        rm -rf "$t"
+        # As the agent: skills/ is its, and a root rm by a path through it follows a swapped link.
+        as_agent rm -rf "$t"
         log "Skill frontend-debugging: removed, the chrome-devtools MCP is not registered"
     fi
 }
