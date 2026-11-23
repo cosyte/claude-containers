@@ -27,12 +27,19 @@
 #     that exists): §2d's runtime dir, §8d, §8e
 #   - root makes no temp file in TMPDIR (the agent's /scratch) for the agent's content: a
 #     here-string bigger than a pipe is one, which bash opens again by name (§6, §7, §12f)
+#   - the login (§1) keeps the auth volume root's: it runs as the agent in a private directory,
+#     its result is read by the agent and written into the volume as root's own file; links in
+#     the login's directory or left in the volume by an older login are never followed, and a
+#     failed login changes nothing. A master an older login left open is locked before root
+#     reads it: at start (§6), on every sync pass, and before a switch reads it (§6a)
 #   - own_tree never hands over a file with a second hard link
 #   - §0a's as_agent really drops to the agent user (a recording gosu), on the system PATH
 #   - the image keeps /opt/claude-config root's; the healthcheck reads the agent's log as the
-#     agent; claude-kit's settings merge runs as the agent; and nowhere in the boot path does a
-#     root mktemp, install, chmod, chown, cp, ln, cat, jq, grep or redirect name an agent path
-#     (a static net under the behavioural checks)
+#     agent; claude-kit's settings merge runs as the agent; nowhere in the boot path does a root
+#     file operation (mktemp, install, chmod, chown, cp, ln, cat, jq, grep, dd, rm, mkdir, mv,
+#     find, a redirect) name a path in the agent's dirs, and root never hands the auth volume to
+#     the agent or writes it other than through root_put and lock_master (static nets under the
+#     behavioural checks)
 # The shims are functions in root's shell. The agent's own processes (as_agent's `sh -c`) run
 # the real tools: a racing session plants links around root's steps, and what the agent itself
 # opens, the kernel checks against the agent's own rights. One user here, so as_agent runs the
@@ -361,16 +368,26 @@ command grep -qF 'if as_agent /usr/local/bin/claude-kit settings "$CLAUDE_CONFIG
     || bad "§8c must run claude-kit settings as the agent: it reads and writes the agent's settings.json"
 
 echo "== nowhere in the boot path does a root step name an agent path =="
-# Every line root runs, outside comments and log lines, that names an agent path and a tool that
-# opens, creates or changes a file by name (install -d too: it follows a symlink at a name that
-# exists). The agent's own steps (as_agent, agent_put, agent_cat, asclaude), own_tree
-# (-execdir, -h), a test ([[ -L ]], [[ -s ]]) and an unlink are allowed.
-AGENT_VARS='CLAUDE_CONFIG_DIR|CLAUDE_HOME|CJSON|ACCT_FILE|SWITCH_FILE|ACTIVE_FILE|SETTINGS_DST|AUTHKEYS_DST|HOOKS_DIR|CC_PREFIX|gmd|cj|b'
-NET="$(ep_boot | command grep -nE "(^|[^a-z_-])(mktemp|install|chmod|chown|cp|ln|cat|jq|grep|cmp|diff|tee|touch|tail|dd)( [^|;&]*)?\"\\\$\\{?($AGENT_VARS)[}\"/]|>>? *\"?\\\$\\{?($AGENT_VARS)[}\"/]" \
-    | command grep -vE '^[0-9]+: *#|^[0-9]+: *(log|die) |as_agent |agent_put |agent_cat |asclaude |-execdir chown -h|own_tree ' || true)"
+# Every line root runs, outside comments and log lines, that names a path in the agent's dirs
+# (the config dir, which in a bare `docker run` is a plain directory the agent can swap, its
+# home, the CLI prefix, the files in them) and a tool that opens, creates, removes, moves or
+# changes a file by name (install -d too: it follows a symlink at a name that exists). The
+# agent's own steps (as_agent, agent_put, agent_cat, asclaude), own_tree (-execdir, -h) and a
+# test ([[ -L ]], [[ -s ]]) are allowed.
+AGENT_VARS='CLAUDE_CONFIG_DIR|CLAUDE_HOME|CJSON|ACCT_FILE|SWITCH_FILE|ACTIVE_FILE|SETTINGS_DST|AUTHKEYS_DST|HOOKS_DIR|CC_PREFIX|gmd|cj|b|req_file|done_file|use_req_file|use_done_file|_ld'
+TOOLS='mktemp|install|chmod|chown|cp|ln|cat|jq|grep|cmp|diff|tee|touch|tail|head|dd|rm|mkdir|mv|find|ls|truncate|sed'
+NET="$(ep_boot | command grep -nE "(^|[^a-z_-])($TOOLS)( [^|;&]*)?\"\\\$\\{?($AGENT_VARS)[}\"/]|[<>]+ *\"?\\\$\\{?($AGENT_VARS)[}\"/]" \
+    | command grep -vE '^[0-9]+: *#|^[0-9]+: *(log|die) |as_agent |agent_put |agent_cat |asclaude |-execdir chown -h|own_tree |_ld="\$\(mktemp -d ' || true)"
 [[ -z "$NET" ]] \
-    && ok "no root mktemp, install, chmod, chown, cp, ln, cat, jq, grep, cmp, diff, tail, dd or redirect names an agent path" \
+    && ok "no root mktemp, install, chmod, chown, cp, ln, cat, jq, grep, cmp, diff, tail, dd, rm, mkdir, mv, find or redirect names an agent path" \
     || bad "root acts by name on an agent path:"$'\n'"$NET"
+# The auth volume ($AUTH_DIR, /auth-accounts/<name>) is root's: root reads it, writes it only
+# through root_put and lock_master, and never hands it, or the login, to the agent.
+AUTH_NET="$(ep_boot | command grep -nE '(chown|chmod)[^#|;&]*CLAUDE_UID[^#|;&]*AUTH_DIR|CLAUDE_CONFIG_DIR="\$AUTH_DIR"|>>? *"?\$\{?AUTH_DIR|(cp|install|tee|mv|ln|dd|mktemp)( [^|;&]*)?"\$\{?AUTH_DIR' \
+    | command grep -vE '^[0-9]+: *#|^[0-9]+: *(log|die) ' || true)"
+[[ -z "$AUTH_NET" ]] \
+    && ok "root never hands the auth volume to the agent, and writes it only through root_put and lock_master" \
+    || bad "root hands the auth volume to the agent, or writes it by name:"$'\n'"$AUTH_NET"
 
 # §2d: root makes the agent's runtime dir in its own /run/user; what goes inside, the agent makes.
 S2D="$(cat "$(ep_section 2d)")"
@@ -411,6 +428,160 @@ sleep 0.01
 cj_trusted && tmpdir_untouched "$t0" \
     && ok "§7 merges a 70 KB .claude.json and makes nothing in TMPDIR" \
     || bad "§7 made a temp file in TMPDIR for the agent's .claude.json (root's would be in /scratch)"
+
+echo "== the login (§1): the auth volume is root's before, during and after =="
+# A login used to hand the whole auth volume to the agent user (chown -R) and log in with the
+# volume itself as the CLI's config dir, so every running container's agent could reach the
+# master until it restarted. The real §1 block runs here against a sandbox: a fake login CLI,
+# the agent's side of a read modelled as the kernel does it (the agent's cat cannot open a
+# root-only file), and root's chown recorded instead of run (the agent is uid 4242 here).
+L1="$(awk '/^# --- Login mode/{f=1} f{print} f&&/^fi$/{exit}' "$(ep_section 1)")"
+extracted "§1's login mode" "$L1"
+CRED_SECRET="$OUT/other-account.credentials.json"   # root-only: another account's credential
+LB="$SB/lbin"; LA="$SB/lagent"                      # the fake CLI; the agent's own tools
+run_login() {  # run_login <fake mode> [plant-temp]: the shipped block; prints rc=<n> last
+    local blk
+    command rm -rf "$LB" "$LA"; mkdir -p "$LB" "$LA" "$SB/tmp"
+    printf '{"claudeAiOauth":{"accessToken":"%s"}}\n' "$SECRET_MARK" > "$CRED_SECRET"; chmod 600 "$CRED_SECRET"
+    # The fake `claude auth login`: writes what the real one does into CLAUDE_CONFIG_DIR, or not.
+    cat > "$LB/claude" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$CLAUDE_CONFIG_DIR" > "$FAKE_SEEN"
+d="$CLAUDE_CONFIG_DIR"
+case "$FAKE_MODE" in
+    fail) exit 1 ;;
+    notoken) printf '{"claudeAiOauth":{"accessToken":""}}\n' > "$d/.credentials.json" ;;
+    plant-cred) ln -s "$FAKE_CRED_SECRET" "$d/.credentials.json" ;;
+    *) printf '{"claudeAiOauth":{"accessToken":"tok-login"}}\n' > "$d/.credentials.json" ;;
+esac
+case "$FAKE_MODE" in
+    plant-json) ln -s "$FAKE_SECRET" "$d/.claude.json" ;;
+    fail|notoken|plant-cred) ;;
+    *) printf '{"oauthAccount":{"accountUuid":"u-login"}}\n' > "$d/.claude.json" ;;
+esac
+FAKE
+    chmod +x "$LB/claude"; command cp "$LB/claude" "$LA/claude"
+    # The agent's cat, as the kernel answers it: a root-only file (under OUT) cannot be opened.
+    printf '#!/bin/sh\nfor a; do case "$(readlink -f -- "$a" 2>/dev/null)" in "%s"/*) echo "cat: $a: Permission denied" >&2; exit 1 ;; esac; done\nexec /bin/cat "$@"\n' "$OUT" > "$LA/cat"
+    printf '#!/usr/bin/env bash\nshift\nexec "$@"\n' > "$LA/gosu"
+    chmod +x "$LA/cat" "$LA/gosu"
+    blk="$(printf '%s\n' "$L1" | sed -e "s#^LOGIN_CLI=.*#LOGIN_CLI=\"$LB/claude\"#" -e "s#^LOGIN_TMP=.*#LOGIN_TMP=\"$SB/tmp\"#")"
+    ( export FAKE_MODE="$1" FAKE_SEEN="$SB/login-dir" FAKE_SECRET="$SECRET" FAKE_CRED_SECRET="$CRED_SECRET"
+      export CLAUDE_AGENT_PATH="$LA:$PATH"; export PATH="$LA:$PATH"
+      AUTH_DIR="$SB/auth"; CLAUDE_USER="$(id -un)"; CLAUDE_UID=4242; CLAUDE_GID=4242; CLAUDE_HOME="$AGENT_HOME"
+      CLAUDE_LOGIN_MODE=1
+      as_agent() { PATH="$LA:$PATH" "$@"; }
+      chown() { printf '%s\n' "$*" >> "$SB/chown.log"; }
+      die() { echo "die: $*"; exit 1; }
+      log() { :; }
+      # root's own reads and writes: any name in the agent's private login dir is recorded
+      for t in cat jq grep dd cp install head; do
+          eval "$t() { local a; for a; do [[ \"\$a\" == \"$SB/tmp/claude-login.\"* ]] && printf '%s %s\n' $t \"\$a\" >> \"$SB/root-opened.log\"; done; command $t \"\$@\"; }"
+      done
+      if [[ "${2:-}" == plant-temp ]]; then
+          mktemp() { local t; t="$(command mktemp "$@")" || return; [[ "$1" == -u && "$t" == "$SB/auth/"* ]] && command ln -s "$VICTIM" "$t"; printf '%s\n' "$t"; }
+      fi
+      eval "$blk"
+      echo "fell through" ) 2>&1
+    echo "rc=$?"
+}
+login_sb() {  # a volume an older login left: mode 755, links at both names, an old credential elsewhere
+    reset_sb; mkdir -p "$SB/auth"; chmod 755 "$SB/auth"; : > "$SB/chown.log"; : > "$SB/root-opened.log"
+    command ln -s "$VICTIM" "$SB/auth/.credentials.json"; command ln -s "$VICTIM" "$SB/auth/.claude.json"
+}
+login_sb_old() {  # the same, with a credential of its own already there (tok-old)
+    login_sb; command rm -f "$SB/auth/.credentials.json"
+    printf '{"claudeAiOauth":{"accessToken":"tok-old"}}\n' > "$SB/auth/.credentials.json"
+}
+handed_to_agent() { command grep -E '4242:4242' "$SB/chown.log" | command grep -F "$SB/auth" || true; }
+login_dir_gone() { local d; d="$(command cat "$SB/login-dir" 2>/dev/null)"; [[ -n "$d" && "$d" != "$SB/auth"* && ! -e "$d" ]]; }
+
+login_sb; out="$(run_login ok)"
+if [[ "$out" == *"rc=0"* ]] && regular "$SB/auth/.credentials.json" && command grep -q tok-login "$SB/auth/.credentials.json" \
+   && [[ "$(stat -c %a "$SB/auth/.credentials.json")" == 600 && "$(stat -c %a "$SB/auth")" == 700 ]] \
+   && regular "$SB/auth/.claude.json" && [[ "$(command jq -r .oauthAccount.accountUuid "$SB/auth/.claude.json")" == u-login ]]; then
+    ok "§1: the login's credential and identity land in the volume as regular files, mode 600, the volume mode 700"
+else
+    bad "§1: the login did not land as root's own files in a mode-700 volume: $(tail -n 3 <<<"$out" | tr '\n' ' ')"
+fi
+victim_intact \
+    && ok "§1: links an older login's agent left in the volume are replaced, never written through" \
+    || bad "§1 wrote through a link in the auth volume (victim: $(victim_state))"
+[[ -z "$(handed_to_agent)" ]] \
+    && ok "§1: nothing in the auth volume is ever handed to the agent user" \
+    || bad "§1 handed the auth volume to the agent: $(handed_to_agent | head -n 2 | tr '\n' ' ')"
+login_dir_gone \
+    && ok "§1: the login runs in a private directory outside the volume, removed afterwards" \
+    || bad "§1: the login's config dir was the volume, or was left behind: $(command cat "$SB/login-dir" 2>/dev/null)"
+[[ ! -s "$SB/root-opened.log" ]] \
+    && ok "§1: root opens no name in the login's directory (the agent reads it, agent_cat)" \
+    || bad "§1: root opened names in the agent's login directory: $(head -n 2 "$SB/root-opened.log" | tr '\n' ' ')"
+
+login_sb; out="$(run_login plant-json)"
+[[ "$out" == *"rc=0"* && ! -L "$SB/auth/.claude.json" ]] && ! command grep -rqF "$SECRET_MARK" "$SB/auth" \
+    && ok "§1: a link the login leaves at .claude.json to a root-only file never reaches the volume" \
+    || bad "§1: a root-only file reached the volume through the login's .claude.json: $(tail -n 2 <<<"$out" | tr '\n' ' ')"
+login_sb_old; out="$(run_login plant-cred)"
+[[ "$out" != *"rc=0"* ]] && command grep -q tok-old "$SB/auth/.credentials.json" && ! command grep -rqF "$SECRET_MARK" "$SB/auth" \
+    && ok "§1: a link at the login's .credentials.json to another account's credential is no login: the volume keeps its own" \
+    || bad "§1 took a root-only credential through the login's .credentials.json: $(tail -n 2 <<<"$out" | tr '\n' ' ')"
+for mode in fail notoken; do
+    login_sb_old; out="$(run_login "$mode")"
+    [[ "$out" != *"rc=0"* ]] && command grep -q tok-old "$SB/auth/.credentials.json" \
+        && ok "§1: a login that $([[ $mode == fail ]] && echo fails || echo leaves no token) stops with an error, the volume's credential unchanged" \
+        || bad "§1: a $mode login changed the volume or reported success: $(tail -n 2 <<<"$out" | tr '\n' ' ')"
+done
+login_sb_old; out="$(run_login ok plant-temp)"
+victim_intact && command grep -q tok-old "$SB/auth/.credentials.json" && [[ "$out" != *"rc=0"* ]] \
+    && ok "§1: a link at root's temp name in the volume is never written through (an exclusive create, then a rename)" \
+    || bad "§1 wrote through a link at its temp name in the volume (victim: $(victim_state))"
+
+echo "== a master an older login left to the agent (§6 at start, every sync pass, §6a) =="
+# Until it is locked again the volume is the agent's: a link at the master's name to a root-only
+# credential must never be read into the agent's own copy.
+S6TOP="$(awk '/^# >>> credential sync/{exit} {print}' "$S6")"
+reset_sb; mkdir -p "$SB/master"; chmod 755 "$SB/master"
+printf '{"claudeAiOauth":{"accessToken":"%s"}}\n' "$SECRET_MARK" > "$OUT/cred"; chmod 600 "$OUT/cred"
+command ln -s "$OUT/cred" "$SB/master/.credentials.json"
+( CLAUDE_CONFIG_DIR="$CFG"; AUTH_DIR="$SB/master"; CLAUDE_SKIP_AUTH_CHECK=1; CLAUDE_UID="$(id -u)"; CLAUDE_GID="$(id -g)"
+  die() { exit 1; }; set -euo pipefail; eval "$S6TOP" ) >/dev/null 2>&1
+[[ ! -e "$CFG/.credentials.json" || -z "$(command grep -F "$SECRET_MARK" "$CFG/.credentials.json")" ]] \
+   && [[ ! -L "$SB/master/.credentials.json" && "$(stat -c %a "$SB/master")" == 700 ]] \
+    && ok "§6 at start: the master is locked before it is read; a link at its name is removed, never copied to the agent" \
+    || bad "§6 at start copied a root-only file to the agent through a link at the master's name, or left the master open"
+
+reset_sb; mkdir -p "$SB/master"; chmod 755 "$SB/master"
+printf '{"claudeAiOauth":{"accessToken":"%s"}}\n' "$SECRET_MARK" > "$OUT/cred"; chmod 600 "$OUT/cred"
+command ln -s "$OUT/cred" "$SB/master/.credentials.json"
+printf '{"claudeAiOauth":{"accessToken":""}}\n' > "$CFG/.credentials.json"
+( CLAUDE_CONFIG_DIR="$CFG"; AUTH_DIR="$SB/master"; CLAUDE_UID="$(id -u)"; CLAUDE_GID="$(id -g)"
+  CLAUDE_AUTH_FOLLOW=0; CREDS_SNAP_DIR="$SB/root/snap"; CLAUDE_BIN_RE='^/fake/bin/claude$'
+  set -euo pipefail; eval "$SYNC"; reconcile_once || true ) >/dev/null 2>&1
+! command grep -qF "$SECRET_MARK" "$CFG/.credentials.json" 2>/dev/null \
+   && [[ ! -L "$SB/master/.credentials.json" && "$(stat -c %a "$SB/master")" == 700 ]] \
+    && ok "§6 every pass: the master is locked again before it is read; a link at its name never reaches the agent's copy" \
+    || bad "§6's sync read a root-only file into the agent's copy through a link at the master's name"
+
+# §6a: a switch to an account whose volume an older login left open.
+S6A="$(sed "s#/auth-accounts/#$SB/accts/#g; s/while sleep 2; do/while sleep 0.1; do/" "$(ep_section 6a)")"
+reset_sb; mkdir -p "$SB/accts/work" "$SB/accts/home"; chmod 755 "$SB/accts/home"
+printf '{"claudeAiOauth":{"accessToken":"%s"}}\n' "$SECRET_MARK" > "$OUT/cred"; chmod 600 "$OUT/cred"
+command ln -s "$OUT/cred" "$SB/accts/home/.credentials.json"
+printf '{"oauthAccount":{"accountUuid":"u-home"}}\n' > "$SB/accts/home/.claude.json"
+(
+    CLAUDE_CONFIG_DIR="$CFG"; CLAUDE_UID="$(id -u)"; CLAUDE_GID="$(id -g)"; CLAUDE_ACCOUNTS="work,home"
+    ACCT_FILE="$CFG/.credentials-account"; SWITCH_FILE="$CFG/.account-changed"; CREDS_SNAP_DIR="$SB/root/snap"
+    eval "$SYNC" 2>/dev/null
+    eval "$S6A"
+    echo "$ACCT_SWITCH_PID" > "$SB/listener.pid"
+) >/dev/null 2>&1
+printf 'home\n' > "$CFG/.account-switch-request"
+for _ in $(seq 1 40); do [[ -s "$CFG/.account-switch-done" ]] && break; sleep 0.1; done
+kill "$(command cat "$SB/listener.pid" 2>/dev/null)" 2>/dev/null || true
+! command grep -qF "$SECRET_MARK" "$CFG/.credentials.json" 2>/dev/null \
+   && [[ "$(command cat "$CFG/.account-switch-done" 2>/dev/null)" == "ERROR:no-token:home" && "$(stat -c %a "$SB/accts/home")" == 700 ]] \
+    && ok "§6a: an account's master is locked before a switch reads it; a link at its name is no credential" \
+    || bad "§6a read a root-only file into the agent's copy through a link at an account's master: answer '$(command cat "$CFG/.account-switch-done" 2>/dev/null)'"
 
 echo
 echo "agent-paths-unit: $PASS passed, $FAIL failed"

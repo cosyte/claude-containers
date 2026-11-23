@@ -5,7 +5,7 @@ if compgen -G "$BAKE_DIR/commands/*.md" > /dev/null; then
     # name already present (a symlink included, even a dangling one) is never installed over.
     # The agent makes the directory and writes each file (as_agent, agent_put, §0a's): a root
     # `install -d -o` follows a symlink put at the name after the check, and chowns its target.
-    [[ -L "$CLAUDE_CONFIG_DIR/commands" ]] && rm -f "$CLAUDE_CONFIG_DIR/commands"
+    [[ -L "$CLAUDE_CONFIG_DIR/commands" ]] && as_agent rm -f "$CLAUDE_CONFIG_DIR/commands"
     as_agent mkdir -p "$CLAUDE_CONFIG_DIR/commands"
     for f in "$BAKE_DIR"/commands/*.md; do
         t="$CLAUDE_CONFIG_DIR/commands/$(basename "$f")"

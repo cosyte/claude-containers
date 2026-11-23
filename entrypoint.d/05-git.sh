@@ -136,7 +136,7 @@ case "${CLAUDE_SECRET_GUARD:-1}" in
         # ~/.claude-hooks is agent-owned; drop a symlink the agent may have left at it (never
         # follow it), and let the agent make the directory and the hook link in it (as_agent):
         # a root `ln` or `chown` by a name there would act on whatever the agent swapped in.
-        [[ -L "$HOOKS_DIR" ]] && rm -f "$HOOKS_DIR"
+        [[ -L "$HOOKS_DIR" ]] && as_agent rm -f "$HOOKS_DIR"
         asclaude mkdir -p "$HOOKS_DIR"
         as_agent ln -sf /usr/local/bin/claude-secret-guard "$HOOKS_DIR/pre-commit"
         asclaude git config --global core.hooksPath "$HOOKS_DIR"

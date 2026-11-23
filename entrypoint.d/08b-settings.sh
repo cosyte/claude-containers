@@ -85,5 +85,5 @@ if echo "$EXISTING_SETTINGS" | jq -e '.env // {} | (.DISABLE_TELEMETRY // .DO_NO
         printf '%s\n' "$CJSON_NEW" | agent_put "$CJSON" 600 || true
     fi
     unset CJSON_NEW
-    rm -rf "$CLAUDE_CONFIG_DIR/statsig" 2>/dev/null || true
+    as_agent rm -rf "$CLAUDE_CONFIG_DIR/statsig" 2>/dev/null || true
 fi

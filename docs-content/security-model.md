@@ -126,8 +126,11 @@ description: "What the containment covers: permissions, managed policy, the git-
   locked to `root` (`/auth`, mode 700), so the agent can't reach the token that
   backs the rest of the fleet; it only ever holds its **own** per-container
   session token, which is unavoidable (Claude Code authenticates with it, and a
-  Max subscription has no scopable API key). Rotate the master with
-  `docker volume rm claude-auth` + `make login`.
+  Max subscription has no scopable API key). A login (`make login`, `claude-account-login`,
+  or `CLAUDE_LOGIN_MODE=1` on a stack's own service) keeps the volume `root`'s throughout:
+  the CLI runs as the agent in a private directory, and root moves the credential into the
+  volume, mode 600; every container start and every credential sync pass lock it again.
+  Rotate the master with `docker volume rm claude-auth` + `make login`.
 - **Egress lockdown (opt-in).** `CLAUDE_EGRESS_LOCKDOWN=1` applies a default-deny
   iptables firewall at boot: as root, before the agent starts and while it's
   still unprivileged, so a prompt-injected agent can neither exfiltrate to

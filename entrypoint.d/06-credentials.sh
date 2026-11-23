@@ -4,6 +4,21 @@
 # rest of the config dir is per-container so sessions never collide. Claude
 # rewrites .credentials.json on token refresh, so a small loop keeps the
 # per-container file and the shared volume converged (newest wins).
+# Defense-in-depth: lock the SHARED fleet-wide credential master to root-only so
+# a prompt-injected agent can't read or even list it. The agent keeps its OWN
+# per-container session token ($CLAUDE_CONFIG_DIR/.credentials.json, claude:600,
+# unavoidable: Claude Code authenticates with it), but cannot reach the master
+# that backs every other container. A login keeps the volume root's throughout (§1).
+# In multi-account mode every account dir gets the same lockdown, not just the active one:
+# the agent must never read a not-currently-active account's credential either.
+# First, before root reads any master: lock_master (§0a) also repairs a volume an older login
+# left to the agent, and removes a link at a master's name.
+masters=("$AUTH_DIR")
+[[ -z "${CLAUDE_ACCOUNTS:-}" ]] || masters=("${ACCOUNT_NAMES[@]/#//auth-accounts/}")
+for d in "${masters[@]}"; do
+    lock_master "$d"
+done
+unset masters d
 if [[ ! -s "$AUTH_DIR/.credentials.json" ]]; then
     if [[ "${CLAUDE_SKIP_AUTH_CHECK:-0}" == "1" ]]; then
         log "WARNING: no credentials for the active account (auth check skipped)"
@@ -19,23 +34,6 @@ if [[ -s "$AUTH_DIR/.credentials.json" && ! -s "$CLAUDE_CONFIG_DIR/.credentials.
     # The config dir is the agent's, so the agent writes its copy (agent_put, §0a's).
     agent_put "$CLAUDE_CONFIG_DIR/.credentials.json" 600 < "$AUTH_DIR/.credentials.json"
 fi
-# Defense-in-depth: lock the SHARED fleet-wide credential master to root-only so
-# a prompt-injected agent can't read or even list it. The agent keeps its OWN
-# per-container session token ($CLAUDE_CONFIG_DIR/.credentials.json, claude:600,
-# unavoidable: Claude Code authenticates with it), but cannot reach the master
-# that backs every other container. `make login` (root-chowns /auth) is separate.
-# In multi-account mode every account dir gets the same lockdown, not just the active one:
-# the agent must never read a not-currently-active account's credential either.
-masters=("$AUTH_DIR")
-[[ -z "${CLAUDE_ACCOUNTS:-}" ]] || masters=("${ACCOUNT_NAMES[@]/#//auth-accounts/}")
-for d in "${masters[@]}"; do
-    chown root:root "$d" 2>/dev/null || true
-    chmod 700 "$d" 2>/dev/null || true
-    # A symlink at the master's name is never the master: left alone, its target untouched.
-    [[ -f "$d/.credentials.json" && ! -L "$d/.credentials.json" ]] \
-        && { chown -h root:root "$d/.credentials.json" 2>/dev/null || true; chmod 600 "$d/.credentials.json" 2>/dev/null || true; }
-done
-unset masters d
 
 # >>> credential sync (test/sessions-unit.sh runs this block against a sandbox)
 # A .credentials.json is USABLE only if it carries a non-empty OAuth access
@@ -54,29 +52,18 @@ creds_have_token() {  # creds_have_token <file>  -> 0 if it holds a non-empty ac
     [[ -s "$1" ]] && grep -q '"accessToken"[[:space:]]*:[[:space:]]*"[^"]' "$1"
 }
 
-# Publish SRC over DST atomically: a unique tmp in DST's own dir (so a shared
-# /auth is never left with a half-written file, and no fixed tmp name can be
-# picked up by a concurrent container), then rename onto DST's own name (mv -T).
-# Ownership follows DST: the shared master stays root:600, the per-container copy
-# claude:600. The per-container copy is in the agent's config dir, so the agent
-# writes it (agent_put); the master's source is a root-owned snapshot (local_snapshot
-# below), never a name in the agent's dir. Root's temp file there is created
-# exclusively (dd conv=excl opens no name that exists, a symlink included) with mode
-# 600 from the umask: root never acts on a name it did not just create. A copy
-# without a token is never published.
+# Publish SRC over DST atomically, renamed onto DST's own name, so a shared /auth is never left
+# with a half-written file and no fixed temp name is picked up by a concurrent container.
+# Ownership follows DST: the shared master stays root:600, the per-container copy claude:600.
+# The per-container copy is in the agent's config dir, so the agent writes it (agent_put); the
+# master is root's own file (root_put), and its source is a root-only snapshot (local_snapshot
+# below), never a name in the agent's dir. A copy without a token is never published.
 publish_creds() {  # publish_creds <src> <dst>
-    local src="$1" dst="$2" t
-    if [[ "$dst" == "$CLAUDE_CONFIG_DIR/.credentials.json" ]]; then
-        agent_put "$dst" 600 < "$src"
-        return
+    if [[ "$2" == "$CLAUDE_CONFIG_DIR/.credentials.json" ]]; then
+        agent_put "$2" 600 < "$1"
+    else
+        creds_have_token "$1" && root_put "$2" < "$1"
     fi
-    t="$(mktemp -u "$dst.XXXXXX")" || return 1
-    if ( umask 077; dd if="$src" of="$t" conv=excl status=none 2>/dev/null ) \
-       && creds_have_token "$t" && mv -fT "$t" "$dst"; then
-        return 0
-    fi
-    rm -f "$t"
-    return 1
 }
 # The agent's own copy, read BY THE AGENT into root's own file, its mtime kept, once per
 # pass: every decision below is made on the snapshot, never on a name in the agent's dir.
@@ -168,6 +155,9 @@ reconcile_once() {
     # keeps token-refresh write-back flowing to whichever account is now active.
     local md a m l
     md="$(master_dir)"; a="$md/.credentials.json"          # the shared master (root:600)
+    # Every pass, before reading it: a volume an older login left to the agent is the
+    # agent's until it is locked again (§0a).
+    lock_master "$md"
     m="$(account_of "$md")"; l="$(local_account)"
     # CLAUDE_AUTH_FOLLOW=0: no account logic at all, the pre-existing newest-wins sync.
     [[ "${CLAUDE_AUTH_FOLLOW:-1}" =~ ^(0|false|no|off)$ ]] && m=""

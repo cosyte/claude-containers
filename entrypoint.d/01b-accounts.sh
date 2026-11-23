@@ -15,8 +15,10 @@ if [[ -n "${CLAUDE_ACCOUNTS:-}" ]]; then
     for n in "${ACCOUNT_NAMES[@]}"; do
         [[ -d "/auth-accounts/$n" ]] || die "account '$n' listed in CLAUDE_ACCOUNTS has no volume mounted at /auth-accounts/$n: check claude-launch --accounts wiring"
     done
-    mkdir -p "$CLAUDE_CONFIG_DIR"
-    # This runs before §2 hands the config dir over, and the agent writes in it below: its top first.
+    # This runs before §2 hands the config dir over, and the agent writes in it below: its top
+    # first. The agent makes it when it is missing (a root mkdir by a name in its home would act
+    # on whatever the agent put there).
+    as_agent mkdir -p "$CLAUDE_CONFIG_DIR"
     own_tree "$CLAUDE_CONFIG_DIR" -maxdepth 0
     ACTIVE_FILE="$CLAUDE_CONFIG_DIR/.active-account"
     # The config dir is the agent's, so the agent reads and writes the file (agent_put, agent_cat,

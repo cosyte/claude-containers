@@ -24,7 +24,7 @@ CJSON="$CLAUDE_CONFIG_DIR/.claude.json"
 # replaced. The agent reads and writes the file itself (agent_cat, agent_put, §0a's), and
 # root only computes the merge: a root read or write by that name would follow a symlink the
 # agent swapped in after the check, copying a root-only file into the agent's.
-[[ -L "$CJSON" ]] && rm -f "$CJSON"
+[[ -L "$CJSON" ]] && as_agent rm -f "$CJSON"
 [[ -s "$CJSON" ]] || echo '{}' | agent_put "$CJSON" 600
 CJSON_CUR="$(agent_cat "$CJSON" 2>/dev/null || true)"
 OAUTH_ACCOUNT='{}'

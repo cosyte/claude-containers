@@ -14,7 +14,7 @@ if [[ -f "$BAKE_DIR/CLAUDE.md" ]]; then
     elif [[ -L "$gmd" ]] || ! as_agent cmp -s "$BAKE_DIR/CLAUDE.md" "$gmd"; then
         # The config dir is the agent's: a symlink at the path is replaced, and the agent compares
         # and writes the file (as_agent, agent_put, §0a's), never root by that name.
-        [[ -L "$gmd" ]] && rm -f "$gmd"
+        [[ -L "$gmd" ]] && as_agent rm -f "$gmd"
         # Never fatal: a full volume (or a directory at the path) must not stop the boot.
         if agent_put "$gmd" 644 < "$BAKE_DIR/CLAUDE.md" 2>/dev/null; then
             log "Global CLAUDE.md    : installed the image's copy"

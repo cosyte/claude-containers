@@ -19,3 +19,32 @@ agent_put() {
         cat > "$t" && chmod "$2" "$t" && mv -fT "$t" "$1" && exit 0
         rm -f "$t"; exit 1' agent_put "$1" "$2"
 }
+# lock_master <dir>: a credential master (an auth volume's root) root's, mode 700, then its two
+# files root's, mode 600; a link at either name is removed, never followed (only a login writes
+# them). First the directory: once it is root's, no agent can change what is in it. A running
+# agent never reaches a master, whatever an older login left in the volume.
+lock_master() {
+    local f
+    chown root:root "$1" 2>/dev/null || true
+    chmod 700 "$1" 2>/dev/null || true
+    for f in .credentials.json .claude.json; do
+        if [[ -L "$1/$f" ]]; then
+            rm -f "$1/$f"
+        elif [[ -f "$1/$f" ]]; then
+            chown root:root "$1/$f" 2>/dev/null || true
+            chmod 600 "$1/$f" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+# root_put <file>: stdin becomes <file>, root's own, mode 600, in a directory root keeps (the
+# credential masters). Its temp file is created exclusively (dd conv=excl opens no name that
+# exists, a symlink included) and renamed onto the name: root never reopens a name there.
+root_put() {
+    local t; t="$(mktemp -u "$1.XXXXXX")" || return 1
+    if ( umask 077; dd of="$t" conv=excl status=none 2>/dev/null ) && mv -fT "$t" "$1"; then
+        return 0
+    fi
+    rm -f "$t"
+    return 1
+}
