@@ -853,6 +853,9 @@ out="$(use --use nouuid)"; rc=$?
 out="$(use --use)"; rc=$?
 (( rc != 0 )) && [[ "$out" == *"usage: claude-sessions account"* ]] \
     && ok "--use without a NAME prints the usage" || bad "no name: rc=$rc $out"
+out="$(use --use --now)"; rc=$?
+(( rc != 0 )) && [[ "$out" == *"usage: claude-sessions account"* ]] && unchanged \
+    && ok "--use --now with no NAME prints the usage (--now is never taken for a name)" || bad "--use --now: rc=$rc $out"
 out="$(use --bogus)"; rc=$?
 (( rc != 0 )) && [[ "$out" == *"usage: claude-sessions account"* ]] \
     && ok "an unknown account option prints the usage" || bad "unknown option: rc=$rc $out"
@@ -890,6 +893,36 @@ out="$(USE_WAIT=1 use --use home)"; rc=$?
 (( rc != 0 )) && [[ "$out" == *"the entrypoint's account-switch listener did not answer"* && ! -e "$CFG/.account-use-request" ]] \
     && ok "with no listener (an older image) it says so, and leaves no request behind" || bad "no listener: rc=$rc $out"
 unset CLAUDE_SESSIONS
+
+echo "== the usage watchdog stands down while an account switch is in progress =="
+# Sessions not moved yet still run on the previous account; a limit they hit is not the new
+# account's. A rotation then would bench the account chosen and replace it.
+WDC="$TMPD/wd-config"; mkdir -p "$WDC"; echo home > "$WDC/.active-account"
+tm_reset; tm_main
+wdrun() {  # wdrun: two passes of the real watch_loop, limits stubbed, rotation recorded
+    ( export CLAUDE_ACCOUNTS=work,home CLAUDE_CONFIG_DIR="$WDC" CLAUDE_SESSIONS_SWITCH_FILE="$WDC/.account-changed" CLAUDE_RC_WATCHDOG_BIN="$WD"
+      # shellcheck source=bin/claude-usage-watchdog
+      source "$REPO_ROOT/bin/claude-usage-watchdog"
+      n=0; sleep() { n=$((n + 1)); (( n <= 2 )); }
+      limited_windows() { echo main; }
+      rotate_account() { echo "ROTATE $*"; }
+      watch_loop 2>&1 )
+}
+echo "$(date +%s) uuid-home" > "$WDC/.account-changed"
+out="$(wdrun)"
+[[ "$out" != *ROTATE* && "$(grep -c 'An account switch is in progress' <<<"$out")" == 1 ]] \
+    && ok "a limit during a switch: no rotation, and one log line, not one per pass" || bad "during a switch: $out"
+rm -f "$WDC/.account-changed"
+out="$(wdrun)"
+[[ "$out" == *"ROTATE home main"* ]] && ok "once the switch is done, a limit rotates as before" || bad "after the switch: $out"
+out="$( export CLAUDE_ACCOUNTS=work,home CLAUDE_CONFIG_DIR="$WDC" CLAUDE_SESSIONS_SWITCH_FILE="$WDC/.account-changed" CLAUDE_RC_WATCHDOG_BIN="$WD"
+        source "$REPO_ROOT/bin/claude-usage-watchdog"
+        mark_cooldown_if_new() { :; }; next_account() { echo work; }; usage_state() { echo limited; }
+        pane_idle() { echo personal > "$WDC/.active-account"; }   # an operator's --use lands while it waits
+        request_account_switch() { echo "REQUEST $1"; }
+        rotate_account home main; echo "rc=$?" )"
+[[ "$out" != *REQUEST* && "$out" == *"not rotating"* && "$out" == *"rc=1"* ]] \
+    && ok "a rotation already waiting stands down when the active account changes under it" || bad "in-flight rotation: $out"
 
 echo
 echo "sessions-unit: $PASS passed, $FAIL failed"

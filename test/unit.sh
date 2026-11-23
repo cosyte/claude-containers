@@ -2233,11 +2233,39 @@ as_use() {  # as_use <name>: send a request as claude-sessions account --use doe
         sleep 0.1
     done
 }
+# A symlink whose target holds a configured name is still no request: root opens a request
+# without following a link (dd iflag=nofollow, also against a swap after the check), so a link
+# can never make it act on what a root-only file says.
+touch "$AS_DIR/has-token" "$AS_DIR/publish-ok"; rm -f "$AS_DIR/calls"
+echo work > "$AS_CFG/.active-account"; echo home > "$AS_DIR/says-home"
+for pair in switch use; do
+    rm -f "$AS_CFG/.account-$pair-done"; ln -sfn "$AS_DIR/says-home" "$AS_CFG/.account-$pair-request"
+    for ((i = 0; i < 30; i++)); do [[ -s "$AS_CFG/.account-$pair-done" ]] && break; sleep 0.1; done
+    [[ "$(cat "$AS_CFG/.account-$pair-done" 2>/dev/null)" == "ERROR:unknown-account" && ! -s "$AS_DIR/calls" \
+       && "$(cat "$AS_CFG/.active-account")" == work ]] \
+        && ok  "a symlinked .account-$pair-request whose target names an account is refused: nothing published or recorded" \
+        || bad "a symlinked .account-$pair-request was acted on: $(cat "$AS_CFG/.account-$pair-done" 2>&1) / $(cat "$AS_DIR/calls" 2>&1)"
+done
+# A huge request is read 64 bytes, once: a sparse 16 GiB file (reading it whole takes ~20 s) is
+# answered within the 3 s window.
+truncate -s 16G "$AS_CFG/.account-use-request.big" && mv -fT "$AS_CFG/.account-use-request.big" "$AS_CFG/.account-use-request"
+rm -f "$AS_CFG/.account-use-done"
+for ((i = 0; i < 30; i++)); do [[ -s "$AS_CFG/.account-use-done" ]] && break; sleep 0.1; done
+[[ "$(cat "$AS_CFG/.account-use-done" 2>/dev/null)" == "ERROR:unknown-account" && ! -e "$AS_CFG/.account-use-request" ]] && as_alive \
+    && ok  "a 16 GiB request is read 64 bytes only: answered within 3 s and removed" \
+    || bad "a huge request was read whole, or not answered within 3 s"
 mkfifo "$AS_CFG/.account-switch-request"
 [[ "$(as_use nosuch)" == "ERROR:unknown-account" ]] && as_alive \
-    && ok  "a FIFO at a request's name is never opened: the listener keeps answering" \
+    && ok  "a FIFO at a request's name is no request (never opened): the listener keeps answering the other pair" \
     || bad "a FIFO at the request's name stopped the listener"
 rm -f "$AS_CFG/.account-switch-request"
+# A directory at a request's name is left alone: never answered, never logged about again and again.
+mkdir "$AS_CFG/.account-switch-request"; rm -f "$AS_CFG/.account-switch-done"; n0="$(wc -l < "$AS_DIR/log")"
+[[ "$(as_use nosuch)" == "ERROR:unknown-account" ]]; sleep 0.5
+[[ ! -e "$AS_CFG/.account-switch-done" && "$(wc -l < "$AS_DIR/log")" == "$n0" ]] && as_alive \
+    && ok  "a directory at a request's name is skipped: no answer, no log line, the listener keeps going" \
+    || bad "a directory at the request's name was answered or logged: $(tail -2 "$AS_DIR/log")"
+rmdir "$AS_CFG/.account-switch-request"; rm -f "$AS_DIR/has-token" "$AS_DIR/publish-ok"
 for v in "work,home" "../work" "wor" "work " ""; do
     [[ "$(as_use "$v")" == "ERROR:unknown-account" ]] \
         && ok  "--use '$v' is not a configured name: refused" || bad "--use '$v' was taken for an account"

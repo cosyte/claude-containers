@@ -679,12 +679,15 @@ cmd_account() {
     while (( $# )); do
         case "$1" in
             --now)   now=--now; shift ;;
-            --use)   have_use=1; use="${2:-}"; shift; (( $# )) && shift ;;
+            --use)   have_use=1; use="${2:-}"; shift
+                     # --use --now: no NAME given, not an account called --now
+                     if [[ "$use" == -* ]]; then use=""; else (( $# )) && shift; fi ;;
             --use=*) have_use=1; use="${1#--use=}"; shift ;;
             *) die "$ACCOUNT_USAGE" ;;
         esac
     done
-    if (( have_use )); then account_use "$use" || exit 1; fi
+    # Not taken over yet: no --now, which would act on whatever older switch is still recorded.
+    if (( have_use )); then account_use "$use" || now=""; fi
     email="$(jq -r '.oauthAccount.emailAddress // "unknown"' "$CONFIG_DIR/.claude.json" 2>/dev/null || echo unknown)"
     acct="$(cat "$CONFIG_DIR/.credentials-account" 2>/dev/null || true)"
     echo "account: $email${acct:+ (${acct:0:8})}"
@@ -712,7 +715,8 @@ cmd_account() {
 # another account's credential (root's, /auth-accounts/NAME), so the entrypoint's root listener
 # (§6a) checks NAME and records it; §6's credential sync then takes it over on its next pass (every
 # 30 s), as it does a new login, and writes the switch request the supervisor and --now act on.
-# Waits for that takeover (CLAUDE_SESSIONS_USE_WAIT seconds, default 45); exits 1 when refused.
+# Waits for that takeover (CLAUDE_SESSIONS_USE_WAIT seconds, default 45): 0 once taken over, 1 when
+# not yet; exits 1 when refused.
 account_use() {  # account_use NAME
     local name="$1" accounts n known=0 wait ans uuid before t i j
     local req="$CONFIG_DIR/.account-use-request" done_file="$CONFIG_DIR/.account-use-done"
@@ -740,7 +744,7 @@ account_use() {  # account_use NAME
     rm -f "$done_file"
     case "$ans" in
         "") rm -f "$req"
-            die "account --use: the entrypoint's account-switch listener did not answer (a container started from an image without --use? restart it on a current image)" ;;
+            die "account --use: the entrypoint's account-switch listener did not answer: it is not running (claude-logs names why; a container restart starts it again)" ;;
         ERROR:no-token:*)      die "account --use: '$name' has no valid token: log it in on the host (claude-account-login $name), then try again" ;;
         ERROR:no-identity:*)   die "account --use: '$name' has no account recorded beside its credential (.claude.json): log it in again on the host (claude-account-login $name)" ;;
         ERROR:follow-off:*)    die "account --use: this container runs with CLAUDE_AUTH_FOLLOW=0, so its sessions do not follow an account change; --use is refused" ;;
@@ -766,7 +770,7 @@ account_use() {  # account_use NAME
         sleep 1
     done
     echo "use    : not taken over within ${wait}s; claude-sessions account shows it once it is (then --now moves the busy sessions)"
-    return 0
+    return 1
 }
 
 # --- capacity: pids and memory near the container's limits --------------------------------------

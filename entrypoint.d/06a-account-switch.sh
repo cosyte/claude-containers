@@ -43,12 +43,19 @@ account_switch_listener() {
         return 0
     }
     # A request is a file the agent wrote, so it may be anything: a symlink to a root-only file,
-    # a FIFO, a huge file. Root reads only a regular file, at most 64 bytes, its first line, and
-    # an answer never repeats what it read unless it names a configured account.
+    # a FIFO, a huge file, a directory. Root opens it without following a symlink (nofollow, also
+    # when one is swapped in after the check) and without waiting on a FIFO (nonblock), reads at
+    # most 64 bytes in one read, keeps its first line, and never repeats what it read in an answer
+    # unless it names a configured account. A directory there is left alone and never answered.
+    _switch_pending() {  # _switch_pending <request file>: there is a request to read
+        [[ -L "$1" ]] || [[ -f "$1" && -s "$1" ]]
+    }
     _switch_read() {  # _switch_read <request file>: prints the name asked for; the file is removed
         local r=""
-        if [[ -f "$1" && ! -L "$1" ]]; then r="$(timeout 2 head -c 64 -- "$1" 2>/dev/null | head -n 1)"; fi
-        rm -f "$1"
+        if [[ -f "$1" && ! -L "$1" ]]; then
+            r="$(timeout 2 dd if="$1" iflag=nofollow,nonblock bs=64 count=1 status=none 2>/dev/null | head -n 1)"
+        fi
+        rm -f -- "$1" 2>/dev/null
         printf '%s' "$r"
     }
     # Validate against CLAUDE_ACCOUNTS before touching any path: an unvalidated name
@@ -59,7 +66,7 @@ account_switch_listener() {
         return 1
     }
     while sleep 2; do
-        if [[ -s "$req_file" ]]; then
+        if _switch_pending "$req_file"; then
             req="$(_switch_read "$req_file")"
             if ! _is_account "$req"; then
                 _switch_answer "$done_file" "ERROR:unknown-account"
@@ -76,7 +83,7 @@ account_switch_listener() {
                 _switch_answer "$done_file" "$req"
             fi
         fi
-        if [[ -s "$use_req_file" ]]; then
+        if _switch_pending "$use_req_file"; then
             # An operator's switch: only validated and recorded here. §6's credential sync sees the
             # new active account on its next pass and follows it as it follows a new login (the
             # credential, the cached identity, then each session at its next idle moment, its old
