@@ -7,7 +7,7 @@
 
 # Throwaway stage: just re-exports the uv/uvx binaries (BuildKit forbids
 # variable expansion directly in COPY --from=, so it goes through a stage).
-FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.10@sha256:a3ea1357342c1a4bf9a0c53a3deb1b55379aefa037338d8113d5771efa01774f AS uv
 
 # --- Base image ---------------------------------------------------------------
 #
@@ -20,7 +20,7 @@ FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b98
 #
 # Node 24 ("Krypton") is the active LTS. A literal tag and digest rather than
 # an ARG: Dependabot bumps the digest (and minor tags) here, never the major.
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d
+FROM node:24-trixie-slim@sha256:4d00acb4bcc42c454c4eb801526f7ad7f772ea3bd4fd168c5cc2e384abcbb9d4
 
 # --- Build-time configuration -------------------------------------------------
 # CLAUDE_CODE_VERSION: pinned npm version. Minimum 2.1.295, the managed
