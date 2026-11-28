@@ -32,8 +32,13 @@ agent process exists.
 `includeCoAuthoredBy` is deliberately **not** here. It is a commit-message
 preference: nothing about the container depends on it, and a session that wants
 the co-author trailer should be free to turn it on. The entrypoint still sets it
-in `~/.claude/settings.json`, where a session can still change it: its default
-there is `false`, and a value that file already holds wins.
+in `~/.claude/settings.json`, to `false`, at every start: a stored `true` (which
+images before this default wrote into every config volume) is set back to
+`false`, and an `attribution` object that would add a commit trailer gets
+`"commit": ""`, since Claude Code prefers `attribution` where one sets `commit` or
+`pr`. Every other key in that file is left as it is. A session that wants the
+trailer sets the key to `true` there after the container starts, and it holds
+until the next start.
 
 `env.DISABLE_AUTOUPDATER` is deliberately **not** here either, since the
 bump to Claude Code 2.1.258: auto-update is now this image's default

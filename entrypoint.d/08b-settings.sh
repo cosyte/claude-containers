@@ -16,10 +16,10 @@ PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 # §7a's $MANAGED_FILE).
 # includeCoAuthoredBy is false, so a commit a session makes carries only the configured git
 # identity (§5), with no Co-Authored-By trailer (the same key drops Claude Code's attribution
-# line from a pull request body). It is a default, not policy (§7a leaves it out of the
-# managed file): a value already in the agent's settings.json wins the merge below. A session
-# that wants the trailer sets it to true there, and a config volume an earlier image wrote
-# keeps the true stored in it.
+# line from a pull request body). It is not policy (§7a leaves it out of the managed file), and
+# a stored value wins the merge below, so Self-heal 3 sets a stored true back to false at every
+# boot: images before this default wrote true into every config volume. A session that wants
+# the trailer sets it to true in its settings.json after boot, and it holds until the next one.
 BASE_SETTINGS="$(jq -n --arg pm "$PERM_MODE" '{
     permissions: { defaultMode: $pm },
     skipDangerousModePermissionPrompt: true,
@@ -45,6 +45,13 @@ EXISTING_SETTINGS='{}'
 # persisted into every per-project config VOLUME, and this merge lets existing
 # user settings win, so it would survive forever and fire an ENOENT at every
 # session start. Same class of residue, same fix, as the telemetry strip above.
+#
+# Self-heal 3: clear a stored co-author trailer setting (the note above BASE_SETTINGS). A stored
+# includeCoAuthoredBy: true becomes false. Claude Code prefers attribution where it is an object
+# that sets commit or pr, and then uses attribution.commit as the commit's attribution text (the
+# Co-Authored-By trailer when commit is unset, none when it is ""), so such an object whose
+# commit is not "" gets commit "". Only those two values change, and a second boot finds
+# nothing to change.
 STALE_HOOK_CMD="/usr/local/bin/claude-md-fragments"
 # settings.json sits in the agent-owned config dir, so a session can replace it with a symlink,
 # or swap one in while root works there. Root only computes the merge; the agent writes the
@@ -52,6 +59,13 @@ STALE_HOOK_CMD="/usr/local/bin/claude-md-fragments"
 # without following it). The type guards below keep jq from failing; if it fails anyway, the
 # boot stops before anything is written, as it did.
 SETTINGS_DST="$CLAUDE_CONFIG_DIR/settings.json"
+TRAILER_CLEAR='if type != "object" then . else
+      (if .includeCoAuthoredBy == true then .includeCoAuthoredBy = false else . end)
+    | (if (.attribution | type) == "object"
+          and (((.attribution.commit | type) == "string" and .attribution.commit != "")
+               or ((.attribution | has("commit") | not) and (.attribution | has("pr"))))
+       then .attribution.commit = "" else . end)
+  end'
 SETTINGS_NEW="$(jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") <(echo "$EXISTING_SETTINGS") \
     | jq 'if .env then .env |= (del(.DISABLE_TELEMETRY,.DO_NOT_TRACK,.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)) else . end' \
     | jq --arg stale "$STALE_HOOK_CMD" '
@@ -72,9 +86,13 @@ SETTINGS_NEW="$(jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") <(echo "$EXISTING_S
               and ((.hooks.SessionStart | length) == 0)
            then del(.hooks.SessionStart) else . end)
         | (if (.hooks | type) == "object" and ((.hooks | length) == 0)
-           then del(.hooks) else . end)')"
+           then del(.hooks) else . end)' \
+    | jq "$TRAILER_CLEAR")"
 printf '%s\n' "$SETTINGS_NEW" | agent_put "$SETTINGS_DST" 600
 unset SETTINGS_NEW
+if echo "$EXISTING_SETTINGS" | jq -e "($TRAILER_CLEAR) != ." >/dev/null 2>&1; then
+    log "Migrated settings.json: set a stored co-author trailer setting (includeCoAuthoredBy, attribution.commit) to off"
+fi
 if echo "$EXISTING_SETTINGS" \
     | jq -e --arg stale "$STALE_HOOK_CMD" \
         '[.hooks.SessionStart // [] | .[] | .hooks // [] | .[] | select((.command // "") == $stale)] | length > 0' \
