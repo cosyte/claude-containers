@@ -2015,7 +2015,7 @@ MS_8B="$(awk '/^# --- 8b\. settings.json/{f=1} f{print}' "$(ep_section 8b)")"
                   || bad "could not extract §8b: the additive checks below would be vacuous"
 ms_8b_missing=()
 for _needle in 'permissions: { defaultMode: $pm }' 'skipDangerousModePermissionPrompt: true' \
-               'includeCoAuthoredBy: true' \
+               'includeCoAuthoredBy: false' \
                'del(.DISABLE_TELEMETRY,.DO_NOT_TRACK,.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)' \
                'STALE_HOOK_CMD' 'agent_put "$SETTINGS_DST" 600'; do
     grep -qF "$_needle" <<<"$MS_8B" || ms_8b_missing+=("$_needle")

@@ -14,10 +14,16 @@ PERM_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 # baked CLAUDE_CODE_VERSION should set DISABLE_AUTOUPDATER=1 themselves (env, their
 # own mounted settings.json, or, to make it non-overridable, their own file at
 # §7a's $MANAGED_FILE).
+# includeCoAuthoredBy is false, so a commit a session makes carries only the configured git
+# identity (§5), with no Co-Authored-By trailer (the same key drops Claude Code's attribution
+# line from a pull request body). It is a default, not policy (§7a leaves it out of the
+# managed file): a value already in the agent's settings.json wins the merge below. A session
+# that wants the trailer sets it to true there, and a config volume an earlier image wrote
+# keeps the true stored in it.
 BASE_SETTINGS="$(jq -n --arg pm "$PERM_MODE" '{
     permissions: { defaultMode: $pm },
     skipDangerousModePermissionPrompt: true,
-    includeCoAuthoredBy: true
+    includeCoAuthoredBy: false
 }')"
 [[ -f "$BAKE_DIR/settings.json" ]] && \
     BASE_SETTINGS="$(jq -s '.[0] * .[1]' <(echo "$BASE_SETTINGS") "$BAKE_DIR/settings.json")"
