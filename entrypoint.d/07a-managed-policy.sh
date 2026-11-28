@@ -32,7 +32,8 @@
 #                                      Claude Code reads this key only from managed settings.
 # includeCoAuthoredBy is deliberately NOT here. It is a commit-message
 # preference: nothing about the container depends on it, and a session that
-# wants it off should be free to turn it off. Section 8b still sets it.
+# wants the co-author trailer should be free to turn it on. Section 8b still
+# sets it, to false.
 # The telemetry kills stay out of BOTH files for the reason in 8b's own note.
 #
 # env.DISABLE_AUTOUPDATER is deliberately NOT here either: auto-update, and §7d's update
