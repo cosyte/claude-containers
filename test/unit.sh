@@ -153,6 +153,81 @@ else
 fi
 
 echo
+echo "== entrypoint.sh §8b: a stored co-author trailer setting is cleared at boot =="
+
+# Images before this default wrote includeCoAuthoredBy: true into every config volume, and §8b's
+# merge lets a stored value win, so those volumes kept adding the trailer. §8b now sets a stored
+# true back to false, and an attribution.commit that would add a trailer back to "", and changes
+# nothing else. The whole section runs here against a sandbox config dir.
+T8B="$TMPDIR/s8b"
+run_8b() {  # run_8b <settings.json at start, or "" for none>: the section's log on stdout
+    rm -rf "$T8B"; mkdir -p "$T8B/cfg" "$T8B/bake"
+    printf '{}\n' > "$T8B/bake/settings.json"
+    [[ -z "$1" ]] || printf '%s\n' "$1" > "$T8B/cfg/settings.json"
+    # shellcheck disable=SC2034  # read by the sourced section
+    ( CLAUDE_CONFIG_DIR="$T8B/cfg"; BAKE_DIR="$T8B/bake"; CJSON="$T8B/cfg/.claude.json"
+      log() { echo "[entrypoint] $*"; }
+      set -euo pipefail
+      # shellcheck disable=SC1090  # the section under test
+      source "$(ep_section 8b)"
+      echo "section_done=1" ) 2>&1
+}
+s8b() { jq -cS "${1:-.}" "$T8B/cfg/settings.json" 2>/dev/null; }
+# Every key §8b's base supplies is already stored, so the only change the section may make is
+# the one under test, and the other stored keys are compared whole.
+T8B_KEEP='"permissions":{"defaultMode":"bypassPermissions","allow":["Bash(ls:*)"]},"skipDangerousModePermissionPrompt":true,"model":"x","env":{"FOO":"1"},"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"/usr/local/bin/mine"}]}]}'
+out="$(run_8b "{$T8B_KEEP,\"includeCoAuthoredBy\":true}")"
+[[ "$(s8b .includeCoAuthoredBy)" == false ]] && grep -qxF section_done=1 <<<"$out" \
+    && ok  "a stored includeCoAuthoredBy: true is false after boot" \
+    || bad "a stored includeCoAuthoredBy: true survived the boot: $(s8b .includeCoAuthoredBy) ($out)"
+[[ "$(s8b 'del(.includeCoAuthoredBy)')" == "$(jq -cS . <<<"{$T8B_KEEP}")" ]] \
+    && ok  "and every other stored key is left as it was" \
+    || bad "clearing the trailer setting changed another key: $(s8b)"
+grep -qF 'includeCoAuthoredBy' <<<"$out" \
+    && ok  "and the boot log says the setting was cleared" \
+    || bad "the boot log does not say the stored trailer setting was cleared: $out"
+t8b_first="$(cat "$T8B/cfg/settings.json")"
+# A second boot on the same volume: the file it starts from is the one the first boot wrote.
+cp "$T8B/cfg/settings.json" "$TMPDIR/s8b-first.json"
+out="$(run_8b "$(cat "$TMPDIR/s8b-first.json")")"
+[[ "$(cat "$T8B/cfg/settings.json")" == "$t8b_first" ]] && ! grep -qF 'includeCoAuthoredBy' <<<"$out" \
+    && ok  "a second boot changes nothing and logs nothing (idempotent)" \
+    || bad "a second boot rewrote settings.json or logged the clear again: $out"
+t8b_bad=()
+for _case in '{"includeCoAuthoredBy":false}=false' '{"model":"x"}=false' '=false'; do
+    run_8b "${_case%=*}" >/dev/null
+    [[ "$(s8b .includeCoAuthoredBy)" == "${_case##*=}" ]] || t8b_bad+=("${_case%=*}: $(s8b .includeCoAuthoredBy)")
+done
+[[ ${#t8b_bad[@]} -eq 0 ]] \
+    && ok  "a stored false, a file with no value, and no file at all all end false" \
+    || bad "the trailer setting ended wrong: ${t8b_bad[*]}"
+
+# attribution takes precedence over includeCoAuthoredBy in Claude Code: an object that sets
+# commit or pr is used, its commit (the default Co-Authored-By trailer when unset) is the
+# commit's attribution text, and "" hides it. Only an object that would add a trailer changes.
+t8b_bad=()
+for _case in \
+    '{"pr":"p"}|{"commit":"","pr":"p"}' \
+    '{"commit":"Co-Authored-By: A <a@example.com>"}|{"commit":""}' \
+    '{"commit":"Trailer: x","pr":"p","sessionUrl":false}|{"commit":"","pr":"p","sessionUrl":false}' \
+    '{"commit":""}|{"commit":""}' \
+    '{"commit":"","pr":"p"}|{"commit":"","pr":"p"}' \
+    '{"sessionUrl":false}|{"sessionUrl":false}' \
+    '{}|{}' \
+    'false|false' \
+    'true|true'
+do
+    run_8b "{$T8B_KEEP,\"attribution\":${_case%|*}}" >/dev/null
+    [[ "$(s8b .attribution)" == "$(jq -cS . <<<"${_case#*|}")" \
+       && "$(s8b 'del(.attribution, .includeCoAuthoredBy)')" == "$(jq -cS . <<<"{$T8B_KEEP}")" ]] \
+        || t8b_bad+=("${_case%|*} -> $(s8b .attribution)")
+done
+[[ ${#t8b_bad[@]} -eq 0 ]] \
+    && ok  "an attribution that would add a commit trailer gets commit \"\"; any other is left as it was" \
+    || bad "attribution handled wrong: ${t8b_bad[*]}"
+rm -rf "$T8B" "$TMPDIR/s8b-first.json"
+
+echo
 echo "== entrypoint.sh §0: retired env vars warn loudly, never silently no-op =="
 
 # The removed --broker/--sysbox/--worker-tarball FLAGS hard-die. The env vars they used to
